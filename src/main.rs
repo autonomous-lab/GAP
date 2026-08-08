@@ -12,7 +12,7 @@
 //!   GAP_DB_INIT          "1" to run ClickHouse migrations at startup
 
 use gap::error::Result;
-use gap::server::{NodeState, route};
+use gap::server::{NodeState, route_with_ip};
 use gap::storage::clickhouse::{ClickHouseStorage, UreqTransport};
 use gap::storage::sqlite::SqliteStorage;
 use gap::storage::Storage;
@@ -95,6 +95,16 @@ fn main() -> Result<()> {
     println!("[gap-node] node DID: {}", state.lock().unwrap().node_did());
     println!("[gap-node] agent card: http://{addr}/.well-known/gap-agent.json");
 
+    // Audit M-02: warn loudly when the node is exposed without TLS.
+    let exposed = addr.starts_with("0.0.0.0") || addr.starts_with("::");
+    if exposed {
+        println!(
+            "[gap-node] ⚠ SECURITY: node bound to {addr} without TLS. \
+             In production, terminate TLS at the load balancer / reverse \
+             proxy — bearer tokens and contract data travel in cleartext."
+        );
+    }
+
     for mut request in server.incoming_requests() {
         // Read the body (limit to a sane size).
         let mut body = Vec::new();
@@ -112,7 +122,10 @@ fn main() -> Result<()> {
             .find(|h| h.field.equiv("Authorization"))
             .map(|h| h.value.as_str().to_string());
 
-        let (status, json_body) = route(&state, &method, &path, &body, auth.as_deref());
+        let client_ip = request
+            .remote_addr()
+            .map(|addr| addr.ip().to_string());
+        let (status, json_body) = route_with_ip(&state, &method, &path, &body, auth.as_deref(), client_ip.as_deref());
         let json_str = json_body.to_string();
 
         let mut response = Response::from_string(json_str)

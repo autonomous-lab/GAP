@@ -7,6 +7,7 @@
 use crate::error::{Error, Result};
 use crate::identity::Did;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 /// The zero hash used as the first link of every chain.
 pub const ZERO_HASH: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -183,13 +184,44 @@ impl ChainLedger {
     }
 
     /// Replace a receipt's payload with a commitment (GDPR redaction).
-    /// The chain link is preserved, so integrity holds.
-    pub fn redact(&mut self, index: usize, commitment: serde_json::Value) -> Result<()> {
+    ///
+    /// Redacting a middle entry changes its hash, which would break the
+    /// chain — so this re-links every SUBSEQUENT entry's `previous_hash`
+    /// to the updated hash, and re-signs the affected entries with the
+    /// provided re-signer. The re-link is itself an auditable event
+    /// (a `chain.redacted` entry is appended).
+    pub fn redact(
+        &mut self,
+        index: usize,
+        commitment: serde_json::Value,
+        re_signer: &crate::identity::AgentIdentity,
+    ) -> Result<()> {
         let entry = self
             .entries
             .get_mut(index)
             .ok_or_else(|| Error::Other("redaction index out of range".into()))?;
         entry.payload = serde_json::json!({ "redacted": true, "commitment": commitment });
+        // Re-sign the redacted entry itself.
+        if let Some(sig) = entry.signature.take() {
+            let _ = sig;
+            entry.signer = Some(re_signer.did().clone());
+            let canonical = entry.canonical_bytes();
+            entry.signature = Some(re_signer.sign(&canonical).to_hex());
+        }
+        // Re-link and re-sign every subsequent entry so the chain stays
+        // valid (audit M-04: redaction must not corrupt the spine).
+        for i in (index + 1)..self.entries.len() {
+            let prev_hash = self.entries[i - 1].hash();
+            let cur = &mut self.entries[i];
+            cur.chain.previous_hash = prev_hash;
+            if cur.signature.is_some() {
+                cur.signer = Some(re_signer.did().clone());
+                let canonical = cur.canonical_bytes();
+                cur.signature = Some(re_signer.sign(&canonical).to_hex());
+            }
+        }
+        // Append an auditable redaction event.
+        self.append(json!({ "event": "chain.redacted", "at_index": index }));
         Ok(())
     }
 
@@ -270,15 +302,28 @@ mod tests {
 
     #[test]
     fn redaction_preserves_chain_integrity() {
-        // Redacting the LAST entry preserves the chain (nothing follows
-        // it). Redacting middle entries requires re-linking, which is
-        // deliberately not automatic — a re-link is itself a new
-        // chained event so the change is auditable.
+        let re_signer = AgentIdentity::generate();
+        // Redacting ANY entry (first, middle, last) re-links and keeps
+        // the chain valid (audit M-04).
         let mut ledger = ChainLedger::new("urn:gap:chain:test");
         ledger.append(json!({ "a": 1 }));
-        ledger.redact(0, json!("sha256:c")).unwrap();
-        assert!(ledger.verify_chain().is_ok()); // last entry: chain intact
-        assert_eq!(ledger.entries()[0].chain.previous_hash, ZERO_HASH);
+        ledger.append(json!({ "b": 2 }));
+        ledger.append(json!({ "c": 3 }));
+        ledger.redact(1, json!("sha256:c"), &re_signer).unwrap();
+        assert!(ledger.verify_chain().is_ok());
+        assert_eq!(ledger.entries()[1].payload["redacted"], true);
+        // The redaction event itself is chained at the end.
+        assert_eq!(ledger.entries().last().unwrap().payload["event"], "chain.redacted");
+    }
+
+    #[test]
+    fn redaction_out_of_range_errors() {
+        let re_signer = AgentIdentity::generate();
+        let mut ledger = ChainLedger::new("urn:gap:chain:test");
+        ledger.append(json!({ "a": 1 }));
+        assert!(ledger.redact(5, json!("x"), &re_signer).is_err());
+        // Chain still valid after failed redaction.
+        assert!(ledger.verify_chain().is_ok());
     }
 
     #[test]

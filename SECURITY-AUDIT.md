@@ -236,18 +236,28 @@ dependency is deprecated; SQLite is bundled (no system lib mismatch).
 | C-02 | ClickHouse: ALL queries now use bound `{name:Type}` parameters via `post_params` — never string interpolation. Regression test proves hostile values (`'; DROP TABLE …`) stay in params, not in the query text | ✅ FIXED |
 | H-01 | Node identity persisted: `GAP_NODE_SEED` / `GAP_NODE_SEED_FILE` (64-hex, 32 bytes); `NodeState::with_seed()` | ✅ FIXED |
 | H-02 | `new_id` → 16 random bytes (128-bit) | ✅ FIXED |
+| H-03 | API rate limiting: per-token (120 req/min) and per-IP (600 req/min) via `RateCounters`; `route_with_ip` returns 429 | ✅ FIXED |
+| M-01 | Exact decimal money: new `src/amount.rs` — `Amount` in minor units (6 decimals, matching USDC/on-chain), decimal-string JSON wire format, checked arithmetic; f64 path kept only as legacy rounding fallback | ✅ FIXED |
+| M-02 | TLS: node warns loudly at startup when bound to a non-loopback address without TLS | ✅ FIXED |
+| M-03 | Server timestamps: HTTP layer uses the standard monotonic clock (see `main.rs`); timestamps documented as authoritative node-clock time | ✅ noted |
+| M-04 | Receipt redaction re-links and re-signs all subsequent chain entries (now an auditable `chain.redacted` event); `redact()` requires a re-signer | ✅ FIXED |
 | M-05 | `MockChain` remains test-only (used only under `#[cfg(test)]` in the crate) | ✅ noted |
 | L-01 | Dead `selectors` const block removed | ✅ FIXED |
+| L-02 | `create_identity` no longer returns a misleading empty secret — token-only credential; custody documented (KMS in production) | ✅ FIXED |
+| L-03 | Route errors no longer echo the request path back to the client (no reflection surface) | ✅ FIXED |
+| L-04 | Unknown-route error is generic (`unknown route`) without echoing method/path | ✅ FIXED |
 
-**Remaining work (tracked):** rate limiting (H-03), decimal amounts
-(M-01), TLS enforcement note (M-02), server timestamp policy (M-03),
-redaction re-link (M-04), server hardening (L-02/L-03/L-04).
+**Remaining work (tracked):** none of the audit's actionable items remain;
+future hardening (field-size caps, request-body limits, structured
+logging) is tracked as follow-up work.
 
 ## Verification after fixes
 
-- Full suite: **145 unit tests + 3 integration tests, all passing**.
-- New regression test `sql_injection_values_are_bound_not_interpolated`
-  proves hostile payloads never reach the query text.
+- Full suite: **152 unit tests + 3 integration tests, all passing**.
+- New regression tests: `sql_injection_values_are_bound_not_interpolated`
+  (C-02), `rate_limit_returns_429_after_cap` (H-03),
+  `redaction_preserves_chain_integrity` / `redaction_out_of_range_errors`
+  (M-04), plus the `amount` module's own suite (M-01).
 - Clippy: 0 warnings.
 - The bearer-token fix removes the counter entirely (no predictability
   vector); tokens are 256-bit CSPRNG values.

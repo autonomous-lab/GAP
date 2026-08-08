@@ -15,6 +15,7 @@ use crate::message::{now_unix, Envelope, Kind};
 use crate::payment::Escrow;
 use crate::relayer::{Chain, Relayer};
 use crate::storage::Storage;
+use crate::sybil::RateCounters;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -48,6 +49,10 @@ pub struct NodeState {
     relayer: Option<Relayer>,
     /// The audit spine.
     pub storage: Box<dyn Storage>,
+    /// Per-token rate counters (audit H-03: API rate limiting).
+    rate_limits: std::collections::HashMap<String, RateCounters>,
+    /// Per-source-IP rate counters (audit H-03).
+    ip_limits: std::collections::HashMap<String, RateCounters>,
 }
 
 impl NodeState {
@@ -71,7 +76,28 @@ impl NodeState {
             escrows: HashMap::new(),
             relayer: None,
             storage,
+            rate_limits: std::collections::HashMap::new(),
+            ip_limits: std::collections::HashMap::new(),
         }
+    }
+
+    /// Enforce per-token and per-IP rate limits before processing a
+    /// request (audit fix H-03). Returns an error when over limit.
+    pub fn check_rate_limit(&mut self, token: Option<&str>, ip: Option<&str>) -> Result<()> {
+        let now = crate::message::now_unix();
+        if let Some(t) = token {
+            self.rate_limits
+                .entry(t.to_string())
+                .or_default()
+                .record_invocation(now, 120)?; // 120 req/min per token
+        }
+        if let Some(src) = ip {
+            self.ip_limits
+                .entry(src.to_string())
+                .or_default()
+                .record_invocation(now, 600)?; // 600 req/min per IP
+        }
+        Ok(())
     }
 
     /// The node's identity seed (hex) — persist this to keep the same
@@ -113,14 +139,15 @@ impl NodeState {
         format!("gat_{}", hex::encode(bytes))
     }
 
-    /// Create a new agent identity, returning (did, token, secret hex).
-    pub fn create_identity(&mut self) -> (String, String, String) {
+    /// Create a new agent identity, returning (did, token).
+    ///
+    /// The token is the only credential (audit L-02: removed the
+    /// misleading empty "secret" field). Key custody is server-side;
+    /// a production deployment backs it with a KMS.
+    pub fn create_identity(&mut self) -> (String, String) {
         let identity = AgentIdentity::generate();
         let did = identity.did().to_string();
         let token = self.issue_token();
-        let secret = hex::encode([0u8; 0]); // secret is the seed; shown once
-        // We store the identity by token. (The seed is not recoverable
-        // from this demo path; production signs with a KMS.)
         self.agents.insert(
             token.clone(),
             RegisteredAgent {
@@ -128,7 +155,7 @@ impl NodeState {
                 announcement: None,
             },
         );
-        (did, token, secret)
+        (did, token)
     }
 
     /// Look up an agent by bearer token.
@@ -313,7 +340,7 @@ impl NodeState {
     }
 
     /// Client parks funds into escrow for a contract.
-    pub fn escrow_park(&mut self, client_token: &str, contract_id: &str, amount: f64) -> Result<()> {
+    pub fn escrow_park(&mut self, client_token: &str, contract_id: &str, amount: &crate::amount::Amount) -> Result<()> {
         let client = self.agent_by_token(client_token)?;
         let contract = self
             .contracts
@@ -332,18 +359,19 @@ impl NodeState {
             // addresses from the relayer's key custody.
             let provider_addr = relayer.key_for(&contract.provider.to_string()).address();
             let arb_addr = relayer.key_for(&self.node_did().to_string()).address();
-            let amount_units = (amount * 1_000_000.0) as u128; // 6 decimals
+            let amount_units = amount.minor_units(); // exact minor units
             relayer.park(&hash, &provider_addr, &arb_addr, amount_units)?;
             self.record("pay.parked.onchain", json!({ "contract_id": contract_id, "amount": amount }));
             return Ok(());
         }
 
         // Off-chain path (reference escrow).
+        let amount_f64 = amount.minor_units() as f64 / crate::amount::SCALE as f64;
         let instruction = Envelope::new(
             client.identity.did().clone(),
             self.node_did(),
             Kind::PayPark,
-            json!({ "amount": amount }),
+            json!({ "amount": amount_f64 }),
         )
         .for_contract(contract_id)
         .sign(&client.identity);
@@ -351,7 +379,10 @@ impl NodeState {
         escrow.register(contract)?;
         escrow.park(&instruction)?;
         self.escrows.insert(contract_id.into(), escrow);
-        self.record("pay.parked", json!({ "contract_id": contract_id, "amount": amount }));
+        self.record(
+            "pay.parked",
+            json!({ "contract_id": contract_id, "amount": amount.to_string_decimal() }),
+        );
         Ok(())
     }
 
@@ -391,10 +422,31 @@ pub fn route(
     body: &[u8],
     auth: Option<&str>,
 ) -> (u16, Value) {
+    route_with_ip(state, method, path, body, auth, None)
+}
+
+/// Route with client IP for rate limiting (audit H-03).
+pub fn route_with_ip(
+    state: &Arc<Mutex<NodeState>>,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    auth: Option<&str>,
+    client_ip: Option<&str>,
+) -> (u16, Value) {
     let mut guard = match state.lock() {
         Ok(g) => g,
         Err(_) => return (500, json!({ "error": { "code": "internal", "message": "state lock poisoned" } })),
     };
+
+    // Rate limiting first (audit H-03): 429 when over limit.
+    let token = auth.and_then(|h| h.strip_prefix("Bearer "));
+    if guard.check_rate_limit(token, client_ip).is_err() {
+        return (
+            429,
+            json!({ "error": { "code": "rate_limited", "message": "too many requests" } }),
+        );
+    }
 
     let path = path.split('?').next().unwrap_or(path);
     let body: Value = if body.is_empty() {
@@ -410,7 +462,6 @@ pub fn route(
             }
         }
     };
-    let token = auth.and_then(|h| h.strip_prefix("Bearer "));
 
     let response = match (method, path) {
         // ---- health & card ----
@@ -419,7 +470,7 @@ pub fn route(
 
         // ---- identity ----
         ("POST", "/v1/identity") => {
-            let (did, tok, _secret) = guard.create_identity();
+            let (did, tok) = guard.create_identity();
             Ok(json!({ "did": did, "token": tok }))
         }
 
@@ -503,10 +554,21 @@ pub fn route(
         // ---- escrow ----
         ("POST", "/v1/escrow/park") => {
             let id = body.get("contract_id").and_then(|v| v.as_str()).unwrap_or("");
-            let amount = body.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            match token {
-                Some(t) => guard.escrow_park(t, id, amount).map(|_| json!({ "receipt": { "event": "pay.parked" } })),
-                None => Err(Error::Unauthorized("missing bearer token".into())),
+            let amount = match body.get("amount") {
+                Some(v) if v.is_string() => {
+                    crate::amount::Amount::parse(v.as_str().unwrap_or(""))
+                }
+                Some(v) if v.is_number() => Ok(crate::amount::Amount::from_f64_rounding(
+                    v.as_f64().unwrap_or(0.0),
+                )),
+                _ => Err(Error::Other("amount required (decimal string)".into())),
+            };
+            match (token, amount) {
+                (Some(t), Ok(amt)) => guard
+                    .escrow_park(t, id, &amt)
+                    .map(|_| json!({ "receipt": { "event": "pay.parked" } })),
+                (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
+                (_, Err(e)) => Err(e),
             }
         }
 
@@ -519,7 +581,7 @@ pub fn route(
             Ok(json!({ "events": events }))
         }
 
-        _ => Err(Error::Other(format!("unknown route: {method} {path}"))),
+        _ => Err(Error::Other("unknown route".into())),
     };
 
     match response {
@@ -593,7 +655,7 @@ mod tests {
     }
 
     fn register(arc: &Arc<Mutex<NodeState>>) -> String {
-        let (_, token, _) = arc.lock().unwrap().create_identity();
+        let (_, token) = arc.lock().unwrap().create_identity();
         token
     }
 
@@ -720,6 +782,24 @@ mod tests {
 
         let (s2, _) = route(&arc, "GET", "/v1/contract/urn:gap:ctr:nope", &[], None);
         assert_eq!(s2, 400);
+    }
+
+    #[test]
+    fn rate_limit_returns_429_after_cap() {
+        let arc = state();
+        let token = register(&arc);
+        // Health is not rate-limited per-token when no token is passed,
+        // but with a token we hit the 120/min cap.
+        let auth = Some(format!("Bearer {token}"));
+        let mut saw_429 = false;
+        for _ in 0..130 {
+            let (s, _) = route_with_ip(&arc, "GET", "/v1/audit", &[], auth.as_deref(), Some("10.0.0.1"));
+            if s == 429 {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(saw_429, "expected a 429 after exceeding the per-token rate cap");
     }
 
     #[test]

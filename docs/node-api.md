@@ -186,13 +186,16 @@ implementation).
 
 ### `POST /v1/escrow/park`
 
-Client parks funds:
+Client parks funds. Amounts are **exact decimal strings** (up to 6
+fractional digits, minor-unit resolution — never floating point):
 
 ```json
 { "contract_id": "urn:gap:ctr:…", "amount": "5.00", "currency": "EUR" }
 ```
 
 **200:** `{ "receipt": { "receipt_id": "…", "event": "pay.parked" } }`
+
+**400:** invalid amount (more than 6 decimals, negative, malformed).
 
 ### `POST /v1/escrow/release`
 
@@ -209,6 +212,22 @@ Client-driven refund (parked or disputed state). **200:** receipt
 
 Arbitrator's signed ruling; the node executes the split (must sum to
 1.0). **200:** receipt `pay.ruled`.
+
+## 5bis. Rate limiting
+
+Every authenticated request is rate-limited **per bearer token**
+(120 req/min) and **per client IP** (600 req/min). When a limit is
+exceeded the node returns:
+
+```json
+{ "error": { "code": "rate_limited", "message": "too many requests" } }
+```
+
+with status **429**. Unauthenticated endpoints (`/health`,
+`/.well-known/gap-agent.json`) are subject to the per-IP limit only.
+
+The limits are enforced in-process (`src/server.rs`, `RateCounters`);
+a multi-node deployment shares limits at the load balancer.
 
 ## 6. Workflows
 
