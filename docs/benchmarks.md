@@ -60,28 +60,43 @@ append). Le spine SQLite tient 229 k événements/s en append.
 
 ## Benchmark HTTP (node complet)
 
-Serveur mono-processus, boucle `recv → route → respond` séquentielle,
-état partagé derrière un `Mutex` global (design actuel). Durée : 5 s par
+Deux configurations mesurées : la boucle séquentielle initiale et le
+**worker pool** actuel (`GAP_WORKERS`, défaut min(cœurs, 8)). Les
+chiffres ci-dessous sont le pool actuel ; les lignes du chemin complet
+sont comparées à l'historique dans la section suivante. Durée : 5 s par
 cellule, 0 erreur.
 
 | Concurrence | Endpoint | req/s | p50 | p99 |
 |---|---|---|---|---|
 | 1 | GET /health | 14 871 | 0.04 ms | 1.34 ms |
-| 1 | GET /v1/audit | 12 000 | 0.07 ms | 0.14 ms |
-| 1 | POST /v1/identity | 13 345 | 0.06 ms | 0.12 ms |
-| 1 | POST /v1/contract/propose | 10 357 | 0.09 ms | 0.15 ms |
-| 4 | GET /health | 16 734 | 0.07 ms | 3.86 ms |
-| 4 | GET /v1/audit | 5 630 | 0.58 ms | 2.85 ms |
-| 4 | POST /v1/identity | 17 136 | 0.11 ms | 3.70 ms |
-| 4 | POST /v1/contract/propose | 14 377 | 0.16 ms | 3.45 ms |
-| 8 | GET /health | 15 983 | 0.11 ms | 4.37 ms |
-| 8 | GET /v1/audit | 6 272 | 1.17 ms | 3.84 ms |
-| 8 | POST /v1/identity | 17 334 | 0.24 ms | 4.18 ms |
-| 8 | POST /v1/contract/propose | 15 096 | 0.32 ms | 4.10 ms |
-| 16 | GET /health | 16 783 | 0.26 ms | 7.10 ms |
-| 16 | GET /v1/audit | 6 795 | 2.23 ms | 5.63 ms |
-| 16 | POST /v1/identity | 18 215 | 0.48 ms | 6.33 ms |
-| 16 | POST /v1/contract/propose | 15 294 | 0.66 ms | 6.86 ms |
+| 1 | GET /v1/audit | 12 945 | 0.06 ms | 0.15 ms |
+| 1 | POST /v1/identity | 12 827 | 0.07 ms | 0.13 ms |
+| 1 | POST /v1/contract/propose | 10 972 | 0.08 ms | 0.17 ms |
+| 4 | GET /health | 17 492 | 0.07 ms | 3.67 ms |
+| 4 | GET /v1/audit | 8 115 | 0.40 ms | 2.75 ms |
+| 4 | POST /v1/identity | 16 155 | 0.11 ms | 3.55 ms |
+| 4 | POST /v1/contract/propose | 14 206 | 0.16 ms | 3.39 ms |
+| 8 | GET /health | 17 539 | 0.10 ms | 4.26 ms |
+| 8 | GET /v1/audit | 7 154 | 0.95 ms | 4.12 ms |
+| 8 | POST /v1/identity | 16 788 | 0.22 ms | 4.21 ms |
+| 8 | POST /v1/contract/propose | 14 328 | 0.37 ms | 4.20 ms |
+| 16 | GET /health | 18 724 | 0.20 ms | 6.61 ms |
+| 16 | GET /v1/audit | 6 420 | 2.15 ms | 8.80 ms |
+| 16 | POST /v1/identity | 17 402 | 0.45 ms | 6.83 ms |
+| 16 | POST /v1/contract/propose | 14 407 | 0.78 ms | 6.19 ms |
+
+## Trois étapes, chiffres du propose (chemin complet)
+
+| Configuration | c=1 | c=4 | c=8 | c=16 |
+|---|---|---|---|---|
+| Séquentiel, avant audit de perf | 602 | 467 | 211 | 41 |
+| + fixes quadratiques (SQLite seq, index DID) | 10 357 | 14 377 | 15 096 | 15 294 |
+| + worker pool + parsing hors lock | 10 972 | 14 206 | 14 328 | 14 407 |
+
+Le worker pool stabilise la latence à forte concurrence (p99 6.2 ms vs
+6.9 ms) et gagne ~10-40 % selon l'endpoint ; le plafond restant est le
+Mutex global de l'état (section critique ~27 µs) — le design « one
+process, one order » de l'event sourcing.
 
 ## Deux bugs quadratiques trouvés et corrigés par le benchmark
 
@@ -121,16 +136,16 @@ protègent les deux corrections (`sqlite_sequence_continues_after_reopen`,
 
 ## Implications pour le scaling
 
-- **Par node** : capacité utile ~15 k req/s (lectures, identités,
-  propose). Le scaling horizontal prévu (`docker-compose.scale.yml` +
-  HAProxy, `docs/scaling.md`) est le bon outil : chaque node ajoute
-  ~15 k req/s de capacité de traitement.
-- **Prochaines optimisations** (par ordre d'impact) : passer la boucle
-  serveur sur un pool de threads (le trait `Storage` est déjà
-  `Send + Sync`) et réduire la section critique du Mutex global — le
-  chemin propose complet coûte ~96 µs dont ~27 µs de logique ; la
-  plomberie HTTP (lecture body, sérialisation réponse, ping-pong
-  keep-alive) domine à la concurrence 1.
+- **Par node** : capacité utile ~14-19 k req/s selon l'endpoint, le
+  propose (chemin complet signé + écriture spine) plafonne à
+  ~14.4 k req/s (Mutex global, design « one process, one order »). Le
+  scaling horizontal prévu (`docker-compose.scale.yml` + HAProxy,
+  `docs/scaling.md`) est le bon outil : chaque node ajoute ~14 k req/s.
+- **Prochaines optimisations** (par ordre d'impact) : remplacer le
+  Mutex global par un `RwLock` (lectures en parallèle — health,
+  discover, audit) et sharder l'état par agent ; la section critique du
+  propose (~27 µs de logique) est le plafond théorique de ~37 k req/s
+  pour le chemin complet sur un node.
 - **La vérification de chaîne (1.57 ms / 1000 entrées)** est linéaire
   par conception (chaîne, RFC-0003) ; les ancrages Merkle
   (`root_commitment`) sont le chemin de vérification rapide pour les

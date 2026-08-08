@@ -210,7 +210,8 @@ Environment variables: `GAP_ADDR`, `GAP_STORAGE` (`sqlite` |
 `clickhouse`), `GAP_SQLITE_PATH`, `GAP_CLICKHOUSE_URL`, `GAP_DB_INIT`,
 `GAP_RATE_TOKEN_CAP` / `GAP_RATE_IP_CAP` (requests per minute; defaults
 120 and 600 — see [`docs/benchmarks.md`](./docs/benchmarks.md) for
-throughput at other caps).
+throughput at other caps), `GAP_WORKERS` (HTTP worker pool size;
+default min(cpus, 8)).
 
 ### Scaling: many nodes, one ClickHouse
 

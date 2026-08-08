@@ -375,6 +375,12 @@ impl NodeState {
         if contract.client != *client.identity.did() {
             return Err(Error::Unauthorized("only the client may park".into()));
         }
+        if contract.state != ContractState::Signed {
+            return Err(Error::EscrowViolation(format!(
+                "contract must be signed before parking (state: {})",
+                contract.state.wire_name()
+            )));
+        }
 
         // On-chain path: submit park() to the GapEscrow contract.
         if let Some(relayer) = &self.relayer {
@@ -409,6 +415,117 @@ impl NodeState {
             json!({ "contract_id": contract_id, "amount": amount.to_string_decimal() }),
         );
         Ok(())
+    }
+
+    /// Client explicitly releases escrow. The automatic path
+    /// (`accept-delivery`) already releases; this route exists for
+    /// clients that settle through the release endpoint directly and
+    /// confirms the release state.
+    pub fn escrow_release(&mut self, client_token: &str, contract_id: &str) -> Result<Value> {
+        let client = self.agent_by_token(client_token)?;
+        let escrow = self
+            .escrows
+            .get(contract_id)
+            .ok_or_else(|| Error::EscrowViolation("no escrow for contract".into()))?;
+        if escrow.state() != crate::payment::EscrowState::Released {
+            return Err(Error::EscrowViolation(
+                "funds not released; accept delivery first".into(),
+            ));
+        }
+        let _ = client;
+        self.record("pay.released.confirmed", json!({ "contract_id": contract_id }));
+        Ok(json!({ "state": "released", "contract_id": contract_id }))
+    }
+
+    /// Client-driven refund (parked or disputed state).
+    pub fn escrow_refund(&mut self, client_token: &str, contract_id: &str) -> Result<Value> {
+        let client = self.agent_by_token(client_token)?;
+        let contract = self
+            .contracts
+            .get(contract_id)
+            .cloned()
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.client != *client.identity.did() {
+            return Err(Error::Unauthorized("only the client may refund".into()));
+        }
+        let instruction = Envelope::new(
+            client.identity.did().clone(),
+            self.node_did(),
+            Kind::PayRefund,
+            json!({}),
+        )
+        .for_contract(contract_id)
+        .sign(&client.identity);
+        let escrow = self
+            .escrows
+            .get_mut(contract_id)
+            .ok_or_else(|| Error::EscrowViolation("no escrow for contract".into()))?;
+        let receipt = escrow.refund(&instruction)?;
+        self.record(
+            "pay.refunded",
+            json!({ "contract_id": contract_id, "amount": receipt.amount }),
+        );
+        Ok(json!({ "receipt": { "event": "pay.refunded", "amount": receipt.amount } }))
+    }
+
+    /// Client disputes a contract; funds move to `disputed`.
+    pub fn contract_dispute(&mut self, client_token: &str, contract_id: &str, reason: &str) -> Result<Value> {
+        let client = self.agent_by_token(client_token)?;
+        let contract = self
+            .contracts
+            .get(contract_id)
+            .cloned()
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.client != *client.identity.did() {
+            return Err(Error::Unauthorized("only the client may dispute".into()));
+        }
+        let instruction = Envelope::new(
+            client.identity.did().clone(),
+            self.node_did(),
+            Kind::PayDispute,
+            json!({ "reason": reason }),
+        )
+        .for_contract(contract_id)
+        .sign(&client.identity);
+        let escrow = self
+            .escrows
+            .get_mut(contract_id)
+            .ok_or_else(|| Error::EscrowViolation("no escrow for contract".into()))?;
+        let receipt = escrow.dispute(&instruction)?;
+        self.record(
+            "ctr.disputed",
+            json!({ "contract_id": contract_id, "reason": reason }),
+        );
+        Ok(json!({ "state": "disputed", "amount": receipt.amount }))
+    }
+
+    /// Arbitrator (the node) executes a signed ruling: splits disputed
+    /// funds between client and provider. Fractions must sum to 1.0.
+    pub fn escrow_rule(&mut self, contract_id: &str, client_share: f64, provider_share: f64) -> Result<Value> {
+        let ruling = Envelope::new(
+            self.node_did(),
+            self.node_did(),
+            Kind::CtrRuling,
+            json!({ "split": { "client": client_share, "provider": provider_share } }),
+        )
+        .for_contract(contract_id)
+        .sign(&self.node.identity);
+        let node_did = self.node_did();
+        let escrow = self
+            .escrows
+            .get_mut(contract_id)
+            .ok_or_else(|| Error::EscrowViolation("no escrow for contract".into()))?;
+        let receipt = escrow.rule(&ruling, &node_did)?;
+        self.record(
+            "pay.ruled",
+            json!({ "contract_id": contract_id, "client_share": client_share, "provider_share": provider_share }),
+        );
+        Ok(json!({
+            "state": "ruled",
+            "client_share": client_share,
+            "provider_share": provider_share,
+            "amount": receipt.amount,
+        }))
     }
 
     /// Record an event on the audit spine.
@@ -459,20 +576,9 @@ pub fn route_with_ip(
     auth: Option<&str>,
     client_ip: Option<&str>,
 ) -> (u16, Value) {
-    let mut guard = match state.lock() {
-        Ok(g) => g,
-        Err(_) => return (500, json!({ "error": { "code": "internal", "message": "state lock poisoned" } })),
-    };
-
-    // Rate limiting first (audit H-03): 429 when over limit.
-    let token = auth.and_then(|h| h.strip_prefix("Bearer "));
-    if guard.check_rate_limit(token, client_ip).is_err() {
-        return (
-            429,
-            json!({ "error": { "code": "rate_limited", "message": "too many requests" } }),
-        );
-    }
-
+    // Parse the JSON body BEFORE taking the state lock: with the worker
+    // pool this keeps the global lock's critical section minimal
+    // (parsing and serialization are the parallelizable parts).
     let path = path.split('?').next().unwrap_or(path);
     let body: Value = if body.is_empty() {
         Value::Null
@@ -487,6 +593,20 @@ pub fn route_with_ip(
             }
         }
     };
+
+    let mut guard = match state.lock() {
+        Ok(g) => g,
+        Err(_) => return (500, json!({ "error": { "code": "internal", "message": "state lock poisoned" } })),
+    };
+
+    // Rate limiting first (audit H-03): 429 when over limit.
+    let token = auth.and_then(|h| h.strip_prefix("Bearer "));
+    if guard.check_rate_limit(token, client_ip).is_err() {
+        return (
+            429,
+            json!({ "error": { "code": "rate_limited", "message": "too many requests" } }),
+        );
+    }
 
     let response = match (method, path) {
         // ---- health & card ----
@@ -571,7 +691,12 @@ pub fn route_with_ip(
         ("GET", p) if p.starts_with("/v1/contract/") => {
             let id = p.trim_start_matches("/v1/contract/");
             match guard.contracts.get(id) {
-                Some(c) => Ok(json!({ "contract_id": c.contract_id, "state": format!("{:?}", c.state) })),
+                Some(c) => Ok(json!({
+                    "contract_id": c.contract_id,
+                    // Lowercase wire state, consistent with the other
+                    // routes ("draft", "signed", …).
+                    "state": c.state.wire_name(),
+                })),
                 None => Err(Error::UnknownContract(id.into())),
             }
         }
@@ -599,11 +724,50 @@ pub fn route_with_ip(
 
         // ---- audit ----
         ("GET", "/v1/audit") => {
-            let events = guard
-                .storage
-                .events_after(0, 100)
-                .unwrap_or_default();
-            Ok(json!({ "events": events }))
+            // Authenticated endpoint: the audit spine is tamper-evident
+            // evidence; anonymous read access would leak every contract
+            // event (found by the exhaustive route tests).
+            let authed = token.map(|t| guard.agent_by_token(t).is_ok()).unwrap_or(false);
+            if !authed {
+                Err(Error::Unauthorized("authentication required".into()))
+            } else {
+                let events = guard
+                    .storage
+                    .events_after(0, 100)
+                    .unwrap_or_default();
+                Ok(json!({ "events": events }))
+            }
+        }
+
+        // ---- escrow: explicit settlement routes ----
+        ("POST", "/v1/escrow/release") => {
+            let id = body.get("contract_id").and_then(|v| v.as_str()).unwrap_or("");
+            match token {
+                Some(t) => guard.escrow_release(t, id),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("POST", "/v1/escrow/refund") => {
+            let id = body.get("contract_id").and_then(|v| v.as_str()).unwrap_or("");
+            match token {
+                Some(t) => guard.escrow_refund(t, id),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("POST", "/v1/escrow/rule") => {
+            let id = body.get("contract_id").and_then(|v| v.as_str()).unwrap_or("");
+            let split = body.get("split").cloned().unwrap_or_default();
+            let client_share = split.get("client").and_then(|v| v.as_f64()).unwrap_or(-1.0);
+            let provider_share = split.get("provider").and_then(|v| v.as_f64()).unwrap_or(-1.0);
+            guard.escrow_rule(id, client_share, provider_share)
+        }
+        (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/dispute") => {
+            let id = p.trim_start_matches("/v1/contract/").trim_end_matches("/dispute");
+            let reason = body.get("reason").and_then(|v| v.as_str()).unwrap_or("unspecified");
+            match token {
+                Some(t) => guard.contract_dispute(t, id, reason),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
         }
 
         _ => Err(Error::Other("unknown route".into())),
@@ -843,8 +1007,8 @@ mod tests {
         assert_eq!(s, 200, "accept-delivery failed: {v}");
         assert_eq!(v["state"], "accepted");
 
-        // Audit spine has events.
-        let (s, v) = route(&arc, "GET", "/v1/audit", &[], None);
+        // Audit spine has events (authenticated endpoint).
+        let (s, v) = route(&arc, "GET", "/v1/audit", &[], Some(&format!("Bearer {client_tok}")));
         assert_eq!(s, 200);
         assert!(!v["events"].as_array().unwrap().is_empty());
     }
@@ -947,8 +1111,8 @@ mod tests {
         assert_eq!(v["state"], "accepted");
         assert_eq!(v["settlement"]["chain"], "onchain");
 
-        // Audit records the on-chain events.
-        let (s, v) = route(&arc, "GET", "/v1/audit", &[], None);
+        // Audit records the on-chain events (authenticated endpoint).
+        let (s, v) = route(&arc, "GET", "/v1/audit", &[], Some(&format!("Bearer {client_tok}")));
         assert_eq!(s, 200);
         let events = v["events"].as_array().unwrap();
         assert!(events.iter().any(|e| e["kind"] == "pay.parked.onchain"));

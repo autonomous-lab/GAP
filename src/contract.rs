@@ -23,6 +23,22 @@ pub enum ContractState {
     Cancelled,
 }
 
+impl ContractState {
+    /// Lowercase wire representation, consistent across all routes.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            ContractState::Draft => "draft",
+            ContractState::Signed => "signed",
+            ContractState::Executing => "executing",
+            ContractState::Delivered => "delivered",
+            ContractState::Accepted => "accepted",
+            ContractState::Disputed => "disputed",
+            ContractState::Ruled => "ruled",
+            ContractState::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// Price terms.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Price {

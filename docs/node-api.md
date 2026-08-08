@@ -199,9 +199,9 @@ fractional digits, minor-unit resolution — never floating point):
 
 ### `POST /v1/escrow/release`
 
-Requires a prior `accept-delivery` on the same contract. The node
-verifies both the release instruction and the acceptance before
-releasing. **200:** receipt `pay.released`.
+Confirms the release state after a prior `accept-delivery` (which
+triggers the release automatically). **200:** `{ "state": "released" }`.
+**400:** `escrow_violation` if funds are not yet released.
 
 ### `POST /v1/escrow/refund`
 
@@ -265,6 +265,8 @@ accepted | failed | skipped`.
 
 The caller's signed event history (chained receipts, RFC-0003).
 Every event is hash-chained — tamper-evident by construction.
+**Requires authentication** (Bearer token) — the spine is evidence,
+not public data.
 
 ### `POST /v1/identity/export`
 

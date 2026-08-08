@@ -38,32 +38,38 @@ fn main() {
         let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
         let port = server.server_addr().to_ip().unwrap().port();
         let base = format!("http://127.0.0.1:{port}");
-        // Serve in the background (same loop as main.rs).
-        let state2 = state.clone();
-        std::thread::spawn(move || loop {
-            let mut request: tiny_http::Request = match server.recv() {
-                Ok(r) => r,
-                Err(_) => break,
-            };
-            let method = request.method().as_str().to_string();
-            let url = request.url().to_string();
-            let auth = request
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("Authorization"))
-                .map(|h| h.value.as_str().to_string());
-            let mut body = Vec::new();
-            let _ = request.as_reader().read_to_end(&mut body);
-            let client_ip = request.remote_addr().map(|a| a.ip().to_string());
-            let (status, json_body) =
-                route_with_ip(&state2, &method, &url, &body, auth.as_deref(), client_ip.as_deref());
-            let payload = json_body.to_string();
-            let _ = request.respond(
-                Response::from_string(payload)
-                    .with_status_code(status)
-                    .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap()),
-            );
-        });
+        // Serve in the background (worker pool, like main.rs).
+        let workers: usize = std::env::var("GAP_BENCH_WORKERS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+        let server = std::sync::Arc::new(server);
+        for _ in 0..workers {
+            let state2 = state.clone();
+            let server = server.clone();
+            std::thread::spawn(move || loop {
+                let mut request: tiny_http::Request = match server.recv() {
+                    Ok(r) => r,
+                    Err(_) => break,
+                };
+                let method = request.method().as_str().to_string();
+                let url = request.url().to_string();
+                let auth = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.as_str().to_string());
+                let mut body = Vec::new();
+                let _ = request.as_reader().read_to_end(&mut body);
+                let client_ip = request.remote_addr().map(|a| a.ip().to_string());
+                let (status, json_body) =
+                    route_with_ip(&state2, &method, &url, &body, auth.as_deref(), client_ip.as_deref());
+                let payload = json_body.to_string();
+                let _ = request.respond(
+                    Response::from_string(payload)
+                        .with_status_code(status)
+                        .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap()),
+                );
+            });
+        }
         base
     });
 

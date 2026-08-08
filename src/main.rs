@@ -97,11 +97,23 @@ fn main() -> Result<()> {
     }
     let state = Arc::new(Mutex::new(state));
 
-    let server = Server::http(&addr)
-        .map_err(|e| gap::Error::Other(format!("failed to bind {addr}: {e}")))?;
+    let server = Arc::new(
+        Server::http(&addr).map_err(|e| gap::Error::Other(format!("failed to bind {addr}: {e}")))?,
+    );
     println!("[gap-node] listening on http://{addr}");
     println!("[gap-node] node DID: {}", state.lock().unwrap().node_did());
     println!("[gap-node] agent card: http://{addr}/.well-known/gap-agent.json");
+
+    // Worker pool: request parsing and response serialization run in
+    // parallel; the state lock serializes only the protocol core
+    // (event-sourcing requires one order, so writes stay ordered).
+    let workers: usize = env::var("GAP_WORKERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8)
+        });
+    println!("[gap-node] worker pool: {workers} threads");
 
     // Audit M-02: warn loudly when the node is exposed without TLS.
     let exposed = addr.starts_with("0.0.0.0") || addr.starts_with("::");
@@ -113,36 +125,48 @@ fn main() -> Result<()> {
         );
     }
 
-    for mut request in server.incoming_requests() {
-        // Read the body (limit to a sane size).
-        let mut body = Vec::new();
-        request
-            .as_reader()
-            .take(1024 * 1024)
-            .read_to_end(&mut body)
-            .ok();
+    let mut handles = Vec::new();
+    for _ in 0..workers {
+        let server = server.clone();
+        let state = state.clone();
+        handles.push(std::thread::spawn(move || loop {
+            let mut request = match server.recv() {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+            // Read the body (limit to a sane size).
+            let mut body = Vec::new();
+            request
+                .as_reader()
+                .take(1024 * 1024)
+                .read_to_end(&mut body)
+                .ok();
 
-        let method = request.method().as_str().to_string();
-        let path = request.url().to_string();
-        let auth = request
-            .headers()
-            .iter()
-            .find(|h| h.field.equiv("Authorization"))
-            .map(|h| h.value.as_str().to_string());
+            let method = request.method().as_str().to_string();
+            let path = request.url().to_string();
+            let auth = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.as_str().to_string());
 
-        let client_ip = request
-            .remote_addr()
-            .map(|addr| addr.ip().to_string());
-        let (status, json_body) = route_with_ip(&state, &method, &path, &body, auth.as_deref(), client_ip.as_deref());
-        let json_str = json_body.to_string();
+            let client_ip = request
+                .remote_addr()
+                .map(|addr| addr.ip().to_string());
+            let (status, json_body) =
+                route_with_ip(&state, &method, &path, &body, auth.as_deref(), client_ip.as_deref());
+            let json_str = json_body.to_string();
 
-        let mut response = Response::from_string(json_str)
-            .with_status_code(status);
-        response.add_header(
-            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-        );
+            let mut response = Response::from_string(json_str).with_status_code(status);
+            response.add_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
 
-        let _ = request.respond(response);
+            let _ = request.respond(response);
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
     }
     Ok(())
 }
