@@ -25,6 +25,7 @@
 //! ```
 
 pub mod contract;
+pub mod delegation;
 pub mod discovery;
 pub mod error;
 pub mod execution;
@@ -32,6 +33,8 @@ pub mod governance;
 pub mod identity;
 pub mod message;
 pub mod payment;
+pub mod policy;
+pub mod receipt_chain;
 pub mod runtime;
 
 pub use contract::{Contract, ContractState, Price, Terms};

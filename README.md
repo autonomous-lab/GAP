@@ -38,6 +38,9 @@ cargo run -- --help
 GAP/
 ├── README.md          # You are here
 ├── BUSINESS.md        # The business model: how GAP becomes durable
+├── COMPETITIVE-ANALYSIS.md  # GAP vs A2A, OAP, OpenAgents, xlang, robpolak
+├── docs/              # The RFC process (like OAP's)
+│   └── rfcs/          # RFC-0001 … RFC-0012 (delegation, workflows, …)
 ├── spec/              # The protocol specification (normative)
 │   ├── 00-overview.md
 │   ├── 01-identity.md
@@ -50,10 +53,15 @@ GAP/
 ├── src/               # Rust reference implementation
 │   ├── lib.rs         # Public API surface
 │   ├── identity.rs    # DIDs, keys, reputation
+│   ├── credential.rs  # Verifiable credentials (RFC-0005) [planned]
 │   ├── discovery.rs   # Registry & capability announcements
+│   ├── agentcard.rs   # Well-known discovery (RFC-0010) [planned]
 │   ├── contract.rs    # Contract lifecycle
 │   ├── message.rs     # Wire format & addressing
 │   ├── payment.rs     # Escrow & settlement (signed instructions only)
+│   ├── policy.rs      # Layered policy engine (RFC-0004)
+│   ├── delegation.rs  # Delegation tokens (RFC-0001)
+│   ├── receipt_chain.rs  # Hash-chained receipts (RFC-0003)
 │   ├── governance.rs  # Autonomy levels, certification, meta-agents
 │   ├── runtime.rs     # The ergonomic facade binding all layers
 │   └── error.rs       # Error taxonomy
@@ -86,7 +94,7 @@ Expect breaking changes until v1.0.
 ## Testing
 
 ```bash
-cargo test            # 32 unit tests + 3 integration scenarios
+cargo test            # 74 unit tests + 3 integration scenarios
 cargo clippy          # zero warnings
 cargo run --example lead_gen   # end-to-end demo
 ```
@@ -94,8 +102,10 @@ cargo run --example lead_gen   # end-to-end demo
 The test suite covers: signature tampering, replay attacks, forged
 announcements, forged contract signatures, escrow authorization
 (wrong party / unsigned instructions / price caps), TTL expiry,
-reputation filtering, dispute arbitration, and full happy-path
-economy flows.
+reputation filtering, dispute arbitration, delegation chains
+(escalation, depth, budgets), policy engine (layers, terminal deny,
+localized explanations), receipt hash-chains (tamper detection,
+redaction), and full happy-path economy flows.
 
 ## License
 
