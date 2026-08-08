@@ -25,9 +25,46 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Minimal HTTP transport abstraction (mockable).
+/// A bound query parameter for ClickHouse's `{name:Type}` placeholders.
+#[derive(Debug, Clone)]
+pub struct QueryParam {
+    pub name: &'static str,
+    pub value: String,
+}
+
+impl QueryParam {
+    pub fn new(name: &'static str, value: impl Into<String>) -> Self {
+        Self {
+            name,
+            value: value.into(),
+        }
+    }
+}
+
+/// Minimal HTTP transport abstraction (mockable).
 pub trait HttpTransport: Send {
     /// POST a raw query to ClickHouse, return the raw response body.
     fn post(&self, query: &str) -> Result<String>;
+
+    /// POST a query with bound parameters. Implementations MUST bind
+    /// values through ClickHouse's `{name:Type}` placeholder mechanism
+    /// (`param_<name>` in the request) — never by string interpolation.
+    /// This is the SQL-injection-safe path (audit finding C-02).
+    fn post_params(&self, query: &str, params: &[QueryParam]) -> Result<String> {
+        // Default: append params as query-string bindings after
+        // encoding the query itself.
+        let mut url = format!("{}/?query={}", self.base_url(), urlencode(query));
+        for p in params {
+            url.push_str(&format!("&param_{}={}", p.name, urlencode(&p.value)));
+        }
+        self.post_url(&url)
+    }
+
+    /// The base URL (used by the default `post_params`).
+    fn base_url(&self) -> String;
+
+    /// POST to a fully-built URL.
+    fn post_url(&self, url: &str) -> Result<String>;
 }
 
 /// A real transport using `ureq`.
@@ -46,7 +83,15 @@ impl UreqTransport {
 impl HttpTransport for UreqTransport {
     fn post(&self, query: &str) -> Result<String> {
         let url = format!("{}/?query={}", self.base_url, urlencode(query));
-        let mut resp = ureq::post(&url)
+        self.post_url(&url)
+    }
+
+    fn base_url(&self) -> String {
+        self.base_url.clone()
+    }
+
+    fn post_url(&self, url: &str) -> Result<String> {
+        let mut resp = ureq::post(url)
             .send_empty()
             .map_err(|e| Error::Other(format!("clickhouse request failed: {e}")))?;
         resp.body_mut()
@@ -158,21 +203,24 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .lock()
             .map_err(|_| Error::Other("events lock poisoned".into()))?;
         let seq = events.len() as u64;
+        let at = crate::message::now_unix();
         events.push(EventRecord {
             seq,
             kind: kind.into(),
-            at: crate::message::now_unix(),
+            at,
             payload: payload.clone(),
         });
-        // Fire-and-forget insert to the cluster (async in production;
-        // the mirror is the hot path).
-        let q = format!(
-            "INSERT INTO gap_events (seq, kind, at, payload) VALUES ({seq}, '{}', {}, '{}')",
-            kind.replace('\'', "\\'"),
-            crate::message::now_unix(),
-            payload.to_string().replace('\'', "\\'"),
-        );
-        let _ = self.transport.post(&q);
+        // Fire-and-forget insert with BOUND parameters — never string
+        // interpolation (audit fix C-02: SQL injection).
+        let q = "INSERT INTO gap_events (seq, kind, at, payload) \
+                 VALUES ({seq:UInt64}, {kind:String}, {at:UInt64}, {payload:String})";
+        let params = [
+            QueryParam::new("seq", seq.to_string()),
+            QueryParam::new("kind", kind),
+            QueryParam::new("at", at.to_string()),
+            QueryParam::new("payload", payload.to_string()),
+        ];
+        let _ = self.transport.post_params(q, &params);
         Ok(seq)
     }
 
@@ -203,18 +251,20 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .lock()
             .map_err(|_| Error::Other("contracts lock poisoned".into()))?;
         contracts.insert(record.contract_id.clone(), record.clone());
-        // Async mirror write; ReplacingMergeTree collapses on merge.
-        let q = format!(
-            "INSERT INTO gap_contracts VALUES ('{}', '{}', '{}', '{}', '{}', '{}', {})",
-            record.contract_id.replace('\'', "\\'"),
-            record.client.replace('\'', "\\'"),
-            record.provider.replace('\'', "\\'"),
-            record.capability_id.replace('\'', "\\'"),
-            record.state.replace('\'', "\\'"),
-            record.contract_json.replace('\'', "\\'"),
-            record.updated_at,
-        );
-        let _ = self.transport.post(&q);
+        // Async mirror write with BOUND parameters (audit fix C-02).
+        let q = "INSERT INTO gap_contracts (contract_id, client, provider, capability_id, state, contract_json, updated_at) \
+                 VALUES ({contract_id:String}, {client:String}, {provider:String}, \
+                         {capability_id:String}, {state:String}, {contract_json:String}, {updated_at:UInt64})";
+        let params = [
+            QueryParam::new("contract_id", &record.contract_id),
+            QueryParam::new("client", &record.client),
+            QueryParam::new("provider", &record.provider),
+            QueryParam::new("capability_id", &record.capability_id),
+            QueryParam::new("state", &record.state),
+            QueryParam::new("contract_json", &record.contract_json),
+            QueryParam::new("updated_at", record.updated_at.to_string()),
+        ];
+        let _ = self.transport.post_params(q, &params);
         Ok(())
     }
 
@@ -244,13 +294,15 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .lock()
             .map_err(|_| Error::Other("announcements lock poisoned".into()))?;
         announcements.insert(record.agent_did.clone(), record.clone());
-        let q = format!(
-            "INSERT INTO gap_announcements VALUES ('{}', '{}', {})",
-            record.agent_did.replace('\'', "\\'"),
-            record.announcement_json.replace('\'', "\\'"),
-            record.expires_at,
-        );
-        let _ = self.transport.post(&q);
+        // BOUND parameters (audit fix C-02).
+        let q = "INSERT INTO gap_announcements (agent_did, announcement_json, expires_at) \
+                 VALUES ({agent_did:String}, {announcement_json:String}, {expires_at:UInt64})";
+        let params = [
+            QueryParam::new("agent_did", &record.agent_did),
+            QueryParam::new("announcement_json", &record.announcement_json),
+            QueryParam::new("expires_at", record.expires_at.to_string()),
+        ];
+        let _ = self.transport.post_params(q, &params);
         Ok(())
     }
 
@@ -271,8 +323,9 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
         let before = announcements.len();
         announcements.retain(|_, a| a.expires_at > now);
         let removed = before - announcements.len();
-        let q = format!("ALTER TABLE gap_announcements DELETE WHERE expires_at <= {now}");
-        let _ = self.transport.post(&q);
+        let q = "ALTER TABLE gap_announcements DELETE WHERE expires_at <= {now:UInt64}";
+        let params = [QueryParam::new("now", now.to_string())];
+        let _ = self.transport.post_params(q, &params);
         Ok(removed)
     }
 }
@@ -283,15 +336,32 @@ mod tests {
     use crate::storage::test_helpers::run_conformance_suite;
     use std::cell::RefCell;
 
-    /// A mock transport recording queries.
+    /// A mock transport recording queries and bound parameters.
     #[derive(Default)]
     pub struct MockTransport {
         pub queries: RefCell<Vec<String>>,
+        /// (query, params) pairs recorded via post_params.
+        pub param_queries: RefCell<Vec<(String, Vec<QueryParam>)>>,
     }
 
     impl HttpTransport for MockTransport {
         fn post(&self, query: &str) -> Result<String> {
             self.queries.borrow_mut().push(query.to_string());
+            Ok(String::new())
+        }
+
+        fn base_url(&self) -> String {
+            "http://mock".into()
+        }
+
+        fn post_url(&self, _url: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn post_params(&self, query: &str, params: &[QueryParam]) -> Result<String> {
+            self.param_queries
+                .borrow_mut()
+                .push((query.to_string(), params.to_vec()));
             Ok(String::new())
         }
     }
@@ -304,13 +374,58 @@ mod tests {
 
     #[test]
     fn clickhouse_emits_queries() {
-        let transport = MockTransport::default();
-        let mut storage = ClickHouseStorage::new(transport);
+        let mut storage = ClickHouseStorage::new(MockTransport::default());
         storage
             .append_event("ctr.signed", serde_json::json!({ "id": "c1" }))
             .unwrap();
-        assert!(!storage.transport.queries.borrow().is_empty());
-        assert!(storage.transport.queries.borrow()[0].contains("INSERT INTO gap_events"));
+        let t = &storage.transport;
+        assert!(!t.param_queries.borrow().is_empty());
+        assert!(t.param_queries.borrow()[0].0.contains("INSERT INTO gap_events"));
+    }
+
+    #[test]
+    fn sql_injection_values_are_bound_not_interpolated() {
+        // Audit fix C-02 regression test: hostile values must appear as
+        // bound parameters, never inside the query text.
+        let mut storage = ClickHouseStorage::new(MockTransport::default());
+
+        let hostile_kind = "x'; DROP TABLE gap_events; --";
+        let hostile_payload = serde_json::json!({ "note": "'); DELETE FROM gap_contracts; --" });
+        storage.append_event(hostile_kind, hostile_payload).unwrap();
+
+        {
+            let (query, params) = &storage.transport.param_queries.borrow()[0];
+            // The query text must NOT contain the hostile strings.
+            assert!(!query.contains("DROP TABLE"), "query must not embed hostile kind: {query}");
+            assert!(!query.contains("DELETE FROM"), "query must not embed hostile payload: {query}");
+            // The query must use placeholders.
+            assert!(query.contains("{kind:String}"), "query must use bound placeholder: {query}");
+            assert!(query.contains("{payload:String}"), "query must use bound placeholder: {query}");
+            // The hostile values travel as bound parameters.
+            let kind_param = params.iter().find(|p| p.name == "kind").expect("kind param");
+            assert_eq!(kind_param.value, hostile_kind);
+            let payload_param = params.iter().find(|p| p.name == "payload").expect("payload param");
+            assert!(payload_param.value.contains("DELETE FROM"));
+        }
+
+        // Same for contract upsert.
+        let rec = ContractRecord {
+            contract_id: "urn:gap:ctr:'; DROP TABLE gap_contracts; --".into(),
+            client: "did:gap:a'.client".into(),
+            provider: "did:gap:b".into(),
+            capability_id: "cap:x'; --".into(),
+            state: "signed".into(),
+            contract_json: "{\"evil\":\"; DROP\"}".into(),
+            updated_at: 1,
+        };
+        storage.upsert_contract(&rec).unwrap();
+        {
+            let (query, params) = &storage.transport.param_queries.borrow()[1];
+            assert!(!query.contains("DROP"), "contract query must not embed hostile id: {query}");
+            assert!(query.contains("{contract_id:String}"));
+            let id_param = params.iter().find(|p| p.name == "contract_id").expect("contract_id param");
+            assert_eq!(id_param.value, rec.contract_id);
+        }
     }
 
     #[test]

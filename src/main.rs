@@ -50,7 +50,32 @@ fn build_storage() -> Result<Box<dyn Storage>> {
 fn main() -> Result<()> {
     let addr = env::var("GAP_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let storage = build_storage()?;
-    let mut state = NodeState::new(storage);
+
+    // Node identity persistence (audit fix H-01): load the seed from
+    // GAP_NODE_SEED (hex) or GAP_NODE_SEED_FILE. Without it, the node
+    // DID changes on every restart.
+    let seed: Option<[u8; 32]> = {
+        let hex_seed = env::var("GAP_NODE_SEED")
+            .ok()
+            .or_else(|| {
+                env::var("GAP_NODE_SEED_FILE")
+                    .ok()
+                    .and_then(|f| std::fs::read_to_string(f).ok())
+                    .map(|s| s.trim().to_string())
+            });
+        match hex_seed {
+            Some(hex_str) => {
+                let bytes = hex::decode(hex_str.trim())
+                    .map_err(|_| gap::Error::Other("GAP_NODE_SEED must be 64 hex chars".into()))?;
+                let arr: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| gap::Error::Other("GAP_NODE_SEED must be 32 bytes".into()))?;
+                Some(arr)
+            }
+            None => None,
+        }
+    };
+    let mut state = NodeState::with_seed(storage, seed);
 
     // Optional on-chain escrow: when GAP_ESCROW_ADDRESS is set, escrow
     // operations go to the GapEscrow contract via the relayer.

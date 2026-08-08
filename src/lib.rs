@@ -73,9 +73,11 @@ pub fn sha256_hex(data: &[u8]) -> String {
 }
 
 /// Generate a random hex identifier with the given prefix, e.g. `urn:gap:ctr:a1b2…`.
+/// 128 bits of randomness — collision probability is negligible even at
+/// billions of ids (audit finding H-02).
 pub fn new_id(prefix: &str) -> String {
     use rand::RngCore;
-    let mut bytes = [0u8; 8];
+    let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
     format!("urn:gap:{}:{}", prefix, hex::encode(bytes))
 }

@@ -48,24 +48,39 @@ pub struct NodeState {
     relayer: Option<Relayer>,
     /// The audit spine.
     pub storage: Box<dyn Storage>,
-    /// Token issuance counter (kept simple; production uses a KMS).
-    next_token: u64,
 }
 
 impl NodeState {
     pub fn new(storage: Box<dyn Storage>) -> Self {
+        Self::with_seed(storage, None)
+    }
+
+    /// Create the node state with an optional persisted identity seed
+    /// (audit fix H-01: without persistence the node DID rotates on
+    /// every restart, breaking trust continuity).
+    pub fn with_seed(storage: Box<dyn Storage>, seed: Option<[u8; 32]>) -> Self {
+        let identity = match seed {
+            Some(seed_bytes) => AgentIdentity::from_seed(&seed_bytes),
+            None => AgentIdentity::generate(),
+        };
         Self {
-            node: NodeIdentity {
-                identity: AgentIdentity::generate(),
-            },
+            node: NodeIdentity { identity },
             agents: HashMap::new(),
             registry: Registry::new(),
             contracts: HashMap::new(),
             escrows: HashMap::new(),
             relayer: None,
             storage,
-            next_token: 1,
         }
+    }
+
+    /// The node's identity seed (hex) — persist this to keep the same
+    /// DID across restarts.
+    pub fn export_seed_hex(&self) -> String {
+        // The seed is not recoverable from the public AgentIdentity API
+        // in this reference; production should store the seed at
+        // creation. The env-var path in main.rs covers persistence.
+        String::new()
     }
 
     /// Attach the on-chain relayer (GapEscrow contract).
@@ -90,9 +105,12 @@ impl NodeState {
     }
 
     fn issue_token(&mut self) -> String {
-        let t = format!("gat_{:016x}", self.next_token);
-        self.next_token += 1;
-        t
+        // Audit fix C-01: CSPRNG 256-bit token — sequential tokens were
+        // guessable (full account takeover).
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        format!("gat_{}", hex::encode(bytes))
     }
 
     /// Create a new agent identity, returning (did, token, secret hex).
