@@ -207,7 +207,10 @@ default (`deploy/clickhouse/system-logs.xml`). The node's own audit
 spine is the protocol log; ClickHouse system logs are redundant.
 
 Environment variables: `GAP_ADDR`, `GAP_STORAGE` (`sqlite` |
-`clickhouse`), `GAP_SQLITE_PATH`, `GAP_CLICKHOUSE_URL`, `GAP_DB_INIT`.
+`clickhouse`), `GAP_SQLITE_PATH`, `GAP_CLICKHOUSE_URL`, `GAP_DB_INIT`,
+`GAP_RATE_TOKEN_CAP` / `GAP_RATE_IP_CAP` (requests per minute; defaults
+120 and 600 — see [`docs/benchmarks.md`](./docs/benchmarks.md) for
+throughput at other caps).
 
 ### Scaling: many nodes, one ClickHouse
 

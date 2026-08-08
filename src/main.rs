@@ -75,7 +75,15 @@ fn main() -> Result<()> {
             None => None,
         }
     };
-    let mut state = NodeState::with_seed(storage, seed);
+    let token_cap: u32 = env::var("GAP_RATE_TOKEN_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
+    let ip_cap: u32 = env::var("GAP_RATE_IP_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600);
+    let mut state = NodeState::with_rate_limits(storage, seed, token_cap, ip_cap);
 
     // Optional on-chain escrow: when GAP_ESCROW_ADDRESS is set, escrow
     // operations go to the GapEscrow contract via the relayer.

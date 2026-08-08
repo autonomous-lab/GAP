@@ -53,6 +53,12 @@ pub struct NodeState {
     rate_limits: std::collections::HashMap<String, RateCounters>,
     /// Per-source-IP rate counters (audit H-03).
     ip_limits: std::collections::HashMap<String, RateCounters>,
+    /// Per-token cap (requests per minute). Configurable via env
+    /// (`GAP_RATE_TOKEN_CAP`) so operators can trade security vs.
+    /// throughput; default 120.
+    token_cap: u32,
+    /// Per-IP cap (requests per minute); default 600.
+    ip_cap: u32,
 }
 
 impl NodeState {
@@ -64,6 +70,18 @@ impl NodeState {
     /// (audit fix H-01: without persistence the node DID rotates on
     /// every restart, breaking trust continuity).
     pub fn with_seed(storage: Box<dyn Storage>, seed: Option<[u8; 32]>) -> Self {
+        Self::with_rate_limits(storage, seed, 120, 600)
+    }
+
+    /// Full constructor with explicit rate caps (used by tests and the
+    /// HTTP benchmark to lift the security caps when measuring raw
+    /// capacity).
+    pub fn with_rate_limits(
+        storage: Box<dyn Storage>,
+        seed: Option<[u8; 32]>,
+        token_cap: u32,
+        ip_cap: u32,
+    ) -> Self {
         let identity = match seed {
             Some(seed_bytes) => AgentIdentity::from_seed(&seed_bytes),
             None => AgentIdentity::generate(),
@@ -78,6 +96,8 @@ impl NodeState {
             storage,
             rate_limits: std::collections::HashMap::new(),
             ip_limits: std::collections::HashMap::new(),
+            token_cap,
+            ip_cap,
         }
     }
 
@@ -89,13 +109,13 @@ impl NodeState {
             self.rate_limits
                 .entry(t.to_string())
                 .or_default()
-                .record_invocation(now, 120)?; // 120 req/min per token
+                .record_invocation(now, self.token_cap)?; // per-token cap
         }
         if let Some(src) = ip {
             self.ip_limits
                 .entry(src.to_string())
                 .or_default()
-                .record_invocation(now, 600)?; // 600 req/min per IP
+                .record_invocation(now, self.ip_cap)?; // per-IP cap
         }
         Ok(())
     }
