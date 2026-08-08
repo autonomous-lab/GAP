@@ -25,6 +25,8 @@ pub struct Runtime {
     arbitrators: Vec<Did>,
     /// Received-and-processed message ids (replay protection, in-memory).
     seen: std::collections::HashSet<String>,
+    /// Optional persistent storage (event spine).
+    storage: Option<Box<dyn crate::storage::Storage>>,
 }
 
 impl Runtime {
@@ -36,6 +38,20 @@ impl Runtime {
             escrow: None,
             arbitrators: vec![],
             seen: std::collections::HashSet::new(),
+            storage: None,
+        }
+    }
+
+    /// Attach a persistent storage backend (SQLite, ClickHouse, …).
+    /// Every subsequent event is appended to the spine.
+    pub fn set_storage(&mut self, storage: Box<dyn crate::storage::Storage>) {
+        self.storage = Some(storage);
+    }
+
+    /// Append an event to the attached storage (no-op without storage).
+    fn record_event(&mut self, kind: &str, payload: serde_json::Value) {
+        if let Some(storage) = self.storage.as_mut() {
+            let _ = storage.append_event(kind, payload);
         }
     }
 
@@ -90,8 +106,12 @@ impl Runtime {
         let state = contract.state;
         self.contracts.push((contract.clone(), state));
         if let Some(escrow) = self.escrow.as_mut() {
-            escrow.register(contract)?;
+            escrow.register(contract.clone())?;
         }
+        self.record_event(
+            "ctr.bound",
+            json!({ "contract_id": contract.contract_id, "state": format!("{state:?}") }),
+        );
         Ok(())
     }
 
@@ -106,6 +126,10 @@ impl Runtime {
             if c.contract_id == id {
                 c.transition(to)?;
                 *state = c.state;
+                self.record_event(
+                    "ctr.transition",
+                    json!({ "contract_id": id, "to": format!("{to:?}") }),
+                );
                 return Ok(());
             }
         }

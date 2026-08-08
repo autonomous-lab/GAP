@@ -40,7 +40,8 @@ GAP/
 ├── BUSINESS.md        # The business model: how GAP becomes durable
 ├── COMPETITIVE-ANALYSIS.md  # GAP vs A2A, OAP, OpenAgents, xlang, robpolak
 ├── docs/              # The RFC process (like OAP's)
-│   └── rfcs/          # RFC-0001 … RFC-0012 (delegation, workflows, …)
+│   ├── rfcs/          # RFC-0001 … RFC-0012 (delegation, workflows, …)
+│   └── deployment.md  # Storage architecture (SQLite / ClickHouse)
 ├── spec/              # The protocol specification (normative)
 │   ├── 00-overview.md
 │   ├── 01-identity.md
@@ -69,13 +70,18 @@ GAP/
 │   ├── workflow.rs    # DAG workflow engine (RFC-0002)
 │   ├── conformance.rs # L0-L4 levels & reports (RFC-0011)
 │   ├── sla.rs         # SLA tracking & incidents (RFC-0012)
+│   ├── storage/       # Storage abstraction + backends
+│   │   ├── mod.rs     # Storage trait + conformance suite
+│   │   ├── sqlite.rs  # SQLite backend (dev/tests)
+│   │   └── clickhouse.rs  # ClickHouse backend + sequencer (prod)
 │   ├── governance.rs  # Autonomy levels, certification, meta-agents
 │   ├── runtime.rs     # The ergonomic facade binding all layers
 │   └── error.rs       # Error taxonomy
 ├── tests/             # Integration tests (full economy scenarios)
 │   └── economy.rs
 └── examples/          # Runnable examples
-    └── lead_gen.rs
+    ├── lead_gen.rs    # 1:1 agent economy (discovery→escrow)
+    └── workflow_demo.rs  # multi-agent pipeline (3 steps, SQLite persistence)
 ```
 
 ## Design principles

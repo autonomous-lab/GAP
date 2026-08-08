@@ -42,6 +42,7 @@ pub mod policy;
 pub mod receipt_chain;
 pub mod runtime;
 pub mod sla;
+pub mod storage;
 pub mod subscription;
 pub mod sybil;
 pub mod workflow;
