@@ -42,11 +42,14 @@ GAP/
 ├── COMPETITIVE-ANALYSIS.md  # GAP vs A2A, OAP, OpenAgents, xlang, robpolak
 ├── Dockerfile         # The node server image (multi-stage, musl)
 ├── docker-compose.yml # Node + ClickHouse stack
-├── deploy/            # Runtime configs (ClickHouse system-log control)
+├── docker-compose.scale.yml  # LB + 3 nodes + ClickHouse (scaling)
+├── deploy/            # Runtime configs (ClickHouse system-log control, HAProxy)
 ├── docs/              # The RFC process (like OAP's)
 │   ├── rfcs/          # RFC-0001 … RFC-0012 (delegation, workflows, …)
 │   ├── node-api.md    # The GAP node HTTP API (what agents point at)
-│   └── deployment.md  # Storage architecture (SQLite / ClickHouse)
+│   ├── deployment.md  # Storage architecture (SQLite / ClickHouse)
+│   ├── scaling.md     # Multi-node, load balancer, sequencer
+│   └── use-cases.md   # 5 concrete scenarios with real commands
 ├── spec/              # The protocol specification (normative)
 │   ├── 00-overview.md
 │   ├── 01-identity.md
@@ -199,12 +202,35 @@ spine is the protocol log; ClickHouse system logs are redundant.
 Environment variables: `GAP_ADDR`, `GAP_STORAGE` (`sqlite` |
 `clickhouse`), `GAP_SQLITE_PATH`, `GAP_CLICKHOUSE_URL`, `GAP_DB_INIT`.
 
+### Scaling: many nodes, one ClickHouse
+
+```bash
+# Load balancer + 3 node replicas + ClickHouse
+docker compose -f docker-compose.scale.yml up --build
+curl http://localhost:8080/health   # LB → any node
+curl http://localhost:8404/stats    # HAProxy stats
+```
+
+Nodes are stateless replicas sharing ClickHouse; the load balancer
+round-robins without sticky sessions. Escrow critical sections are
+serialized by a dedicated sequencer (see [`docs/scaling.md`](./docs/scaling.md)).
+
 Try it end-to-end:
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/identity   # → did + token
 curl -s http://localhost:8080/.well-known/gap-agent.json
 ```
+
+### Concrete examples
+
+Five verified scenarios in [`docs/use-cases.md`](./docs/use-cases.md):
+
+1. **Sales** — one company's agent hires another's (discover → contract → escrow → deliver → paid)
+2. **Support** — internal agent subcontracts a DevOps specialist (OpenClaw behind an adapter)
+3. **Content pipeline** — three agents, one workflow (scrape → analyze → publish)
+4. **E-commerce** — procurement agent negotiates with 3 suppliers, picks by price × reputation
+5. **Regulated** — law-firm assistant with NDA + Chinese walls enforced by the protocol
 
 ### Full agent instructions
 
