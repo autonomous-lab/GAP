@@ -12,6 +12,12 @@ use rusqlite::{Connection, params};
 /// SQLite-backed storage.
 pub struct SqliteStorage {
     conn: Connection,
+    /// In-memory sequence counter: `MAX(seq)` per insert is O(n) and
+    /// was the throughput killer under load (the events table grows
+    /// unboundedly). Initialized once at open; single-writer per
+    /// process, which matches the node architecture (one storage
+    /// instance, sequential writes).
+    next_seq: u64,
 }
 
 impl SqliteStorage {
@@ -19,8 +25,14 @@ impl SqliteStorage {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)
             .map_err(|e| Error::Other(format!("sqlite open failed: {e}")))?;
-        let mut s = Self { conn };
+        let mut s = Self { conn, next_seq: 0 };
         s.init()?;
+        // One-time O(n) scan to seed the counter (startup only).
+        let max: i64 = s
+            .conn
+            .query_row("SELECT COALESCE(MAX(seq), -1) + 1 FROM events", [], |r| r.get(0))
+            .map_err(|e| Error::Other(format!("sqlite seq init failed: {e}")))?;
+        s.next_seq = max.max(0) as u64;
         Ok(s)
     }
 
@@ -60,19 +72,17 @@ impl Storage for SqliteStorage {
     fn append_event(&mut self, kind: &str, payload: serde_json::Value) -> Result<u64> {
         validate_event(kind, &payload)?;
         let at = crate::message::now_unix() as i64;
-        // Explicit 0-based sequence (not the rowid, which starts at 1).
-        let seq = self.conn.query_row(
-            "SELECT COALESCE(MAX(seq), -1) + 1 FROM events",
-            [],
-            |r| r.get::<_, i64>(0),
-        ).map_err(|e| Error::Other(format!("sqlite seq failed: {e}")))?;
+        // O(1) sequence from the in-memory counter (see struct docs:
+        // MAX(seq) per insert was quadratic under load).
+        let seq = self.next_seq;
+        self.next_seq += 1;
         self.conn
             .execute(
                 "INSERT INTO events (seq, kind, at, payload) VALUES (?1, ?2, ?3, ?4)",
-                params![seq, kind, at, payload.to_string()],
+                params![seq as i64, kind, at, payload.to_string()],
             )
             .map_err(|e| Error::Other(format!("sqlite insert failed: {e}")))?;
-        Ok(seq as u64)
+        Ok(seq)
     }
 
     fn events_after(&self, seq: u64, limit: u64) -> Result<Vec<EventRecord>> {
@@ -265,6 +275,27 @@ mod tests {
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].kind, "b");
             assert_eq!(events[0].seq, 1);
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}-wal"));
+        let _ = std::fs::remove_file(format!("{path}-shm"));
+    }
+
+    #[test]
+    fn sqlite_sequence_continues_after_reopen() {
+        // Regression for the O(n) MAX(seq) bug: the in-memory counter
+        // must continue from the persisted max after a reopen.
+        let path = format!("/tmp/gap-test-{}.db", crate::new_id("t"));
+        {
+            let mut s = SqliteStorage::open(&path).unwrap();
+            s.append_event("a", serde_json::json!({})).unwrap();
+        }
+        {
+            let mut s = SqliteStorage::open(&path).unwrap();
+            let seq = s.append_event("b", serde_json::json!({})).unwrap();
+            assert_eq!(seq, 1, "counter must resume after reopen");
+            let seq = s.append_event("c", serde_json::json!({})).unwrap();
+            assert_eq!(seq, 2);
         }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{path}-wal"));

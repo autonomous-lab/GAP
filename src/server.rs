@@ -39,6 +39,11 @@ pub struct NodeState {
     pub node: NodeIdentity,
     /// token -> registered agent (key custody).
     agents: HashMap<String, RegisteredAgent>,
+    /// did -> token. O(1) provider lookup for propose; without this
+    /// index every propose scanned all agents (O(n) with an
+    /// allocation per entry) — the throughput killer under load and a
+    /// DoS vector via the unauthenticated identity endpoint.
+    agents_by_did: HashMap<String, String>,
     /// The discovery registry.
     pub registry: Registry,
     /// contract_id -> contract (materialized state).
@@ -89,6 +94,7 @@ impl NodeState {
         Self {
             node: NodeIdentity { identity },
             agents: HashMap::new(),
+            agents_by_did: HashMap::new(),
             registry: Registry::new(),
             contracts: HashMap::new(),
             escrows: HashMap::new(),
@@ -175,6 +181,7 @@ impl NodeState {
                 announcement: None,
             },
         );
+        self.agents_by_did.insert(did.clone(), token.clone());
         (did, token)
     }
 
@@ -231,12 +238,10 @@ impl NodeState {
     ) -> Result<String> {
         let client = self.agent_by_token(client_token)?;
         let provider = crate::identity::Did::parse(provider_did)?;
-        // Verify the provider is known to the node (has announced).
-        let provider_known = self
-            .agents
-            .values()
-            .any(|a| a.identity.did().to_string() == provider_did);
-        if !provider_known {
+        // O(1) provider lookup via the DID index (previously a scan of
+        // every registered agent — quadratic once the node serves
+        // many identities).
+        if !self.agents_by_did.contains_key(provider_did) {
             return Err(Error::UnknownContract(format!(
                 "provider {provider_did} not registered on this node"
             )));
@@ -672,6 +677,57 @@ mod tests {
         Arc::new(Mutex::new(NodeState::new(Box::new(
             SqliteStorage::open(":memory:").unwrap(),
         ))))
+    }
+
+    #[test]
+    fn propose_lookup_is_constant_time_with_many_agents() {
+        // Regression: propose used to scan ALL registered agents
+        // (O(n) with an allocation per entry). The DID index must keep
+        // propose fast regardless of the agent count, and correct
+        // (unknown providers still rejected).
+        let arc = Arc::new(Mutex::new(NodeState::with_rate_limits(
+            Box::new(SqliteStorage::open(":memory:").unwrap()),
+            None,
+            100_000_000,
+            100_000_000,
+        )));
+        let (_, client_tok) = arc.lock().unwrap().create_identity();
+        let (provider_did, _provider_tok) = arc.lock().unwrap().create_identity();
+        // Flood the node with 5_000 extra identities (as the public
+        // identity endpoint allows).
+        for _ in 0..5_000 {
+            let _ = arc.lock().unwrap().create_identity();
+        }
+        assert_eq!(arc.lock().unwrap().agents.len(), 5_002);
+        // Propose must still succeed and stay fast.
+        let now = crate::message::now_unix();
+        let body = json!({
+            "provider": provider_did, "capability_id": "cap:x",
+            "terms": {
+                "input": {}, "deliverable": {}, "acceptance_criteria": ["ok"],
+                "deadline": now + 3600,
+                "price": { "amount": 0.05, "currency": "EUR", "model": "fixed", "cap": 100.0 },
+                "autonomy": "propose", "confidentiality": null
+            },
+            "escrow": false
+        });
+        let bytes = body.to_string().into_bytes();
+        let auth = format!("Bearer {client_tok}");
+        let t0 = std::time::Instant::now();
+        for _ in 0..200 {
+            let (s, _) = route(&arc, "POST", "/v1/contract/propose", &bytes, Some(&auth));
+            assert_eq!(s, 200, "propose must succeed with many agents");
+        }
+        let per_req = t0.elapsed().as_secs_f64() / 200.0;
+        assert!(
+            per_req < 5e-3,
+            "propose degraded with many agents: {:.1} ms/req (O(n) scan regression?)",
+            per_req * 1e3
+        );
+        // Unknown provider still rejected.
+        let bad = json!({ "provider": "did:gap:unknown", "capability_id": "cap:x", "terms": body["terms"], "escrow": false });
+        let (s, _) = route(&arc, "POST", "/v1/contract/propose", &bad.to_string().into_bytes(), Some(&auth));
+        assert_eq!(s, 400);
     }
 
     fn register(arc: &Arc<Mutex<NodeState>>) -> String {

@@ -15,7 +15,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tiny_http::{Request, Response};
+use tiny_http::Response;
 
 const DEFAULT_SECONDS: u64 = 5;
 
@@ -33,16 +33,15 @@ fn main() {
         10_000_000,
     )));
 
-    // Bind on an ephemeral port.
-    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
-    let port = server.server_addr().to_ip().unwrap().port();
-    let base = format!("http://127.0.0.1:{port}");
-
-    // Serve in the background (same loop as main.rs).
-    {
-        let state = state.clone();
+    let base = std::env::var("GAP_BENCH_TARGET").unwrap_or_else(|_| {
+        // Bind on an ephemeral port.
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let port = server.server_addr().to_ip().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        // Serve in the background (same loop as main.rs).
+        let state2 = state.clone();
         std::thread::spawn(move || loop {
-            let mut request: Request = match server.recv() {
+            let mut request: tiny_http::Request = match server.recv() {
                 Ok(r) => r,
                 Err(_) => break,
             };
@@ -55,8 +54,9 @@ fn main() {
                 .map(|h| h.value.as_str().to_string());
             let mut body = Vec::new();
             let _ = request.as_reader().read_to_end(&mut body);
+            let client_ip = request.remote_addr().map(|a| a.ip().to_string());
             let (status, json_body) =
-                route_with_ip(&state, &method, &url, &body, auth.as_deref(), Some("127.0.0.1"));
+                route_with_ip(&state2, &method, &url, &body, auth.as_deref(), client_ip.as_deref());
             let payload = json_body.to_string();
             let _ = request.respond(
                 Response::from_string(payload)
@@ -64,7 +64,9 @@ fn main() {
                     .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap()),
             );
         });
-    }
+        base
+    });
+
 
     // Warm up: create identities (client + provider), announce the
     // provider's capability, then benchmark propose flows.

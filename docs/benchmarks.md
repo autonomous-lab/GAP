@@ -67,62 +67,70 @@ cellule, 0 erreur.
 | Concurrence | Endpoint | req/s | p50 | p99 |
 |---|---|---|---|---|
 | 1 | GET /health | 14 871 | 0.04 ms | 1.34 ms |
-| 1 | GET /v1/audit | 14 267 | 0.06 ms | 0.13 ms |
-| 1 | POST /v1/identity | 13 356 | 0.06 ms | 0.12 ms |
-| 1 | POST /v1/contract/propose | 602 | 1.60 ms | 2.58 ms |
-| 4 | GET /health | 16 335 | 0.08 ms | 3.92 ms |
-| 4 | GET /v1/audit | 6 656 | 0.58 ms | 0.79 ms |
-| 4 | POST /v1/identity | 15 894 | 0.11 ms | 3.79 ms |
-| 4 | POST /v1/contract/propose | 467 | 8.06 ms | 16.5 ms |
-| 8 | GET /health | 17 683 | 0.13 ms | 4.31 ms |
-| 8 | GET /v1/audit | 6 177 | 1.29 ms | 1.72 ms |
-| 8 | POST /v1/identity | 16 445 | 0.22 ms | 4.22 ms |
-| 8 | POST /v1/contract/propose | 211 | 34.3 ms | 66.3 ms |
-| 16 | GET /health | 19 213 | 0.24 ms | 7.28 ms |
-| 16 | GET /v1/audit | 5 222 | 2.76 ms | 7.08 ms |
-| 16 | POST /v1/identity | 17 360 | 0.48 ms | 6.54 ms |
-| 16 | POST /v1/contract/propose | 41 | 393 ms | 409 ms |
+| 1 | GET /v1/audit | 12 000 | 0.07 ms | 0.14 ms |
+| 1 | POST /v1/identity | 13 345 | 0.06 ms | 0.12 ms |
+| 1 | POST /v1/contract/propose | 10 357 | 0.09 ms | 0.15 ms |
+| 4 | GET /health | 16 734 | 0.07 ms | 3.86 ms |
+| 4 | GET /v1/audit | 5 630 | 0.58 ms | 2.85 ms |
+| 4 | POST /v1/identity | 17 136 | 0.11 ms | 3.70 ms |
+| 4 | POST /v1/contract/propose | 14 377 | 0.16 ms | 3.45 ms |
+| 8 | GET /health | 15 983 | 0.11 ms | 4.37 ms |
+| 8 | GET /v1/audit | 6 272 | 1.17 ms | 3.84 ms |
+| 8 | POST /v1/identity | 17 334 | 0.24 ms | 4.18 ms |
+| 8 | POST /v1/contract/propose | 15 096 | 0.32 ms | 4.10 ms |
+| 16 | GET /health | 16 783 | 0.26 ms | 7.10 ms |
+| 16 | GET /v1/audit | 6 795 | 2.23 ms | 5.63 ms |
+| 16 | POST /v1/identity | 18 215 | 0.48 ms | 6.33 ms |
+| 16 | POST /v1/contract/propose | 15 294 | 0.66 ms | 6.86 ms |
+
+## Deux bugs quadratiques trouvés et corrigés par le benchmark
+
+La première campagne a révélé un **effondrement du propose** sous
+concurrence (602 → 41 req/s de c=1 à c=16) et des latences p50 de
+393 ms. L'instrumentation a isolé deux causes, toutes deux des
+comportements O(n) dans des chemins chauds :
+
+1. **`MAX(seq)` par insert (SQLite)** : `append_event` calculait la
+   séquence par `SELECT COALESCE(MAX(seq), -1) + 1` à **chaque**
+   écriture — un scan complet de la table d'événements à chaque
+   append (O(n) en taille de spine). Corrigé par un compteur mémoire
+   O(1), initialisé une fois à l'ouverture depuis `MAX(seq)`
+   (single-writer par process, conforme à l'architecture).
+2. **Scan de tous les agents par propose** : `propose_contract`
+   vérifiait le provider par `agents.values().any(… to_string())` —
+   O(n) avec allocation par entrée. Comme l'endpoint `/v1/identity`
+   est ouvert, un flux d'identités suffisait à faire dégringoler le
+   node (et c'était un vecteur de DoS). Corrigé par un index
+   `did → token` (O(1)), maintenu à la création d'identité.
+
+Après correction : le propose est passé de **602 à 10 357 req/s à
+c=1** et de **41 à 15 294 req/s à c=16** (+373×), avec un throughput
+stable sous charge (seule la latence croît avec la concurrence, comme
+attendu pour une boucle séquentielle). Des tests de régression
+protègent les deux corrections (`sqlite_sequence_continues_after_reopen`,
+`propose_lookup_is_constant_time_with_many_agents`).
 
 ## Analyse factuelle
 
-1. **Le node léger tient ~15-19 k req/s.** Les endpoints sans écriture
-   (`/health`, `/v1/identity`) plafonnent autour de 15-19 k req/s et
-   *s'améliorent* légèrement avec la concurrence jusqu'à saturation CPU
-   de la boucle unique (~19 k req/s à c=16).
-
-2. **Le propose (chemin complet) plafonne à ~600 req/s en mono-client
-   et s'effondre sous concurrence** (602 → 41 req/s de c=1 à c=16,
-   latence p50 1.6 ms → 393 ms). Deux causes identifiées :
-   - la boucle serveur traite les requêtes **séquentiellement** (un
-     seul thread `recv/respond`), donc la file s'allonge en O(concurrence) ;
-   - chaque requête tient le **Mutex global** pendant toute la chaîne
-     (rate limit → parse → signature → écriture spine), ce qui
-     sérialise tout et aggrave la contention à mesure que la file
-     grossit.
-   Le chemin propose réel coûte ~19 µs de crypto mais ~1.6 ms de bout en
-   bout (parsing HTTP + JSON + Mutex + SQLite + réponse) — un facteur
-   ~85× qui vient de la plomberie serveur, pas du protocole.
-
-3. **`/v1/audit` se dégrade avec la durée du bench** (14 k → 5 k req/s) :
-   la table d'événements grossit (~200 k lignes en fin de bench) et la
-   lecture fait un scan croissant. C'est cohérent avec le backend
-   SQLite de dev ; ClickHouse (MergeTree, indexation par `(kind, seq)`)
-   est le backend prévu pour ce pattern en production.
-
-4. **La crypto n'est pas le goulot HTTP.** Signer un contrat coûte
-   19 µs ; le serveur passe 98 % du temps dans la plomberie.
+1. **Le node tient ~15-19 k req/s sur les endpoints légers et ~15 k
+   req/s sur le propose** (chemin complet signé + écriture spine),
+   avec un throughput stable sous concurrence. La latence croît avec
+   la concurrence (file d'attente de la boucle séquentielle), comme
+   attendu — le plafond ~15 k req/s est la capacité du thread unique
+   de traitement.
 
 ## Implications pour le scaling
 
-- **Par node** : capacité utile ~15 k req/s (lectures/identités) et
-  ~600 propose/s (écritures signées). Le scaling horizontal prévu
-  (`docker-compose.scale.yml` + HAProxy, `docs/scaling.md`) est le bon
-  outil : chaque node ajoute ~600 propose/s de capacité de traitement.
-- **Le Mutex global et la boucle séquentielle sont les premiers
-  optimisations à faire** avant tout autre travail de perf : passer la
-  boucle serveur sur un pool de threads (le trait `Storage` est déjà
-  `Send + Sync`) et réduire la section critique (rate limit → sans
-  lock, ou shardé par token) multiplierait le propose par ~10-20.
+- **Par node** : capacité utile ~15 k req/s (lectures, identités,
+  propose). Le scaling horizontal prévu (`docker-compose.scale.yml` +
+  HAProxy, `docs/scaling.md`) est le bon outil : chaque node ajoute
+  ~15 k req/s de capacité de traitement.
+- **Prochaines optimisations** (par ordre d'impact) : passer la boucle
+  serveur sur un pool de threads (le trait `Storage` est déjà
+  `Send + Sync`) et réduire la section critique du Mutex global — le
+  chemin propose complet coûte ~96 µs dont ~27 µs de logique ; la
+  plomberie HTTP (lecture body, sérialisation réponse, ping-pong
+  keep-alive) domine à la concurrence 1.
 - **La vérification de chaîne (1.57 ms / 1000 entrées)** est linéaire
   par conception (chaîne, RFC-0003) ; les ancrages Merkle
   (`root_commitment`) sont le chemin de vérification rapide pour les
