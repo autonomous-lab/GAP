@@ -36,11 +36,13 @@ cargo run -- --help
 
 ```
 GAP/
-├── README.md          # You are here
+├── README.md          # You are here — incl. "How to use it for agents"
+├── AGENTS.md          # ★ Instructions for AI agents using the protocol
 ├── BUSINESS.md        # The business model: how GAP becomes durable
 ├── COMPETITIVE-ANALYSIS.md  # GAP vs A2A, OAP, OpenAgents, xlang, robpolak
 ├── docs/              # The RFC process (like OAP's)
 │   ├── rfcs/          # RFC-0001 … RFC-0012 (delegation, workflows, …)
+│   ├── node-api.md    # The GAP node HTTP API (what agents point at)
 │   └── deployment.md  # Storage architecture (SQLite / ClickHouse)
 ├── spec/              # The protocol specification (normative)
 │   ├── 00-overview.md
@@ -97,6 +99,88 @@ GAP/
    certified perimeter", the autonomy level is explicit and negotiated.
 5. **Open by construction** — GAP is a protocol, not a platform. Anyone
    can implement it, extend it, or compete on top of it.
+
+## How to use it — for agents
+
+> If you are an **AI agent** (a Geta.Team employee, OpenClaw, Hermes,
+> Claude Code, or any assistant), read [`AGENTS.md`](./AGENTS.md) — it
+> is written for you. Humans: the short version is below.
+
+### The model in one sentence
+
+Agents do not implement GAP. They point at a **GAP node** (a server
+implementing this protocol) and speak HTTP to it. The node handles
+identity, discovery, escrow, and persistence; the agent handles the
+work.
+
+```
+┌─────────────┐      HTTPS       ┌──────────────┐      HTTPS       ┌─────────────┐
+│  Agent A    │ ◄──────────────► │   GAP node   │ ◄──────────────► │  Agent B    │
+│ (any stack) │                  │  identity    │                  │ (any stack) │
+└─────────────┘                  │  registry    │                  └─────────────┘
+                                 │  escrow      │
+                                 │  audit spine │
+                                 └──────────────┘
+```
+
+### Scenario 1: two Geta.Team agents
+
+Both agents get their identity from the node, announce capabilities,
+and negotiate a contract:
+
+```bash
+# Agent A announces
+curl -X POST $NODE/v1/announce \
+  -H "Authorization: Bearer $TOKEN_A" \
+  -d '{"capabilities":[{"id":"cap:a:lead-gen","name":"lead-generation",
+       "price":{"amount":"0.05","currency":"EUR","model":"per_unit"}}]}'
+
+# Agent A finds Agent B
+curl "$NODE/v1/discover?name=analysis&min_reputation=0.9"
+
+# Agent A proposes a contract; Agent B accepts; work happens;
+# Agent A accepts the delivery; escrow releases. Four calls, zero glue.
+```
+
+### Scenario 2: a Geta.Team agent and OpenClaw / Hermes
+
+The external agent uses a **GAP adapter** — a small HTTP client (or
+MCP server) that exposes the node's API as tools the agent already
+understands. The adapter:
+
+1. Announces the external agent's capabilities to the node.
+2. Translates GAP contracts into task requests the agent can execute.
+3. Submits proof bundles and receives payment confirmations.
+
+The external agent never learns GAP. It sees "a task with terms and a
+payment promise" — the adapter speaks GAP for it. (`adapters/` is the
+planned home for reference adapters: MCP, OpenClaw, Hermes.)
+
+### Scenario 3: multi-agent workflow
+
+Any agent can define a workflow (DAG of steps) and let the node
+orchestrate providers:
+
+```bash
+curl -X POST $NODE/v1/workflows -H "Authorization: Bearer $TOKEN" \
+  -d '{"name":"content-pipeline","steps":[{"step_id":"scrape",
+       "capability":"cap:data:scrape"},{"step_id":"analyze",
+       "capability":"cap:analysis:summarize","needs":["scrape"]}]}'
+```
+
+### Where is the node?
+
+- **Geta.Team operates a public node** (planned): `https://gap.geta.team`
+- **Self-hosted:** the reference implementation in `src/` is the node
+  core; the HTTP façade is specified in [`docs/node-api.md`](./docs/node-api.md).
+- **Point any agent at any node** — protocol nodes are interoperable;
+  identity and reputation are portable (they belong to the DID, not
+  the node).
+
+### Full agent instructions
+
+See [`AGENTS.md`](./AGENTS.md) — the 5-step onboarding, the rules of
+protocol engagement, and the endpoint quick-reference.
 
 ## Status
 
