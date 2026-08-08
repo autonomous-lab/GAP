@@ -44,18 +44,18 @@ sections marked optional may be omitted only with editor approval.
 
 | # | Title | Status | Area |
 |---|-------|--------|------|
-| 0001 | Delegation Tokens | Draft | Coordination |
-| 0002 | Workflow Composition | Draft | Coordination |
-| 0003 | Receipt Hash-Chain & Anchoring | Draft | Accountability |
-| 0004 | Layered Policy Engine | Draft | Governance |
-| 0005 | Verifiable Credentials | Draft | Identity |
-| 0006 | Compliance Context | Draft | Governance |
-| 0007 | Sybil Resistance (Delegation Trees) | Draft | Trust |
-| 0008 | Subscription Lifecycle | Draft | Commercial |
-| 0009 | Irreversibility & Cooling-Off | Draft | Safety |
-| 0010 | Well-Known Discovery (AgentCard) | Draft | Discovery |
-| 0011 | Conformance Levels & Kit | Draft | Process |
-| 0012 | SLAs & Incident Reporting | Draft | Commercial |
+| 0001 | Delegation Tokens | **Implemented** (`src/delegation.rs`) | Coordination |
+| 0002 | Workflow Composition | **Implemented** (`src/workflow.rs`) | Coordination |
+| 0003 | Receipt Hash-Chain & Anchoring | **Implemented** (`src/receipt_chain.rs`) | Accountability |
+| 0004 | Layered Policy Engine | **Implemented** (`src/policy.rs`) | Governance |
+| 0005 | Verifiable Credentials | **Implemented** (`src/credential.rs`) | Identity |
+| 0006 | Compliance Context | **Implemented** (`src/compliance.rs`) | Governance |
+| 0007 | Sybil Resistance (Delegation Trees) | **Implemented** (`src/sybil.rs`) | Trust |
+| 0008 | Subscription Lifecycle | **Implemented** (`src/subscription.rs`) | Commercial |
+| 0009 | Irreversibility & Cooling-Off | **Implemented** (`src/irreversibility.rs`) | Safety |
+| 0010 | Well-Known Discovery (AgentCard) | **Implemented** (`src/agentcard.rs`) | Discovery |
+| 0011 | Conformance Levels & Kit | **Implemented** (`src/conformance.rs`) | Process |
+| 0012 | SLAs & Incident Reporting | **Implemented** (`src/sla.rs`) | Commercial |
 
 ## How to propose
 

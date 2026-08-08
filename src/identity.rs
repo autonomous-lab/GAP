@@ -45,7 +45,7 @@ impl fmt::Display for Did {
 }
 
 /// A GAP agent identity: keypair + derived DID + reputation log.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AgentIdentity {
     signing_key: ed25519_dalek::SigningKey,
     did: Did,

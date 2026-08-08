@@ -53,15 +53,22 @@ GAP/
 ├── src/               # Rust reference implementation
 │   ├── lib.rs         # Public API surface
 │   ├── identity.rs    # DIDs, keys, reputation
-│   ├── credential.rs  # Verifiable credentials (RFC-0005) [planned]
+│   ├── credential.rs  # Verifiable credentials (RFC-0005)
 │   ├── discovery.rs   # Registry & capability announcements
-│   ├── agentcard.rs   # Well-known discovery (RFC-0010) [planned]
+│   ├── agentcard.rs   # Well-known discovery (RFC-0010)
 │   ├── contract.rs    # Contract lifecycle
 │   ├── message.rs     # Wire format & addressing
 │   ├── payment.rs     # Escrow & settlement (signed instructions only)
 │   ├── policy.rs      # Layered policy engine (RFC-0004)
 │   ├── delegation.rs  # Delegation tokens (RFC-0001)
 │   ├── receipt_chain.rs  # Hash-chained receipts (RFC-0003)
+│   ├── compliance.rs  # NDA/embargo/chinese walls (RFC-0006)
+│   ├── sybil.rs       # Delegation-tree aggregation (RFC-0007)
+│   ├── subscription.rs  # Subscription lifecycle (RFC-0008)
+│   ├── irreversibility.rs # Cooling-off windows (RFC-0009)
+│   ├── workflow.rs    # DAG workflow engine (RFC-0002)
+│   ├── conformance.rs # L0-L4 levels & reports (RFC-0011)
+│   ├── sla.rs         # SLA tracking & incidents (RFC-0012)
 │   ├── governance.rs  # Autonomy levels, certification, meta-agents
 │   ├── runtime.rs     # The ergonomic facade binding all layers
 │   └── error.rs       # Error taxonomy
@@ -94,7 +101,7 @@ Expect breaking changes until v1.0.
 ## Testing
 
 ```bash
-cargo test            # 74 unit tests + 3 integration scenarios
+cargo test            # 124 unit tests + 3 integration scenarios
 cargo clippy          # zero warnings
 cargo run --example lead_gen   # end-to-end demo
 ```
@@ -105,7 +112,12 @@ announcements, forged contract signatures, escrow authorization
 reputation filtering, dispute arbitration, delegation chains
 (escalation, depth, budgets), policy engine (layers, terminal deny,
 localized explanations), receipt hash-chains (tamper detection,
-redaction), and full happy-path economy flows.
+redaction), compliance gates (embargo, chinese walls, NDA), sybil
+resistance (tree aggregation, one-bid-per-tree), subscription
+lifecycle (consent, renewal, budget), cooling-off windows, workflow
+DAG execution, credentials (projection, revocation), AgentCard
+(well-known discovery), conformance reports, SLA divergence, and full
+happy-path economy flows.
 
 ## License
 

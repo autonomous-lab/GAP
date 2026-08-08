@@ -24,18 +24,27 @@
 //! assert!(alice.verify(msg, &sig));
 //! ```
 
+pub mod agentcard;
+pub mod compliance;
+pub mod conformance;
 pub mod contract;
+pub mod credential;
 pub mod delegation;
 pub mod discovery;
 pub mod error;
 pub mod execution;
 pub mod governance;
 pub mod identity;
+pub mod irreversibility;
 pub mod message;
 pub mod payment;
 pub mod policy;
 pub mod receipt_chain;
 pub mod runtime;
+pub mod sla;
+pub mod subscription;
+pub mod sybil;
+pub mod workflow;
 
 pub use contract::{Contract, ContractState, Price, Terms};
 pub use discovery::{Capability, Query};
