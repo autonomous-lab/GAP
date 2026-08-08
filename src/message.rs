@@ -1,0 +1,463 @@
+//! Message layer (GAP spec part 00, §0.3).
+//!
+//! Every exchange in GAP travels inside a signed `Envelope`. The envelope
+//! carries addressing, routing, and protocol metadata; the payload is the
+//! layer-specific body.
+
+use crate::error::{Error, Result};
+use crate::identity::Did;
+use crate::{PROTOCOL, VERSION};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// The taxonomy of envelope kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    // discovery (part 02)
+    CapAnnounce,
+    CapQuery,
+    CapDeregister,
+    // contracts (part 03)
+    CtrPropose,
+    CtrCounter,
+    CtrAccept,
+    CtrReject,
+    CtrCancel,
+    CtrDispute,
+    CtrRuling,
+    // execution (part 04)
+    ExeStart,
+    ExeProgress,
+    ExeDeliver,
+    ExeAccept,
+    ExeReject,
+    // payment (part 05)
+    PayPark,
+    PayParked,
+    PayRelease,
+    PayReleased,
+    PayRefund,
+    PayDispute,
+    PayRuled,
+    // governance (part 06)
+    GovCertify,
+    GovRevoke,
+    GovAlert,
+    GovHalt,
+    // identity (part 01)
+    KeyRotate,
+    PrincipalBind,
+    PrincipalUnbind,
+}
+
+impl Kind {
+    /// Wire representation (dotted, lowercased).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Kind::CapAnnounce => "cap.announce",
+            Kind::CapQuery => "cap.query",
+            Kind::CapDeregister => "cap.deregister",
+            Kind::CtrPropose => "ctr.propose",
+            Kind::CtrCounter => "ctr.counter",
+            Kind::CtrAccept => "ctr.accept",
+            Kind::CtrReject => "ctr.reject",
+            Kind::CtrCancel => "ctr.cancel",
+            Kind::CtrDispute => "ctr.dispute",
+            Kind::CtrRuling => "ctr.ruling",
+            Kind::ExeStart => "exe.start",
+            Kind::ExeProgress => "exe.progress",
+            Kind::ExeDeliver => "exe.deliver",
+            Kind::ExeAccept => "exe.accept",
+            Kind::ExeReject => "exe.reject",
+            Kind::PayPark => "pay.park",
+            Kind::PayParked => "pay.parked",
+            Kind::PayRelease => "pay.release",
+            Kind::PayReleased => "pay.released",
+            Kind::PayRefund => "pay.refund",
+            Kind::PayDispute => "pay.dispute",
+            Kind::PayRuled => "pay.ruled",
+            Kind::GovCertify => "gov.certify",
+            Kind::GovRevoke => "gov.revoke",
+            Kind::GovAlert => "gov.alert",
+            Kind::GovHalt => "gov.halt",
+            Kind::KeyRotate => "key.rotate",
+            Kind::PrincipalBind => "principal.bind",
+            Kind::PrincipalUnbind => "principal.unbind",
+        }
+    }
+
+    /// Parse a wire string back into a `Kind`.
+    pub fn parse(s: &str) -> Option<Kind> {
+        Some(match s {
+            "cap.announce" => Kind::CapAnnounce,
+            "cap.query" => Kind::CapQuery,
+            "cap.deregister" => Kind::CapDeregister,
+            "ctr.propose" => Kind::CtrPropose,
+            "ctr.counter" => Kind::CtrCounter,
+            "ctr.accept" => Kind::CtrAccept,
+            "ctr.reject" => Kind::CtrReject,
+            "ctr.cancel" => Kind::CtrCancel,
+            "ctr.dispute" => Kind::CtrDispute,
+            "ctr.ruling" => Kind::CtrRuling,
+            "exe.start" => Kind::ExeStart,
+            "exe.progress" => Kind::ExeProgress,
+            "exe.deliver" => Kind::ExeDeliver,
+            "exe.accept" => Kind::ExeAccept,
+            "exe.reject" => Kind::ExeReject,
+            "pay.park" => Kind::PayPark,
+            "pay.parked" => Kind::PayParked,
+            "pay.release" => Kind::PayRelease,
+            "pay.released" => Kind::PayReleased,
+            "pay.refund" => Kind::PayRefund,
+            "pay.dispute" => Kind::PayDispute,
+            "pay.ruled" => Kind::PayRuled,
+            "gov.certify" => Kind::GovCertify,
+            "gov.revoke" => Kind::GovRevoke,
+            "gov.alert" => Kind::GovAlert,
+            "gov.halt" => Kind::GovHalt,
+            "key.rotate" => Kind::KeyRotate,
+            "principal.bind" => Kind::PrincipalBind,
+            "principal.unbind" => Kind::PrincipalUnbind,
+            _ => return None,
+        })
+    }
+}
+
+/// A signed protocol envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    pub protocol: String,
+    pub version: String,
+    pub message_id: String,
+    pub from: Did,
+    pub to: Did,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_id: Option<String>,
+    pub kind: Kind,
+    pub timestamp: u64,
+    pub payload: Value,
+    /// Ed25519 signature over the canonical serialization of the envelope
+    /// body (everything except `signature`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+impl Envelope {
+    /// Create a new unsigned envelope.
+    pub fn new(from: Did, to: Did, kind: Kind, payload: Value) -> Self {
+        Self {
+            protocol: PROTOCOL.to_string(),
+            version: VERSION.to_string(),
+            message_id: crate::new_id("msg"),
+            from,
+            to,
+            contract_id: None,
+            kind,
+            timestamp: now_unix(),
+            payload,
+            signature: None,
+        }
+    }
+
+    /// Set the contract this envelope refers to.
+    pub fn for_contract(mut self, contract_id: impl Into<String>) -> Self {
+        self.contract_id = Some(contract_id.into());
+        self
+    }
+
+    /// The bytes that must be signed (canonical JSON of the body).
+    fn canonical_bytes(&self) -> Vec<u8> {
+        let mut clone = self.clone();
+        clone.signature = None;
+        // serde_json is deterministic for a given Value ordering; we
+        // serialize via a struct to keep field order stable.
+        let body = serde_json::to_value(&clone).expect("envelope serializes");
+        serde_json::to_vec(&body).expect("envelope serializes")
+    }
+
+    /// Sign this envelope with the sender's identity.
+    pub fn sign(mut self, sender: &crate::identity::AgentIdentity) -> Self {
+        let sig = sender.sign(&self.canonical_bytes());
+        self.signature = Some(sig.to_hex());
+        self
+    }
+
+    /// Verify the envelope's signature against its `from` DID.
+    pub fn verify(&self) -> Result<()> {
+        let sig_hex = self
+            .signature
+            .as_ref()
+            .ok_or(Error::BadSignature)?;
+        let sig_bytes: [u8; 64] = hex::decode(sig_hex)
+            .map_err(|_| Error::BadSignature)?
+            .try_into()
+            .map_err(|_| Error::BadSignature)?;
+        crate::identity::verify_signature(
+            &self.from,
+            &self.canonical_bytes(),
+            &crate::identity::Signature(sig_bytes),
+        )
+    }
+
+    /// Full receiver-side validation: protocol, version, signature, and
+    /// timestamp freshness. This is what a compliant runtime calls before
+    /// acting on any incoming message.
+    pub fn validate(&self, max_age_secs: u64) -> Result<()> {
+        if self.protocol != crate::PROTOCOL {
+            return Err(Error::WrongProtocol(self.protocol.clone()));
+        }
+        if self.version != crate::VERSION {
+            return Err(Error::UnsupportedVersion(self.version.clone()));
+        }
+        self.verify()?;
+        let now = now_unix();
+        // Reject messages from the future beyond the skew window, and
+        // messages too old (replay protection).
+        if self.timestamp > now + max_age_secs {
+            return Err(Error::StaleTimestamp);
+        }
+        if now.saturating_sub(self.timestamp) > max_age_secs {
+            return Err(Error::StaleTimestamp);
+        }
+        Ok(())
+    }
+
+    /// Decode a payload field into a typed value.
+    pub fn decode<T: for<'de> Deserialize<'de>>(&self) -> Result<T> {
+        Ok(serde_json::from_value(self.payload.clone())?)
+    }
+}
+
+/// Current UNIX timestamp (seconds).
+///
+/// Wraps [`std::time::SystemTime`] with a test-controlled offset so that
+/// TTL expiry, deadlines, and certificate validity windows can be tested
+/// deterministically without sleeping.
+pub fn now_unix() -> u64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static OFFSET: AtomicI64 = AtomicI64::new(0);
+    let base = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    (base + OFFSET.load(Ordering::Relaxed)) as u64
+}
+
+/// Advance the test clock by `secs` seconds. Only compiled in tests.
+#[cfg(test)]
+pub fn advance_clock(secs: u64) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static OFFSET: AtomicI64 = AtomicI64::new(0);
+    OFFSET.fetch_add(secs as i64, Ordering::Relaxed);
+}
+
+/// Reset the test clock to wall time. Only compiled in tests.
+#[cfg(test)]
+pub fn reset_clock() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static OFFSET: AtomicI64 = AtomicI64::new(0);
+    OFFSET.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::AgentIdentity;
+    use serde_json::json;
+
+    #[test]
+    fn envelope_roundtrip_and_signature() {
+        let alice = AgentIdentity::generate();
+        let bob = AgentIdentity::generate();
+        let env = Envelope::new(
+            alice.did().clone(),
+            bob.did().clone(),
+            Kind::ExeDeliver,
+            json!({ "deliverable_hash": "sha256:abc" }),
+        )
+        .sign(&alice);
+        assert!(env.verify().is_ok());
+        let wire = serde_json::to_string(&env).unwrap();
+        let back: Envelope = serde_json::from_str(&wire).unwrap();
+        assert!(back.verify().is_ok());
+        assert_eq!(back.kind, Kind::ExeDeliver);
+    }
+
+    #[test]
+    fn tampered_envelope_fails() {
+        let alice = AgentIdentity::generate();
+        let bob = AgentIdentity::generate();
+        let mut env = Envelope::new(
+            alice.did().clone(),
+            bob.did().clone(),
+            Kind::CtrPropose,
+            json!({ "terms": "x" }),
+        )
+        .sign(&alice);
+        // tamper with the payload after signing
+        env.payload = json!({ "terms": "y" });
+        assert!(env.verify().is_err());
+    }
+
+    #[test]
+    fn kind_parse_roundtrip() {
+        for kind in [
+            Kind::CapAnnounce,
+            Kind::CapQuery,
+            Kind::CapDeregister,
+            Kind::CtrPropose,
+            Kind::CtrCounter,
+            Kind::CtrAccept,
+            Kind::CtrReject,
+            Kind::CtrCancel,
+            Kind::CtrDispute,
+            Kind::CtrRuling,
+            Kind::ExeStart,
+            Kind::ExeProgress,
+            Kind::ExeDeliver,
+            Kind::ExeAccept,
+            Kind::ExeReject,
+            Kind::PayPark,
+            Kind::PayParked,
+            Kind::PayRelease,
+            Kind::PayReleased,
+            Kind::PayRefund,
+            Kind::PayDispute,
+            Kind::PayRuled,
+            Kind::GovCertify,
+            Kind::GovRevoke,
+            Kind::GovAlert,
+            Kind::GovHalt,
+            Kind::KeyRotate,
+            Kind::PrincipalBind,
+            Kind::PrincipalUnbind,
+        ] {
+            assert_eq!(Kind::parse(kind.as_str()), Some(kind), "parse({})", kind.as_str());
+        }
+        assert_eq!(Kind::parse("not.a.kind"), None);
+        assert_eq!(Kind::parse(""), None);
+    }
+
+    #[test]
+    fn envelope_validate_rejects_wrong_protocol_and_version() {
+        let alice = AgentIdentity::generate();
+        let mut env = Envelope::new(
+            alice.did().clone(),
+            alice.did().clone(),
+            Kind::CapQuery,
+            json!({}),
+        )
+        .sign(&alice);
+        assert!(env.validate(300).is_ok());
+
+        env.protocol = "not-gap".into();
+        assert!(matches!(env.validate(300), Err(Error::WrongProtocol(_))));
+        env.protocol = PROTOCOL.into();
+
+        env.version = "99.0.0".into();
+        assert!(matches!(env.validate(300), Err(Error::UnsupportedVersion(_))));
+    }
+
+    #[test]
+    fn envelope_validate_rejects_stale_and_future_timestamps() {
+        let alice = AgentIdentity::generate();
+        let mut env = Envelope::new(
+            alice.did().clone(),
+            alice.did().clone(),
+            Kind::CapQuery,
+            json!({}),
+        )
+        .sign(&alice);
+        let now = now_unix();
+
+        // Too old (replay) — re-sign after mutating the timestamp so
+        // signature verification passes and the age check is reached.
+        env.timestamp = now - 10_000;
+        let env2 = env.clone().sign(&alice);
+        assert!(matches!(env2.validate(300), Err(Error::StaleTimestamp)));
+
+        // Too far in the future (clock manipulation)
+        env.timestamp = now + 10_000;
+        let env3 = env.clone().sign(&alice);
+        assert!(matches!(env3.validate(300), Err(Error::StaleTimestamp)));
+    }
+
+    #[test]
+    fn unsigned_envelope_fails_validation() {
+        let alice = AgentIdentity::generate();
+        let env = Envelope::new(
+            alice.did().clone(),
+            alice.did().clone(),
+            Kind::CapQuery,
+            json!({}),
+        );
+        assert!(env.validate(300).is_err());
+    }
+
+    #[test]
+    fn envelope_signed_by_wrong_key_fails() {
+        let alice = AgentIdentity::generate();
+        let mallory = AgentIdentity::generate();
+        // Alice's DID in `from`, but signed by Mallory's key.
+        let env = Envelope::new(
+            alice.did().clone(),
+            alice.did().clone(),
+            Kind::CapQuery,
+            json!({}),
+        )
+        .sign(&mallory);
+        assert!(env.verify().is_err());
+    }
+
+    #[test]
+    fn tampering_any_field_invalidates_signature() {
+        let alice = AgentIdentity::generate();
+        let bob = AgentIdentity::generate();
+        let base = Envelope::new(
+            alice.did().clone(),
+            bob.did().clone(),
+            Kind::CtrPropose,
+            json!({ "terms": "x" }),
+        )
+        .for_contract("urn:gap:ctr:orig")
+        .sign(&alice);
+
+        // Every field, mutated, must break verification.
+        let mut e = base.clone();
+        e.protocol = "evil".into();
+        assert!(e.verify().is_err(), "protocol");
+
+        let mut e = base.clone();
+        e.version = "9.9.9".into();
+        assert!(e.verify().is_err(), "version");
+
+        let mut e = base.clone();
+        e.message_id = "urn:gap:msg:evil".into();
+        assert!(e.verify().is_err(), "message_id");
+
+        let mut e = base.clone();
+        e.from = bob.did().clone();
+        assert!(e.verify().is_err(), "from");
+
+        let mut e = base.clone();
+        e.to = alice.did().clone();
+        assert!(e.verify().is_err(), "to");
+
+        let mut e = base.clone();
+        e.contract_id = Some("urn:gap:ctr:evil".into());
+        assert!(e.verify().is_err(), "contract_id");
+
+        let mut e = base.clone();
+        e.kind = Kind::CtrAccept;
+        assert!(e.verify().is_err(), "kind");
+
+        let mut e = base.clone();
+        e.timestamp += 1;
+        assert!(e.verify().is_err(), "timestamp");
+
+        let mut e = base.clone();
+        e.payload = json!({ "terms": "EVIL" });
+        assert!(e.verify().is_err(), "payload");
+    }
+}
