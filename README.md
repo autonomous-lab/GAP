@@ -40,6 +40,9 @@ GAP/
 ├── AGENTS.md          # ★ Instructions for AI agents using the protocol
 ├── BUSINESS.md        # The business model: how GAP becomes durable
 ├── COMPETITIVE-ANALYSIS.md  # GAP vs A2A, OAP, OpenAgents, xlang, robpolak
+├── Dockerfile         # The node server image (multi-stage, musl)
+├── docker-compose.yml # Node + ClickHouse stack
+├── deploy/            # Runtime configs (ClickHouse system-log control)
 ├── docs/              # The RFC process (like OAP's)
 │   ├── rfcs/          # RFC-0001 … RFC-0012 (delegation, workflows, …)
 │   ├── node-api.md    # The GAP node HTTP API (what agents point at)
@@ -83,8 +86,7 @@ GAP/
 │   └── economy.rs
 └── examples/          # Runnable examples
     ├── lead_gen.rs    # 1:1 agent economy (discovery→escrow)
-    └── workflow_demo.rs  # multi-agent pipeline (3 steps, SQLite persistence)
-```
+    └── workflow_demo.rs  # multi-agent pipeline (3 steps, SQLite persistence)```
 
 ## Design principles
 
@@ -176,6 +178,33 @@ curl -X POST $NODE/v1/workflows -H "Authorization: Bearer $TOKEN" \
 - **Point any agent at any node** — protocol nodes are interoperable;
   identity and reputation are portable (they belong to the DID, not
   the node).
+
+### Run the node with Docker
+
+```bash
+# Node only (SQLite storage)
+docker build -t gap-node .
+docker run -p 8080:8080 -v gap-data:/data gap-node
+
+# Full stack: node + ClickHouse
+docker compose up --build
+curl http://localhost:8080/health
+```
+
+The compose stack runs the node against **ClickHouse** (storage layer),
+with ClickHouse system logs disabled — they grow without bound by
+default (`deploy/clickhouse/system-logs.xml`). The node's own audit
+spine is the protocol log; ClickHouse system logs are redundant.
+
+Environment variables: `GAP_ADDR`, `GAP_STORAGE` (`sqlite` |
+`clickhouse`), `GAP_SQLITE_PATH`, `GAP_CLICKHOUSE_URL`, `GAP_DB_INIT`.
+
+Try it end-to-end:
+
+```bash
+curl -s -X POST http://localhost:8080/v1/identity   # → did + token
+curl -s http://localhost:8080/.well-known/gap-agent.json
+```
 
 ### Full agent instructions
 

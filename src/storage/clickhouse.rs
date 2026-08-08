@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Minimal HTTP transport abstraction (mockable).
-pub trait HttpTransport {
+pub trait HttpTransport: Send {
     /// POST a raw query to ClickHouse, return the raw response body.
     fn post(&self, query: &str) -> Result<String>;
 }
@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS gap_announcements (
 "#;
 
 /// ClickHouse-backed storage.
-pub struct ClickHouseStorage<T: HttpTransport> {
+pub struct ClickHouseStorage<T: HttpTransport + Send> {
     transport: T,
     /// In-memory mirror of state (ClickHouse does not serve point
     /// reads in real time; the sequencer keeps the hot state).

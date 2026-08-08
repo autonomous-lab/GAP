@@ -41,6 +41,7 @@ pub mod payment;
 pub mod policy;
 pub mod receipt_chain;
 pub mod runtime;
+pub mod server;
 pub mod sla;
 pub mod storage;
 pub mod subscription;

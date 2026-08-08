@@ -55,7 +55,7 @@ pub struct AnnouncementRecord {
 
 /// The storage abstraction. Implementations MUST be safe to call from
 /// the runtime; errors map to [`Error`].
-pub trait Storage {
+pub trait Storage: Send {
     /// Append an event to the spine. Returns its sequence number.
     fn append_event(&mut self, kind: &str, payload: serde_json::Value) -> Result<u64>;
 

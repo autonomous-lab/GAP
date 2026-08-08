@@ -1,0 +1,51 @@
+# GAP node + ClickHouse — local stack
+#
+# Usage:
+#   docker compose up --build
+#   curl http://localhost:8080/health
+#
+# The node defaults to ClickHouse storage when GAP_STORAGE=clickhouse.
+# GAP_DB_INIT=1 runs the schema migration at startup.
+
+services:
+  gap-node:
+    build: .
+    container_name: gap-node
+    ports:
+      - "8080:8080"
+    environment:
+      GAP_ADDR: "0.0.0.0:8080"
+      GAP_STORAGE: "clickhouse"
+      GAP_CLICKHOUSE_URL: "http://clickhouse:8123"
+      GAP_DB_INIT: "1"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      - gap-data:/data
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: gap-clickhouse
+    ports:
+      - "8123:8123"   # HTTP interface (used by the node)
+      - "9000:9000"   # native protocol (admin/analytics)
+    volumes:
+      # System logs are disabled/kept tiny — they grow forever otherwise.
+      - ./deploy/clickhouse/system-logs.xml:/etc/clickhouse-server/config.d/system-logs.xml:ro
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  gap-data:
+  clickhouse-data:
