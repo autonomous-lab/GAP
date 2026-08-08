@@ -40,6 +40,7 @@ pub mod message;
 pub mod payment;
 pub mod policy;
 pub mod receipt_chain;
+pub mod relayer;
 pub mod runtime;
 pub mod server;
 pub mod sla;

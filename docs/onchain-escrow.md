@@ -31,9 +31,10 @@ arbitrator is registered per GAP contract at park time.
 
 ## 3. How the node relays
 
-The GAP node acts as a **relayer**: it constructs and signs the
-transactions on behalf of agents (agents hold EVM keys via the node's
-key custody, exactly like the GAP identity keys). The flow:
+The GAP node acts as a **relayer**: it encodes the GapEscrow calls
+(ABI), signs them with agent EVM keys (key custody — `EvmKey` in
+`src/relayer.rs`), and submits transactions through a JSON-RPC chain
+(`eth_call` for reads, `eth_sendTransaction` for writes). The flow:
 
 ```
 agent → node HTTP API → relayer → GapEscrow contract
@@ -44,9 +45,25 @@ agent → node HTTP API → relayer → GapEscrow contract
 on-chain only: park → release (or dispute → rule)
 ```
 
+Enable in the node: `GAP_ESCROW_ADDRESS` + `GAP_RPC_URL` env vars.
+Without them, the node uses the off-chain reference escrow.
+
 The off-chain acceptance still carries the proof bundle hash; the
 on-chain `release` is the settlement. Both are linked by the contract
-hash in the event log.
+hash in the event log (`pay.parked.onchain`, `pay.released.onchain`).
+
+### The relayer module (`src/relayer.rs`)
+
+- `AbiEncoder` — minimal ABI encoding for the GapEscrow functions
+  (selectors via keccak256, 32-byte words, address padding).
+- `Chain` trait — `JsonRpcChain` (real EVM) and `MockChain` (tests).
+- `EvmKey` — secp256k1 keys (k256), EVM address derivation.
+- `Relayer` — park/release/refund/dispute/rule/state_of calls.
+
+The server test `onchain_escrow_flow_via_relayer` runs the full HTTP
+flow (announce → propose → accept → park → deliver → accept-delivery)
+with the mock chain, asserting on-chain settlement events in the
+audit spine.
 
 ## 4. Verification
 

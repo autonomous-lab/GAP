@@ -50,7 +50,19 @@ fn build_storage() -> Result<Box<dyn Storage>> {
 fn main() -> Result<()> {
     let addr = env::var("GAP_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let storage = build_storage()?;
-    let state = Arc::new(Mutex::new(NodeState::new(storage)));
+    let mut state = NodeState::new(storage);
+
+    // Optional on-chain escrow: when GAP_ESCROW_ADDRESS is set, escrow
+    // operations go to the GapEscrow contract via the relayer.
+    if let Ok(escrow_address) = env::var("GAP_ESCROW_ADDRESS") {
+        let rpc_url = env::var("GAP_RPC_URL").unwrap_or_else(|_| "http://localhost:8545".into());
+        let chain = gap::relayer::JsonRpcChain::new(&rpc_url, 1);
+        state.set_relayer(Box::new(chain), &escrow_address);
+        println!("[gap-node] escrow: on-chain via {escrow_address} ({rpc_url})");
+    } else {
+        println!("[gap-node] escrow: off-chain (reference implementation)");
+    }
+    let state = Arc::new(Mutex::new(state));
 
     let server = Server::http(&addr)
         .map_err(|e| gap::Error::Other(format!("failed to bind {addr}: {e}")))?;

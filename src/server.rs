@@ -13,6 +13,7 @@ use crate::error::{Error, Result};
 use crate::identity::AgentIdentity;
 use crate::message::{now_unix, Envelope, Kind};
 use crate::payment::Escrow;
+use crate::relayer::{Chain, Relayer};
 use crate::storage::Storage;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -43,6 +44,8 @@ pub struct NodeState {
     contracts: HashMap<String, Contract>,
     /// contract_id -> escrow instance.
     escrows: HashMap<String, Escrow>,
+    /// Optional on-chain relayer (when configured, escrow goes on-chain).
+    relayer: Option<Relayer>,
     /// The audit spine.
     pub storage: Box<dyn Storage>,
     /// Token issuance counter (kept simple; production uses a KMS).
@@ -59,9 +62,26 @@ impl NodeState {
             registry: Registry::new(),
             contracts: HashMap::new(),
             escrows: HashMap::new(),
+            relayer: None,
             storage,
             next_token: 1,
         }
+    }
+
+    /// Attach the on-chain relayer (GapEscrow contract).
+    pub fn set_relayer(&mut self, chain: Box<dyn Chain>, escrow_address: &str) {
+        self.relayer = Some(Relayer::new(chain, escrow_address));
+    }
+
+    /// Hash a contract id for on-chain use (keccak256, matching the
+    /// GapEscrow contract's hashContract semantics).
+    pub fn contract_hash(id: &str) -> [u8; 32] {
+        use tiny_keccak::{Hasher, Keccak};
+        let mut keccak = Keccak::v256();
+        keccak.update(id.as_bytes());
+        let mut out = [0u8; 32];
+        keccak.finalize(&mut out);
+        out
     }
 
     /// The node's DID.
@@ -235,6 +255,23 @@ impl NodeState {
         .for_contract(contract_id)
         .sign(&client.identity);
 
+        // On-chain path: submit release() to the GapEscrow contract.
+        if let Some(relayer) = &self.relayer {
+            let hash = Self::contract_hash(contract_id);
+            relayer.release(&hash)?;
+            self.record("pay.released.onchain", json!({ "contract_id": contract_id }));
+            let contract = self
+                .contracts
+                .get_mut(contract_id)
+                .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+            contract.transition(ContractState::Accepted)?;
+            self.record("exe.accepted", json!({ "contract_id": contract_id }));
+            return Ok(json!({
+                "state": "accepted",
+                "settlement": { "amount": 0.0, "currency": "USDC", "chain": "onchain" }
+            }));
+        }
+
         // Settle through the contract's escrow.
         let escrow = self
             .escrows
@@ -268,6 +305,22 @@ impl NodeState {
         if contract.client != *client.identity.did() {
             return Err(Error::Unauthorized("only the client may park".into()));
         }
+
+        // On-chain path: submit park() to the GapEscrow contract.
+        if let Some(relayer) = &self.relayer {
+            let hash = Self::contract_hash(contract_id);
+            // In production the provider/arbitrator EVM addresses come
+            // from the agents' EVM keys; the reference uses derived
+            // addresses from the relayer's key custody.
+            let provider_addr = relayer.key_for(&contract.provider.to_string()).address();
+            let arb_addr = relayer.key_for(&self.node_did().to_string()).address();
+            let amount_units = (amount * 1_000_000.0) as u128; // 6 decimals
+            relayer.park(&hash, &provider_addr, &arb_addr, amount_units)?;
+            self.record("pay.parked.onchain", json!({ "contract_id": contract_id, "amount": amount }));
+            return Ok(());
+        }
+
+        // Off-chain path (reference escrow).
         let instruction = Envelope::new(
             client.identity.did().clone(),
             self.node_did(),
@@ -512,6 +565,7 @@ pub use crate::discovery::Price as DiscoveryPrice;
 mod tests {
     use super::*;
     use crate::contract::Price;
+    use crate::relayer::MockChain;
     use crate::storage::sqlite::SqliteStorage;
 
     fn state() -> Arc<Mutex<NodeState>> {
@@ -656,5 +710,74 @@ mod tests {
         let (s, v) = route(&arc, "DELETE", "/v1/whatever", &[], None);
         assert_eq!(s, 400);
         assert!(v["error"]["message"].as_str().unwrap().contains("unknown route"));
+    }
+
+    #[test]
+    fn onchain_escrow_flow_via_relayer() {
+        // Node configured with a mock chain -> escrow goes on-chain.
+        let arc = Arc::new(Mutex::new(NodeState::new(Box::new(
+            SqliteStorage::open(":memory:").unwrap(),
+        ))));
+        {
+            let mut g = arc.lock().unwrap();
+            let chain = MockChain::new();
+            g.set_relayer(Box::new(chain), "0xGapEscrow");
+        }
+
+        let client_tok = register(&arc);
+        let provider_tok = register(&arc);
+        let provider_did = arc.lock().unwrap().agents[&provider_tok].identity.did().to_string();
+
+        // Provider announces.
+        let caps = vec![Capability {
+            id: "cap:p:analyze".into(),
+            name: "analyze".into(),
+            description: "summarize".into(),
+            input: json!({}),
+            output: json!({}),
+            price: Some(DiscoveryPrice { amount: 1.0, currency: "EUR".into(), model: "fixed".into() }),
+            autonomy: vec!["propose".into()],
+        }];
+        let body = json!({ "capabilities": caps });
+        let (s, _) = route(&arc, "POST", "/v1/announce", &body.to_string().into_bytes(), Some(&format!("Bearer {provider_tok}")));
+        assert_eq!(s, 200);
+
+        // Propose + accept + park (on-chain) + deliver + accept-delivery (on-chain release).
+        let terms = Terms {
+            input: json!({}),
+            deliverable: json!({}),
+            acceptance_criteria: vec!["ok".into()],
+            deadline: now_unix() + 3600,
+            price: Price { amount: 1.0, currency: "EUR".into(), model: "fixed".into(), cap: Some(5.0) },
+            autonomy: "propose".into(),
+            confidentiality: None,
+        };
+        let body = json!({ "provider": provider_did, "capability_id": "cap:p:analyze", "terms": terms, "escrow": true });
+        let (s, v) = route(&arc, "POST", "/v1/contract/propose", &body.to_string().into_bytes(), Some(&format!("Bearer {client_tok}")));
+        assert_eq!(s, 200, "propose failed: {v}");
+        let contract_id = v["contract_id"].as_str().unwrap().to_string();
+
+        let (s, _) = route(&arc, "POST", &format!("/v1/contract/{contract_id}/accept"), &[], Some(&format!("Bearer {provider_tok}")));
+        assert_eq!(s, 200, "accept failed");
+
+        let body = json!({ "contract_id": contract_id, "amount": 1.0 });
+        let (s, _) = route(&arc, "POST", "/v1/escrow/park", &body.to_string().into_bytes(), Some(&format!("Bearer {client_tok}")));
+        assert_eq!(s, 200, "on-chain park failed");
+
+        let body = json!({ "deliverable_hash": "sha256:abc" });
+        let (s, _) = route(&arc, "POST", &format!("/v1/contract/{contract_id}/deliver"), &body.to_string().into_bytes(), Some(&format!("Bearer {provider_tok}")));
+        assert_eq!(s, 200, "deliver failed");
+
+        let (s, v) = route(&arc, "POST", &format!("/v1/contract/{contract_id}/accept-delivery"), &[], Some(&format!("Bearer {client_tok}")));
+        assert_eq!(s, 200, "accept-delivery failed: {v}");
+        assert_eq!(v["state"], "accepted");
+        assert_eq!(v["settlement"]["chain"], "onchain");
+
+        // Audit records the on-chain events.
+        let (s, v) = route(&arc, "GET", "/v1/audit", &[], None);
+        assert_eq!(s, 200);
+        let events = v["events"].as_array().unwrap();
+        assert!(events.iter().any(|e| e["kind"] == "pay.parked.onchain"));
+        assert!(events.iter().any(|e| e["kind"] == "pay.released.onchain"));
     }
 }
