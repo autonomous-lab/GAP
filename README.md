@@ -43,12 +43,17 @@ GAP/
 ├── Dockerfile         # The node server image (multi-stage, musl)
 ├── docker-compose.yml # Node + ClickHouse stack
 ├── docker-compose.scale.yml  # LB + 3 nodes + ClickHouse (scaling)
+├── contracts/         # On-chain escrow (Solidity) + test harness
+│   ├── GapEscrow.sol  # park/release/refund/dispute/rule
+│   ├── MockToken.sol  # test stablecoin
+│   └── test-escrow.js # 14 lifecycle tests (solc + EVM sim)
 ├── deploy/            # Runtime configs (ClickHouse system-log control, HAProxy)
 ├── docs/              # The RFC process (like OAP's)
 │   ├── rfcs/          # RFC-0001 … RFC-0012 (delegation, workflows, …)
 │   ├── node-api.md    # The GAP node HTTP API (what agents point at)
 │   ├── deployment.md  # Storage architecture (SQLite / ClickHouse)
 │   ├── scaling.md     # Multi-node, load balancer, sequencer
+│   ├── onchain-escrow.md  # Solidity escrow: production settlement
 │   └── use-cases.md   # 5 concrete scenarios with real commands
 ├── spec/              # The protocol specification (normative)
 │   ├── 00-overview.md
