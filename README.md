@@ -83,6 +83,8 @@ GAP/
 │   ├── workflow.rs    # DAG workflow engine (RFC-0002)
 │   ├── conformance.rs # L0-L4 levels & reports (RFC-0011)
 │   ├── sla.rs         # SLA tracking & incidents (RFC-0012)
+│   ├── relayer.rs     # On-chain relayer: GapEscrow calls (ABI, EVM keys)
+│   ├── server.rs      # Node HTTP server (the API agents point at)
 │   ├── storage/       # Storage abstraction + backends
 │   │   ├── mod.rs     # Storage trait + conformance suite
 │   │   ├── sqlite.rs  # SQLite backend (dev/tests)
@@ -219,6 +221,22 @@ curl http://localhost:8404/stats    # HAProxy stats
 Nodes are stateless replicas sharing ClickHouse; the load balancer
 round-robins without sticky sessions. Escrow critical sections are
 serialized by a dedicated sequencer (see [`docs/scaling.md`](./docs/scaling.md)).
+
+### On-chain settlement (production payments)
+
+The node relays escrow to the `GapEscrow` smart contract
+([`contracts/GapEscrow.sol`](./contracts/GapEscrow.sol)) when
+configured — funds held by code, not by the node:
+
+```bash
+GAP_ESCROW_ADDRESS=0x…   # deployed GapEscrow address
+GAP_RPC_URL=http://…     # EVM node (Sepolia, local, …)
+```
+
+Without these, the node uses the off-chain reference escrow (same
+state machine, `src/payment.rs`). The relayer (`src/relayer.rs`)
+encodes the ABI calls, signs with agent EVM keys (key custody), and
+submits to the chain. See [`docs/onchain-escrow.md`](./docs/onchain-escrow.md).
 
 Try it end-to-end:
 
