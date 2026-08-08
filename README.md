@@ -40,6 +40,7 @@ GAP/
 ├── AGENTS.md          # ★ Instructions for AI agents using the protocol
 ├── BUSINESS.md        # The business model: how GAP becomes durable
 ├── COMPETITIVE-ANALYSIS.md  # GAP vs A2A, OAP, OpenAgents, xlang, robpolak
+├── BENCHMARK.md       # Full benchmark report (protocol + HTTP layers)
 ├── Dockerfile         # The node server image (multi-stage, musl)
 ├── docker-compose.yml # Node + ClickHouse stack
 ├── docker-compose.scale.yml  # LB + 3 nodes + ClickHouse (scaling)
@@ -209,7 +210,7 @@ spine is the protocol log; ClickHouse system logs are redundant.
 Environment variables: `GAP_ADDR`, `GAP_STORAGE` (`sqlite` |
 `clickhouse`), `GAP_SQLITE_PATH`, `GAP_CLICKHOUSE_URL`, `GAP_DB_INIT`,
 `GAP_RATE_TOKEN_CAP` / `GAP_RATE_IP_CAP` (requests per minute; defaults
-120 and 600 — see [`docs/benchmarks.md`](./docs/benchmarks.md) for
+120 and 600 — see [`BENCHMARK.md`](./BENCHMARK.md) for
 throughput at other caps), `GAP_WORKERS` (HTTP worker pool size;
 default min(cpus, 8)).
 
@@ -273,7 +274,7 @@ Expect breaking changes until v1.0.
 ## Testing
 
 ```bash
-cargo test            # 124 unit tests + 3 integration scenarios
+cargo test            # 162 tests (154 unitaires + 8 intégration)
 cargo clippy          # zero warnings
 cargo run --example lead_gen   # end-to-end demo
 ```
@@ -288,8 +289,31 @@ redaction), compliance gates (embargo, chinese walls, NDA), sybil
 resistance (tree aggregation, one-bid-per-tree), subscription
 lifecycle (consent, renewal, budget), cooling-off windows, workflow
 DAG execution, credentials (projection, revocation), AgentCard
-(well-known discovery), conformance reports, SLA divergence, and full
-happy-path economy flows.
+(well-known discovery), conformance reports, SLA divergence, full
+happy-path economy flows, and exhaustive HTTP route coverage
+(`tests/http_routes.rs`).
+
+## Benchmarks
+
+Chiffres clés (EPYC 16 cœurs, release, SQLite `:memory:`) — rapport
+complet et méthodologie dans [`BENCHMARK.md`](./BENCHMARK.md) :
+
+| Métrique | Valeur |
+|---|---|
+| Propose (chemin complet), c=1 | 10 972 req/s (p50 0.08 ms) |
+| Propose, c=16 | 14 407 req/s (p50 0.78 ms) |
+| `/health`, `/v1/identity`, c=16 | 17 402 – 18 724 req/s |
+| Signature / vérification Ed25519 | 14.0 µs / 40.5 µs |
+| Append spine SQLite | 4.36 µs (229 k ops/s) |
+
+Le propose est passé de **602 → 10 972 req/s à c=1** et de
+**41 → 14 407 req/s à c=16** depuis la première campagne (fixes
+quadratiques + worker pool). Le throughput est stable sous charge ;
+le plafond restant est le Mutex global de l'état (design « one
+process, one order »).
+
+Reproduction : `cargo bench --bench protocol` (couche protocole),
+`cargo run --release --example http_bench 5` (couche HTTP).
 
 ## License
 
