@@ -1,14 +1,13 @@
-# ClickHouse system-log control
-#
-# By default ClickHouse writes internal system logs (query_log,
-# query_thread_log, part_log, trace_log, metric_log, ...) which grow
-# without bound. This config:
-#   - disables the most prolific logs entirely (Null engine),
-#   - keeps only what is operationally useful, with a 7-day TTL.
-#
-# Mounted at /etc/clickhouse-server/config.d/system-logs.xml in the
-# compose file; ClickHouse merges it into the main config at startup.
-
+<!--
+  ClickHouse system-log control
+  By default ClickHouse writes internal system logs (query_log,
+  query_thread_log, part_log, trace_log, metric_log, ...) which grow
+  without bound. This config:
+  - disables the most prolific logs entirely (Null engine),
+  - keeps only what is operationally useful, with a 7-day TTL.
+  Mounted at /etc/clickhouse-server/config.d/system-logs.xml in the
+  compose file; ClickHouse merges it into the main config at startup.
+-->
 <clickhouse>
     <!-- Disable the chatty logs: they grow forever and we do not need them.
          The node's audit spine is GAP's own log; ClickHouse system logs
