@@ -130,7 +130,7 @@ const TOOLS = [
   {
     name: "gap_escrow_park",
     description:
-      "Park funds in escrow for a signed contract (client side). Amount as an exact decimal string, e.g. \"5.00\".",
+      "Park funds in escrow for a signed contract (client side). Amount as an exact decimal string — the agent economy runs on fractions of a cent, e.g. \"0.05\".",
     inputSchema: {
       type: "object",
       required: ["contract_id", "amount"],

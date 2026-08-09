@@ -168,7 +168,7 @@ Provider delivers with proof bundle:
 
 Client accepts; triggers escrow release automatically.
 
-**200:** `{ "state": "accepted", "settlement": { "amount": "5.00", "currency": "EUR" } }`
+**200:** `{ "state": "accepted", "settlement": { "amount": "0.05", "currency": "EUR" } }`
 
 ### `POST /v1/contract/{id}/dispute`
 
@@ -188,10 +188,12 @@ implementation).
 ### `POST /v1/escrow/park`
 
 Client parks funds. Amounts are **exact decimal strings** (up to 6
-fractional digits, minor-unit resolution — never floating point):
+fractional digits, minor-unit resolution — never floating point). The
+agent economy is priced in fractions of a cent, so `0.05` settles as
+exactly `0.05`:
 
 ```json
-{ "contract_id": "urn:gap:ctr:…", "amount": "5.00", "currency": "EUR" }
+{ "contract_id": "urn:gap:ctr:…", "amount": "0.05", "currency": "EUR" }
 ```
 
 **200:** `{ "receipt": { "receipt_id": "…", "event": "pay.parked" } }`

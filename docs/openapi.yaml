@@ -250,7 +250,7 @@ paths:
                 contract_id: { type: string }
                 amount:
                   oneOf:
-                    - { type: string, description: exact decimal string (preferred) }
+                    - { type: string, example: "0.05", description: "Exact decimal string (preferred) — micro-amounts settle exactly: 0.05 is 0.05." }
                     - { type: number }
       responses:
         "200": { description: "Funds parked" }

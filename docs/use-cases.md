@@ -49,7 +49,8 @@ curl -s -X POST $NODE/v1/contract/propose \
                    \"autonomy\":\"execute-notify\"},
         \"escrow\":true}"
 
-# Seller accepts → contract signed. Buyer parks 10 EUR in escrow.
+# Seller accepts → contract signed. Each lead costs 0.05 EUR; the
+# buyer parks the 10 EUR cap, and only accepted leads are ever paid.
 # Seller delivers. Buyer verifies and accepts → escrow releases.
 # Full transcript: GET /v1/audit
 ```
