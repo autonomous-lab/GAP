@@ -51,6 +51,11 @@ pub struct Announcement {
     #[serde(default)]
     pub regions: Vec<String>,
     pub ttl_seconds: u64,
+    /// The agent's X25519 public key (hex), so a counterparty can seal
+    /// confidential payloads to it without a prior exchange
+    /// (spec 01 §1.2). Empty on announcements made before this existed.
+    #[serde(default)]
+    pub encryption_key: String,
     /// Signature by the announcing agent over the canonical payload.
     #[serde(default)]
     pub signature: Option<String>,
@@ -79,6 +84,7 @@ impl Announcement {
             languages: vec![],
             regions: vec![],
             ttl_seconds,
+            encryption_key: crate::sealed::EncryptionKey::of(agent).public_hex(),
             signature: None,
         };
         ann.resign(agent);
@@ -293,6 +299,81 @@ impl Registry {
     pub fn is_empty(&self) -> bool {
         self.announcements.is_empty()
     }
+}
+
+/// A registry's signed answer to a query (spec 02 §2.4.3).
+///
+/// The spec requires a registry to "return signed query results, so
+/// clients can verify the registry actually held the announcement
+/// (prevents registry-side tampering)". Announcements were already
+/// signed by their agents — but nothing bound a *result set* to the
+/// registry that served it, so a registry could silently drop a
+/// competitor from every answer and no client could tell.
+///
+/// The signature covers the query digest, the timestamp and the exact
+/// results, so omission and substitution are both attributable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedQueryResult {
+    /// The registry (node) that answered.
+    pub registry: Did,
+    /// SHA-256 of the canonical query, so a reply cannot be replayed
+    /// as the answer to a different question.
+    pub query_digest: String,
+    pub at: u64,
+    pub results: Vec<Announcement>,
+    #[serde(default)]
+    pub signature: Option<String>,
+}
+
+impl SignedQueryResult {
+    /// Answer a query and sign the answer.
+    pub fn signed(registry: &AgentIdentity, query: &Query, results: Vec<Announcement>) -> Self {
+        let mut r = Self {
+            registry: registry.did().clone(),
+            query_digest: query_digest(query),
+            at: crate::message::now_unix(),
+            results,
+            signature: None,
+        };
+        r.signature = Some(registry.sign(&r.canonical_bytes()).to_hex());
+        r
+    }
+
+    /// Verify the registry's signature, and that this is the answer to
+    /// the query the caller actually asked.
+    pub fn verify(&self, expected_query: &Query) -> Result<()> {
+        if self.query_digest != query_digest(expected_query) {
+            return Err(Error::Other(
+                "signed results answer a different query".into(),
+            ));
+        }
+        let sig_hex = self.signature.as_ref().ok_or(Error::BadSignature)?;
+        let sig_bytes: [u8; 64] = hex::decode(sig_hex)
+            .map_err(|_| Error::BadSignature)?
+            .try_into()
+            .map_err(|_| Error::BadSignature)?;
+        crate::identity::verify_signature(
+            &self.registry,
+            &self.canonical_bytes(),
+            &crate::identity::Signature(sig_bytes),
+        )
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        let mut clone = self.clone();
+        clone.signature = None;
+        let v = serde_json::to_value(&clone).expect("result serializes");
+        serde_json::to_vec(&v).expect("result serializes")
+    }
+}
+
+/// Canonical digest of a query, so a signed answer is bound to it.
+pub fn query_digest(q: &Query) -> String {
+    let v = serde_json::to_value(q).unwrap_or_default();
+    format!(
+        "sha256:{}",
+        crate::sha256_hex(&serde_json::to_vec(&v).unwrap_or_default())
+    )
 }
 
 #[cfg(test)]
@@ -510,5 +591,108 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(reg.query(&q).len(), 3);
+    }
+
+    #[test]
+    fn query_results_are_signed_by_the_registry() {
+        // Spec 02 §2.4.3: announcements were already signed by their
+        // agents, but nothing bound a RESULT SET to the registry that
+        // served it.
+        let node = AgentIdentity::generate();
+        let provider = AgentIdentity::generate();
+        let mut reg = Registry::new();
+        reg.announce(Announcement::signed(
+            &provider,
+            vec![make_agent("analysis").1],
+            vec![],
+            3600,
+        ))
+        .unwrap();
+        let q = Query {
+            name: Some("lead-generation".into()),
+            ..Default::default()
+        };
+        let answer = SignedQueryResult::signed(&node, &q, reg.query(&q));
+        assert_eq!(answer.results.len(), 1);
+        assert!(answer.verify(&q).is_ok());
+        assert_eq!(answer.registry, *node.did());
+    }
+
+    #[test]
+    fn a_registry_cannot_silently_drop_a_competitor() {
+        // The attack the spec cares about: answer honestly to some
+        // clients, omit a rival for others. Tampering with a signed
+        // result set is detectable.
+        let node = AgentIdentity::generate();
+        let a = AgentIdentity::generate();
+        let b = AgentIdentity::generate();
+        let mut reg = Registry::new();
+        reg.announce(Announcement::signed(
+            &a,
+            vec![make_agent("analysis").1],
+            vec![],
+            3600,
+        ))
+        .unwrap();
+        reg.announce(Announcement::signed(
+            &b,
+            vec![make_agent("analysis").1],
+            vec![],
+            3600,
+        ))
+        .unwrap();
+        let q = Query {
+            name: Some("lead-generation".into()),
+            ..Default::default()
+        };
+        let honest = SignedQueryResult::signed(&node, &q, reg.query(&q));
+        assert_eq!(honest.results.len(), 2);
+
+        let mut censored = honest.clone();
+        censored.results.truncate(1);
+        assert!(
+            censored.verify(&q).is_err(),
+            "omission must break the registry signature"
+        );
+
+        // Substituting a different agent's announcement is caught too.
+        let mut swapped = honest;
+        swapped.results.reverse();
+        // Reordering changes the signed bytes as well.
+        assert!(swapped.verify(&q).is_err());
+    }
+
+    #[test]
+    fn a_signed_answer_cannot_be_replayed_for_another_question() {
+        let node = AgentIdentity::generate();
+        let reg = Registry::new();
+        let asked = Query {
+            name: Some("lead-generation".into()),
+            ..Default::default()
+        };
+        let other = Query {
+            name: Some("data-analysis".into()),
+            ..Default::default()
+        };
+        let answer = SignedQueryResult::signed(&node, &asked, reg.query(&asked));
+        assert!(answer.verify(&asked).is_ok());
+        assert!(
+            answer.verify(&other).is_err(),
+            "an empty answer to one question must not pass as the answer to another"
+        );
+    }
+
+    #[test]
+    fn announcements_publish_an_encryption_key() {
+        // Spec 01 §1.2: a counterparty must be able to seal a payload
+        // without a prior key exchange.
+        let agent = AgentIdentity::generate();
+        let ann = Announcement::signed(&agent, vec![make_agent("x").1], vec![], 3600);
+        assert_eq!(ann.encryption_key.len(), 64, "32-byte X25519 key, hex");
+        assert_eq!(
+            ann.encryption_key,
+            crate::sealed::EncryptionKey::of(&agent).public_hex()
+        );
+        assert!(ann.verify().is_ok(), "the key is inside the signed body");
     }
 }

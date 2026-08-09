@@ -45,6 +45,7 @@ pub mod principal;
 pub mod receipt_chain;
 pub mod relayer;
 pub mod runtime;
+pub mod sealed;
 pub mod server;
 pub mod sla;
 pub mod storage;

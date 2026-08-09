@@ -561,6 +561,21 @@ impl NodeState {
     }
 
     /// Query the registry.
+    /// Answer a query and sign the answer as the registry.
+    pub fn discover_signed(&self, query: &Query) -> crate::discovery::SignedQueryResult {
+        crate::discovery::SignedQueryResult::signed(
+            &self.node.identity,
+            query,
+            self.registry.query(query),
+        )
+    }
+
+    /// The node's own X25519 public key, so agents can seal payloads to
+    /// it (and so the AgentCard can publish it).
+    pub fn node_encryption_key(&self) -> String {
+        crate::sealed::EncryptionKey::of(&self.node.identity).public_hex()
+    }
+
     pub fn discover(&self, query: &Query) -> Vec<Announcement> {
         self.registry.query(query)
     }
@@ -2158,13 +2173,22 @@ impl NodeState {
                 "did": self.node_did(),
                 "name": "GAP Node",
                 "description_for_agents": "Reference GAP node: identity, discovery, contracts, escrow.",
-                "provider": { "did": self.node_did(), "legal_name": "Geta.Team" }
+                "provider": { "did": self.node_did(), "legal_name": "Geta.Team" },
+                // Seal confidential payloads to this key (spec 01 §1.2).
+                "encryption_key": {
+                    "alg": crate::sealed::SealedEnvelope::ALG,
+                    "x25519": self.node_encryption_key()
+                }
             },
             "capabilities": [],
             "endpoints": {
                 "invoke": "/v1/contract/propose",
                 "discover": "/v1/discover",
-                "billing": "/v1/escrow/park"
+                "billing": "/v1/escrow/park",
+                "verify": "/v1/contract/{id}/verify",
+                "reputation": "/v1/reputation/{did}",
+                "events": "/v1/events",
+                "activity": "/v1/activity/stream"
             },
             "auth": ["bearer"],
             "updated_at": now_unix()
@@ -2425,8 +2449,18 @@ pub fn route_with_ip(
         }
         ("GET", "/v1/discover") => {
             let q = parse_query(&body, raw_path);
-            let results = guard.discover(&q);
-            Ok(json!({ "results": results }))
+            // Spec 02 §2.4.3: the result SET is signed by the registry,
+            // so a node that quietly drops a competitor from an answer
+            // can be caught. `results` stays at the top level for
+            // existing clients.
+            let signed = guard.discover_signed(&q);
+            Ok(json!({
+                "results": signed.results,
+                "registry": signed.registry.to_string(),
+                "query_digest": signed.query_digest,
+                "at": signed.at,
+                "signature": signed.signature,
+            }))
         }
 
         // ---- contracts ----

@@ -83,6 +83,7 @@ GAP/
 │   ├── payment.rs     # Escrow & settlement (one escrow per contract)
 │   ├── amount.rs      # Exact decimal amounts (integer minor units)
 │   ├── vault.rs       # Seed encryption at rest (XChaCha20-Poly1305)
+│   ├── sealed.rs      # X25519 sealed payloads (spec 01 §1.2)
 │   ├── policy.rs      # Layered policy engine (RFC-0004)
 │   ├── delegation.rs  # Delegation tokens (RFC-0001)
 │   ├── receipt_chain.rs  # Hash-chained receipts (RFC-0003)
@@ -454,12 +455,12 @@ Honest accounting of what the reference implementation covers today:
 | 00 §0.6 | Canonical JSON signing form | ✅ (sorted keys, no whitespace) |
 | 01 §1.1–1.2 | DIDs, Ed25519 sign/verify | ✅ |
 | 01 §1.2 | Key rotation (old key signs handover, chain verify) | ✅ |
-| 01 §1.2 | X25519 payload encryption (`confidentiality: encrypted`) | ❌ planned |
+| 01 §1.2 | X25519 payload encryption (`confidentiality: encrypted`) | ✅ `src/sealed.rs` — sealed boxes; the node cannot read them |
 | 01 §1.3 | Bilateral principal binding + unbind | ✅ `principal.rs` |
 | 01 §1.4 | Reputation log, **signed** endorsements, public job history | ✅ (`GET /v1/reputation/{did}`) |
 | 02 | Announce / query / TTL / deregister | ✅ |
 | 02 §2.2 / §2.4.4 | Agent-declared reachability stored and honoured | ✅ (was overwritten by a placeholder before RFC-0013) |
-| 02 §2.4.3 | Registry-signed query results | ❌ planned (announcements are signed; the query response wrapper is not) |
+| 02 §2.4.3 | Registry-signed query results | ✅ omission and substitution are attributable |
 | 03 §3.5 | Remedy window (`ctr.remedy`): one rework attempt | ✅ (RFC-0015) |
 | 03 §3.3 | Negotiation: `ctr.counter` / `ctr.reject` / `ctr.cancel` | ✅ |
 | 04 §4.2 | `exe.start` / `exe.progress` (plan, heartbeats) | ✅ |
@@ -476,7 +477,7 @@ Honest accounting of what the reference implementation covers today:
 ## Testing
 
 ```bash
-cargo test            # 280 tests: 224 unit + 55 integration + 1 doc
+cargo test            # 292 tests: 236 unit + 55 integration + 1 doc
 cargo clippy          # zero warnings
 cargo run --example lead_gen   # end-to-end demo
 ```
