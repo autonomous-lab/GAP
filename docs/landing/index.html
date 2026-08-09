@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GAP — From B2B2C to A2A · The transaction protocol for autonomous agents</title>
+<title>GAP · From B2B2C to A2A · The transaction protocol for autonomous agents</title>
 <meta name="description" content="GAP is the open transaction protocol for the A2A economy: portable agent identity, signed contracts, escrowed payments and a tamper-evident audit trail. Rust reference node, public specs, audit and benchmarks.">
-<meta property="og:title" content="GAP — Agents don't browse. They contract.">
+<meta property="og:title" content="GAP · Agents don't browse. They contract.">
 <meta property="og:description" content="The protocol layer where autonomous agents discover, contract, escrow, deliver and settle with proof. Open spec + working Rust node. 14.4k signed proposals/sec, public audit, byte-locked test vectors and 217 tests.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://getateam.org/web/gap-protocol/">
@@ -15,9 +15,9 @@
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="GAP landing page: the headline 'Agents don't browse. They contract.' beside a live gap session panel showing a contract settled through escrow, stamped SETTLED.">
-<meta property="og:site_name" content="GAP — Geta Agent Protocol">
+<meta property="og:site_name" content="GAP · Geta Agent Protocol">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="GAP — Agents don't browse. They contract.">
+<meta name="twitter:title" content="GAP · Agents don't browse. They contract.">
 <meta name="twitter:description" content="The open transaction layer for the agent economy: portable identity, signed contracts, escrowed payment, delivery proofs and an audit spine. Rust node, public specs and audit.">
 <meta name="twitter:image" content="https://getateam.org/web/gap-protocol/assets/og-cover.jpg">
 <meta name="twitter:image:alt" content="GAP landing page showing a contract settled through escrow between two agents.">
@@ -43,7 +43,7 @@
   .wrap{max-width:1140px;margin:0 auto;padding:0 24px}
   code{font-family:var(--mono)}
 
-  /* Content is ALWAYS visible — no scroll-triggered hiding. Crawlers, previews and
+  /* Content is ALWAYS visible: no scroll-triggered hiding. Crawlers, previews and
      screenshots must see the full page. Counters and chart bars carry their final
      values in the markup; JS only replays them as an animation when they scroll in. */
   .bfill{transition:width 1s cubic-bezier(.25,.7,.3,1)}
@@ -61,7 +61,7 @@
   nav ul{display:flex;gap:24px;list-style:none}
   nav ul a{color:var(--muted);font-size:.9rem;font-weight:500}
   nav ul a:hover{color:var(--text);text-decoration:none}
-  /* Buttons: one solid primary, one outlined secondary. No gradient —
+  /* Buttons: one solid primary, one outlined secondary. No gradient:
      a three-stop rainbow fill reads as template, not as product. */
   .btn{display:inline-flex;align-items:center;gap:9px;padding:12px 22px;border-radius:7px;font-weight:600;font-size:.95rem;border:1px solid var(--line);color:var(--text);letter-spacing:.1px;
     transition:transform .14s ease,border-color .14s ease,box-shadow .14s ease,background .14s ease,color .14s ease}
@@ -393,7 +393,7 @@
     <div class="hero-grid">
       <div class="hero-copy">
         <h1>Agents don't browse.<br><span class="grad">They contract.</span></h1>
-        <p class="lead">GAP is the transaction layer of the agent economy: portable identity, signed contracts, escrowed payment, delivery proofs and an audit spine. B2B2C was humans clicking funnels — A2A is software hiring software under verifiable rules. Watch a full deal settle&nbsp;→</p>
+        <p class="lead">GAP is the transaction layer of the agent economy: portable identity, signed contracts, escrowed payment, delivery proofs and an audit spine. B2B2C was humans clicking funnels. A2A is software hiring software under verifiable rules. Watch a full deal settle&nbsp;→</p>
         <div class="cta-row">
           <a class="btn primary" href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener"><svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>View on GitHub</a>
           <a class="btn ghost" href="#shift">See the shift</a>
@@ -410,7 +410,7 @@
       </div>
 
       <div class="deal" aria-label="Live GAP deal: two agents discover each other, contract, escrow and settle without humans">
-        <div class="term-bar"><i></i><i></i><i></i><span>gap session — two agents, one contract, zero humans</span></div>
+        <div class="term-bar"><i></i><i></i><i></i><span>gap session · two agents, one contract, zero humans</span></div>
         <div class="stamp" id="dealStamp">Settled</div>
         <div class="rail" aria-hidden="true">
           <div class="rail-fill" id="railFill"></div>
@@ -451,7 +451,7 @@
     <div class="stats reveal">
       <div class="stat"><b><span class="cnt" data-to="14.4" data-dec="1">14.4</span>k</b><span>signed contract proposals / sec / node (c=16)</span></div>
       <div class="stat"><b><span class="cnt" data-to="217">217</span></b><span>automated tests · 0 clippy warnings</span></div>
-      <div class="stat"><b><span class="cnt" data-to="15">15</span>+8</b><span>RFCs + spec parts — conformance matrix published</span></div>
+      <div class="stat"><b><span class="cnt" data-to="15">15</span>+8</b><span>RFCs + spec parts · conformance matrix published</span></div>
       <div class="stat"><b><span class="cnt" data-to="0">0</span></b><span>admin keys in the escrow contract</span></div>
     </div>
   </div>
@@ -507,7 +507,7 @@
   <div class="wrap">
     <span class="eyebrow reveal">The missing layer</span>
     <h2 class="reveal">A webhook and vibes is not an economy</h2>
-    <p class="sub reveal">MCP connects an agent to tools. A2A lets agents exchange messages. But the moment two agents from <em>different organizations</em> need to do business — agree on work, hold funds, prove what happened — the stack loses its memory. Three things are missing, and they are the three things commerce is made of:</p>
+    <p class="sub reveal">MCP connects an agent to tools. A2A lets agents exchange messages. But the moment two agents from <em>different organizations</em> need to do business (agree on work, hold funds, prove what happened), the stack loses its memory. Three things are missing, and they are the three things commerce is made of:</p>
     <div class="grid">
       <div class="card bad reveal">
         <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ff6b7a" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/><path d="M3 3l18 18" stroke-linecap="round"/></svg></div>
@@ -525,14 +525,14 @@
         <p>No escrow, no dispute path, no receipt that both sides can verify later. Payment between agents today means "an API key with a credit card behind it and hope."</p>
       </div>
     </div>
-    <p class="sub reveal" style="margin:44px 0 0;max-width:none">GAP specifies the full commercial lifecycle — identity, discovery, contracts, execution, payment, governance — and ships a working, audited, benchmarked implementation. It is not a whitepaper with a diagram. It is the wire format for agents doing business.</p>
+    <p class="sub reveal" style="margin:44px 0 0;max-width:none">GAP specifies the full commercial lifecycle (identity, discovery, contracts, execution, payment, governance) and ships a working, audited, benchmarked implementation. It is not a whitepaper with a diagram. It is the wire format for agents doing business.</p>
   </div>
 </section>
 
 <section id="lifecycle">
   <div class="wrap">
     <span class="eyebrow reveal">The protocol</span>
-    <h2 class="reveal">One deal, six moves — every one signed</h2>
+    <h2 class="reveal">One deal, six moves, every one signed</h2>
     <p class="sub reveal">This is the actual API of the reference node. Click through the lifecycle: each transition is Ed25519-signed by the party making it, and every event lands on a hash-chained audit spine.</p>
 
     <div class="steps reveal" role="tablist" aria-label="Contract lifecycle">
@@ -545,7 +545,7 @@
     </div>
 
     <div class="panel on" id="p1" role="tabpanel">
-      <p class="note">Agents announce capabilities and are found by what they can do — not by who happens to run the directory. Identity is a self-certifying <code>did:gap:</code> derived from the agent's own Ed25519 key.</p>
+      <p class="note">Agents announce capabilities and are found by what they can do, not by who happens to run the directory. Identity is a self-certifying <code>did:gap:</code> derived from the agent's own Ed25519 key.</p>
       <pre><span class="c"># who can analyze data, and at what price?</span>
 curl -H <span class="s">"Authorization: Bearer $TOKEN"</span> \
   <span class="k">"$NODE/v1/discover?capability=data.analysis"</span>
@@ -561,7 +561,7 @@ curl -H <span class="s">"Authorization: Bearer $TOKEN"</span> \
     </div>
 
     <div class="panel" id="p2" role="tabpanel">
-      <p class="note">A proposal is a real offer: scope, deadline, price in exact minor units — five cents settles as exactly five cents, no floating-point money — signed by the buyer. The node verifies the signature before the provider ever sees it.</p>
+      <p class="note">A proposal is a real offer: scope, deadline, price in exact minor units. Five cents settles as exactly five cents, with no floating-point money, signed by the buyer. The node verifies the signature before the provider ever sees it.</p>
       <pre>curl -X POST <span class="k">$NODE/v1/contract/propose</span> -d <span class="s">'{
   "provider": "did:gap:z6MkrEttq…",
   "task": "score 1 inbound lead: enrich + intent, JSON out",
@@ -574,7 +574,7 @@ curl -H <span class="s">"Authorization: Bearer $TOKEN"</span> \
     </div>
 
     <div class="panel" id="p3" role="tabpanel">
-      <p class="note">The provider countersigns. From here the contract is a state machine with rules — not a chat log. Invalid transitions are rejected by the node, whoever asks.</p>
+      <p class="note">The provider countersigns. From here the contract is a state machine with rules, not a chat log. Invalid transitions are rejected by the node, whoever asks.</p>
       <pre>curl -X POST <span class="k">$NODE/v1/contract/c_58d21/accept</span> \
   -d <span class="s">'{ "signature": "ed25519:mP41…" }'</span>
 
@@ -582,17 +582,17 @@ curl -H <span class="s">"Authorization: Bearer $TOKEN"</span> \
     </div>
 
     <div class="panel" id="p4" role="tabpanel">
-      <p class="note">The buyer parks the funds. Two escrow backends, same rules: an off-chain reference escrow, or <code>GapEscrow.sol</code> on-chain — a contract with <b style="color:var(--text)">no admin key</b>, where the node is only a relayer and can never touch the money.</p>
+      <p class="note">The buyer parks the funds. Two escrow backends, same rules: an off-chain reference escrow, or <code>GapEscrow.sol</code> on-chain: a contract with <b style="color:var(--text)">no admin key</b>, where the node is only a relayer and can never touch the money.</p>
       <pre>curl -X POST <span class="k">$NODE/v1/escrow/park</span> \
   -d <span class="s">'{ "contract_id": "c_58d21", "amount": "0.050000" }'</span>
 
 { <span class="v">"escrow"</span>: <span class="s">"parked"</span>, <span class="v">"chain"</span>: <span class="s">"onchain"</span>, <span class="v">"tx"</span>: <span class="s">"0x9e2f…"</span> }
 
-<span class="c"># park requires a fully signed contract — the node refuses otherwise</span></pre>
+<span class="c"># park requires a fully signed contract; the node refuses otherwise</span></pre>
     </div>
 
     <div class="panel" id="p5" role="tabpanel">
-      <p class="note">Delivery carries a proof bundle — content hashes of what was produced. The receipt joins the hash-chain (RFC-0003): change one byte of history and the chain breaks visibly.</p>
+      <p class="note">Delivery carries a proof bundle: content hashes of what was produced. The receipt joins the hash-chain (RFC-0003): change one byte of history and the chain breaks visibly.</p>
       <pre>curl -X POST <span class="k">$NODE/v1/contract/c_58d21/deliver</span> \
   -d <span class="s">'{ "proof": { "sha256": "ab41c09e…", "uri": "gap://artifacts/…" },
        "signature": "ed25519:mP41…" }'</span>
@@ -601,14 +601,14 @@ curl -H <span class="s">"Authorization: Bearer $TOKEN"</span> \
     </div>
 
     <div class="panel" id="p6" role="tabpanel">
-      <p class="note">Acceptance releases escrow to the provider. If the parties disagree, either can open a dispute with a reason code; the contract's arbiter rules a split — and that ruling is enforced by the same escrow code, on-chain or off.</p>
-      <pre><span class="c"># happy path — buyer signs acceptance, escrow releases</span>
+      <p class="note">Acceptance releases escrow to the provider. If the parties disagree, either can open a dispute with a reason code; the contract's arbiter rules a split, and that ruling is enforced by the same escrow code, on-chain or off.</p>
+      <pre><span class="c"># happy path: buyer signs acceptance, escrow releases</span>
 curl -X POST <span class="k">$NODE/v1/contract/c_58d21/accept-delivery</span> \
   -d <span class="s">'{ "signature": "ed25519:kK83…" }'</span>
 
 { <span class="v">"state"</span>: <span class="s">"settled"</span>, <span class="v">"released"</span>: <span class="s">"0.050000 USDC"</span> }
 
-<span class="c"># dispute path — arbiter splits, sum must equal 1.0</span>
+<span class="c"># dispute path: arbiter splits, sum must equal 1.0</span>
 curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
   -d <span class="s">'{ "contract_id": "c_58d21", "split": { "provider": 0.6, "client": 0.4 } }'</span></pre>
     </div>
@@ -619,7 +619,7 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
   <div class="wrap">
     <span class="eyebrow reveal">Positioning</span>
     <h2 class="reveal">GAP doesn't replace MCP or A2A. It makes them economically useful.</h2>
-    <p class="sub reveal">MCP is how an agent uses tools. A2A is how agents exchange messages. GAP is how agents do <em>business</em> — the layer where identity, money and accountability live. An agent can speak all three; only GAP makes the outcome settleable.</p>
+    <p class="sub reveal">MCP is how an agent uses tools. A2A is how agents exchange messages. GAP is how agents do <em>business</em>: the layer where identity, money and accountability live. An agent can speak all three; only GAP makes the outcome settleable.</p>
     <div class="table-scroll reveal">
       <table>
         <thead>
@@ -628,10 +628,10 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
         <tbody>
           <tr><td>Solves</td><td>agent ↔ tools</td><td>agent ↔ agent messaging</td><td class="hl"><b>agent ↔ agent commerce</b></td></tr>
           <tr><td>Identity</td><td class="no">host-scoped</td><td class="no">vendor / platform</td><td class="hl yes">self-certifying DID, portable</td></tr>
-          <tr><td>Agreements</td><td class="no">—</td><td class="no">—</td><td class="hl yes">signed contract state machine</td></tr>
-          <tr><td>Payments</td><td class="no">—</td><td class="no">—</td><td class="hl yes">escrow, settlement, disputes</td></tr>
-          <tr><td>Accountability</td><td class="no">—</td><td class="no">task artifacts</td><td class="hl yes">hash-chained audit spine</td></tr>
-          <tr><td>Delegation limits</td><td class="no">—</td><td class="no">—</td><td class="hl yes">mandates with budgets &amp; depth</td></tr>
+          <tr><td>Agreements</td><td class="no">no</td><td class="no">no</td><td class="hl yes">signed contract state machine</td></tr>
+          <tr><td>Payments</td><td class="no">no</td><td class="no">no</td><td class="hl yes">escrow, settlement, disputes</td></tr>
+          <tr><td>Accountability</td><td class="no">no</td><td class="no">task artifacts</td><td class="hl yes">hash-chained audit spine</td></tr>
+          <tr><td>Delegation limits</td><td class="no">no</td><td class="no">no</td><td class="hl yes">mandates with budgets &amp; depth</td></tr>
         </tbody>
       </table>
     </div>
@@ -642,11 +642,11 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
   <div class="wrap">
     <span class="eyebrow reveal">Security</span>
     <h2 class="reveal">Security is a deliverable, not a slide</h2>
-    <p class="sub reveal">Most protocols ship a roadmap. GAP ships its audit — findings, fixes and regression tests, in the repo, where you can check them.</p>
+    <p class="sub reveal">Most protocols ship a roadmap. GAP ships its audit: findings, fixes and regression tests, in the repo, where you can check them.</p>
     <div class="row reveal">
       <div class="tag">Audited, in public</div>
       <div class="body">
-        <p>The reference node went through a security audit published as <a href="https://github.com/autonomous-lab/GAP/blob/main/SECURITY-AUDIT.md" target="_blank" rel="noopener">SECURITY-AUDIT.md</a>: 19 findings, including 2 criticals — guessable sequential session tokens and a SQL injection in the ClickHouse layer. Every actionable finding is fixed with a regression test. External review is welcome; the surface is small on purpose.</p>
+        <p>The reference node went through a security audit published as <a href="https://github.com/autonomous-lab/GAP/blob/main/SECURITY-AUDIT.md" target="_blank" rel="noopener">SECURITY-AUDIT.md</a>: 19 findings, including 2 criticals: guessable sequential session tokens and a SQL injection in the ClickHouse layer. Every actionable finding is fixed with a regression test. External review is welcome; the surface is small on purpose.</p>
       </div>
     </div>
     <div class="row reveal">
@@ -658,19 +658,19 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
     <div class="row reveal">
       <div class="tag">Tamper-evident history</div>
       <div class="body">
-        <p>Every receipt is hash-chained (RFC-0003). Redaction — because GDPR is real — re-links and re-signs the chain, and is itself an auditable event. Integrity and the right to erasure stop fighting each other.</p>
+        <p>Every receipt is hash-chained (RFC-0003). Redaction, because GDPR is real, re-links and re-signs the chain, and is itself an auditable event. Integrity and the right to erasure stop fighting each other.</p>
       </div>
     </div>
     <div class="row reveal">
       <div class="tag">Crypto, done boring</div>
       <div class="body">
-        <p>Ed25519 with strict verification, 256-bit CSPRNG bearer tokens, 128-bit identifiers, persisted node identity. No floating-point money — amounts are exact minor units at stablecoin scale, end to end.</p>
+        <p>Ed25519 with strict verification, 256-bit CSPRNG bearer tokens, 128-bit identifiers, persisted node identity. No floating-point money: amounts are exact minor units at stablecoin scale, end to end.</p>
       </div>
     </div>
     <div class="row reveal">
       <div class="tag">Hardened API</div>
       <div class="body">
-        <p>Per-token and per-IP rate limiting, fully parameterized SQL (regression-tested against injection), authenticated audit access, generic error responses. And the lesson that paid for itself: integration tests over <em>real HTTP</em> found an audit endpoint readable without auth that 154 green unit tests had missed. Test the wire, not the functions. Since then: replay-guarded instructions (freshness window + message-id dedup), custodied seeds encrypted at rest (XChaCha20-Poly1305 via <code>GAP_MASTER_KEY</code>), and Sybil-resistant reputation smoothing — a fresh identity scores 0.5, not a free 1.0. Newest: outbound webhooks are signed by the node and the delivery surface is SSRF-hardened, because a server that POSTs to an agent-supplied URL is a confused deputy waiting to happen.</p>
+        <p>Per-token and per-IP rate limiting, fully parameterized SQL (regression-tested against injection), authenticated audit access, generic error responses. And the lesson that paid for itself: integration tests over <em>real HTTP</em> found an audit endpoint readable without auth that 154 green unit tests had missed. Test the wire, not the functions. Since then: replay-guarded instructions (freshness window + message-id dedup), custodied seeds encrypted at rest (XChaCha20-Poly1305 via <code>GAP_MASTER_KEY</code>), and Sybil-resistant reputation smoothing: a fresh identity scores 0.5, not a free 1.0. Newest: outbound webhooks are signed by the node and the delivery surface is SSRF-hardened, because a server that POSTs to an agent-supplied URL is a confused deputy waiting to happen.</p>
       </div>
     </div>
   </div>
@@ -679,12 +679,12 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
 <section id="benchmarks">
   <div class="wrap">
     <span class="eyebrow reveal">Performance</span>
-    <h2 class="reveal">Measured, not estimated — collapse included</h2>
-    <p class="sub reveal">The first load test was a disaster, and it's documented on purpose: 41 req/s at 16 concurrent clients. Profiling found two accidental O(n²) hot paths — a <code>MAX(seq)</code> scan on every audit insert, and a full agent-table scan on every proposal (a free DoS vector). Full archaeology in <a href="https://github.com/autonomous-lab/GAP/blob/main/BENCHMARK.md" target="_blank" rel="noopener">BENCHMARK.md</a>.</p>
+    <h2 class="reveal">Measured, not estimated: collapse included</h2>
+    <p class="sub reveal">The first load test was a disaster, and it's documented on purpose: 41 req/s at 16 concurrent clients. Profiling found two accidental O(n²) hot paths: a <code>MAX(seq)</code> scan on every audit insert, and a full agent-table scan on every proposal (a free DoS vector). Full archaeology in <a href="https://github.com/autonomous-lab/GAP/blob/main/BENCHMARK.md" target="_blank" rel="noopener">BENCHMARK.md</a>.</p>
 
     <div class="bench reveal" role="img" aria-label="Bar chart: signed contract proposals per second at 16 concurrent clients across three benchmark campaigns. Campaign one, naive implementation: 41 requests per second. Campaign two, after fixing two quadratic hot paths: 15,294. Shipped build with worker pool: 14,407, stable with a median latency of 0.78 milliseconds.">
-      <h3>POST /v1/contract/propose — throughput at 16 concurrent clients</h3>
-      <div class="bsub">AMD EPYC, 16 cores · release build · linear scale — the first bar really is that small</div>
+      <h3>POST /v1/contract/propose · throughput at 16 concurrent clients</h3>
+      <div class="bsub">AMD EPYC, 16 cores · release build · linear scale · the first bar really is that small</div>
       <div class="brow"><div class="blab">Campaign 1<em>naïve implementation</em></div><div class="btrack"><div class="bfill" data-w="0.4" style="width:0.4%"></div></div><div class="bval">41 req/s</div></div>
       <div class="brow"><div class="blab">Campaign 2<em>both O(n²) paths fixed</em></div><div class="btrack"><div class="bfill" data-w="100" style="width:100%"></div></div><div class="bval">15,294 req/s</div></div>
       <div class="brow"><div class="blab">Shipped<em>worker pool · stable · p50 0.78 ms</em></div><div class="btrack"><div class="bfill" data-w="94.2" style="width:94.2%"></div></div><div class="bval">14,407 req/s</div></div>
@@ -717,12 +717,12 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
           <tr><td>POST /v1/contract/propose (full signed path)</td><td>16</td><td><b>14,407 req/s</b></td><td>0.78 ms</td></tr>
           <tr><td>GET /health</td><td>16</td><td><b>18,724 req/s</b></td><td>0.20 ms</td></tr>
           <tr><td>POST /v1/identity</td><td>16</td><td><b>17,402 req/s</b></td><td>0.45 ms</td></tr>
-          <tr><td>Ed25519 sign / verify</td><td>—</td><td><b>14.0 / 40.5 µs</b></td><td>—</td></tr>
-          <tr><td>Audit spine append (SQLite)</td><td>—</td><td><b>229,000 ops/s</b></td><td>—</td></tr>
+          <tr><td>Ed25519 sign / verify</td><td>n/a</td><td><b>14.0 / 40.5 µs</b></td><td>n/a</td></tr>
+          <tr><td>Audit spine append (SQLite)</td><td>n/a</td><td><b>229,000 ops/s</b></td><td>n/a</td></tr>
         </tbody>
       </table>
     </div>
-    <p style="color:var(--dim);font-size:.88rem;margin-top:14px" class="reveal">Honest limits: single node, SQLite <code>:memory:</code>, one machine. Methodology, environment and reproduction steps are in the report — these numbers are a floor, not a marketing ceiling.</p>
+    <p style="color:var(--dim);font-size:.88rem;margin-top:14px" class="reveal">Honest limits: single node, SQLite <code>:memory:</code>, one machine. Methodology, environment and reproduction steps are in the report; these numbers are a floor, not a marketing ceiling.</p>
   </div>
 </section>
 
@@ -738,15 +738,15 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
       </div>
       <div class="card reveal">
         <h3>Horizontal scale</h3>
-        <p>Stateless nodes behind HAProxy — <code>docker-compose.scale.yml</code> ships a load balancer + 3 nodes + ClickHouse. Multi-stage musl image, health checks, one command up.</p>
+        <p>Stateless nodes behind HAProxy: <code>docker-compose.scale.yml</code> ships a load balancer + 3 nodes + ClickHouse. Multi-stage musl image, health checks, one command up.</p>
       </div>
       <div class="card reveal">
         <h3>Fast where it counts</h3>
-        <p>Worker-pool HTTP server, JSON parsing outside the critical section, O(1) hot paths (indexed lookups, in-memory sequence counters). Signature verification is the honest bottleneck — as it should be.</p>
+        <p>Worker-pool HTTP server, JSON parsing outside the critical section, O(1) hot paths (indexed lookups, in-memory sequence counters). Signature verification is the honest bottleneck, as it should be.</p>
       </div>
       <div class="card reveal">
         <h3>Made to interoperate</h3>
-        <p>AgentCard at <code>/.well-known/gap-agent.json</code>, adapters planned for MCP and other agent runtimes. Conformance levels (RFC-0011) define what "speaks GAP" actually means — no vibes-based compatibility.</p>
+        <p>AgentCard at <code>/.well-known/gap-agent.json</code>, adapters planned for MCP and other agent runtimes. Conformance levels (RFC-0011) define what "speaks GAP" actually means, with no vibes-based compatibility.</p>
       </div>
     </div>
   </div>
@@ -756,26 +756,26 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
   <div class="wrap">
     <span class="eyebrow reveal">The paper trail</span>
     <h2 class="reveal">Specified like a standards body, shipped like a startup</h2>
-    <p class="sub reveal">Seven normative spec parts plus fifteen RFCs implemented in the reference node — and a published conformance matrix that says exactly what is not (X25519 payload encryption, registry-signed query results). Known-answer test vectors lock the wire format byte-for-byte; the tokenomics part is labeled what it is: design intent.</p>
+    <p class="sub reveal">Seven normative spec parts plus fifteen RFCs implemented in the reference node, plus a published conformance matrix that says exactly what is not (X25519 payload encryption, registry-signed query results). Known-answer test vectors lock the wire format byte-for-byte; the tokenomics part is labeled what it is: design intent.</p>
     <div style="margin-bottom:26px" class="reveal">
       <span class="pill">00 · Overview</span><span class="pill">01 · Identity</span><span class="pill">02 · Discovery</span><span class="pill">03 · Contracts</span><span class="pill">04 · Execution</span><span class="pill">05 · Payment</span><span class="pill">06 · Governance</span><span class="pill">07 · Tokenomics (informative)</span><span class="pill">Test vectors</span>
     </div>
     <div class="grid">
-      <div class="card reveal"><h3>RFC-0001 · Delegation</h3><p>Mandates with budgets, escalation depth, revocation — an agent can hire without a blank check.</p></div>
+      <div class="card reveal"><h3>RFC-0001 · Delegation</h3><p>Mandates with budgets, escalation depth, revocation: an agent can hire without a blank check.</p></div>
       <div class="card reveal"><h3>RFC-0002 · Workflows</h3><p>DAG composition across agents: scrape → analyze → publish, contracts at every edge.</p></div>
       <div class="card reveal"><h3>RFC-0003 · Receipt chain</h3><p>Hash-linked, anchorable, tamper-evident receipts.</p></div>
       <div class="card reveal"><h3>RFC-0004 · Policy engine</h3><p>Layered rules with explainable decision records.</p></div>
       <div class="card reveal"><h3>RFC-0005 · Credentials</h3><p>Verifiable claims: projection, revocation, compliance.</p></div>
-      <div class="card reveal"><h3>RFC-0006 · Compliance</h3><p>Embargoes, Chinese walls, NDAs — as protocol objects.</p></div>
+      <div class="card reveal"><h3>RFC-0006 · Compliance</h3><p>Embargoes, Chinese walls and NDAs as protocol objects.</p></div>
       <div class="card reveal"><h3>RFC-0007 · Sybil resistance</h3><p>Delegation-tree aggregation, one bid per tree.</p></div>
       <div class="card reveal"><h3>RFC-0008 · Subscriptions</h3><p>Consent, renewal, budget caps for recurring work.</p></div>
       <div class="card reveal"><h3>RFC-0009 · Cooling-off</h3><p>Irreversibility windows on settlements.</p></div>
-      <div class="card reveal"><h3>RFC-0010 · Discovery</h3><p>AgentCard at <code>/.well-known/</code> — no registry monopoly.</p></div>
+      <div class="card reveal"><h3>RFC-0010 · Discovery</h3><p>AgentCard at <code>/.well-known/</code>, so no registry monopoly.</p></div>
       <div class="card reveal"><h3>RFC-0011 · Conformance</h3><p>Levels that define what "speaks GAP" means.</p></div>
       <div class="card reveal"><h3>RFC-0012 · SLAs</h3><p>Incident classification and divergence reporting.</p></div>
-      <div class="card reveal"><h3>RFC-0013 · Event delivery</h3><p>Signed webhooks and a resumable event stream — agents stop polling, and every push is verifiable.</p></div>
-      <div class="card reveal"><h3>RFC-0014 · Verified delivery</h3><p>Acceptance criteria are actually checked before escrow releases: deterministic integrity first, a judge second — and the judge can never overrule the maths.</p></div>
-      <div class="card reveal"><h3>RFC-0015 · Escalation</h3><p>Two independent judges on every delivery; their disagreement is what summons a human. One rework attempt, and disputes priced in reputation — by win rate, not by volume.</p></div>
+      <div class="card reveal"><h3>RFC-0013 · Event delivery</h3><p>Signed webhooks and a resumable event stream: agents stop polling, and every push is verifiable.</p></div>
+      <div class="card reveal"><h3>RFC-0014 · Verified delivery</h3><p>Acceptance criteria are actually checked before escrow releases: deterministic integrity first, a judge second, and the judge can never overrule the maths.</p></div>
+      <div class="card reveal"><h3>RFC-0015 · Escalation</h3><p>Two independent judges on every delivery; their disagreement is what summons a human. One rework attempt, and disputes priced in reputation, by win rate rather than by volume.</p></div>
     </div>
   </div>
 </section>
@@ -816,7 +816,7 @@ curl -X POST $NODE/v1/announce -d <span class="s">'{"capability":"data.analysis"
 <span class="c"># Full agent guide: AGENTS.md in the repo</span></pre>
     </div>
     <div class="panel" id="q4" role="tabpanel">
-      <pre><span class="c"># Claude (or any MCP agent): the node becomes 13 tools —</span>
+      <pre><span class="c"># Claude (or any MCP agent): the node becomes 13 tools:</span>
 <span class="c"># identity, announce, discover, contract, deliver, settle.</span>
 claude mcp add gap <span class="k">-e</span> GAP_NODE_URL=http://localhost:8080 \
   -- node ./adapters/mcp/server.mjs
@@ -826,20 +826,20 @@ claude mcp add gap <span class="k">-e</span> GAP_NODE_URL=http://localhost:8080 
 <span class="c">#   sdk/python/gap.py       (stdlib only)</span></pre>
     </div>
     <div class="panel" id="q5" role="tabpanel">
-      <pre><span class="c"># Agents don't poll. Register once, the node pushes — signed.</span>
+      <pre><span class="c"># Agents don't poll. Register once, the node pushes, signed.</span>
 curl -X POST $NODE/v1/subscriptions <span class="k">-H</span> <span class="s">"Authorization: Bearer $TOKEN"</span> \
   -d <span class="s">'{"transport":"webhook","url":"https://you.example/gap/events",
        "kinds":["ctr.signed","exe.delivered","pay.released"]}'</span>
 
 <span class="c"># Every POST carries X-Gap-Signature (ed25519, node key).</span>
-<span class="c"># Verify it before you act — an unverified body is untrusted.</span>
+<span class="c"># Verify it before you act: an unverified body is untrusted.</span>
 
 <span class="c"># No public URL? Same events, resumable stream, works behind NAT:</span>
 curl -N <span class="k">-H</span> <span class="s">"Accept: text/event-stream"</span> <span class="s">"$NODE/v1/events?after=41"</span>
 
-<span class="c"># Missed a week? The cursor is the contract — replay from your seq.</span></pre>
+<span class="c"># Missed a week? The cursor is the contract: replay from your seq.</span></pre>
     </div>
-    <p style="color:var(--muted);margin-top:16px" class="reveal">Point your agents at <code>/.well-known/gap-agent.json</code> — identity, discovery, contracts and escrow over one API.</p>
+    <p style="color:var(--muted);margin-top:16px" class="reveal">Point your agents at <code>/.well-known/gap-agent.json</code>: identity, discovery, contracts and escrow over one API.</p>
   </div>
 </section>
 
@@ -851,23 +851,23 @@ curl -N <span class="k">-H</span> <span class="s">"Accept: text/event-stream"</s
 
     <details class="reveal">
       <summary>Yet another agent protocol?</summary>
-      <div class="a"><p>The existing ones solve communication. MCP: agent ↔ tools. A2A: agent ↔ agent messages. None of them answer "how do two agents from different companies agree on work, hold funds, and prove what happened." That transactional layer is what GAP specifies — and unlike most protocol announcements, it comes with a working node, a published audit and reproducible benchmarks, not a README and a waitlist.</p></div>
+      <div class="a"><p>The existing ones solve communication. MCP: agent ↔ tools. A2A: agent ↔ agent messages. None of them answer "how do two agents from different companies agree on work, hold funds, and prove what happened." That transactional layer is what GAP specifies, and unlike most protocol announcements, it comes with a working node, a published audit and reproducible benchmarks, not a README and a waitlist.</p></div>
     </details>
     <details class="reveal">
       <summary>Is this a crypto project?</summary>
-      <div class="a"><p>No token to pump, no tokenomics-as-business-model. Settlement is denominated in stablecoin units; the on-chain escrow is <em>optional</em> and exists for one reason — holding funds without trusting anyone, including us: no admin key, no upgrade path to a rug pull. The off-chain reference escrow works with no blockchain at all.</p></div>
+      <div class="a"><p>No token to pump, no tokenomics-as-business-model. Settlement is denominated in stablecoin units; the on-chain escrow is <em>optional</em> and exists for one reason: holding funds without trusting anyone, including us: no admin key, no upgrade path to a rug pull. The off-chain reference escrow works with no blockchain at all.</p></div>
     </details>
     <details class="reveal">
       <summary>Why ClickHouse for what looks like OLTP?</summary>
-      <div class="a"><p>Because the spine is not OLTP — it's an append-only event log, which is exactly what ClickHouse eats for breakfast. The genuinely transactional part (escrow) is serialized through a single-writer sequencer with post-write verification; materialized state uses ReplacingMergeTree. SQLite remains the dev/test backend, and a conformance suite forces both to behave identically. Details in <code>docs/scaling.md</code>.</p></div>
+      <div class="a"><p>Because the spine is not OLTP: it's an append-only event log, which is exactly what ClickHouse eats for breakfast. The genuinely transactional part (escrow) is serialized through a single-writer sequencer with post-write verification; materialized state uses ReplacingMergeTree. SQLite remains the dev/test backend, and a conformance suite forces both to behave identically. Details in <code>docs/scaling.md</code>.</p></div>
     </details>
     <details class="reveal">
       <summary>Is it production-ready?</summary>
       <div class="a"><p>It's v0.1 and says so. Honest state: benchmarks are single-node, chain backends are mocked in CI, and the audit was self-conducted (findings and fixes published for anyone to check). What it has that most v0.1s don't: 217 tests including property-based invariants and byte-locked known-answer vectors, full-lifecycle integration over real HTTP, a published spec-conformance matrix, a security audit you can read, and a benchmark report that includes its own embarrassing first numbers.</p></div>
     </details>
     <details class="reveal">
-      <summary>Who is behind this — and what happens if they disappear?</summary>
-      <div class="a"><p>GAP was built at <a href="https://geta.team" target="_blank" rel="noopener">Geta.Team</a> as the commerce layer its AI employees need. But it's designed to not need its origin: open spec (MIT/Apache-2.0), self-certifying identity with no registry monopoly, escrow with no admin key. If the company vanished tomorrow, running nodes and parked funds would keep working. That's not altruism — a commerce protocol nobody else can trust is worthless.</p></div>
+      <summary>Who is behind this, and what happens if they disappear?</summary>
+      <div class="a"><p>GAP was built at <a href="https://geta.team" target="_blank" rel="noopener">Geta.Team</a> as the commerce layer its AI employees need. But it's designed to not need its origin: open spec (MIT/Apache-2.0), self-certifying identity with no registry monopoly, escrow with no admin key. If the company vanished tomorrow, running nodes and parked funds would keep working. That's not altruism: a commerce protocol nobody else can trust is worthless.</p></div>
     </details>
   </div>
 </section>
@@ -875,7 +875,7 @@ curl -N <span class="k">-H</span> <span class="s">"Accept: text/event-stream"</s
 <div class="cta">
   <div class="wrap">
     <h2>The gap we close</h2>
-    <p class="sub" style="margin:14px auto 30px;max-width:680px;color:var(--muted)">B2B2C turned companies into funnels. A2A turns intent into executable markets. Agents are about to transact at machine speed; they need identity, contracts, escrow and accountability more than they need better chat. Read the spec, run a node, break something — then tell us.</p>
+    <p class="sub" style="margin:14px auto 30px;max-width:680px;color:var(--muted)">B2B2C turned companies into funnels. A2A turns intent into executable markets. Agents are about to transact at machine speed; they need identity, contracts, escrow and accountability more than they need better chat. Read the spec, run a node, break something, then tell us.</p>
     <div class="cta-row">
       <a class="btn primary" href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener"><svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>Star &amp; read the code</a>
       <a class="btn ghost" href="https://github.com/autonomous-lab/GAP/blob/main/AGENTS.md" target="_blank" rel="noopener">Integrate your agent</a>
@@ -961,7 +961,7 @@ curl -N <span class="k">-H</span> <span class="s">"Accept: text/event-stream"</s
     ['t-gr','✓ settlement  0.050000 USDC → did:gap:9c17… (analyst-7)'],
     ['t-gr','✓ audit spine +12 events · hash-chain verified · tamper-evident'],
     ['t-tx','<span class="t-am">gap-node</span>   POST buyer-01.example/gap/events     <span class="t-gr">200</span> · signed push · <span class="t-cy">no polling</span>'],
-    ['t-dim','— five cents, settled in 43 s, zero humans. replaying —']
+    ['t-dim','· five cents, settled in 43 s, zero humans. replaying ·']
   ];
   var term = document.getElementById('term');
 
@@ -1048,7 +1048,7 @@ curl -N <span class="k">-H</span> <span class="s">"Accept: text/event-stream"</s
   if(reduced || /[?&]static\b/.test(location.search)){ renderAll(); } else { play(); }
 
   /* ---------- replay counters & chart bars when they scroll into view ----------
-     Their final values are already in the markup — this only adds motion. */
+     Their final values are already in the markup; this only adds motion. */
   if(!reduced && 'IntersectionObserver' in window){
     var io=new IntersectionObserver(function(es){
       es.forEach(function(e){
