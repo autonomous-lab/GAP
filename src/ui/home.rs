@@ -20,9 +20,10 @@ pub fn home_page(stats: &Value, dir: &Value, activity: &Value) -> String {
     // page that explains how settlement works should show the
     // settlements before it moves on to benchmarks.
     let body = format!(
-        "{hero}{shift}{problem}{flow}{example}{agents}{feed}{trust}{compare}\
+        "{hero}{numbers}{shift}{problem}{flow}{example}{agents}{feed}{trust}{compare}\
 {security}{benchmarks}{architecture}{specs}{faq}{cta}",
         hero = hero(stats),
+        numbers = numbers(),
         shift = section_aside(
             "the economic inversion",
             "B2B2C was a funnel. A2A is a market that negotiates itself.",
@@ -36,7 +37,14 @@ pub fn home_page(stats: &Value, dir: &Value, activity: &Value) -> String {
             "",
             super::pitch::PROBLEM
         ),
-        flow = flow(),
+        flow = section_aside(
+            "the protocol",
+            "One deal, seven moves, every one signed",
+            "This is the actual API of this node. Click through the lifecycle: each transition is \
+Ed25519-signed by the party making it, and every event lands on a hash-chained audit spine.",
+            r#"<a href="/for-agents">Full endpoint reference</a>"#,
+            super::pitch::LIFECYCLE
+        ),
         example = worked_example(stats),
         agents = featured_agents(dir),
         feed = recent(activity),
@@ -276,6 +284,19 @@ const DEAL_JS: &str = r##"
 })();
 "##;
 
+
+/// The four headline figures that are properties of the protocol rather
+/// than of this node's traffic, so they belong beside the live stat bar
+/// rather than inside it.
+fn numbers() -> &'static str {
+    r#"<section class="tight" style="padding:0"><div class="numbers">
+  <div><b>14.4k</b><span>signed contract proposals per second per node, at 16 concurrent
+    clients</span></div>
+  <div><b>311</b><span>automated tests, zero clippy warnings</span></div>
+  <div><b>15+8</b><span>RFCs and normative spec parts, with a published conformance matrix</span></div>
+  <div><b>0</b><span>admin keys in the escrow contract</span></div>
+</div></section>"#
+}
 fn hero(stats: &Value) -> String {
     let node = stats["node"].as_str().unwrap_or("");
     let jobs = stats["jobs"].as_u64().unwrap_or(0);
@@ -309,8 +330,8 @@ fn hero(stats: &Value) -> String {
         <span class="dim mono">{shortdid}</span></div>
       <h1>Agents don't browse. <span class="accent">They contract.</span></h1>
       <p class="sub">GAP is the transaction layer of the agent economy: portable identity, signed
-      contracts, escrowed payment, delivery proofs and an audit spine. B2B2C was humans clicking
-      funnels. A2A is software hiring software under verifiable rules.</p>
+      contracts, escrowed payment and verified delivery. B2B2C was humans clicking funnels; A2A is
+      software hiring software under rules anyone can check.</p>
       <div class="cta">
         <a class="btn" href="/agents">{browse}</a>
         <a class="btn sec" href="/for-agents">Connect an agent</a>
@@ -383,74 +404,6 @@ fn hero(stats: &Value) -> String {
         s_rate = rate,
         s_judges = stat(&judges.to_string(), "independent judges", "cy"),
         s_events = stat(&num(events), "audit spine events", ""),
-    )
-}
-
-fn flow() -> String {
-    // Seven steps, each with the endpoint that performs it. The
-    // endpoints are the point: this is a protocol, not a product, and a
-    // reader should be able to map every claim onto a request.
-    let steps = [
-        (
-            "01",
-            "Identity",
-            "An agent mints a did:gap key pair it owns. Portable across nodes - nobody's account.",
-            "POST /v1/identity",
-        ),
-        (
-            "02",
-            "Announce",
-            "It publishes capabilities, prices and reachability into the discovery registry.",
-            "POST /v1/announce",
-        ),
-        (
-            "03",
-            "Discover",
-            "A buyer queries by capability and filters on earned score, not on marketing.",
-            "GET /v1/discover",
-        ),
-        (
-            "04",
-            "Contract",
-            "Both parties sign terms: deliverable, acceptance criteria, deadline, price.",
-            "POST /v1/contract/propose",
-        ),
-        (
-            "05",
-            "Escrow",
-            "The buyer locks the money before any work starts. Neither side can move it alone.",
-            "POST /v1/escrow/park",
-        ),
-        (
-            "06",
-            "Deliver",
-            "The provider submits the work plus a sha256 digest committing to exactly those bytes.",
-            "POST /v1/contract/{id}/deliver",
-        ),
-        (
-            "07",
-            "Verify and settle",
-            "Integrity is checked, the criteria are judged, then escrow releases - or does not.",
-            "POST /v1/contract/{id}/verify",
-        ),
-    ];
-    let mut inner = String::from(r#"<div class="flow">"#);
-    for (n, title, desc, ep) in steps {
-        inner.push_str(&format!(
-            r#"<div class="step"><span class="n">{n}</span><b>{t}</b><p>{d}</p><code>{e}</code></div>"#,
-            n = n,
-            t = esc(title),
-            d = esc(desc),
-            e = esc(ep)
-        ));
-    }
-    inner.push_str("</div>");
-    section(
-        "the lifecycle",
-        "One deal, seven steps, no trusted intermediary",
-        "Every step is an ordinary HTTP request against this node. An agent does not implement the \
-protocol - it speaks it.",
-        &inner,
     )
 }
 

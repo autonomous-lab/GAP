@@ -374,7 +374,8 @@ transform:translateX(-100%);animation:dealsweep 8s ease-in-out infinite}
 .term-bar{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}
 .term-bar i{width:11px;height:11px;border-radius:50%;background:#2a3a5c;display:inline-block}
 .term-bar i:nth-child(1){background:#ff5f57}.term-bar i:nth-child(2){background:#febc2e}.term-bar i:nth-child(3){background:#28c840}
-.term-bar span{margin-left:10px;color:var(--dim);font-size:.78rem;font-family:ui-monospace,monospace}
+.term-bar span{margin-left:10px;color:var(--dim);font-size:.78rem;font-family:ui-monospace,monospace;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .rail{display:flex;align-items:flex-start;justify-content:space-between;padding:18px 20px 4px;position:relative}
 .rail:before{content:"";position:absolute;left:46px;right:46px;top:30px;height:2px;background:var(--line-2)}
 .rail-fill{position:absolute;left:46px;top:30px;height:2px;width:0;max-width:calc(100% - 92px);
@@ -416,13 +417,64 @@ transition:opacity .25s,transform .25s;color:var(--muted)}
 .claim b{display:block;color:var(--text);font-size:.88rem}
 .claim span{display:block;color:var(--muted);font-size:.78rem;line-height:1.45;margin-top:2px}
 @media(max-width:900px){
-.hero-grid{grid-template-columns:1fr;gap:30px}
+.hero-grid{grid-template-columns:1fr;gap:26px}
+.hero-copy{display:contents}
+.hero-copy .eyebrow{order:1}
+.hero-copy h1{order:2}
+.deal{order:3}
+.hero-copy .sub{order:4}
+.hero-copy .cta{order:5}
+.hero-copy .proof-chips{order:6}
+.hero-grid{display:flex;flex-direction:column;align-items:stretch}
+.hero-copy .eyebrow{align-self:flex-start}
+.proof-chips{gap:6px}
+.proof-chips span{font-size:.66rem;padding:6px 10px}
+.lc-tabs{grid-template-columns:repeat(2,1fr)}
 .hero-claim{grid-template-columns:1fr}
 .term-body{height:220px;font-size:.63rem}
 .rstep span{display:none}
 .rail:before,.rail-fill{left:26px;right:26px}
 }
 @media(prefers-reduced-motion:reduce){.deal:before{animation:none}}
+
+
+/* ------------------------------------------- lifecycle stepper
+   Radio inputs, not a script: every panel ships in the HTML, so a
+   crawler reads all seven and the tabs still work with JS disabled. */
+.lc>input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.lc-tabs{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;
+background:var(--line);border:1px solid var(--line);border-radius:var(--radius) var(--radius) 0 0;overflow:hidden}
+.lc-tabs label{background:var(--panel);padding:13px 14px;cursor:pointer;display:block;
+font-size:.86rem;color:var(--muted);transition:background .18s,color .18s}
+.lc-tabs label b{display:block;font:800 .66rem/1 ui-monospace,monospace;letter-spacing:.9px;
+color:var(--dim);margin-bottom:6px}
+.lc-tabs label:hover{background:var(--panel-2);color:var(--text)}
+.lc-panels>.lc-p{display:none;border:1px solid var(--line);border-top:0;
+border-radius:0 0 var(--radius) var(--radius);padding:20px 22px;background:var(--panel)}
+.lc-p p.note{color:var(--muted);font-size:.93rem;margin-bottom:14px;max-width:78ch}
+.lc-p p.note b{color:var(--text)}
+#lc1:checked~.lc-tabs label[for=lc1],#lc2:checked~.lc-tabs label[for=lc2],
+#lc3:checked~.lc-tabs label[for=lc3],#lc4:checked~.lc-tabs label[for=lc4],
+#lc5:checked~.lc-tabs label[for=lc5],#lc6:checked~.lc-tabs label[for=lc6],
+#lc7:checked~.lc-tabs label[for=lc7]{background:var(--panel-3);color:var(--text);
+box-shadow:inset 0 2px 0 var(--cyan)}
+#lc1:checked~.lc-tabs label[for=lc1] b,#lc2:checked~.lc-tabs label[for=lc2] b,
+#lc3:checked~.lc-tabs label[for=lc3] b,#lc4:checked~.lc-tabs label[for=lc4] b,
+#lc5:checked~.lc-tabs label[for=lc5] b,#lc6:checked~.lc-tabs label[for=lc6] b,
+#lc7:checked~.lc-tabs label[for=lc7] b{color:var(--cyan)}
+#lc1:checked~.lc-panels>.lc-p:nth-child(1),#lc2:checked~.lc-panels>.lc-p:nth-child(2),
+#lc3:checked~.lc-panels>.lc-p:nth-child(3),#lc4:checked~.lc-panels>.lc-p:nth-child(4),
+#lc5:checked~.lc-panels>.lc-p:nth-child(5),#lc6:checked~.lc-panels>.lc-p:nth-child(6),
+#lc7:checked~.lc-panels>.lc-p:nth-child(7){display:block}
+.lc>input:focus-visible~.lc-tabs label{outline:1px solid var(--line-3)}
+
+/* headline numbers band */
+.numbers{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:1px;
+background:var(--line);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.numbers>div{background:var(--bg-soft);padding:26px 24px}
+.numbers b{display:block;font-family:ui-monospace,monospace;font-size:2.1rem;letter-spacing:-.03em;
+line-height:1;color:var(--text)}
+.numbers span{display:block;color:var(--dim);font-size:.83rem;margin-top:8px;line-height:1.45}
 
 /* ---------------------------------------------------------- footer */
 footer.site{border-top:1px solid var(--line);margin-top:60px;padding:38px 0 46px;background:var(--bg-soft)}
