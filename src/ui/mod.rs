@@ -72,6 +72,16 @@ footer{border-top:1px solid var(--line);margin-top:50px;padding:22px 0;color:var
 .live i{width:7px;height:7px;border-radius:50%;background:var(--green);animation:p 1.6s infinite}
 @keyframes p{50%{opacity:.25}}
 .empty{color:var(--dim);padding:22px 0}
+.search{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:18px 0}
+.search input{background:#080e18;border:1px solid var(--line);border-radius:7px;padding:9px 12px;color:var(--text);font:inherit;font-size:.92rem}
+.search input[name=q]{flex:1;min-width:240px}
+.search button{background:#f2f7ff;color:#0a1220;border:0;border-radius:7px;padding:10px 18px;font:inherit;font-weight:600;cursor:pointer}
+.search button:hover{background:#fff}
+.verdict{border-left:3px solid var(--line);padding:2px 0 2px 14px;margin:10px 0}
+.verdict.ok{border-color:var(--green)}.verdict.bad{border-color:var(--red)}
+.check{display:flex;gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid rgba(33,49,74,.5)}
+.check b{min-width:240px;font-weight:600;font-size:.85rem}
+.sig{word-break:break-all;font-size:.72rem;color:var(--dim)}
 "#;
 
 fn page(title: &str, description: &str, canonical: &str, body: &str) -> String {
@@ -140,14 +150,28 @@ pub fn directory(dir: &Value) -> String {
 <p class="lead">Every agent below announced its capabilities to this GAP node and can be
 hired under a signed contract with escrowed payment. Scores are earned from verified
 deliveries — smoothed, so a brand-new agent starts at 0.50 rather than a free 1.00.</p>
+<form class="search" method="get" action="/">
+  <input name="q" value="{q}" placeholder="Search capabilities — lead-generation, analysis…" aria-label="Search capabilities">
+  <input name="min_score" value="{minscore}" placeholder="min score" aria-label="Minimum score" size="9">
+  <input name="max_price" value="{maxprice}" placeholder="max price" aria-label="Maximum price" size="9">
+  <button type="submit">Search</button>{clear}
+</form>
 <p class="muted">{count} agent(s) listed · node <code>{node}</code></p>
 <div class="grid">{cards}</div>
 {empty}"#,
+        q = esc(dir["query"].as_str().unwrap_or("")),
+        minscore = esc(dir["min_score"].as_str().unwrap_or("")),
+        maxprice = esc(dir["max_price"].as_str().unwrap_or("")),
+        clear = if dir["query"].as_str().unwrap_or("").is_empty() {
+            String::new()
+        } else {
+            r#" <a href="/" class="pill">clear</a>"#.to_string()
+        },
         count = agents.len(),
         node = esc(&short(dir["node"].as_str().unwrap_or(""))),
         cards = cards,
         empty = if agents.is_empty() {
-            r#"<p class="empty">No agent has announced yet. Point one at this node — see <a href="/docs">Use it</a>.</p>"#
+            r#"<p class="empty">No agent matches. Try a broader search, or point an agent at this node — see <a href="/docs">Use it</a>.</p>"#
         } else {
             ""
         }
@@ -250,6 +274,128 @@ one-way digests, so outcomes are auditable without exposing who this agent works
     )
 }
 
+/// `/job/{ref}` — one settled job's full verdict, pseudonymously.
+///
+/// This is what turns a score into evidence rather than an assertion:
+/// the criteria that were agreed, the deterministic checks, every
+/// judge's opinion and the node's signature — with the contract id and
+/// both parties absent by construction.
+pub fn job_page(job: &Value) -> String {
+    let v = &job["verdict"];
+    let ruling = v["ruling"].as_str().unwrap_or("—");
+    let cls = match ruling {
+        "conforms" => "ok",
+        "nonconforming" => "bad",
+        _ => "muted",
+    };
+    let mut criteria = String::new();
+    for c in job["acceptance_criteria"].as_array().unwrap_or(&vec![]) {
+        criteria.push_str(&format!("<li>{}</li>", esc(c.as_str().unwrap_or(""))));
+    }
+    if criteria.is_empty() {
+        criteria = r#"<li class="dim">No subjective criteria were agreed.</li>"#.into();
+    }
+    let mut checks = String::new();
+    for c in v["checks"].as_array().unwrap_or(&vec![]) {
+        let passed = c["passed"].as_bool().unwrap_or(false);
+        checks.push_str(&format!(
+            r#"<div class="check"><b>{}</b><span class="{}">{}</span><span class="muted">{}</span></div>"#,
+            esc(c["name"].as_str().unwrap_or("")),
+            if passed { "ok" } else { "bad" },
+            if passed { "pass" } else { "fail" },
+            esc(c["detail"].as_str().unwrap_or(""))
+        ));
+    }
+    if checks.is_empty() {
+        checks = r#"<p class="dim">No verification was requested for this job.</p>"#.into();
+    }
+    let mut opinions = String::new();
+    for o in v["opinions"].as_array().unwrap_or(&vec![]) {
+        let r = o["ruling"].as_str().unwrap_or("");
+        let mut why = String::new();
+        for reason in o["reasons"].as_array().unwrap_or(&vec![]) {
+            why.push_str(&format!("<li>{}</li>", esc(reason.as_str().unwrap_or(""))));
+        }
+        opinions.push_str(&format!(
+            r#"<div class="verdict {}"><b class="mono">{}</b> → <b>{}</b><ul class="muted" style="margin:6px 0 0 18px">{}</ul></div>"#,
+            match r {
+                "conforms" => "ok",
+                "nonconforming" => "bad",
+                _ => "",
+            },
+            esc(o["judge"].as_str().unwrap_or("")),
+            esc(r),
+            why
+        ));
+    }
+    if opinions.is_empty() {
+        opinions =
+            r#"<p class="dim">Decided deterministically — no judge was consulted.</p>"#.into();
+    }
+    let jref = job["job_ref"].as_str().unwrap_or("");
+    let body = format!(
+        r#"<h1>Job {jref}</h1>
+<p class="lead">A settled job, in public. The contract id and both parties are absent by
+construction — what you can check is <em>what was promised, what was verified, and who
+judged it</em>.</p>
+<div class="grid">
+  <div class="card"><h3>Verdict</h3><div class="{cls}" style="font-size:1.4rem">{ruling}</div>
+    <span class="muted">{outcome}{escalated}</span></div>
+  <div class="card"><h3>Capability</h3><div class="mono">{cap}</div>
+    <span class="muted">{ontime} · {remedied}</span></div>
+  <div class="card"><h3>Judged by</h3><div class="mono">{judges}</div>
+    <span class="muted">verdict signed by the node</span></div>
+</div>
+<h2>What was agreed</h2><ul class="muted" style="margin-left:20px">{criteria}</ul>
+<h2>Deterministic checks</h2>
+<p class="muted">These run before any judge and cannot be overruled by one.</p>
+{checks}
+<h2>Judge opinions</h2>{opinions}
+<h2>Proof</h2>
+<p class="muted">Evidence digest <code>{digest}</code></p>
+<p class="sig">Node signature: {sig}</p>
+<p class="dim">Machine-readable: <a href="/v1/job/{jref}">/v1/job/{jref}</a></p>"#,
+        jref = esc(jref),
+        cls = cls,
+        ruling = esc(ruling),
+        outcome = esc(job["outcome"].as_str().unwrap_or("")),
+        escalated = match v["escalation"].as_str() {
+            Some(e) => format!(" · escalated ({})", esc(e)),
+            None => String::new(),
+        },
+        cap = esc(job["capability_id"].as_str().unwrap_or("")),
+        ontime = if job["on_time"].as_bool().unwrap_or(false) {
+            "on time"
+        } else {
+            "late"
+        },
+        remedied = if job["remedied"].as_bool().unwrap_or(false) {
+            "reworked once"
+        } else {
+            "first try"
+        },
+        judges = esc(&v["opinions"]
+            .as_array()
+            .map(|o| o
+                .iter()
+                .filter_map(|x| x["judge"].as_str())
+                .collect::<Vec<_>>()
+                .join(", "))
+            .unwrap_or_else(|| "deterministic only".into())),
+        criteria = criteria,
+        checks = checks,
+        opinions = opinions,
+        digest = esc(v["evidence_digest"].as_str().unwrap_or("—")),
+        sig = esc(v["signature"].as_str().unwrap_or("—")),
+    );
+    page(
+        &format!("Job {jref} — verified delivery on GAP"),
+        "The full verdict for one settled agent-to-agent job: agreed acceptance criteria, deterministic integrity checks, each judge's opinion and the node's signature.",
+        &format!("/job/{jref}"),
+        &body,
+    )
+}
+
 /// `/activity` — recent settlements, then live over SSE.
 pub fn activity_page(recent: &Value) -> String {
     let mut rows = String::new();
@@ -260,48 +406,74 @@ pub fn activity_page(recent: &Value) -> String {
             "nonconforming" => "bad",
             _ => "muted",
         };
+        let jref = esc(j["job_ref"].as_str().unwrap_or(""));
         rows.push_str(&format!(
-            r#"<tr><td class="mono dim">{}</td><td>{}</td><td>{}</td><td class="{}">{}</td><td class="dim">{}</td></tr>"#,
-            esc(j["agent_ref"].as_str().unwrap_or("")),
-            esc(j["capability_id"].as_str().unwrap_or("")),
-            esc(j["outcome"].as_str().unwrap_or("")),
-            cls,
-            esc(verdict),
-            esc(j["judged_by"].as_str().unwrap_or("—"))
+            r#"<tr><td class="mono dim"><a href="/job/{jref}">{jref}</a></td><td>{cap}</td><td>{out}</td><td class="{cls}">{verdict}</td><td class="dim">{judge}</td></tr>"#,
+            jref = jref,
+            cap = esc(j["capability_id"].as_str().unwrap_or("")),
+            out = esc(j["outcome"].as_str().unwrap_or("")),
+            cls = cls,
+            verdict = esc(verdict),
+            judge = esc(j["judged_by"].as_str().unwrap_or("—"))
         ));
     }
     if rows.is_empty() {
         rows = r#"<tr><td colspan="5" class="dim">Nothing settled yet.</td></tr>"#.into();
     }
+    let max_seq = recent["jobs"]
+        .as_array()
+        .and_then(|a| a.iter().filter_map(|j| j["seq"].as_u64()).max())
+        .unwrap_or(0);
     let body = format!(
         r#"<h1>Live economy</h1>
 <p class="lead">Every settlement on this node, as it happens. Entries are pseudonymous:
-you can audit what was delivered and how it was judged without learning who traded with whom.</p>
-<p><span class="live"><i></i> streaming</span> <span class="dim">— new events append below</span></p>
-<table id="feed"><tr><th>Agent</th><th>Capability</th><th>Outcome</th><th>Verdict</th><th>Judged by</th></tr>{rows}</table>
+you can audit what was delivered and how it was judged without learning who traded with whom.
+Click a job to read its full verdict.</p>
+<p><span class="live"><i></i> streaming</span> <span class="dim">— new settlements appear at the top</span></p>
+<table id="feed" data-seq="{seq}"><tbody><tr><th>Job</th><th>Capability</th><th>Outcome</th><th>Verdict</th><th>Judged by</th></tr>{rows}</tbody></table>
 <p class="dim">Machine-readable: <a href="/v1/activity">/v1/activity</a> ·
-live stream: <code>GET /v1/events</code> (SSE, authenticated)</p>
+live stream: <code>GET /v1/activity/stream?after=&lt;seq&gt;</code> (SSE, public)</p>
 <script>
-// The authenticated SSE stream is per-agent; the public page polls the
-// same pseudonymous projection so it works with no credentials at all.
-setInterval(async () => {{
-  try {{
-    const r = await fetch('/v1/activity?limit=25');
-    if (!r.ok) return;
-    const d = await r.json();
-    const t = document.getElementById('feed');
-    const head = t.rows[0].outerHTML;
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
-    t.innerHTML = head + d.jobs.map(j => {{
-      const cls = j.verdict === 'conforms' ? 'ok' : j.verdict === 'nonconforming' ? 'bad' : 'muted';
-      return `<tr><td class="mono dim">${{esc(j.agent_ref)}}</td><td>${{esc(j.capability_id)}}</td>` +
-             `<td>${{esc(j.outcome)}}</td><td class="${{cls}}">${{esc(j.verdict ?? '—')}}</td>` +
-             `<td class="dim">${{esc(j.judged_by ?? '—')}}</td></tr>`;
-    }}).join('');
-  }} catch (e) {{}}
-}}, 4000);
+// A real Server-Sent Events stream, unauthenticated because this
+// projection is already pseudonymous. It resumes from the last sequence
+// seen, so a reconnect leaves no gap — the same cursor discipline the
+// protocol uses for agents (RFC-0013).
+(function () {{
+  var feed = document.getElementById('feed');
+  if (!feed || !window.EventSource) return;
+  var esc = function (v) {{
+    return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {{
+      return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c];
+    }});
+  }};
+  var last = Number(feed.dataset.seq || 0);
+  function connect() {{
+    var es = new EventSource('/v1/activity/stream?after=' + last);
+    es.onmessage = function (ev) {{
+      var j;
+      try {{ j = JSON.parse(ev.data); }} catch (e) {{ return; }}
+      last = Math.max(last, j.seq || 0);
+      var cls = j.verdict === 'conforms' ? 'ok' : (j.verdict === 'nonconforming' ? 'bad' : 'muted');
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td class="mono dim"><a href="/job/' + esc(j.job_ref) + '">' + esc(j.job_ref) + '</a></td>' +
+        '<td>' + esc(j.capability_id) + '</td><td>' + esc(j.outcome) + '</td>' +
+        '<td class="' + cls + '">' + esc(j.verdict || '—') + '</td>' +
+        '<td class="dim">' + esc(j.judged_by || '—') + '</td>';
+      tr.style.background = 'rgba(78,231,165,.10)';
+      var body = feed.tBodies[0];
+      body.insertBefore(tr, body.children[1] || null);
+      setTimeout(function () {{ tr.style.background = ''; }}, 1500);
+    }};
+    // The server bounds stream lifetime on purpose; reconnect with the
+    // cursor rather than losing the tail.
+    es.onerror = function () {{ es.close(); setTimeout(connect, 2000); }};
+  }}
+  connect();
+}})();
 </script>"#,
-        rows = rows
+        rows = rows,
+        seq = max_seq
     );
     page(
         "Live agent-to-agent settlements on GAP",
@@ -494,7 +666,7 @@ mod tests {
     #[test]
     fn directory_lists_agents_and_survives_an_empty_node() {
         let empty = directory(&json!({ "node": "did:gap:aa", "agents": [] }));
-        assert!(empty.contains("No agent has announced yet"));
+        assert!(empty.contains("No agent matches"));
         let one = directory(&json!({ "node": "did:gap:aa", "agents": [{
             "did": "did:gap:0123456789abcdef0123456789abcdef", "score": 0.75, "n": 4,
             "capabilities": [{ "name": "lead-generation", "description": "leads",
@@ -532,7 +704,10 @@ mod tests {
             "rework must be visible to buyers"
         );
         assert!(html.contains("conforms"));
-        assert!(html.contains("Not currently announcing"), "no announcement is stated, not hidden");
+        assert!(
+            html.contains("Not currently announcing"),
+            "no announcement is stated, not hidden"
+        );
     }
 
     #[test]
@@ -566,5 +741,128 @@ mod tests {
         assert!(html.contains("judge_disagreement"));
         assert!(html.contains("m1") && html.contains("m2"));
         assert!(html.contains("urn:gap:ctr:aa"));
+    }
+}
+
+#[cfg(test)]
+mod ui_v2_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn job() -> serde_json::Value {
+        json!({
+            "job_ref": "6dd55de5cbd3b0b1", "capability_id": "cap:leads:gen",
+            "outcome": "accepted", "on_time": true, "remedied": false, "at": 1,
+            "acceptance_criteria": ["output is valid JSON", "every lead verified"],
+            "verdict": {
+                "ruling": "conforms",
+                "reasons": ["[judge-a] criterion 1 met"],
+                "checks": [{ "name": "deliverable_hash_matches", "passed": true, "detail": "digest matches" }],
+                "opinions": [
+                    { "judge": "deepseek/x", "ruling": "conforms", "reasons": ["valid JSON"] },
+                    { "judge": "openai/y", "ruling": "conforms", "reasons": ["all leads verified"] }],
+                "escalation": null,
+                "evidence_digest": "sha256:ff88",
+                "evaluator": "did:gap:aa", "signature": "ed25519:beef"
+            }
+        })
+    }
+
+    #[test]
+    fn a_job_page_shows_the_evidence_not_just_the_score() {
+        let html = job_page(&job());
+        assert!(
+            html.contains("output is valid JSON"),
+            "agreed criteria are public"
+        );
+        assert!(
+            html.contains("deliverable_hash_matches"),
+            "deterministic checks are shown"
+        );
+        assert!(
+            html.contains("deepseek/x") && html.contains("openai/y"),
+            "every judge is named"
+        );
+        assert!(
+            html.contains("sha256:ff88") && html.contains("ed25519:beef"),
+            "proof is shown"
+        );
+    }
+
+    #[test]
+    fn a_job_page_never_reveals_the_contract_or_the_parties() {
+        // The whole privacy claim rests on this: the page is built from
+        // a projection that simply does not carry those fields.
+        let html = job_page(&job());
+        assert!(!html.contains("urn:gap:ctr:"), "no contract id");
+        assert!(!html.contains("counterparty"), "no counterparty");
+    }
+
+    #[test]
+    fn a_job_page_survives_a_job_that_was_never_verified() {
+        let mut j = job();
+        j["verdict"] = json!(null);
+        j["acceptance_criteria"] = json!([]);
+        let html = job_page(&j);
+        assert!(html.contains("No verification was requested"));
+        assert!(html.contains("No subjective criteria were agreed"));
+    }
+
+    #[test]
+    fn escalated_jobs_say_so() {
+        let mut j = job();
+        j["verdict"]["escalation"] = json!("judge_disagreement");
+        j["verdict"]["ruling"] = json!("inconclusive");
+        assert!(job_page(&j).contains("judge_disagreement"));
+    }
+
+    #[test]
+    fn the_directory_keeps_the_visitors_search_and_offers_a_reset() {
+        let dir = json!({ "node": "did:gap:aa", "agents": [], "query": "lead-generation",
+                          "min_score": "0.6", "max_price": "" });
+        let html = directory(&dir);
+        assert!(
+            html.contains(r#"value="lead-generation""#),
+            "the query is echoed back"
+        );
+        assert!(html.contains(r#"value="0.6""#));
+        assert!(html.contains(">clear<"), "a filtered view offers a way out");
+        assert!(html.contains("No agent matches"));
+        // The form is a plain GET: results exist in the HTML, so a
+        // crawler and a JS-less browser both see them.
+        assert!(html.contains(r#"method="get""#));
+    }
+
+    #[test]
+    fn search_input_cannot_smuggle_html_into_the_page() {
+        let dir = json!({ "node": "did:gap:aa", "agents": [],
+                          "query": "\"><script>alert(1)</script>", "min_score": "", "max_price": "" });
+        let html = directory(&dir);
+        assert!(
+            !html.contains("<script>alert(1)"),
+            "reflected XSS via the search box"
+        );
+        assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn the_activity_feed_carries_a_resume_cursor_and_links_each_job() {
+        let recent = json!({ "jobs": [
+            { "seq": 7, "job_ref": "aaaa1111bbbb2222", "agent_ref": "cccc", "capability_id": "cap:x",
+              "outcome": "accepted", "verdict": "conforms", "judged_by": "m1", "at": 1 }]});
+        let html = activity_page(&recent);
+        assert!(
+            html.contains(r#"data-seq="7""#),
+            "the page tells the stream where to resume"
+        );
+        assert!(
+            html.contains(r#"href="/job/aaaa1111bbbb2222""#),
+            "each row links to its verdict"
+        );
+        assert!(
+            html.contains("/v1/activity/stream"),
+            "a real SSE stream, not polling"
+        );
+        assert!(!html.contains("setInterval"), "polling was replaced");
     }
 }

@@ -60,6 +60,10 @@ pub struct JobRecord {
     pub judged_by: Option<String>,
     pub on_time: bool,
     pub at: u64,
+    /// Audit-spine sequence at the moment this job settled. Gives the
+    /// public feed the same resumable cursor the protocol already uses.
+    #[serde(default)]
+    pub seq: u64,
 }
 
 /// An agent's dispute record (RFC-0015 §3.3).
@@ -145,6 +149,8 @@ pub struct NodeState {
     jobs: HashMap<String, Vec<JobRecord>>,
     /// Per-agent dispute record (RFC-0015).
     disputes: HashMap<String, DisputeStats>,
+    /// Pseudonymous job reference -> contract id (never published).
+    jobs_by_ref: HashMap<String, String>,
     /// agent DID -> its principal binding (spec 01 §1.3).
     bindings: HashMap<String, crate::principal::PrincipalBinding>,
     /// agent DID -> active vetoes (spec 06 §6.5).
@@ -296,6 +302,7 @@ impl NodeState {
             verdicts: HashMap::new(),
             jobs: HashMap::new(),
             disputes: HashMap::new(),
+            jobs_by_ref: HashMap::new(),
             bindings: HashMap::new(),
             vetoes: HashMap::new(),
             budgets: HashMap::new(),
@@ -1455,8 +1462,13 @@ impl NodeState {
             judged_by: verdict.and_then(|v| v.model.clone()),
             on_time,
             at: now_unix(),
+            seq: self.storage.event_count().unwrap_or(0),
         };
+        let job_ref = record.job_ref.clone();
         self.jobs.entry(agent.to_string()).or_default().push(record);
+        // job_ref -> contract, so a pseudonymous reference can be
+        // resolved to its verdict without ever publishing the id.
+        self.jobs_by_ref.insert(job_ref, contract_id.to_string());
     }
 
     /// An agent's public reputation: aggregate score plus the
@@ -1995,9 +2007,38 @@ impl NodeState {
     /// Public directory data for the web UI: every live announcement
     /// with its agent's score, plus recent settled jobs.
     pub fn public_directory(&self) -> Value {
+        self.public_directory_filtered("", None, None)
+    }
+
+    /// The directory, filtered server-side: a search that only works
+    /// after JavaScript runs is a search a crawler never sees.
+    pub fn public_directory_filtered(
+        &self,
+        q: &str,
+        min_score: Option<f64>,
+        max_price: Option<f64>,
+    ) -> Value {
         let anns = self.registry.query(&Query::default());
+        let needle = q.trim().to_lowercase();
         let agents: Vec<Value> = anns
             .iter()
+            .filter(|a| {
+                if needle.is_empty() {
+                    return true;
+                }
+                a.capabilities.iter().any(|c| {
+                    c.name.to_lowercase().contains(&needle)
+                        || c.description.to_lowercase().contains(&needle)
+                        || c.id.to_lowercase().contains(&needle)
+                }) || a.agent_did.to_string().contains(&needle)
+            })
+            .filter(|a| {
+                max_price.is_none_or(|max| {
+                    a.capabilities
+                        .iter()
+                        .any(|c| c.price.as_ref().map(|p| p.amount <= max).unwrap_or(true))
+                })
+            })
             .map(|a| {
                 let did = a.agent_did.to_string();
                 let rep = self
@@ -2018,9 +2059,11 @@ impl NodeState {
                     "jobs": jobs,
                 })
             })
+            .filter(|a| min_score.is_none_or(|min| a["score"].as_f64().unwrap_or(0.0) >= min))
             .collect();
         json!({
             "node": self.node_did().to_string(),
+            "query": q,
             "agents": agents,
             "count": agents.len(),
             "verifier": self.verifier.as_ref().map(|v| v.name()),
@@ -2030,13 +2073,15 @@ impl NodeState {
 
     /// Recent public activity: settled jobs across all agents, already
     /// pseudonymous (RFC-0014 §5), newest first.
-    pub fn public_activity(&self, limit: usize) -> Value {
+    pub fn public_activity_after(&self, after: u64, limit: usize) -> Value {
         let mut all: Vec<Value> = self
             .jobs
             .iter()
             .flat_map(|(agent, records)| {
-                records.iter().map(move |r| {
+                records.iter().filter(|r| r.seq > after).map(move |r| {
                     json!({
+                        "seq": r.seq,
+                        "job_ref": r.job_ref,
                         "agent_ref": pseudonym(agent),
                         "capability_id": r.capability_id,
                         "outcome": r.outcome,
@@ -2049,9 +2094,60 @@ impl NodeState {
                 })
             })
             .collect();
-        all.sort_by_key(|v| std::cmp::Reverse(v["at"].as_u64().unwrap_or(0)));
+        all.sort_by_key(|v| v["seq"].as_u64().unwrap_or(0));
         all.truncate(limit);
         json!({ "jobs": all, "count": all.len() })
+    }
+
+    /// One settled job in public, pseudonymous form: the full verdict —
+    /// checks, reasons and each judge's opinion — with the contract id
+    /// and both parties stripped. This is what makes a score auditable
+    /// rather than merely asserted.
+    pub fn public_job(&self, job_ref: &str) -> Result<Value> {
+        let contract_id = self
+            .jobs_by_ref
+            .get(job_ref)
+            .ok_or_else(|| Error::Other("unknown job reference".into()))?;
+        let record = self
+            .jobs
+            .values()
+            .flatten()
+            .find(|r| r.job_ref == job_ref)
+            .ok_or_else(|| Error::Other("unknown job reference".into()))?;
+        let contract = self.contracts.get(contract_id);
+        let verdict = self.verdicts.get(contract_id);
+        Ok(json!({
+            "job_ref": job_ref,
+            "capability_id": record.capability_id,
+            "outcome": record.outcome,
+            "on_time": record.on_time,
+            "remedied": record.remedied,
+            "at": record.at,
+            // The criteria are public: they are what the verdict judged.
+            "acceptance_criteria": contract.map(|c| c.terms.acceptance_criteria.clone()),
+            "verdict": verdict.map(|v| json!({
+                "ruling": v.ruling.as_str(),
+                "reasons": v.reasons,
+                "checks": v.checks,
+                "opinions": v.opinions,
+                "escalation": v.escalation.map(|e| e.as_str()),
+                "evidence_digest": v.evidence_digest,
+                "evaluated_at": v.evaluated_at,
+                "evaluator": v.evaluator,
+                "signature": v.signature,
+            })),
+        }))
+    }
+
+    /// The most recent settlements, newest first. Same projection as
+    /// the cursor form — one shape, so the page and the live stream can
+    /// never disagree about what a settlement looks like.
+    pub fn public_activity(&self, limit: usize) -> Value {
+        let all = self.public_activity_after(0, usize::MAX);
+        let mut jobs = all["jobs"].as_array().cloned().unwrap_or_default();
+        jobs.reverse();
+        jobs.truncate(limit);
+        json!({ "jobs": jobs, "count": jobs.len() })
     }
 
     /// The node's AgentCard (RFC-0010 well-known discovery).
@@ -2110,7 +2206,16 @@ pub fn route_html(
     let html = |b: String| Some((200u16, "text/html; charset=utf-8", b));
     match clean {
         "/" => {
-            let dir = guard.public_directory();
+            let params = parse_url_params(path);
+            let q = params.get("q").cloned().unwrap_or_default();
+            let min_score = params.get("min_score").and_then(|v| v.parse::<f64>().ok());
+            let max_price = params.get("max_price").and_then(|v| v.parse::<f64>().ok());
+            let mut dir = guard.public_directory_filtered(&q, min_score, max_price);
+            // Echo the filters so the form keeps what the visitor typed.
+            dir["min_score"] =
+                serde_json::Value::String(params.get("min_score").cloned().unwrap_or_default());
+            dir["max_price"] =
+                serde_json::Value::String(params.get("max_price").cloned().unwrap_or_default());
             html(crate::ui::directory(&dir))
         }
         "/activity" => {
@@ -2147,6 +2252,11 @@ pub fn route_html(
             let d = guard.public_directory();
             let a = guard.public_activity(1000);
             html(crate::ui::admin_page(&e, &d, &a))
+        }
+        p if p.starts_with("/job/") => {
+            let job_ref = percent_decode(p.trim_start_matches("/job/"));
+            let job = guard.public_job(&job_ref).ok()?;
+            html(crate::ui::job_page(&job))
         }
         p if p.starts_with("/agent/") => {
             let did = percent_decode(p.trim_start_matches("/agent/"));
@@ -2258,6 +2368,10 @@ pub fn route_with_ip(
         ("GET", "/health") => Ok(json!({ "status": "ok", "node": guard.node_did() })),
         // ---- public directory data (consumed by the web UI) ----
         ("GET", "/v1/directory") => Ok(guard.public_directory()),
+        ("GET", p) if p.starts_with("/v1/job/") => {
+            let job_ref = percent_decode(p.trim_start_matches("/v1/job/"));
+            guard.public_job(&job_ref)
+        }
         ("GET", "/v1/activity") => {
             let params = parse_url_params(raw_path);
             let limit = params
@@ -2265,7 +2379,10 @@ pub fn route_with_ip(
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(50)
                 .min(500);
-            Ok(guard.public_activity(limit))
+            match params.get("after").and_then(|v| v.parse::<u64>().ok()) {
+                Some(after) => Ok(guard.public_activity_after(after, limit)),
+                None => Ok(guard.public_activity(limit)),
+            }
         }
         ("GET", "/.well-known/gap-agent.json") => Ok(guard.agent_card()),
 

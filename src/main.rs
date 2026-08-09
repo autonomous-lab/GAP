@@ -133,6 +133,76 @@ fn stream_events(
     }
 }
 
+/// Stream public settlements as SSE (`/v1/activity/stream?after=<seq>`).
+///
+/// Unauthenticated on purpose: every field is pseudonymous. Resumable
+/// on the same cursor as the rest of the protocol, so a reconnecting
+/// browser never misses a settlement.
+fn stream_activity(state: &Arc<Mutex<NodeState>>, request: tiny_http::Request, path: &str) {
+    let mut cursor: u64 = path
+        .split_once('?')
+        .map(|(_, q)| q)
+        .and_then(|q| {
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix("after=").and_then(|v| v.parse().ok()))
+        })
+        .or_else(|| {
+            request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Last-Event-ID"))
+                .and_then(|h| h.value.as_str().parse().ok())
+        })
+        .unwrap_or(0);
+
+    let max_secs: u64 = env::var("GAP_SSE_MAX_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    let started = std::time::Instant::now();
+    let mut writer = request.into_writer();
+    let preamble = "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/event-stream\r\n\
+         Cache-Control: no-cache\r\n\
+         Connection: keep-alive\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         X-Accel-Buffering: no\r\n\r\n";
+    if writer.write_all(preamble.as_bytes()).is_err() {
+        return;
+    }
+    let _ = writer.flush();
+
+    loop {
+        let batch = match state.lock() {
+            Ok(guard) => guard.public_activity_after(cursor, 100),
+            Err(_) => return,
+        };
+        let jobs = batch["jobs"].as_array().cloned().unwrap_or_default();
+        for job in &jobs {
+            let seq = job["seq"].as_u64().unwrap_or(cursor);
+            let frame = format!("id: {seq}\nevent: settlement\ndata: {job}\n\n");
+            if writer.write_all(frame.as_bytes()).is_err() {
+                return;
+            }
+            cursor = seq.max(cursor);
+        }
+        if !jobs.is_empty() && writer.flush().is_err() {
+            return;
+        }
+        if started.elapsed().as_secs() >= max_secs {
+            let _ = writer.write_all(b": reconnect\n\n");
+            let _ = writer.flush();
+            return;
+        }
+        if jobs.is_empty() {
+            if writer.write_all(b": keepalive\n\n").is_err() || writer.flush().is_err() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(900));
+        }
+    }
+}
+
 fn build_storage() -> Result<Box<dyn Storage>> {
     let kind = env::var("GAP_STORAGE").unwrap_or_else(|_| "sqlite".into());
     match kind.as_str() {
@@ -294,6 +364,15 @@ fn main() -> Result<()> {
             // connection, so it cannot go through `route()` (which
             // returns a single JSON body). Accept-header negotiated:
             // clients that just want the cursor get the JSON form.
+            // Public, unauthenticated activity stream for the web UI:
+            // the projection is already pseudonymous, so it needs no
+            // credentials — and a live feed nobody can watch without a
+            // token would not be a public directory.
+            if path.starts_with("/v1/activity/stream") {
+                stream_activity(&state, request, &path);
+                continue;
+            }
+
             let wants_sse = path.starts_with("/v1/events")
                 && request.headers().iter().any(|h| {
                     h.field.equiv("Accept") && h.value.as_str().contains("text/event-stream")
