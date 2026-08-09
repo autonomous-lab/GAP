@@ -33,12 +33,15 @@ services:
 
   gap-node-1:
     build: .
+    env_file:
+      - path: .env
+        required: false
     environment:
-      GAP_ADDR: "0.0.0.0:8080"
-      GAP_STORAGE: "clickhouse"
-      GAP_CLICKHOUSE_URL: "http://clickhouse:8123"
-      GAP_DB_INIT: "1"
-      GAP_PUBLIC_URL: "http://172.17.0.1:8080"
+      GAP_ADDR: "${GAP_ADDR:-0.0.0.0:8080}"
+      GAP_STORAGE: "${GAP_STORAGE:-clickhouse}"
+      GAP_CLICKHOUSE_URL: "${GAP_CLICKHOUSE_URL:-http://clickhouse:8123}"
+      GAP_DB_INIT: "${GAP_DB_INIT:-1}"
+      GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -49,12 +52,15 @@ services:
 
   gap-node-2:
     build: .
+    env_file:
+      - path: .env
+        required: false
     environment:
-      GAP_ADDR: "0.0.0.0:8080"
-      GAP_STORAGE: "clickhouse"
-      GAP_CLICKHOUSE_URL: "http://clickhouse:8123"
-      GAP_DB_INIT: "1"
-      GAP_PUBLIC_URL: "http://172.17.0.1:8080"
+      GAP_ADDR: "${GAP_ADDR:-0.0.0.0:8080}"
+      GAP_STORAGE: "${GAP_STORAGE:-clickhouse}"
+      GAP_CLICKHOUSE_URL: "${GAP_CLICKHOUSE_URL:-http://clickhouse:8123}"
+      GAP_DB_INIT: "${GAP_DB_INIT:-1}"
+      GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -64,12 +70,15 @@ services:
 
   gap-node-3:
     build: .
+    env_file:
+      - path: .env
+        required: false
     environment:
-      GAP_ADDR: "0.0.0.0:8080"
-      GAP_STORAGE: "clickhouse"
-      GAP_CLICKHOUSE_URL: "http://clickhouse:8123"
-      GAP_DB_INIT: "1"
-      GAP_PUBLIC_URL: "http://172.17.0.1:8080"
+      GAP_ADDR: "${GAP_ADDR:-0.0.0.0:8080}"
+      GAP_STORAGE: "${GAP_STORAGE:-clickhouse}"
+      GAP_CLICKHOUSE_URL: "${GAP_CLICKHOUSE_URL:-http://clickhouse:8123}"
+      GAP_DB_INIT: "${GAP_DB_INIT:-1}"
+      GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
     depends_on:
       clickhouse:
         condition: service_healthy

@@ -18,13 +18,21 @@ services:
     build: .
     ports:
       - "172.17.0.1:8080:8080"
+    # Operator settings live in .env (see .env.example). Without this,
+    # a .env sitting next to the compose file only feeds interpolation
+    # and never reaches the container - so an API key or admin token set
+    # there would silently do nothing.
+    env_file:
+      - path: .env
+        required: false
     environment:
-      GAP_ADDR: "0.0.0.0:8080"
-      GAP_STORAGE: "clickhouse"
-      GAP_CLICKHOUSE_URL: "http://clickhouse:8123"
-      GAP_DB_INIT: "1"
+      # Interpolated, so anything set in .env wins over these defaults.
+      GAP_ADDR: "${GAP_ADDR:-0.0.0.0:8080}"
+      GAP_STORAGE: "${GAP_STORAGE:-clickhouse}"
+      GAP_CLICKHOUSE_URL: "${GAP_CLICKHOUSE_URL:-http://clickhouse:8123}"
+      GAP_DB_INIT: "${GAP_DB_INIT:-1}"
       # Absolute URLs in sitemap.xml - set this to your public origin.
-      GAP_PUBLIC_URL: "http://172.17.0.1:8080"
+      GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
     depends_on:
       clickhouse:
         condition: service_healthy

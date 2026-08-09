@@ -22,6 +22,12 @@ RUN for attempt in 1 2 3 4 5; do \
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+# benches/ must exist before anything runs cargo: Cargo.toml declares a
+# [[bench]] target, and cargo refuses to even PARSE the manifest if the
+# file is missing. Leaving it out failed the build outright - and worse,
+# it silently defeated the dependency cache below, whose errors are
+# swallowed, so every build recompiled every dependency from scratch.
+COPY benches ./benches
 # Warm the dependency cache with a stub so the real build is fast.
 RUN mkdir -p src && \
     printf 'fn main() {}\n' > src/main.rs && \
