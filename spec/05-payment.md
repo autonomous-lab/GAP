@@ -66,7 +66,7 @@ The contract's `price.model` is one of:
 | Model | Meaning | Settlement trigger |
 |-------|---------|--------------------|
 | `fixed` | one price for the deliverable | on `exe.accept` |
-| `per-unit` | price × accepted units (capped) | on `exe.accept`, computed |
+| `per_unit` | price × accepted units (capped) | on `exe.accept`, computed |
 | `subscription` | recurring billing per period | on period acceptance |
 | `commission` | % of value generated (e.g. closed deals) | on attested value event |
 

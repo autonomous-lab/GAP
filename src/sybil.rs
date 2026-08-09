@@ -71,6 +71,12 @@ pub struct RateCounters {
 }
 
 impl RateCounters {
+    /// True when both windows have lapsed: the counter carries no live
+    /// state and can be evicted without weakening any cap.
+    pub fn is_idle(&self, now: u64) -> bool {
+        self.invocations_minute.0 < now / 60 && self.contracts_day.0 < now / 86400
+    }
+
     /// Record an invocation; returns Err if over the per-minute cap.
     pub fn record_invocation(&mut self, now: u64, cap_per_minute: u32) -> Result<()> {
         let minute = now / 60;

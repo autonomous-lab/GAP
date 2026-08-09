@@ -20,19 +20,15 @@ struct World {
     escrow_agent: AgentIdentity,
     arbitrator: AgentIdentity,
     registry: Registry,
-    escrow: Escrow,
 }
 
 fn build_world() -> World {
-    let escrow_agent = AgentIdentity::generate();
-    let escrow = Escrow::new(escrow_agent.clone());
     World {
         client: AgentIdentity::generate(),
         provider: AgentIdentity::generate(),
-        escrow_agent,
+        escrow_agent: AgentIdentity::generate(),
         arbitrator: AgentIdentity::generate(),
         registry: Registry::new(),
-        escrow,
     }
 }
 
@@ -48,7 +44,7 @@ fn signed_terms(deadline_offset: u64) -> Terms {
         price: Price {
             amount: 0.05,
             currency: "EUR".into(),
-            model: "per-unit".into(),
+            model: "per_unit".into(),
             cap: Some(10.0),
         },
         autonomy: "execute-notify".into(),
@@ -81,7 +77,7 @@ fn happy_path_full_economy() -> Result<()> {
         price: Some(gap::discovery::Price {
             amount: 0.05,
             currency: "EUR".into(),
-            model: "per-unit".into(),
+            model: "per_unit".into(),
         }),
         autonomy: vec!["propose".into(), "execute-notify".into()],
     };
@@ -129,12 +125,10 @@ fn happy_path_full_economy() -> Result<()> {
     );
     bundle.verify(&world.provider, payload)?;
 
-    // 4. Escrow: park, accept, release
-    world.escrow.register(contract.clone())?;
-    world
-        .escrow
-        .park(&park(&world.client, &world.escrow, &contract))?;
-    assert_eq!(world.escrow.state(), EscrowState::Parked);
+    // 4. Escrow: park, accept, release (one escrow per contract)
+    let mut escrow = Escrow::for_contract(world.escrow_agent.clone(), contract.clone())?;
+    escrow.park(&park(&world.client, &escrow, &contract))?;
+    assert_eq!(escrow.state(), EscrowState::Parked);
 
     let acceptance = Envelope::new(
         world.client.did().clone(),
@@ -152,13 +146,15 @@ fn happy_path_full_economy() -> Result<()> {
     )
     .for_contract(contract.contract_id.clone())
     .sign(&world.client);
-    world.escrow.release(&release, &acceptance)?;
-    assert_eq!(world.escrow.state(), EscrowState::Released);
-    assert_eq!(world.escrow.audit_log().len(), 2);
+    escrow.release(&release, &acceptance)?;
+    assert_eq!(escrow.state(), EscrowState::Released);
+    assert_eq!(escrow.audit_log().len(), 2);
 
-    // 5. Reputation reflects the success
+    // 5. Reputation reflects the success (raw 1.0; the smoothed
+    // estimator stays below 1.0 by design — one success is not proof).
     world.provider.reputation_mut().record(true, true);
-    assert_eq!(world.provider.reputation().success_rate(), 1.0);
+    assert_eq!(world.provider.reputation().raw_success_rate(), 1.0);
+    assert!(world.provider.reputation().success_rate() > 0.5);
     Ok(())
 }
 
@@ -184,10 +180,8 @@ fn disputed_delivery_is_arbitrated_and_ruled() -> Result<()> {
     assert!(bundle.verify(&world.provider, received).is_err());
 
     // Client disputes; funds are parked and held.
-    world.escrow.register(contract.clone())?;
-    world
-        .escrow
-        .park(&park(&world.client, &world.escrow, &contract))?;
+    let mut escrow = Escrow::for_contract(world.escrow_agent.clone(), contract.clone())?;
+    escrow.park(&park(&world.client, &escrow, &contract))?;
     let dispute = Envelope::new(
         world.client.did().clone(),
         world.escrow_agent.did().clone(),
@@ -196,8 +190,8 @@ fn disputed_delivery_is_arbitrated_and_ruled() -> Result<()> {
     )
     .for_contract(contract.contract_id.clone())
     .sign(&world.client);
-    world.escrow.dispute(&dispute)?;
-    assert_eq!(world.escrow.state(), EscrowState::Disputed);
+    escrow.dispute(&dispute)?;
+    assert_eq!(escrow.state(), EscrowState::Disputed);
 
     // Arbitrator rules: provider at fault -> full refund to client.
     let ruling = Envelope::new(
@@ -209,10 +203,10 @@ fn disputed_delivery_is_arbitrated_and_ruled() -> Result<()> {
     .for_contract(contract.contract_id.clone())
     .sign(&world.arbitrator);
     // The escrow executes the ruling: full share to the client.
-    let ruled = world.escrow.rule(&ruling, world.arbitrator.did())?;
+    let ruled = escrow.rule(&ruling, world.arbitrator.did())?;
     assert_eq!(ruled.event, "pay.ruled");
-    assert_eq!(world.escrow.state(), EscrowState::Ruled);
-    assert_eq!(world.escrow.held(), gap::amount::Amount::ZERO);
+    assert_eq!(escrow.state(), EscrowState::Ruled);
+    assert_eq!(escrow.held(), gap::amount::Amount::ZERO);
 
     // A ruling from an unapproved arbitrator is rejected.
     let impostor = AgentIdentity::generate();
@@ -225,7 +219,7 @@ fn disputed_delivery_is_arbitrated_and_ruled() -> Result<()> {
     .for_contract(contract.contract_id.clone())
     .sign(&impostor);
     // Need a fresh disputed state for the attempt.
-    let mut world2 = build_world();
+    let world2 = build_world();
     let contract2 = Contract::propose(
         &world2.client,
         world2.provider.did().clone(),
@@ -234,10 +228,8 @@ fn disputed_delivery_is_arbitrated_and_ruled() -> Result<()> {
         true,
     )
     .accept_by_provider(&world2.provider)?;
-    world2.escrow.register(contract2.clone())?;
-    world2
-        .escrow
-        .park(&park(&world2.client, &world2.escrow, &contract2))?;
+    let mut escrow2 = Escrow::for_contract(world2.escrow_agent.clone(), contract2.clone())?;
+    escrow2.park(&park(&world2.client, &escrow2, &contract2))?;
     let dispute2 = Envelope::new(
         world2.client.did().clone(),
         world2.escrow_agent.did().clone(),
@@ -246,11 +238,8 @@ fn disputed_delivery_is_arbitrated_and_ruled() -> Result<()> {
     )
     .for_contract(contract2.contract_id.clone())
     .sign(&world2.client);
-    world2.escrow.dispute(&dispute2)?;
-    assert!(world2
-        .escrow
-        .rule(&fake_ruling, world2.arbitrator.did())
-        .is_err());
+    escrow2.dispute(&dispute2)?;
+    assert!(escrow2.rule(&fake_ruling, world2.arbitrator.did()).is_err());
 
     // Provider's reputation takes a hit (attested by the ruling).
     world.provider.reputation_mut().record(false, false);
@@ -275,5 +264,20 @@ fn replay_attack_is_rejected() -> Result<()> {
     old.timestamp = now_unix().saturating_sub(10_000);
     let old = old.sign(&world.client);
     assert!(matches!(old.validate(300), Err(Error::StaleTimestamp)));
+
+    // A replay INSIDE the freshness window is caught by the guard.
+    let mut guard = gap::message::ReplayGuard::new();
+    let fresh = Envelope::new(
+        world.client.did().clone(),
+        world.provider.did().clone(),
+        Kind::ExeAccept,
+        json!({}),
+    )
+    .sign(&world.client);
+    assert!(guard.check(&fresh, 300).is_ok());
+    assert!(matches!(
+        guard.check(&fresh, 300),
+        Err(Error::ReplayedMessage(_))
+    ));
     Ok(())
 }

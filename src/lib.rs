@@ -40,6 +40,7 @@ pub mod irreversibility;
 pub mod message;
 pub mod payment;
 pub mod policy;
+pub mod principal;
 pub mod receipt_chain;
 pub mod relayer;
 pub mod runtime;
@@ -48,6 +49,7 @@ pub mod sla;
 pub mod storage;
 pub mod subscription;
 pub mod sybil;
+pub mod vault;
 pub mod workflow;
 
 pub use contract::{Contract, ContractState, Price, Terms};
@@ -55,9 +57,10 @@ pub use discovery::{Capability, Query};
 pub use error::{Error, Result};
 pub use execution::{ProofBundle, Step};
 pub use governance::{AutonomyLevel, Certificate};
-pub use identity::{AgentIdentity, Did, Reputation, Signer};
-pub use message::{Envelope, Kind};
+pub use identity::{AgentIdentity, Did, Endorsement, KeyRotation, Reputation, Signer};
+pub use message::{Envelope, Kind, ReplayGuard};
 pub use payment::{Escrow, EscrowState, Receipt};
+pub use principal::{Principal, PrincipalBinding, Unbind};
 
 /// The protocol name, as carried in every envelope.
 pub const PROTOCOL: &str = "gap";

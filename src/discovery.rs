@@ -34,7 +34,7 @@ pub struct Price {
     #[serde(deserialize_with = "crate::contract::de_f64_from_string")]
     pub amount: f64,
     pub currency: String,
-    /// One of: fixed, per-unit, subscription, commission.
+    /// One of: fixed, per_unit, subscription, commission.
     pub model: String,
 }
 
@@ -293,7 +293,7 @@ mod tests {
             price: Some(Price {
                 amount: 0.05,
                 currency: "EUR".into(),
-                model: "per-unit".into(),
+                model: "per_unit".into(),
             }),
             autonomy: vec!["propose".into(), "execute-notify".into()],
         };
@@ -414,7 +414,7 @@ mod tests {
                 price: Some(Price {
                     amount: 0.01,
                     currency: "EUR".into(),
-                    model: "per-unit".into(),
+                    model: "per_unit".into(),
                 }),
                 autonomy: vec!["propose".into()],
             },

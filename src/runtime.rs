@@ -19,12 +19,14 @@ pub struct Runtime {
     identity: AgentIdentity,
     /// Contracts this agent is a party to (id -> contract + local state).
     contracts: Vec<(Contract, ContractState)>,
-    /// The escrow agent this runtime trusts (optional).
-    escrow: Option<Escrow>,
+    /// The escrow agent identity this runtime trusts (optional).
+    escrow_agent: Option<AgentIdentity>,
+    /// One escrow instance per bound contract (contract_id -> escrow).
+    escrows: std::collections::HashMap<String, Escrow>,
     /// DIDs this agent accepts as arbitrators.
     arbitrators: Vec<Did>,
-    /// Received-and-processed message ids (replay protection, in-memory).
-    seen: std::collections::HashSet<String>,
+    /// Incoming-message replay protection (freshness + id dedup, bounded).
+    seen: crate::message::ReplayGuard,
     /// Optional persistent storage (event spine).
     storage: Option<Box<dyn crate::storage::Storage>>,
 }
@@ -35,9 +37,10 @@ impl Runtime {
         Self {
             identity,
             contracts: vec![],
-            escrow: None,
+            escrow_agent: None,
+            escrows: std::collections::HashMap::new(),
             arbitrators: vec![],
-            seen: std::collections::HashSet::new(),
+            seen: crate::message::ReplayGuard::new(),
             storage: None,
         }
     }
@@ -65,9 +68,29 @@ impl Runtime {
         &self.identity
     }
 
-    /// Attach an escrow agent.
-    pub fn set_escrow(&mut self, escrow: Escrow) {
-        self.escrow = Some(escrow);
+    /// Attach an escrow agent. Escrow instances are created per contract
+    /// at [`bind_contract`](Self::bind_contract) time.
+    pub fn set_escrow_agent(&mut self, agent: AgentIdentity) {
+        self.escrow_agent = Some(agent);
+    }
+
+    /// The escrow instance bound to a contract, if any.
+    fn escrow_for(&mut self, contract_id: &str) -> Result<&mut Escrow> {
+        self.escrows
+            .get_mut(contract_id)
+            .ok_or_else(|| Error::EscrowViolation("no escrow attached for contract".into()))
+    }
+
+    fn escrow_did_for(&self, contract_id: &str) -> Result<Did> {
+        self.escrows
+            .get(contract_id)
+            .map(|e| e.did().clone())
+            .ok_or_else(|| Error::EscrowViolation("no escrow attached for contract".into()))
+    }
+
+    /// The escrow state for a bound contract, if an escrow exists.
+    pub fn escrow_state(&self, contract_id: &str) -> Option<crate::payment::EscrowState> {
+        self.escrows.get(contract_id).map(|e| e.state())
     }
 
     /// Trust an arbitrator DID.
@@ -105,8 +128,11 @@ impl Runtime {
         contract.verify_signed()?;
         let state = contract.state;
         self.contracts.push((contract.clone(), state));
-        if let Some(escrow) = self.escrow.as_mut() {
-            escrow.register(contract.clone())?;
+        if let Some(agent) = self.escrow_agent.as_ref() {
+            self.escrows.insert(
+                contract.contract_id.clone(),
+                Escrow::for_contract(agent.clone(), contract.clone())?,
+            );
         }
         self.record_event(
             "ctr.bound",
@@ -142,11 +168,7 @@ impl Runtime {
     /// Park funds for a contract: emits and signs the `pay.park`
     /// instruction, then applies it to the attached escrow.
     pub fn park_funds(&mut self, contract_id: &str, amount: f64) -> Result<()> {
-        let escrow_did = self
-            .escrow
-            .as_ref()
-            .map(|e| e.did().clone())
-            .ok_or_else(|| Error::EscrowViolation("no escrow attached".into()))?;
+        let escrow_did = self.escrow_did_for(contract_id)?;
         let instruction = Envelope::new(
             self.identity.did().clone(),
             escrow_did,
@@ -155,11 +177,7 @@ impl Runtime {
         )
         .for_contract(contract_id)
         .sign(&self.identity);
-        let escrow = self
-            .escrow
-            .as_mut()
-            .ok_or_else(|| Error::EscrowViolation("no escrow attached".into()))?;
-        escrow.park(&instruction)?;
+        self.escrow_for(contract_id)?.park(&instruction)?;
         Ok(())
     }
 
@@ -170,11 +188,7 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| Error::UnknownContract(contract_id.to_string()))?;
         let provider = contract.provider.clone();
-        let escrow_did = self
-            .escrow
-            .as_ref()
-            .map(|e| e.did().clone())
-            .ok_or_else(|| Error::EscrowViolation("no escrow attached".into()))?;
+        let escrow_did = self.escrow_did_for(contract_id)?;
 
         let acceptance = Envelope::new(
             self.identity.did().clone(),
@@ -193,22 +207,15 @@ impl Runtime {
         .for_contract(contract_id)
         .sign(&self.identity);
 
-        let escrow = self
-            .escrow
-            .as_mut()
-            .ok_or_else(|| Error::EscrowViolation("no escrow attached".into()))?;
-        escrow.release(&release, &acceptance)?;
+        self.escrow_for(contract_id)?
+            .release(&release, &acceptance)?;
         self.transition(contract_id, ContractState::Accepted)?;
         Ok(())
     }
 
     /// Dispute a delivery: emits `pay.dispute`.
     pub fn dispute_delivery(&mut self, contract_id: &str, reason: &str) -> Result<()> {
-        let escrow_did = self
-            .escrow
-            .as_ref()
-            .map(|e| e.did().clone())
-            .ok_or_else(|| Error::EscrowViolation("no escrow attached".into()))?;
+        let escrow_did = self.escrow_did_for(contract_id)?;
         let instruction = Envelope::new(
             self.identity.did().clone(),
             escrow_did,
@@ -217,11 +224,7 @@ impl Runtime {
         )
         .for_contract(contract_id)
         .sign(&self.identity);
-        let escrow = self
-            .escrow
-            .as_mut()
-            .ok_or_else(|| Error::EscrowViolation("no escrow attached".into()))?;
-        escrow.dispute(&instruction)?;
+        self.escrow_for(contract_id)?.dispute(&instruction)?;
         self.transition(contract_id, ContractState::Disputed)?;
         Ok(())
     }
@@ -234,11 +237,7 @@ impl Runtime {
         split_client: f64,
         split_provider: f64,
     ) -> Result<()> {
-        let escrow_did = self
-            .escrow
-            .as_ref()
-            .map(|e| e.did().clone())
-            .ok_or_else(|| Error::EscrowViolation("no escrow attached".into()))?;
+        let escrow_did = self.escrow_did_for(contract_id)?;
         let ruling = Envelope::new(
             self.identity.did().clone(),
             escrow_did,
@@ -247,14 +246,10 @@ impl Runtime {
         )
         .for_contract(contract_id)
         .sign(&self.identity);
-        let escrow = self
-            .escrow
-            .as_mut()
-            .ok_or_else(|| Error::EscrowViolation("no escrow attached".into()))?;
         // The arbitrator is this runtime's identity for the purpose of
         // this call; escrow validates `from` against the trusted list.
         let my_did = self.identity.did().clone();
-        escrow.rule(&ruling, &my_did)?;
+        self.escrow_for(contract_id)?.rule(&ruling, &my_did)?;
         self.transition(contract_id, ContractState::Ruled)?;
         Ok(())
     }
@@ -263,11 +258,7 @@ impl Runtime {
     /// (protocol, version, signature, freshness, replay). Returns the
     /// envelope if it is valid and was not seen before.
     pub fn receive(&mut self, envelope: &Envelope, max_age_secs: u64) -> Result<()> {
-        envelope.validate(max_age_secs)?;
-        if !self.seen.insert(envelope.message_id.clone()) {
-            return Err(Error::StaleTimestamp); // replay
-        }
-        Ok(())
+        self.seen.check(envelope, max_age_secs)
     }
 
     /// Sign an arbitrary envelope (helper for protocol extensions).
@@ -306,10 +297,9 @@ mod tests {
         let provider_runtime = Runtime::new(AgentIdentity::generate());
         let escrow_agent = AgentIdentity::generate();
 
-        // Provider binds the escrow.
+        // Provider trusts the escrow agent.
         let mut provider = provider_runtime;
-        let mut escrow = Escrow::new(escrow_agent.clone());
-        provider.set_escrow(escrow);
+        provider.set_escrow_agent(escrow_agent.clone());
 
         // Client proposes; provider accepts; both bind.
         let contract =
@@ -317,22 +307,17 @@ mod tests {
         let contract = provider.accept_contract(contract)?;
         assert_eq!(contract.state, ContractState::Signed);
 
-        // Attach the escrow to the client runtime too, then bind contract.
+        // Attach the escrow agent to the client runtime too, then bind.
         let mut client = client_runtime;
-        escrow = Escrow::new(escrow_agent);
-        client.set_escrow(escrow);
+        client.set_escrow_agent(escrow_agent);
         client.bind_contract(contract.clone())?;
         provider.bind_contract(contract.clone())?;
 
         // Park funds on the client side.
         client.park_funds(&contract.contract_id, 5.0)?;
         assert_eq!(
-            client
-                .escrow
-                .as_ref()
-                .map(|e| e.state())
-                .unwrap_or(crate::payment::EscrowState::Empty),
-            crate::payment::EscrowState::Parked
+            client.escrow_state(&contract.contract_id),
+            Some(crate::payment::EscrowState::Parked)
         );
 
         // The provider executes and delivers (state machine steps).
@@ -349,8 +334,8 @@ mod tests {
             ContractState::Accepted
         );
         assert_eq!(
-            client.escrow.as_ref().map(|e| e.state()).unwrap(),
-            crate::payment::EscrowState::Released
+            client.escrow_state(&contract.contract_id),
+            Some(crate::payment::EscrowState::Released)
         );
         Ok(())
     }
@@ -391,16 +376,14 @@ mod tests {
         let escrow_agent = AgentIdentity::generate();
 
         let mut provider = provider_runtime;
-        let mut escrow = Escrow::new(escrow_agent.clone());
-        provider.set_escrow(escrow);
+        provider.set_escrow_agent(escrow_agent.clone());
 
         let contract =
             client_runtime.propose_contract(provider.did(), "cap:lead-gen", terms(), true)?;
         let contract = provider.accept_contract(contract)?;
 
         let mut client = client_runtime;
-        escrow = Escrow::new(escrow_agent);
-        client.set_escrow(escrow);
+        client.set_escrow_agent(escrow_agent);
         client.bind_contract(contract.clone())?;
         provider.bind_contract(contract.clone())?;
 

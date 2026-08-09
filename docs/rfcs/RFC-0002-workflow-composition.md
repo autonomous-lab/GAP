@@ -54,7 +54,7 @@ that needs a pipeline (scrape → analyze → draft → publish).
       "provider_policy": "any_verified",
       "inputs": { "query": "${workflow.topic}" },
       "outputs": { "raw": "steps.scrape.deliverable" },
-      "terms": { "price": { "amount": 0.01, "model": "per-unit" },
+      "terms": { "price": { "amount": 0.01, "model": "per_unit" },
                  "deadline_offset_secs": 3600,
                  "autonomy": "execute-notify" }
     },

@@ -37,6 +37,12 @@ pub enum Error {
     UnverifiedSignature(String),
     /// Serialization/deserialization failure (JSON).
     Json(String),
+    /// A `message_id` was seen twice inside the freshness window.
+    ReplayedMessage(String),
+    /// A DID string does not parse as `did:gap:<64 hex chars>`.
+    InvalidDid(String),
+    /// A wire string does not name a known state.
+    UnknownState(String),
     /// Any other failure.
     Other(String),
 }
@@ -60,6 +66,9 @@ impl fmt::Display for Error {
             Error::Unauthorized(desc) => write!(f, "unauthorized: {desc}"),
             Error::UnverifiedSignature(desc) => write!(f, "unverified signature: {desc}"),
             Error::Json(e) => write!(f, "json error: {e}"),
+            Error::ReplayedMessage(id) => write!(f, "replayed message: {id}"),
+            Error::InvalidDid(s) => write!(f, "invalid did: {s}"),
+            Error::UnknownState(s) => write!(f, "unknown state: {s}"),
             Error::Other(e) => write!(f, "{e}"),
         }
     }
@@ -130,6 +139,15 @@ mod tests {
             "unverified signature: s"
         );
         assert_eq!(Error::Json("j".into()).to_string(), "json error: j");
+        assert_eq!(
+            Error::ReplayedMessage("m".into()).to_string(),
+            "replayed message: m"
+        );
+        assert_eq!(Error::InvalidDid("d".into()).to_string(), "invalid did: d");
+        assert_eq!(
+            Error::UnknownState("s".into()).to_string(),
+            "unknown state: s"
+        );
         assert_eq!(Error::Other("o".into()).to_string(), "o");
     }
 

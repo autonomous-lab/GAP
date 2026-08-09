@@ -27,7 +27,7 @@ signed contract.**
       "max age 48h"
     ],
     "deadline": "2026-08-09T17:00:00Z",
-    "price": { "amount": 0.05, "currency": "EUR", "model": "per-unit", "cap": 100 },
+    "price": { "amount": 0.05, "currency": "EUR", "model": "per_unit", "cap": 100 },
     "autonomy": "execute-notify",
     "confidentiality": "encrypted"
   },

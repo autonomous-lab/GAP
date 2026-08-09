@@ -226,35 +226,88 @@ impl Envelope {
     }
 }
 
+/// Test-controlled clock offset shared by `now_unix`, `advance_clock`,
+/// and `reset_clock`. A single module-level static: the previous
+/// function-scoped statics were three distinct variables, so the test
+/// clock silently never moved.
+static CLOCK_OFFSET: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
 /// Current UNIX timestamp (seconds).
 ///
 /// Wraps [`std::time::SystemTime`] with a test-controlled offset so that
 /// TTL expiry, deadlines, and certificate validity windows can be tested
 /// deterministically without sleeping.
 pub fn now_unix() -> u64 {
-    use std::sync::atomic::{AtomicI64, Ordering};
-    static OFFSET: AtomicI64 = AtomicI64::new(0);
     let base = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    (base + OFFSET.load(Ordering::Relaxed)) as u64
+    (base + CLOCK_OFFSET.load(std::sync::atomic::Ordering::Relaxed)) as u64
 }
 
 /// Advance the test clock by `secs` seconds. Only compiled in tests.
 #[cfg(test)]
 pub fn advance_clock(secs: u64) {
-    use std::sync::atomic::{AtomicI64, Ordering};
-    static OFFSET: AtomicI64 = AtomicI64::new(0);
-    OFFSET.fetch_add(secs as i64, Ordering::Relaxed);
+    CLOCK_OFFSET.fetch_add(secs as i64, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Reset the test clock to wall time. Only compiled in tests.
 #[cfg(test)]
 pub fn reset_clock() {
-    use std::sync::atomic::{AtomicI64, Ordering};
-    static OFFSET: AtomicI64 = AtomicI64::new(0);
-    OFFSET.store(0, Ordering::Relaxed);
+    CLOCK_OFFSET.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The recommended receiver-side freshness window (seconds). Specified
+/// in part 00 §0.3: implementations SHOULD reject envelopes older (or
+/// more in the future) than this unless a contract negotiates otherwise.
+pub const RECOMMENDED_MAX_AGE_SECS: u64 = 300;
+
+/// Replay protection: freshness window + `message_id` deduplication.
+///
+/// [`Envelope::validate`] alone rejects *stale* messages, but a captured
+/// envelope can still be replayed inside the freshness window. A
+/// `ReplayGuard` closes that gap: it remembers every accepted
+/// `message_id` until the id leaves the window, and rejects duplicates.
+///
+/// One guard per trust boundary (one per node, or one per counterparty
+/// stream). Memory is bounded: entries are pruned as they expire.
+#[derive(Debug, Default)]
+pub struct ReplayGuard {
+    /// message_id -> unix second after which the id can be forgotten.
+    seen: std::collections::HashMap<String, u64>,
+}
+
+impl ReplayGuard {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Full receiver-side validation *plus* replay rejection.
+    ///
+    /// Runs [`Envelope::validate`] (protocol, version, signature,
+    /// freshness), then rejects the envelope if its `message_id` was
+    /// already accepted inside the window.
+    pub fn check(&mut self, envelope: &Envelope, max_age_secs: u64) -> Result<()> {
+        envelope.validate(max_age_secs)?;
+        let now = now_unix();
+        // Prune ids that have left the freshness window: a replay of
+        // those is already rejected by the timestamp check.
+        self.seen.retain(|_, expiry| *expiry > now);
+        let expiry = envelope.timestamp.saturating_add(max_age_secs + 1);
+        if self
+            .seen
+            .insert(envelope.message_id.clone(), expiry)
+            .is_some()
+        {
+            return Err(Error::ReplayedMessage(envelope.message_id.clone()));
+        }
+        Ok(())
+    }
+
+    /// Number of message ids currently remembered.
+    pub fn tracked(&self) -> usize {
+        self.seen.len()
+    }
 }
 
 #[cfg(test)]

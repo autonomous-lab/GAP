@@ -40,7 +40,7 @@ impl EscrowState {
             "refunded" => EscrowState::Refunded,
             "disputed" => EscrowState::Disputed,
             "ruled" => EscrowState::Ruled,
-            _ => return Err(Error::Other(format!("unknown escrow state: {s}"))),
+            _ => return Err(Error::UnknownState(format!("escrow: {s}"))),
         })
     }
 }
@@ -111,34 +111,52 @@ impl Receipt {
     }
 }
 
-/// An escrow agent holding funds for a contract.
+/// An escrow agent holding funds for **one** contract.
 ///
 /// **Security model:** every transition (`park`, `release`, `refund`,
-/// `dispute`) is triggered by a signed [`Envelope`] from the authorized
-/// party, referencing a contract that was verified as signed by both
-/// parties. The escrow NEVER acts on raw strings or unsigned
-/// instructions.
+/// `dispute`) is triggered by a signed [`Envelope`](crate::message::Envelope)
+/// from the authorized party, referencing the contract this escrow was
+/// created for — verified as signed by both parties at construction.
+/// The escrow NEVER acts on raw strings or unsigned instructions, and
+/// its [`ReplayGuard`](crate::message::ReplayGuard) rejects any
+/// instruction envelope presented twice (or outside the freshness
+/// window).
+///
+/// One escrow instance per contract: the previous multi-contract map
+/// shared a single `(state, held)` pair, so registering a second
+/// contract silently made it unusable ("funds already parked").
 pub struct Escrow {
     identity: AgentIdentity,
     state: EscrowState,
     held: Amount,
     currency: String,
-    /// Contract id -> the signed contract (verified before any action).
-    contracts: std::collections::HashMap<String, crate::contract::Contract>,
+    /// The signed contract this escrow settles (verified at construction).
+    contract: crate::contract::Contract,
     /// Append-only receipt log (the audit trail).
     log: Vec<Receipt>,
+    /// Instruction replay protection (freshness + message_id dedup).
+    guard: crate::message::ReplayGuard,
+    /// Freshness window applied to instruction envelopes.
+    max_age_secs: u64,
 }
 
 impl Escrow {
-    pub fn new(identity: AgentIdentity) -> Self {
-        Self {
+    /// Create an escrow for a signed contract. Rejects unsigned contracts.
+    pub fn for_contract(
+        identity: AgentIdentity,
+        contract: crate::contract::Contract,
+    ) -> Result<Self> {
+        contract.verify_signed()?;
+        Ok(Self {
             identity,
             state: EscrowState::Empty,
             held: Amount::ZERO,
             currency: "EUR".into(),
-            contracts: std::collections::HashMap::new(),
+            contract,
             log: vec![],
-        }
+            guard: crate::message::ReplayGuard::new(),
+            max_age_secs: crate::message::RECOMMENDED_MAX_AGE_SECS,
+        })
     }
 
     /// Rebuild an escrow from persisted materialized state.
@@ -150,25 +168,31 @@ impl Escrow {
         currency: String,
     ) -> Result<Self> {
         contract.verify_signed()?;
-        let mut contracts = std::collections::HashMap::new();
-        contracts.insert(contract.contract_id.clone(), contract);
         Ok(Self {
             identity,
             state,
             held,
             currency,
-            contracts,
+            contract,
             log: vec![],
+            guard: crate::message::ReplayGuard::new(),
+            max_age_secs: crate::message::RECOMMENDED_MAX_AGE_SECS,
         })
     }
 
-    /// Register a signed contract so the escrow can verify instructions
-    /// against it. Only signed contracts are accepted.
-    pub fn register(&mut self, contract: crate::contract::Contract) -> Result<()> {
-        contract.verify_signed()?;
-        self.contracts
-            .insert(contract.contract_id.clone(), contract);
-        Ok(())
+    /// Check that an instruction targets this escrow's contract, then
+    /// run full envelope validation + replay rejection.
+    fn admit(&mut self, instruction: &crate::message::Envelope, what: &str) -> Result<()> {
+        let cid = instruction
+            .contract_id
+            .as_deref()
+            .ok_or_else(|| Error::EscrowViolation(format!("{what} missing contract_id")))?;
+        if cid != self.contract.contract_id {
+            return Err(Error::EscrowViolation(format!(
+                "{what} for different contract {cid}"
+            )));
+        }
+        self.guard.check(instruction, self.max_age_secs)
     }
 
     /// `pay.park` — the CLIENT instructs escrow to hold funds.
@@ -177,15 +201,8 @@ impl Escrow {
     /// client, for `Kind::PayPark`, and the amount must not exceed the
     /// contract's price cap.
     pub fn park(&mut self, instruction: &crate::message::Envelope) -> Result<Receipt> {
-        let cid = instruction
-            .contract_id
-            .clone()
-            .ok_or_else(|| Error::EscrowViolation("park instruction missing contract_id".into()))?;
-        let contract = self
-            .contracts
-            .get(&cid)
-            .cloned()
-            .ok_or_else(|| Error::EscrowViolation(format!("contract {cid} not registered")))?;
+        let contract = self.contract.clone();
+        let cid = contract.contract_id.clone();
         // Only the client may park.
         if instruction.from != contract.client {
             return Err(Error::Unauthorized("only the client may park funds".into()));
@@ -195,7 +212,7 @@ impl Escrow {
                 "expected pay.park instruction".into(),
             ));
         }
-        instruction.verify()?;
+        self.admit(instruction, "park instruction")?;
 
         let payload = instruction.decode::<serde_json::Value>()?;
         let amount = parse_amount_value(payload.get("amount"))?;
@@ -237,14 +254,8 @@ impl Escrow {
         instruction: &crate::message::Envelope,
         acceptance: &crate::message::Envelope,
     ) -> Result<Receipt> {
-        let cid = instruction.contract_id.clone().ok_or_else(|| {
-            Error::EscrowViolation("release instruction missing contract_id".into())
-        })?;
-        let contract = self
-            .contracts
-            .get(&cid)
-            .cloned()
-            .ok_or_else(|| Error::EscrowViolation(format!("contract {cid} not registered")))?;
+        let contract = self.contract.clone();
+        let cid = contract.contract_id.clone();
         if instruction.from != contract.client {
             return Err(Error::Unauthorized(
                 "only the client may release funds".into(),
@@ -255,7 +266,7 @@ impl Escrow {
                 "expected pay.release instruction".into(),
             ));
         }
-        instruction.verify()?;
+        self.admit(instruction, "release instruction")?;
         // The acceptance must be a valid exe.accept from the client for
         // the same contract.
         if acceptance.contract_id.as_deref() != Some(cid.as_str()) {
@@ -298,14 +309,8 @@ impl Escrow {
     /// ruling against the provider). Requires a signed instruction from
     /// the client.
     pub fn refund(&mut self, instruction: &crate::message::Envelope) -> Result<Receipt> {
-        let cid = instruction.contract_id.clone().ok_or_else(|| {
-            Error::EscrowViolation("refund instruction missing contract_id".into())
-        })?;
-        let contract = self
-            .contracts
-            .get(&cid)
-            .cloned()
-            .ok_or_else(|| Error::EscrowViolation(format!("contract {cid} not registered")))?;
+        let contract = self.contract.clone();
+        let cid = contract.contract_id.clone();
         if instruction.from != contract.client {
             return Err(Error::Unauthorized(
                 "only the client may request a refund".into(),
@@ -316,7 +321,7 @@ impl Escrow {
                 "expected pay.refund instruction".into(),
             ));
         }
-        instruction.verify()?;
+        self.admit(instruction, "refund instruction")?;
 
         if self.state != EscrowState::Parked {
             return Err(Error::EscrowViolation("funds not parked".into()));
@@ -340,14 +345,8 @@ impl Escrow {
 
     /// `pay.dispute` — hold funds during arbitration.
     pub fn dispute(&mut self, instruction: &crate::message::Envelope) -> Result<Receipt> {
-        let cid = instruction.contract_id.clone().ok_or_else(|| {
-            Error::EscrowViolation("dispute instruction missing contract_id".into())
-        })?;
-        let contract = self
-            .contracts
-            .get(&cid)
-            .cloned()
-            .ok_or_else(|| Error::EscrowViolation(format!("contract {cid} not registered")))?;
+        let contract = self.contract.clone();
+        let cid = contract.contract_id.clone();
         if instruction.from != contract.client {
             return Err(Error::Unauthorized("only the client may dispute".into()));
         }
@@ -356,7 +355,7 @@ impl Escrow {
                 "expected pay.dispute instruction".into(),
             ));
         }
-        instruction.verify()?;
+        self.admit(instruction, "dispute instruction")?;
 
         if self.state != EscrowState::Parked {
             return Err(Error::EscrowViolation("funds not parked".into()));
@@ -387,10 +386,7 @@ impl Escrow {
         ruling: &crate::message::Envelope,
         arbitrator_did: &crate::identity::Did,
     ) -> Result<Receipt> {
-        let cid = ruling
-            .contract_id
-            .clone()
-            .ok_or_else(|| Error::EscrowViolation("ruling missing contract_id".into()))?;
+        let cid = self.contract.contract_id.clone();
         if ruling.kind != crate::message::Kind::CtrRuling {
             return Err(Error::EscrowViolation(
                 "expected ctr.ruling envelope".into(),
@@ -401,7 +397,7 @@ impl Escrow {
                 "ruling from unapproved arbitrator".into(),
             ));
         }
-        ruling.verify()?;
+        self.admit(ruling, "ruling")?;
         if self.state != EscrowState::Disputed {
             return Err(Error::EscrowViolation("funds not in dispute".into()));
         }
@@ -425,13 +421,8 @@ impl Escrow {
         let amount = self.held;
         self.state = EscrowState::Ruled;
         self.held = Amount::ZERO;
-        let contract = self
-            .contracts
-            .get(&cid)
-            .cloned()
-            .ok_or_else(|| Error::EscrowViolation(format!("contract {cid} not registered")))?;
-        let client = contract.client.to_string();
-        let provider = contract.provider.to_string();
+        let client = self.contract.client.to_string();
+        let provider = self.contract.provider.to_string();
         let r = Receipt::signed(
             &self.identity,
             &cid,
@@ -447,6 +438,11 @@ impl Escrow {
 
     pub fn state(&self) -> EscrowState {
         self.state
+    }
+
+    /// The contract this escrow settles.
+    pub fn contract(&self) -> &crate::contract::Contract {
+        &self.contract
     }
 
     /// The escrow agent's DID (public, for addressing instructions).
@@ -525,8 +521,7 @@ mod tests {
         let client = AgentIdentity::generate();
         let provider = AgentIdentity::generate();
         let contract = signed_contract(&client, &provider);
-        let mut escrow = Escrow::new(escrow_id.clone());
-        escrow.register(contract.clone()).unwrap();
+        let mut escrow = Escrow::for_contract(escrow_id.clone(), contract.clone()).unwrap();
 
         let park = park_instruction(&client, &escrow_id, &contract, 5.0);
         escrow.park(&park).unwrap();
@@ -563,8 +558,7 @@ mod tests {
         let client = AgentIdentity::generate();
         let provider = AgentIdentity::generate();
         let contract = signed_contract(&client, &provider);
-        let mut escrow = Escrow::new(escrow_id.clone());
-        escrow.register(contract.clone()).unwrap();
+        let mut escrow = Escrow::for_contract(escrow_id.clone(), contract.clone()).unwrap();
 
         // Unsigned park instruction -> must fail
         let unsigned = Envelope::new(
@@ -585,8 +579,7 @@ mod tests {
         let provider = AgentIdentity::generate();
         let attacker = AgentIdentity::generate();
         let contract = signed_contract(&client, &provider);
-        let mut escrow = Escrow::new(escrow_id.clone());
-        escrow.register(contract.clone()).unwrap();
+        let mut escrow = Escrow::for_contract(escrow_id.clone(), contract.clone()).unwrap();
 
         // The provider tries to park (only the client may park)
         let forged = Envelope::new(
@@ -618,8 +611,7 @@ mod tests {
         let client = AgentIdentity::generate();
         let provider = AgentIdentity::generate();
         let contract = signed_contract(&client, &provider); // cap = 10.0
-        let mut escrow = Escrow::new(escrow_id.clone());
-        escrow.register(contract.clone()).unwrap();
+        let mut escrow = Escrow::for_contract(escrow_id.clone(), contract.clone()).unwrap();
 
         let over_cap = park_instruction(&client, &escrow_id, &contract, 999.0);
         assert!(escrow.park(&over_cap).is_err());
@@ -632,8 +624,7 @@ mod tests {
         let client = AgentIdentity::generate();
         let provider = AgentIdentity::generate();
         let contract = signed_contract(&client, &provider);
-        let mut escrow = Escrow::new(escrow_id.clone());
-        escrow.register(contract.clone()).unwrap();
+        let mut escrow = Escrow::for_contract(escrow_id.clone(), contract.clone()).unwrap();
 
         let park = park_instruction(&client, &escrow_id, &contract, 5.0);
         escrow.park(&park).unwrap();
@@ -665,8 +656,7 @@ mod tests {
         let client = AgentIdentity::generate();
         let provider = AgentIdentity::generate();
         let contract = signed_contract(&client, &provider);
-        let mut escrow = Escrow::new(escrow_id.clone());
-        escrow.register(contract.clone()).unwrap();
+        let mut escrow = Escrow::for_contract(escrow_id.clone(), contract.clone()).unwrap();
 
         let park = park_instruction(&client, &escrow_id, &contract, 5.0);
         escrow.park(&park).unwrap();
@@ -691,8 +681,7 @@ mod tests {
         let client = AgentIdentity::generate();
         let provider = AgentIdentity::generate();
         let contract = signed_contract(&client, &provider);
-        let mut escrow = Escrow::new(escrow_id.clone());
-        escrow.register(contract.clone()).unwrap();
+        let mut escrow = Escrow::for_contract(escrow_id.clone(), contract.clone()).unwrap();
 
         let park = park_instruction(&client, &escrow_id, &contract, 5.0);
         escrow.park(&park).unwrap();
@@ -722,8 +711,7 @@ mod tests {
         let client = AgentIdentity::generate();
         let provider = AgentIdentity::generate();
         let contract = signed_contract(&client, &provider);
-        let mut escrow = Escrow::new(escrow_agent.clone());
-        escrow.register(contract.clone()).unwrap();
+        let mut escrow = Escrow::for_contract(escrow_agent.clone(), contract.clone()).unwrap();
         escrow
             .park(&park_instruction(&client, escrow_agent, &contract, 5.0))
             .unwrap();
@@ -783,8 +771,7 @@ mod tests {
         let client = AgentIdentity::generate();
         let provider = AgentIdentity::generate();
         let contract = signed_contract(&client, &provider);
-        let mut escrow = Escrow::new(escrow_agent.clone());
-        escrow.register(contract.clone()).unwrap();
+        let mut escrow = Escrow::for_contract(escrow_agent.clone(), contract.clone()).unwrap();
         // Parked but NOT disputed.
         escrow
             .park(&park_instruction(&client, &escrow_agent, &contract, 5.0))
@@ -808,8 +795,7 @@ mod tests {
         let client = AgentIdentity::generate();
         let provider = AgentIdentity::generate();
         let contract = signed_contract(&client, &provider);
-        let mut escrow = Escrow::new(escrow_agent.clone());
-        escrow.register(contract.clone()).unwrap();
+        let mut escrow = Escrow::for_contract(escrow_agent.clone(), contract.clone()).unwrap();
         escrow
             .park(&park_instruction(&client, &escrow_agent, &contract, 5.0))
             .unwrap();
@@ -853,8 +839,7 @@ mod tests {
             },
             true,
         );
-        let mut escrow = Escrow::new(escrow_agent);
-        assert!(escrow.register(contract).is_err());
+        assert!(Escrow::for_contract(escrow_agent, contract).is_err());
     }
 
     #[test]
@@ -863,8 +848,7 @@ mod tests {
         let client = AgentIdentity::generate();
         let provider = AgentIdentity::generate();
         let contract = signed_contract(&client, &provider);
-        let mut escrow = Escrow::new(escrow_agent.clone());
-        escrow.register(contract.clone()).unwrap();
+        let mut escrow = Escrow::for_contract(escrow_agent.clone(), contract.clone()).unwrap();
         let park = escrow
             .park(&park_instruction(&client, &escrow_agent, &contract, 5.0))
             .unwrap();

@@ -100,8 +100,6 @@ fn bench_escrow(c: &mut Criterion) {
         true,
     );
     let ctr = ctr.accept_by_provider(&provider).unwrap();
-    let mut escrow = Escrow::new(node.clone());
-    escrow.register(ctr.clone()).unwrap();
 
     let park = Envelope::new(
         client.did().clone(),
@@ -126,8 +124,7 @@ fn bench_escrow(c: &mut Criterion) {
     });
     g.bench_function("verify_and_apply_park", |b| {
         b.iter(|| {
-            let mut e = Escrow::new(node.clone());
-            e.register(ctr.clone()).ok();
+            let mut e = Escrow::for_contract(node.clone(), ctr.clone()).unwrap();
             e.park(&park).ok();
             black_box(e)
         })

@@ -69,6 +69,9 @@ pub struct NodeState {
     ip_cap: u32,
     /// Optional admin token required for node-arbitrated settlement.
     admin_token: Option<String>,
+    /// Seed vault (encryption at rest for custodied identity seeds),
+    /// keyed by `GAP_MASTER_KEY` when set.
+    vault: Option<crate::vault::Vault>,
 }
 
 impl NodeState {
@@ -92,6 +95,23 @@ impl NodeState {
         token_cap: u32,
         ip_cap: u32,
     ) -> Self {
+        // Seed vault (encryption at rest). A malformed master key is a
+        // boot-time configuration error: fail loudly, not silently
+        // plaintext.
+        let vault = crate::vault::Vault::from_env()
+            .map(|r| r.expect("invalid GAP_MASTER_KEY (need 64 hex chars)"));
+        Self::with_vault(storage, seed, token_cap, ip_cap, vault)
+    }
+
+    /// Core constructor with an explicit seed vault (testable without
+    /// touching process environment).
+    pub fn with_vault(
+        storage: Box<dyn Storage>,
+        seed: Option<[u8; 32]>,
+        token_cap: u32,
+        ip_cap: u32,
+        vault: Option<crate::vault::Vault>,
+    ) -> Self {
         let identity = match seed {
             Some(seed_bytes) => AgentIdentity::from_seed(&seed_bytes),
             None => AgentIdentity::generate(),
@@ -99,7 +119,24 @@ impl NodeState {
         let mut agents = HashMap::new();
         let mut agents_by_did = HashMap::new();
         for rec in storage.list_identities().unwrap_or_default() {
-            if let Ok(seed_bytes) = decode_seed_hex(&rec.seed_hex) {
+            let seed_hex = match vault.as_ref() {
+                Some(v) => match v.open(&rec.seed_hex) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("gap-node: skipping identity {}: {e}", rec.did);
+                        continue;
+                    }
+                },
+                None if crate::vault::Vault::is_sealed(&rec.seed_hex) => {
+                    eprintln!(
+                        "gap-node: identity {} is sealed but GAP_MASTER_KEY is unset — skipping",
+                        rec.did
+                    );
+                    continue;
+                }
+                None => rec.seed_hex.clone(),
+            };
+            if let Ok(seed_bytes) = decode_seed_hex(&seed_hex) {
                 let agent_identity = AgentIdentity::from_seed(&seed_bytes);
                 let did = agent_identity.did().to_string();
                 agents.insert(
@@ -161,6 +198,7 @@ impl NodeState {
             token_cap,
             ip_cap,
             admin_token: None,
+            vault,
         }
     }
 
@@ -201,8 +239,24 @@ impl NodeState {
 
     /// Enforce per-token and per-IP rate limits before processing a
     /// request (audit fix H-03). Returns an error when over limit.
+    /// Evict idle rate counters so the maps stay bounded: an attacker
+    /// rotating source IPs (or tokens) must not grow node memory
+    /// without limit. A counter is idle once its window has lapsed —
+    /// evicting it loses nothing, the fresh entry starts at zero.
+    const RATE_MAP_SOFT_CAP: usize = 4096;
+
+    fn evict_idle_counters(&mut self, now: u64) {
+        if self.rate_limits.len() > Self::RATE_MAP_SOFT_CAP {
+            self.rate_limits.retain(|_, c| !c.is_idle(now));
+        }
+        if self.ip_limits.len() > Self::RATE_MAP_SOFT_CAP {
+            self.ip_limits.retain(|_, c| !c.is_idle(now));
+        }
+    }
+
     pub fn check_rate_limit(&mut self, token: Option<&str>, ip: Option<&str>) -> Result<()> {
         let now = crate::message::now_unix();
+        self.evict_idle_counters(now);
         if let Some(t) = token {
             self.rate_limits
                 .entry(t.to_string())
@@ -248,6 +302,31 @@ impl NodeState {
         self.node.identity.did().clone()
     }
 
+    /// Record an execution outcome on an agent's reputation and push the
+    /// smoothed score into the discovery registry, so `min_reputation`
+    /// filters work against earned scores. Before this, the node never
+    /// fed the registry: every agent sat at the 0.0 default and
+    /// reputation-filtered queries returned nothing.
+    fn credit_reputation(
+        &mut self,
+        agent_did: &crate::identity::Did,
+        accepted: bool,
+        on_time: bool,
+    ) {
+        let did_str = agent_did.to_string();
+        if let Some(token) = self.agents_by_did.get(&did_str).cloned() {
+            if let Some(agent) = self.agents.get_mut(&token) {
+                agent.identity.reputation_mut().record(accepted, on_time);
+                let score = agent.identity.reputation().success_rate();
+                self.registry.set_reputation(agent_did.clone(), score);
+                self.record(
+                    "reputation.updated",
+                    json!({ "agent_did": did_str, "score": score, "accepted": accepted, "on_time": on_time }),
+                );
+            }
+        }
+    }
+
     fn issue_token(&mut self) -> String {
         // Audit fix C-01: CSPRNG 256-bit token — sequential tokens were
         // guessable (full account takeover).
@@ -266,7 +345,12 @@ impl NodeState {
         let identity = AgentIdentity::generate();
         let did = identity.did().to_string();
         let token = self.issue_token();
-        let seed_hex = identity.seed_hex();
+        // Seal the custodied seed when a vault is configured; a database
+        // copy must not be a copy of every identity on the node.
+        let seed_hex = match self.vault.as_ref() {
+            Some(v) => v.seal(&identity.seed_hex()),
+            None => identity.seed_hex(),
+        };
         self.agents.insert(
             token.clone(),
             RegisteredAgent {
@@ -470,6 +554,8 @@ impl NodeState {
                 "USDC",
             );
             self.record("exe.accepted", json!({ "contract_id": contract_id }));
+            let on_time = crate::message::now_unix() <= saved.terms.deadline;
+            self.credit_reputation(&saved.provider, true, on_time);
             return Ok(json!({
                 "state": "accepted",
                 "settlement": { "amount": "0.000000", "currency": "USDC", "chain": "onchain" }
@@ -500,6 +586,8 @@ impl NodeState {
         );
 
         self.record("exe.accepted", json!({ "contract_id": contract_id }));
+        let on_time = crate::message::now_unix() <= saved.terms.deadline;
+        self.credit_reputation(&saved.provider, true, on_time);
         Ok(json!({
             "state": "accepted",
             "settlement": { "amount": amount, "currency": currency }
@@ -561,8 +649,7 @@ impl NodeState {
         )
         .for_contract(contract_id)
         .sign(&client.identity);
-        let mut escrow = Escrow::new(self.node.identity.clone());
-        escrow.register(contract)?;
+        let mut escrow = Escrow::for_contract(self.node.identity.clone(), contract)?;
         escrow.park(&instruction)?;
         self.persist_escrow(
             contract_id,
@@ -734,6 +821,11 @@ impl NodeState {
             "pay.ruled",
             json!({ "contract_id": contract_id, "client_share": client_share, "provider_share": provider_share }),
         );
+        // The ruling is the attested outcome: a majority share to the
+        // provider counts as a success, otherwise as a failure.
+        if let Some(provider_did) = self.contracts.get(contract_id).map(|c| c.provider.clone()) {
+            self.credit_reputation(&provider_did, provider_share >= 0.5, false);
+        }
         Ok(json!({
             "state": "ruled",
             "client_share": client_share,
@@ -1610,6 +1702,72 @@ mod tests {
         );
         assert_eq!(s, 200);
         assert!(!v["events"].as_array().unwrap().is_empty());
+
+        // Settlement credited the provider's reputation and fed the
+        // registry: a reputation-filtered discover now finds it.
+        let (s, v) = route(&arc, "GET", "/v1/discover?min_reputation=0.6", &[], None);
+        assert_eq!(s, 200);
+        assert_eq!(
+            v["results"].as_array().unwrap().len(),
+            1,
+            "settled provider should pass the reputation filter: {v}"
+        );
+        // An impossible bar still filters it out.
+        let (s, v) = route(&arc, "GET", "/v1/discover?min_reputation=0.99", &[], None);
+        assert_eq!(s, 200);
+        assert!(v["results"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn vault_seals_custodied_seeds_and_restores() {
+        let path = format!("/tmp/gap-node-vault-{}.db", crate::new_id("db"));
+        let vault = || Some(crate::vault::Vault::new(&[42u8; 32]));
+        let (did, token) = {
+            let mut state = NodeState::with_vault(
+                Box::new(SqliteStorage::open(&path).unwrap()),
+                None,
+                100_000,
+                100_000,
+                vault(),
+            );
+            state.create_identity()
+        };
+
+        // The stored row is sealed, not plaintext.
+        let store = SqliteStorage::open(&path).unwrap();
+        let recs = store.list_identities().unwrap();
+        assert_eq!(recs.len(), 1);
+        assert!(crate::vault::Vault::is_sealed(&recs[0].seed_hex));
+
+        // Restart with the right master key: the agent is usable again.
+        let state = NodeState::with_vault(
+            Box::new(SqliteStorage::open(&path).unwrap()),
+            None,
+            100_000,
+            100_000,
+            vault(),
+        );
+        assert_eq!(
+            state
+                .agent_by_token(&token)
+                .unwrap()
+                .identity
+                .did()
+                .to_string(),
+            did
+        );
+
+        // Restart without the key: the sealed identity is skipped (fails
+        // closed), never silently treated as plaintext.
+        let state = NodeState::with_vault(
+            Box::new(SqliteStorage::open(&path).unwrap()),
+            None,
+            100_000,
+            100_000,
+            None,
+        );
+        assert!(state.agent_by_token(&token).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

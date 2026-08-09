@@ -243,8 +243,7 @@ fn main() -> Result<()> {
             println!("  contract {} signed", &contract.contract_id[..24]);
 
             // 3. Escrow park (client) via signed instruction (part 05).
-            let mut escrow = Escrow::new(escrow_agent.clone());
-            escrow.register(contract.clone())?;
+            let mut escrow = Escrow::for_contract(escrow_agent.clone(), contract.clone())?;
             let park = Envelope::new(
                 orchestrator.did().clone(),
                 escrow_agent.did().clone(),

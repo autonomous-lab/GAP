@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         price: Some(gap::discovery::Price {
             amount: 0.05,
             currency: "EUR".into(),
-            model: "per-unit".into(),
+            model: "per_unit".into(),
         }),
         autonomy: vec!["propose".into(), "execute-notify".into()],
     };
@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         price: Price {
             amount: 0.05,
             currency: "EUR".into(),
-            model: "per-unit".into(),
+            model: "per_unit".into(),
             cap: Some(100.0),
         },
         autonomy: "execute-notify".into(),
@@ -115,8 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- 4. Settlement through escrow (signed instructions only) ---
     println!("\n[4] PAYMENT (escrow)");
-    let mut escrow = Escrow::new(escrow_agent);
-    escrow.register(contract.clone())?;
+    let mut escrow = Escrow::for_contract(escrow_agent, contract.clone())?;
     let total = 10.0; // 200 leads * 0.05 capped
 
     // The client signs a pay.park instruction referencing the contract.
@@ -155,8 +154,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n[5] REPUTATION");
     provider.reputation_mut().record(true, true);
     println!(
-        "provider success rate: {:.2}",
-        provider.reputation().success_rate()
+        "provider success rate: {:.2} (raw {:.2}, n={})",
+        provider.reputation().success_rate(),
+        provider.reputation().raw_success_rate(),
+        provider.reputation().executions
     );
 
     println!("\n=== GAP flow completed successfully ===");

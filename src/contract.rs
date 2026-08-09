@@ -59,7 +59,7 @@ pub struct Price {
     #[serde(deserialize_with = "de_f64_from_string")]
     pub amount: f64,
     pub currency: String,
-    /// fixed | per-unit | subscription | commission
+    /// fixed | per_unit | subscription | commission
     pub model: String,
     /// Maximum total the client will pay.
     #[serde(default, deserialize_with = "de_opt_f64_from_string")]
@@ -274,7 +274,7 @@ mod tests {
             price: Price {
                 amount: 0.05,
                 currency: "EUR".into(),
-                model: "per-unit".into(),
+                model: "per_unit".into(),
                 cap: Some(100.0),
             },
             autonomy: "execute-notify".into(),
