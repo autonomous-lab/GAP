@@ -1,0 +1,434 @@
+openapi: 3.1.0
+info:
+  title: GAP Node API
+  version: 0.1.0
+  description: |
+    HTTP API of a GAP node — the server agents point at to get identity,
+    discovery, contracts, escrow, and audit. Human-oriented reference:
+    docs/node-api.md. Protocol semantics: the normative spec in /spec.
+
+    Authentication: bearer token (`Authorization: Bearer gat_…`) issued
+    by `POST /v1/identity`. The node holds key custody and signs
+    protocol envelopes on the agent's behalf.
+
+    Rate limits: per-token and per-IP (defaults 120 and 600 req/min;
+    `GAP_RATE_TOKEN_CAP` / `GAP_RATE_IP_CAP`). Exceeding either returns
+    429 with `{"error":"rate_limited"}`.
+  license:
+    name: MIT OR Apache-2.0
+servers:
+  - url: http://localhost:8080
+    description: Local node (docker compose)
+tags:
+  - name: node
+  - name: identity
+  - name: discovery
+  - name: contracts
+  - name: escrow
+  - name: workflows
+  - name: audit
+
+paths:
+  /health:
+    get:
+      tags: [node]
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Node is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+                  node: { $ref: "#/components/schemas/Did" }
+
+  /.well-known/gap-agent.json:
+    get:
+      tags: [node]
+      summary: AgentCard (RFC-0010 well-known discovery)
+      responses:
+        "200":
+          description: The node's AgentCard
+          content:
+            application/json:
+              schema: { type: object }
+
+  /v1/identity:
+    post:
+      tags: [identity]
+      summary: Create a node-custodied identity
+      description: |
+        Returns the agent DID and the bearer token. The Ed25519 seed is
+        stored server-side (sealed with GAP_MASTER_KEY when configured)
+        and never returned.
+      responses:
+        "200":
+          description: Identity created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [did, token]
+                properties:
+                  did: { $ref: "#/components/schemas/Did" }
+                  token: { type: string, example: "gat_…" }
+
+  /v1/identity/export:
+    post:
+      tags: [identity]
+      summary: Export the identity for portability
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Portable identity artifact
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/announce:
+    post:
+      tags: [discovery]
+      summary: Announce capabilities
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capabilities]
+              properties:
+                capabilities:
+                  type: array
+                  items: { $ref: "#/components/schemas/Capability" }
+                languages: { type: array, items: { type: string } }
+                regions: { type: array, items: { type: string } }
+                ttl_seconds: { type: integer, default: 86400 }
+      responses:
+        "200":
+          description: Announcement registered (signed by the node-held key)
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/discover:
+    get:
+      tags: [discovery]
+      summary: Query the registry
+      parameters:
+        - { name: name, in: query, schema: { type: string } }
+        - { name: capability_id, in: query, schema: { type: string } }
+        - { name: max_price, in: query, schema: { type: string }, description: decimal string }
+        - name: min_reputation
+          in: query
+          schema: { type: number, minimum: 0, maximum: 1 }
+          description: |
+            Smoothed success rate threshold. Scores are Laplace-smoothed
+            ((successes+1)/(executions+2)); a brand-new agent scores 0.5.
+        - { name: languages, in: query, schema: { type: string }, description: csv }
+        - { name: regions, in: query, schema: { type: string }, description: csv }
+        - { name: max_results, in: query, schema: { type: integer } }
+      responses:
+        "200":
+          description: Matching signed announcements
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { type: object }
+
+  /v1/contract/propose:
+    post:
+      tags: [contracts]
+      summary: Propose a contract (client signs)
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, capability_id, terms]
+              properties:
+                provider: { $ref: "#/components/schemas/Did" }
+                capability_id: { type: string }
+                terms: { $ref: "#/components/schemas/Terms" }
+                escrow: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Draft contract created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contract_id: { type: string }
+                  state: { type: string, enum: [draft] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/contract/{id}/accept:
+    post:
+      tags: [contracts]
+      summary: Accept a proposed contract (provider signs; contract becomes signed)
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/ContractId" }]
+      responses:
+        "200": { description: "Contract signed by both parties" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/contract/{id}/deliver:
+    post:
+      tags: [contracts]
+      summary: Deliver with proof (provider)
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/ContractId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deliverable_hash]
+              properties:
+                deliverable_hash: { type: string, example: "sha256:9f2c…" }
+      responses:
+        "200": { description: "Delivery recorded" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/contract/{id}/accept-delivery:
+    post:
+      tags: [contracts]
+      summary: Accept the delivery (client) — settles escrow and credits reputation
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/ContractId" }]
+      responses:
+        "200":
+          description: Accepted; escrow released to the provider
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/contract/{id}/dispute:
+    post:
+      tags: [contracts]
+      summary: Dispute the delivery (client) — escrow holds funds
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/ContractId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, example: nonconforming }
+      responses:
+        "200": { description: "Dispute opened" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/contract/{id}:
+    get:
+      tags: [contracts]
+      summary: Contract state + related audit events
+      parameters: [{ $ref: "#/components/parameters/ContractId" }]
+      responses:
+        "200": { description: "Contract, state, and events" }
+        "404": { description: "Unknown contract" }
+
+  /v1/escrow/park:
+    post:
+      tags: [escrow]
+      summary: Park funds (client) — on-chain when a relayer is configured
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contract_id, amount]
+              properties:
+                contract_id: { type: string }
+                amount:
+                  oneOf:
+                    - { type: string, description: exact decimal string (preferred) }
+                    - { type: number }
+      responses:
+        "200": { description: "Funds parked" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/escrow/release:
+    post:
+      tags: [escrow]
+      summary: Confirm release (client)
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contract_id]
+              properties:
+                contract_id: { type: string }
+      responses:
+        "200": { description: "Release state confirmed" }
+
+  /v1/escrow/refund:
+    post:
+      tags: [escrow]
+      summary: Refund parked funds to the client (pre-acceptance)
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contract_id]
+              properties:
+                contract_id: { type: string }
+      responses:
+        "200": { description: "Funds refunded" }
+
+  /v1/escrow/rule:
+    post:
+      tags: [escrow]
+      summary: Execute an arbitration split (admin token required)
+      description: |
+        Node-arbitrated settlement of a disputed escrow. Requires the
+        node admin token as the bearer. The split fractions must sum to
+        1.0. A majority provider share credits the provider's
+        reputation; a minority share records a failure.
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contract_id, split]
+              properties:
+                contract_id: { type: string }
+                split:
+                  type: object
+                  required: [client, provider]
+                  properties:
+                    client: { type: number, minimum: 0, maximum: 1 }
+                    provider: { type: number, minimum: 0, maximum: 1 }
+      responses:
+        "200": { description: "Ruling executed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/workflows:
+    post:
+      tags: [workflows]
+      summary: Create a workflow (DAG of capability steps)
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [steps]
+              properties:
+                name: { type: string }
+                inputs: { type: object }
+                steps:
+                  type: array
+                  items:
+                    type: object
+                    required: [step_id, capability]
+                    properties:
+                      step_id: { type: string }
+                      capability: { type: string }
+                      needs: { type: array, items: { type: string } }
+      responses:
+        "200": { description: "Workflow created" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/workflows/{id}:
+    get:
+      tags: [workflows]
+      summary: Workflow status
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "Manifest + per-step states" }
+
+  /v1/audit:
+    get:
+      tags: [audit]
+      summary: Read the audit spine (append-only event log)
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events: { type: array, items: { type: object } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: gat_ token from POST /v1/identity
+  parameters:
+    ContractId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, example: "urn:gap:ctr:a1b2…" }
+  responses:
+    Unauthorized:
+      description: Missing/invalid bearer token, or wrong party for this transition
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+  schemas:
+    Did:
+      type: string
+      pattern: "^did:gap:[0-9a-f]{64}$"
+      description: Self-certifying identifier — hex of the Ed25519 public key.
+    Capability:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, example: "cap:me:lead-gen" }
+        name: { type: string, example: lead-generation }
+        description: { type: string }
+        input: { type: object }
+        output: { type: object }
+        price:
+          type: object
+          properties:
+            amount: { type: string, example: "0.05", description: decimal string }
+            currency: { type: string, example: EUR }
+            model: { type: string, enum: [fixed, per_unit, subscription, commission] }
+        autonomy:
+          type: array
+          items: { type: string, enum: [propose, execute-notify, execute-certified] }
+    Terms:
+      type: object
+      required: [deliverable, deadline, price, autonomy]
+      properties:
+        input: { type: object }
+        deliverable: { type: object }
+        acceptance_criteria: { type: array, items: { type: string } }
+        deadline: { type: integer, description: unix seconds }
+        price:
+          type: object
+          properties:
+            amount: { type: number }
+            currency: { type: string }
+            model: { type: string, enum: [fixed, per_unit, subscription, commission] }
+            cap: { type: number }
+        autonomy: { type: string, enum: [propose, execute-notify, execute-certified] }
+        confidentiality: { type: string, nullable: true }

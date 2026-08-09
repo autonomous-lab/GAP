@@ -11,8 +11,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The taxonomy of envelope kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+///
+/// Serialization uses the normative dotted wire form (`"ctr.propose"`,
+/// `"pay.park"`, …) via [`Kind::as_str`]/[`Kind::parse`]. The previous
+/// derived form serialized `"ctrpropose"` — internally consistent but
+/// diverging from the spec taxonomy, which would have broken every
+/// cross-implementation exchange (test-vector work surfaced it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     // discovery (part 02)
     CapAnnounce,
@@ -121,6 +126,20 @@ impl Kind {
             "principal.unbind" => Kind::PrincipalUnbind,
             _ => return None,
         })
+    }
+}
+
+impl Serialize for Kind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Kind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Kind::parse(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown envelope kind: {s}")))
     }
 }
 

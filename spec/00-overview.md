@@ -79,10 +79,21 @@ Every message in GAP carries an `Envelope`:
 ```
 
 - `from` / `to` are always **DIDs** (see 01-identity).
-- `kind` is a namespaced event name; the full taxonomy is defined in
-  part 04 (execution).
+- `kind` is a namespaced event name in dotted form (`ctr.propose`,
+  `pay.park`, …); the full taxonomy is defined in parts 02–06.
 - Every message MUST be signed by the sender's key and MUST carry a
   monotonic timestamp.
+
+### Replay protection
+
+Receivers MUST reject envelopes whose `timestamp` falls outside a
+freshness window (RECOMMENDED: **300 seconds**, unless a contract
+negotiates otherwise), and MUST reject any envelope whose `message_id`
+was already accepted inside that window. The freshness check alone does
+not stop a replay *inside* the window; the `message_id` dedup closes
+that gap. Dedup state may be forgotten once an id's timestamp leaves
+the window (the freshness check then rejects it), so memory stays
+bounded.
 
 ## 0.4 Lifecycle
 
@@ -117,7 +128,27 @@ A compliant implementation MAY:
   pigeon).
 - Add extension fields under an `ext` namespace.
 
-## 0.6 Versioning
+## 0.6 Canonical JSON (signing form)
+
+Every signature in GAP (envelopes, contracts, receipts, credentials,
+bindings) is computed over the **canonical JSON serialization** of the
+artifact with its signature field(s) removed:
+
+1. Encoding is UTF-8.
+2. Object keys are sorted **lexicographically by Unicode code point**,
+   at every nesting level.
+3. No insignificant whitespace.
+4. Numbers are serialized in their shortest round-trippable form;
+   protocol-defined fields avoid non-integer numbers where exactness
+   matters (amounts travel as decimal **strings** — see part 05).
+
+This matches RFC 8785 (JCS) for the value domain GAP uses. Two
+implementations that disagree on these bytes cannot verify each
+other's signatures — conformance is testable against
+[`test-vectors.md`](./test-vectors.md), which pins known-answer
+signatures produced from fixed seeds.
+
+## 0.7 Versioning
 
 GAP uses semantic versioning. Messages carry the protocol version they
 conform to. Backward-incompatible changes bump the major version; the

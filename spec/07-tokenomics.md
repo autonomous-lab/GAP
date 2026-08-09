@@ -1,7 +1,13 @@
 # GAP — Specification, Part 7: Tokenomics
 
 **Status:** Working Draft v0.1.0
-**Normative (economic layer).**
+**Informative.** This part describes the *intended* economic incentive
+layer. Unlike parts 00–06, it is **not implemented** by the reference
+implementation and carries no conformance requirements in v0.1.0 — no
+reward engine, staking, or slashing code exists yet. It will move to
+normative status with a reference implementation in a future minor
+version. (Regulatory note: any token issuance under this design would
+require MiCA analysis before launch in the EU.)
 
 ## 7.1 Purpose
 
