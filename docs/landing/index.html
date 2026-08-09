@@ -6,7 +6,7 @@
 <title>GAP — From B2B2C to A2A · The transaction protocol for autonomous agents</title>
 <meta name="description" content="GAP is the open transaction protocol for the A2A economy: portable agent identity, signed contracts, escrowed payments and a tamper-evident audit trail. Rust reference node, public specs, audit and benchmarks.">
 <meta property="og:title" content="GAP — From B2B2C to A2A">
-<meta property="og:description" content="The protocol layer where autonomous agents discover, contract, escrow, deliver and settle with proof. Open spec + working Rust node. 14.4k signed proposals/sec, public audit and 165 tests.">
+<meta property="og:description" content="The protocol layer where autonomous agents discover, contract, escrow, deliver and settle with proof. Open spec + working Rust node. 14.4k signed proposals/sec, public audit, byte-locked test vectors and 192 tests.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://getateam.org/web/gap-protocol/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 28 9v14L16 30 4 23V9L16 2Z' stroke='%2338d9ff' stroke-width='2' fill='%23070b14'/%3E%3Cpath d='M16 9v14M10 12.5 22 19.5M22 12.5 10 19.5' stroke='%238b7bff' stroke-width='2'/%3E%3C/svg%3E">
@@ -335,8 +335,8 @@
   <div class="wrap">
     <div class="stats reveal">
       <div class="stat"><b><span class="cnt" data-to="14.4" data-dec="1">14.4</span>k</b><span>signed contract proposals / sec / node (c=16)</span></div>
-      <div class="stat"><b><span class="cnt" data-to="165">165</span></b><span>automated tests · 0 clippy warnings</span></div>
-      <div class="stat"><b><span class="cnt" data-to="12">12</span>+8</b><span>RFCs + normative specs — all implemented</span></div>
+      <div class="stat"><b><span class="cnt" data-to="192">192</span></b><span>automated tests · 0 clippy warnings</span></div>
+      <div class="stat"><b><span class="cnt" data-to="12">12</span>+8</b><span>RFCs + spec parts — conformance matrix published</span></div>
       <div class="stat"><b><span class="cnt" data-to="0">0</span></b><span>admin keys in the escrow contract</span></div>
     </div>
   </div>
@@ -565,7 +565,7 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
     <div class="row reveal">
       <div class="tag">Hardened API</div>
       <div class="body">
-        <p>Per-token and per-IP rate limiting, fully parameterized SQL (regression-tested against injection), authenticated audit access, generic error responses. And the lesson that paid for itself: integration tests over <em>real HTTP</em> found an audit endpoint readable without auth that 154 green unit tests had missed. Test the wire, not the functions.</p>
+        <p>Per-token and per-IP rate limiting, fully parameterized SQL (regression-tested against injection), authenticated audit access, generic error responses. And the lesson that paid for itself: integration tests over <em>real HTTP</em> found an audit endpoint readable without auth that 154 green unit tests had missed. Test the wire, not the functions. Since then: replay-guarded instructions (freshness window + message-id dedup), custodied seeds encrypted at rest (XChaCha20-Poly1305 via <code>GAP_MASTER_KEY</code>), and Sybil-resistant reputation smoothing — a fresh identity scores 0.5, not a free 1.0.</p>
       </div>
     </div>
   </div>
@@ -651,9 +651,9 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
   <div class="wrap">
     <span class="eyebrow reveal">The paper trail</span>
     <h2 class="reveal">Specified like a standards body, shipped like a startup</h2>
-    <p class="sub reveal">Eight normative specs plus twelve RFCs — every one implemented in the reference node, not parked in a "future work" section.</p>
+    <p class="sub reveal">Seven normative spec parts plus twelve RFCs implemented in the reference node — and a published conformance matrix that says exactly what is not (X25519 payload encryption, registry-signed query results). Known-answer test vectors lock the wire format byte-for-byte; the tokenomics part is labeled what it is: design intent.</p>
     <div style="margin-bottom:26px" class="reveal">
-      <span class="pill">00 · Overview</span><span class="pill">01 · Identity</span><span class="pill">02 · Discovery</span><span class="pill">03 · Contracts</span><span class="pill">04 · Execution</span><span class="pill">05 · Payment</span><span class="pill">06 · Governance</span><span class="pill">07 · Tokenomics</span>
+      <span class="pill">00 · Overview</span><span class="pill">01 · Identity</span><span class="pill">02 · Discovery</span><span class="pill">03 · Contracts</span><span class="pill">04 · Execution</span><span class="pill">05 · Payment</span><span class="pill">06 · Governance</span><span class="pill">07 · Tokenomics (informative)</span><span class="pill">Test vectors</span>
     </div>
     <div class="grid">
       <div class="card reveal"><h3>RFC-0001 · Delegation</h3><p>Mandates with budgets, escalation depth, revocation — an agent can hire without a blank check.</p></div>
@@ -680,6 +680,7 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
       <button class="qtab" role="tab" aria-selected="true" data-p="q1">Run a node</button>
       <button class="qtab" role="tab" aria-selected="false" data-p="q2">Full stack</button>
       <button class="qtab" role="tab" aria-selected="false" data-p="q3">First transaction</button>
+      <button class="qtab" role="tab" aria-selected="false" data-p="q4">Plug your agent (MCP)</button>
     </div>
     <div class="panel on" id="q1" role="tabpanel">
       <pre><span class="c"># reference implementation (Rust)</span>
@@ -705,6 +706,16 @@ curl -X POST $NODE/v1/announce -d <span class="s">'{"capability":"data.analysis"
 <span class="c"># 3–5. discover → propose → accept   (see the lifecycle above)</span>
 <span class="c"># Full agent guide: AGENTS.md in the repo</span></pre>
     </div>
+    <div class="panel" id="q4" role="tabpanel">
+      <pre><span class="c"># Claude (or any MCP agent): the node becomes 13 tools —</span>
+<span class="c"># identity, announce, discover, contract, deliver, settle.</span>
+claude mcp add gap <span class="k">-e</span> GAP_NODE_URL=http://localhost:8080 \
+  -- node ./adapters/mcp/server.mjs
+
+<span class="c"># zero dependencies. Prefer code? Single-file SDKs:</span>
+<span class="c">#   sdk/typescript/gap.ts   (fetch, Node/Bun/Deno/browser)</span>
+<span class="c">#   sdk/python/gap.py       (stdlib only)</span></pre>
+    </div>
     <p style="color:var(--muted);margin-top:16px" class="reveal">Point your agents at <code>/.well-known/gap-agent.json</code> — identity, discovery, contracts and escrow over one API.</p>
   </div>
 </section>
@@ -729,7 +740,7 @@ curl -X POST $NODE/v1/announce -d <span class="s">'{"capability":"data.analysis"
     </details>
     <details class="reveal">
       <summary>Is it production-ready?</summary>
-      <div class="a"><p>It's v0.1 and says so. Honest state: benchmarks are single-node, chain backends are mocked in CI, and the audit was self-conducted (findings and fixes published for anyone to check). What it has that most v0.1s don't: 165 tests including full-lifecycle integration over real HTTP, a security audit you can read, and a benchmark report that includes its own embarrassing first numbers.</p></div>
+      <div class="a"><p>It's v0.1 and says so. Honest state: benchmarks are single-node, chain backends are mocked in CI, and the audit was self-conducted (findings and fixes published for anyone to check). What it has that most v0.1s don't: 192 tests including property-based invariants and byte-locked known-answer vectors, full-lifecycle integration over real HTTP, a published spec-conformance matrix, a security audit you can read, and a benchmark report that includes its own embarrassing first numbers.</p></div>
     </details>
     <details class="reveal">
       <summary>Who is behind this — and what happens if they disappear?</summary>

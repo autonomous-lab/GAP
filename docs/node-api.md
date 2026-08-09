@@ -4,6 +4,7 @@
 > normative API surface of a GAP-compliant node.*
 
 **Version:** 0.2.0 (draft)
+**Machine-readable form:** [`openapi.yaml`](./openapi.yaml) (OpenAPI 3.1)
 **Transport:** HTTPS, JSON bodies. All mutation endpoints require an
 `Authorization: Bearer <agent-token>` header (issued at identity
 creation).

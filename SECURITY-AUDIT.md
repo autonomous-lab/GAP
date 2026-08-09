@@ -251,6 +251,20 @@ dependency is deprecated; SQLite is bundled (no system lib mismatch).
 pricing/budget helper, field-size caps, structured logging, and a
 production KMS implementation for node-custodied identity seeds.
 
+## Post-audit hardening (2026-08-09 follow-up)
+
+Addressed since the original audit, verified by tests:
+
+| Item | Fix |
+|------|-----|
+| Seeds at rest | `vault.rs`: XChaCha20-Poly1305 envelope encryption via `GAP_MASTER_KEY`; wrong-key/tamper fail closed; sealed-restore covered by tests. Env var is the interface — back it with a KMS in production. |
+| Replay inside the freshness window | `ReplayGuard` (`message_id` dedup, bounded memory) wired into escrow instruction admission and `Runtime::receive`; requirement made normative in spec 00 §0.3. |
+| Rate-limit memory growth | Idle counters evicted past a soft cap — IP rotation can no longer grow node memory unbounded (follow-up to H-03). |
+| Sybil reputation reset | Smoothed `success_rate` — a fresh identity scores 0.5, closing the "recreate to launder" bypass of `min_reputation` filters. |
+| Wire-format divergence | `Kind` serialized a collapsed variant name instead of the normative dotted taxonomy; fixed and byte-locked by known-answer test vectors (`spec/test-vectors.md`). |
+| Escrow API misuse | One escrow per contract, signature-verified at construction (the multi-contract map shared one state/held pair). |
+| Invariant coverage | Property-based tests: escrow conservation (release exactly once, never above cap, for all amounts), amount exactness, envelope tamper-detection. |
+
 ## Verification after fixes
 
 - Full suite: **152 unit tests + 3 integration tests, all passing**.

@@ -41,6 +41,11 @@ GAP/
 ├── BUSINESS.md        # The business model: how GAP becomes durable
 ├── COMPETITIVE-ANALYSIS.md  # GAP vs A2A, OAP, OpenAgents, xlang, robpolak
 ├── BENCHMARK.md       # Full benchmark report (protocol + HTTP layers)
+├── SECURITY-AUDIT.md  # Adversarial audit + applied fixes
+├── LICENSE-MIT / LICENSE-APACHE  # Dual license
+├── ci/                # GitHub Actions workflow (see ci/README.md)
+├── adapters/mcp/      # ★ MCP adapter: the node as tools for any MCP agent
+├── sdk/               # Client SDKs (TypeScript + Python, dependency-free)
 ├── docs/landing/      # The public landing page (mirror of the hosted site)
 ├── Dockerfile         # The node server image (multi-stage, musl)
 ├── docker-compose.yml # Node + ClickHouse stack
@@ -53,28 +58,28 @@ GAP/
 ├── docs/              # The RFC process (like OAP's)
 │   ├── rfcs/          # RFC-0001 … RFC-0012 (delegation, workflows, …)
 │   ├── node-api.md    # The GAP node HTTP API (what agents point at)
+│   ├── openapi.yaml   # OpenAPI 3.1 spec of the node API
 │   ├── deployment.md  # Storage architecture (SQLite / ClickHouse)
 │   ├── scaling.md     # Multi-node, load balancer, sequencer
 │   ├── onchain-escrow.md  # Solidity escrow: production settlement
 │   └── use-cases.md   # 5 concrete scenarios with real commands
 ├── spec/              # The protocol specification (normative)
-│   ├── 00-overview.md
-│   ├── 01-identity.md
-│   ├── 02-discovery.md
-│   ├── 03-contracts.md
-│   ├── 04-execution.md
-│   ├── 05-payment.md
-│   ├── 06-governance.md
-│   └── 07-tokenomics.md
+│   ├── 00-overview.md #   incl. canonical JSON & replay rules (§0.6)
+│   ├── 01-identity.md … 06-governance.md
+│   ├── 07-tokenomics.md   # informative (design intent, not implemented)
+│   └── test-vectors.md    # known-answer vectors, pinned by CI
 ├── src/               # Rust reference implementation
 │   ├── lib.rs         # Public API surface
-│   ├── identity.rs    # DIDs, keys, reputation
+│   ├── identity.rs    # DIDs, keys, reputation, signed endorsements, key rotation
+│   ├── principal.rs   # Bilateral principal binding (spec §1.3)
 │   ├── credential.rs  # Verifiable credentials (RFC-0005)
 │   ├── discovery.rs   # Registry & capability announcements
 │   ├── agentcard.rs   # Well-known discovery (RFC-0010)
 │   ├── contract.rs    # Contract lifecycle
-│   ├── message.rs     # Wire format & addressing
-│   ├── payment.rs     # Escrow & settlement (signed instructions only)
+│   ├── message.rs     # Wire format, addressing, replay guard
+│   ├── payment.rs     # Escrow & settlement (one escrow per contract)
+│   ├── amount.rs      # Exact decimal amounts (integer minor units)
+│   ├── vault.rs       # Seed encryption at rest (XChaCha20-Poly1305)
 │   ├── policy.rs      # Layered policy engine (RFC-0004)
 │   ├── delegation.rs  # Delegation tokens (RFC-0001)
 │   ├── receipt_chain.rs  # Hash-chained receipts (RFC-0003)
@@ -94,8 +99,11 @@ GAP/
 │   ├── governance.rs  # Autonomy levels, certification, meta-agents
 │   ├── runtime.rs     # The ergonomic facade binding all layers
 │   └── error.rs       # Error taxonomy
-├── tests/             # Integration tests (full economy scenarios)
-│   └── economy.rs
+├── tests/             # Integration tests
+│   ├── economy.rs     # Full economy scenarios + replay attacks
+│   ├── http_routes.rs # Exhaustive HTTP route coverage
+│   ├── properties.rs  # Property-based invariants (proptest)
+│   └── test_vectors.rs  # Known-answer vectors (interop lock)
 └── examples/          # Runnable examples
     ├── lead_gen.rs    # 1:1 agent economy (discovery→escrow)
     └── workflow_demo.rs  # multi-agent pipeline (3 steps, SQLite persistence)```
@@ -156,19 +164,21 @@ curl "$NODE/v1/discover?name=analysis&min_reputation=0.9"
 # Agent A accepts the delivery; escrow releases. Four calls, zero glue.
 ```
 
-### Scenario 2: a Geta.Team agent and OpenClaw / Hermes
+### Scenario 2: any MCP-capable agent (Claude, OpenClaw, Hermes)
 
-The external agent uses a **GAP adapter** — a small HTTP client (or
-MCP server) that exposes the node's API as tools the agent already
-understands. The adapter:
+The external agent uses the **GAP MCP adapter**
+([`adapters/mcp/`](./adapters/mcp/)) — a zero-dependency MCP server
+that exposes the node as 13 tools (identity, announce, discover,
+contract, deliver, settle). The agent never learns GAP; it sees "a
+task with terms and a payment promise":
 
-1. Announces the external agent's capabilities to the node.
-2. Translates GAP contracts into task requests the agent can execute.
-3. Submits proof bundles and receives payment confirmations.
+```bash
+claude mcp add gap -e GAP_NODE_URL=http://localhost:8080 \
+  -- node ./adapters/mcp/server.mjs
+```
 
-The external agent never learns GAP. It sees "a task with terms and a
-payment promise" — the adapter speaks GAP for it. (`adapters/` is the
-planned home for reference adapters: MCP, OpenClaw, Hermes.)
+For programmatic access, single-file dependency-free SDKs exist for
+**TypeScript** and **Python** ([`sdk/`](./sdk/)).
 
 ### Scenario 3: multi-agent workflow
 
@@ -213,7 +223,11 @@ Environment variables: `GAP_ADDR`, `GAP_STORAGE` (`sqlite` |
 `GAP_RATE_TOKEN_CAP` / `GAP_RATE_IP_CAP` (requests per minute; defaults
 120 and 600 — see [`BENCHMARK.md`](./BENCHMARK.md) for
 throughput at other caps), `GAP_WORKERS` (HTTP worker pool size;
-default min(cpus, 8)).
+default min(cpus, 8)), `GAP_NODE_SEED` / `GAP_NODE_SEED_FILE` (persist
+the node DID across restarts), and `GAP_MASTER_KEY` (64 hex chars —
+enables **encryption at rest** for custodied identity seeds,
+XChaCha20-Poly1305; without it a database copy is a copy of every
+identity on the node).
 
 ### Scaling: many nodes, one ClickHouse
 
@@ -272,27 +286,61 @@ protocol engagement, and the endpoint quick-reference.
 a reference implementation to validate the wire format and lifecycle.
 Expect breaking changes until v1.0.
 
+## Spec conformance matrix
+
+Honest accounting of what the reference implementation covers today:
+
+| Spec part | Requirement | Status |
+|-----------|-------------|--------|
+| 00 §0.3 | Envelope format, dotted `kind` taxonomy | ✅ (byte-locked by [test vectors](./spec/test-vectors.md)) |
+| 00 §0.3 | Replay protection (window + `message_id` dedup) | ✅ `ReplayGuard` |
+| 00 §0.6 | Canonical JSON signing form | ✅ (sorted keys, no whitespace) |
+| 01 §1.1–1.2 | DIDs, Ed25519 sign/verify | ✅ |
+| 01 §1.2 | Key rotation (old key signs handover, chain verify) | ✅ |
+| 01 §1.2 | X25519 payload encryption (`confidentiality: encrypted`) | ❌ planned |
+| 01 §1.3 | Bilateral principal binding + unbind | ✅ `principal.rs` |
+| 01 §1.4 | Reputation log, **signed** endorsements | ✅ |
+| 02 | Announce / query / TTL / deregister | ✅ |
+| 02 §2.4.3 | Registry-signed query results | ❌ planned (announcements are signed; the query response wrapper is not) |
+| 03 | Negotiation state machine, dual signatures, disputes | ✅ (counter-offer endpoint on the node: planned) |
+| 04 | Proof bundles, hash verification, autonomy enforcement | ✅ |
+| 05 | Escrow state machine, price caps, signed receipts, exact amounts | ✅ |
+| 06 | Autonomy levels, certification, `gov.halt`, budgets | ✅ (meta-agent supervision chains: partial) |
+| 07 | Tokenomics | — informative only, no implementation |
+
 ## Testing
 
 ```bash
-cargo test            # 162 tests (154 unitaires + 8 intégration)
+cargo test            # 192 tests: 173 unit + 18 integration + 1 doc
 cargo clippy          # zero warnings
 cargo run --example lead_gen   # end-to-end demo
 ```
 
-The test suite covers: signature tampering, replay attacks, forged
-announcements, forged contract signatures, escrow authorization
-(wrong party / unsigned instructions / price caps), TTL expiry,
-reputation filtering, dispute arbitration, delegation chains
-(escalation, depth, budgets), policy engine (layers, terminal deny,
-localized explanations), receipt hash-chains (tamper detection,
-redaction), compliance gates (embargo, chinese walls, NDA), sybil
-resistance (tree aggregation, one-bid-per-tree), subscription
-lifecycle (consent, renewal, budget), cooling-off windows, workflow
-DAG execution, credentials (projection, revocation), AgentCard
-(well-known discovery), conformance reports, SLA divergence, full
-happy-path economy flows, and exhaustive HTTP route coverage
-(`tests/http_routes.rs`).
+The suite includes **property-based tests** (`tests/properties.rs`:
+escrow conservation — funds release exactly once and never above the
+cap, for all amounts; amount-arithmetic exactness; envelope
+tamper-detection under arbitrary payloads) and **known-answer test
+vectors** (`tests/test_vectors.rs`) that lock the wire format
+byte-for-byte — CI fails on any interop-breaking drift.
+
+Scenario coverage: signature tampering, replay attacks (stale AND
+inside-window duplicates), forged announcements, forged contract
+signatures, escrow authorization (wrong party / unsigned instructions /
+price caps), sealed-seed restore (wrong-key fails closed), TTL expiry,
+reputation filtering (smoothed scores fed by real settlements),
+dispute arbitration, delegation chains (escalation, depth, budgets),
+policy engine (layers, terminal deny, localized explanations), receipt
+hash-chains (tamper detection, redaction), compliance gates (embargo,
+chinese walls, NDA), sybil resistance (tree aggregation,
+one-bid-per-tree), subscription lifecycle, cooling-off windows,
+workflow DAG execution, credentials, AgentCard, conformance reports,
+SLA divergence, principal binding (bilateral signatures, expiry,
+forged unbind), key-rotation chains, full economy flows, and
+exhaustive HTTP route coverage (`tests/http_routes.rs`).
+
+CI (fmt, clippy `-D warnings`, tests, cargo-audit) is defined in
+[`ci/github-ci.yml`](./ci/github-ci.yml) — see `ci/README.md` for the
+one-step activation.
 
 ## Benchmarks
 
@@ -318,7 +366,8 @@ Reproduction : `cargo bench --bench protocol` (couche protocole),
 
 ## License
 
-Apache-2.0 (spec) / MIT (reference implementation). See individual files.
+Dual-licensed under [MIT](./LICENSE-MIT) or
+[Apache-2.0](./LICENSE-APACHE), at your option.
 
 ---
 
