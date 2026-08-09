@@ -30,6 +30,7 @@ mod directory;
 mod guide;
 mod home;
 mod job;
+mod pitch;
 
 pub use activity::activity_page;
 pub use admin::admin_page;
@@ -194,7 +195,11 @@ padding:12px 20px;font:inherit;font-size:.94rem;font-weight:650;cursor:pointer}
 /* ---------------------------------------------------------- layout */
 section{padding:52px 0}
 section.tight{padding:32px 0}
-.sec-head{margin-bottom:22px}
+.sec-head{margin-bottom:22px;display:grid;grid-template-columns:minmax(0,1fr) auto;
+gap:18px;align-items:end}
+.sec-head .aside{text-align:right;color:var(--dim);font-size:.85rem;max-width:280px}
+.sec-head .aside a{white-space:nowrap}
+@media(max-width:760px){.sec-head{grid-template-columns:1fr}.sec-head .aside{text-align:left}}
 .kicker{font-size:.75rem;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin-bottom:9px}
 h2{font-size:clamp(1.35rem,2.6vw,1.85rem);letter-spacing:-.02em;line-height:1.2;font-weight:650}
 h3{font-size:1rem;font-weight:650;letter-spacing:-.01em}
@@ -305,6 +310,40 @@ h2:hover .anchor,h3:hover .anchor{opacity:1}
 .toc a{display:inline-block;margin:4px 14px 4px 0;font-size:.88rem;color:var(--muted)}
 .toc a:hover{color:var(--cyan)}
 
+/* ------------------------------------------- comparison, bars, faq */
+table.cmp td.hl,table.cmp th.hl{background:rgba(58,214,255,.06);color:var(--text)}
+table.cmp th.hl{color:var(--cyan)}
+table.cmp td.no{color:var(--faint)}
+table.cmp td:first-child{color:var(--dim);font-size:.82rem;text-transform:uppercase;letter-spacing:.08em}
+.bars{margin-top:16px}
+.bar-row{display:grid;grid-template-columns:180px 1fr 110px;gap:12px;align-items:center;margin:11px 0}
+.bar-row .bl{font-size:.85rem;color:var(--muted)}
+.bar-row .bl i{color:var(--faint);font-style:normal;font-size:.78rem}
+.bar-row .bt{display:block;height:12px;border-radius:4px;background:var(--panel-3);overflow:hidden}
+.bar-row .bt i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--lime));min-width:2px}
+.bar-row b{font-family:ui-monospace,monospace;font-size:.9rem;text-align:right}
+details.faq{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);margin:9px 0}
+details.faq summary{cursor:pointer;padding:14px 17px;font-weight:600;font-size:.96rem;list-style:none}
+details.faq summary::-webkit-details-marker{display:none}
+details.faq summary:before{content:"+";color:var(--cyan);margin-right:10px;font-family:ui-monospace,monospace}
+details.faq[open] summary:before{content:"-"}
+details.faq[open] summary{border-bottom:1px solid var(--line)}
+details.faq>div{padding:14px 17px;color:var(--muted);font-size:.92rem}
+.rfcs{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:0 22px;
+border-top:1px solid var(--line)}
+.rfcs>div{padding:10px 0;border-bottom:1px solid var(--line);font-size:.9rem;color:var(--muted)}
+.rfcs b{font-family:ui-monospace,monospace;font-size:.8rem;color:var(--cyan);margin-right:8px}
+.rfcs i{display:block;color:var(--faint);font-style:normal;font-size:.84rem;margin-top:2px}
+
+/* A copy button on every code block: the whole page is commands, and
+   selecting a multi-line <pre> on a phone is a small ordeal. */
+.codewrap{position:relative}
+.codewrap button.cp{position:absolute;top:8px;right:8px;z-index:2;background:var(--panel-3);
+color:var(--muted);border:1px solid var(--line-2);border-radius:7px;padding:4px 10px;
+font:inherit;font-size:.72rem;cursor:pointer;opacity:.75}
+.codewrap button.cp:hover{opacity:1;color:var(--text);border-color:var(--line-3)}
+.codehead+pre,.codewrap>pre{margin-top:0}
+
 /* ---------------------------------------------------------- footer */
 footer.site{border-top:1px solid var(--line);margin-top:60px;padding:38px 0 46px;background:var(--bg-soft)}
 footer.site .cols{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:26px}
@@ -321,6 +360,8 @@ header.nav .wrap{height:auto;padding-top:10px;padding-bottom:10px;flex-wrap:wrap
 }
 @media(max-width:640px){
 .wrap{padding:0 18px}
+.bar-row{grid-template-columns:1fr;gap:5px}
+.bar-row b{text-align:left}
 /* A 210px label column leaves nothing for the value on a phone: let
    the label take the full row and the value sit under it. */
 .check b{min-width:0;flex:1 1 100%}
@@ -381,6 +422,40 @@ impl<'a> Meta<'a> {
         self
     }
 }
+
+/// Adds a copy button to every code block, at runtime.
+///
+/// Kept out of the page template because its JavaScript braces would
+/// have to be doubled inside a `format!` string, which is exactly the
+/// kind of edit that silently mangles a script months later.
+const COPY_JS: &str = r#"<script>
+// A copy button on every code block. The page is mostly commands, and
+// selecting a multi-line <pre> on a phone is a small ordeal. Added at
+// runtime so no server-side template has to carry button markup, and
+// the page still works with JavaScript off - it just has no button.
+(function () {
+  if (!navigator.clipboard) return;
+  document.querySelectorAll('pre').forEach(function (pre) {
+    var head = pre.previousElementSibling;
+    var host = document.createElement('div');
+    host.className = 'codewrap';
+    var anchor = (head && head.classList.contains('codehead')) ? head : pre;
+    anchor.parentNode.insertBefore(host, anchor);
+    if (anchor !== pre) host.appendChild(anchor);
+    host.appendChild(pre);
+    var b = document.createElement('button');
+    b.className = 'cp'; b.type = 'button'; b.textContent = 'copy';
+    b.addEventListener('click', function () {
+      navigator.clipboard.writeText(pre.innerText).then(function () {
+        b.textContent = 'copied'; b.style.color = 'var(--green)';
+        setTimeout(function () { b.textContent = 'copy'; b.style.color = ''; }, 1400);
+      });
+    });
+    host.appendChild(b);
+  });
+})();
+</script>
+"#;
 
 pub(crate) fn page(meta: &Meta, body: &str) -> String {
     let mut nav = String::new();
@@ -455,6 +530,7 @@ pub(crate) fn page(meta: &Meta, body: &str) -> String {
   <div class="fine">GAP {v} - open specification, verifiable settlement. Every score on this
   site is derived from a signed verdict you can read in full.</div>
 </div></footer>
+{copyjs}
 </body></html>"##,
         t = esc(meta.title),
         d = esc(meta.description),
@@ -466,6 +542,7 @@ pub(crate) fn page(meta: &Meta, body: &str) -> String {
         },
         jsonld = jsonld,
         style = STYLE,
+        copyjs = COPY_JS,
         nav = nav,
         body = body,
         v = crate::VERSION,
@@ -475,11 +552,28 @@ pub(crate) fn page(meta: &Meta, body: &str) -> String {
 /// A section wrapper: `<section>` + `.wrap`, with an optional heading
 /// block. Used by every content page so vertical rhythm is decided once.
 pub(crate) fn section(kicker: &str, heading: &str, lead: &str, inner: &str) -> String {
+    section_aside(kicker, heading, lead, "", inner)
+}
+
+/// A section with something in the right-hand column.
+///
+/// Intro prose is capped at a readable measure, which in a 1140px
+/// container leaves a wide empty gutter beside every heading. Either
+/// commit to a narrow editorial column or put something useful in that
+/// space; this does the latter, with a figure or a link that belongs to
+/// the section rather than filler.
+pub(crate) fn section_aside(
+    kicker: &str,
+    heading: &str,
+    lead: &str,
+    aside: &str,
+    inner: &str,
+) -> String {
     let head = if heading.is_empty() {
         String::new()
     } else {
         format!(
-            r#"<div class="sec-head">{k}<h2>{h}</h2>{l}</div>"#,
+            r#"<div class="sec-head"><div>{k}<h2>{h}</h2>{l}</div>{a}</div>"#,
             k = if kicker.is_empty() {
                 String::new()
             } else {
@@ -490,6 +584,11 @@ pub(crate) fn section(kicker: &str, heading: &str, lead: &str, inner: &str) -> S
                 String::new()
             } else {
                 format!(r#"<p class="lead" style="margin-top:10px">{lead}</p>"#)
+            },
+            a = if aside.is_empty() {
+                String::new()
+            } else {
+                format!(r#"<div class="aside">{aside}</div>"#)
             }
         )
     };

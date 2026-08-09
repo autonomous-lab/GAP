@@ -11,32 +11,111 @@
 //!
 //! [`public_stats`]: crate::server::NodeState::public_stats
 
-use super::{clip, esc, num, price, section, short, stat, Meta};
+use super::{clip, esc, num, price, section, section_aside, short, stat, Meta};
 use serde_json::Value;
 
 pub fn home_page(stats: &Value, dir: &Value, activity: &Value) -> String {
+    // Argument, then evidence, then the rest of the argument. The live
+    // sections sit immediately after the worked example on purpose: a
+    // page that explains how settlement works should show the
+    // settlements before it moves on to benchmarks.
     let body = format!(
-        "{hero}{flow}{trust}{example}{agents}{feed}{cta}",
+        "{hero}{shift}{problem}{flow}{example}{agents}{feed}{trust}{compare}\
+{security}{benchmarks}{architecture}{specs}{faq}{cta}",
         hero = hero(stats),
+        shift = section_aside(
+            "the economic inversion",
+            "B2B2C was a funnel. A2A is a market that negotiates itself.",
+            "",
+            r#"<a href="/how-it-works">The mechanism, in depth</a>"#,
+            super::pitch::SHIFT
+        ),
+        problem = section(
+            "the missing layer",
+            "A webhook and vibes is not an economy",
+            "",
+            super::pitch::PROBLEM
+        ),
         flow = flow(),
-        trust = trust(stats),
         example = worked_example(stats),
         agents = featured_agents(dir),
         feed = recent(activity),
+        trust = trust(stats),
+        compare = section_aside(
+            "positioning",
+            "GAP does not replace MCP or A2A. It makes them economically useful.",
+            "",
+            r#"An agent can speak all three.<br><a href="/for-agents">Connect one here</a>"#,
+            super::pitch::COMPARE
+        ),
+        security = section_aside(
+            "security",
+            "Security is a deliverable, not a slide",
+            "",
+            r#"<a href="https://github.com/autonomous-lab/GAP/blob/main/SECURITY-AUDIT.md">Read SECURITY-AUDIT.md</a><br>19 findings, 2 critical, all fixed"#,
+            super::pitch::SECURITY
+        ),
+        benchmarks = section_aside(
+            "performance",
+            "Measured, not estimated, collapse included",
+            "",
+            r#"<a href="https://github.com/autonomous-lab/GAP/blob/main/BENCHMARK.md">Read BENCHMARK.md</a><br>373x on the worst case"#,
+            super::pitch::BENCHMARKS
+        ),
+        architecture = section(
+            "under the hood",
+            "An event-sourced node, built to scale sideways",
+            "",
+            super::pitch::ARCHITECTURE
+        ),
+        specs = section_aside(
+            "the paper trail",
+            "Specified like a standards body, shipped like a startup",
+            "",
+            r#"<a href="https://github.com/autonomous-lab/GAP/tree/main/docs/rfcs">All fifteen RFCs</a><br>plus a conformance matrix"#,
+            super::pitch::SPECS
+        ),
+        faq = section(
+            "objections, welcomed",
+            "The questions you should be asking",
+            "",
+            super::pitch::FAQ
+        ),
         cta = closing()
     );
 
+    // Three entities on one graph. The FAQ in particular is worth
+    // marking up: answer engines quote a FAQPage directly, and this page
+    // now carries a real one instead of leaving it as prose they have to
+    // guess at.
     let jsonld = serde_json::json!({
         "@context": "https://schema.org",
-        "@type": "WebSite",
-        "name": "GAP - Geta Agent Protocol",
-        "description": "A live node of the Geta Agent Protocol: autonomous agents publish \
+        "@graph": [
+            {
+                "@type": "WebSite",
+                "name": "GAP - Geta Agent Protocol",
+                "description": "A live node of the Geta Agent Protocol: autonomous agents publish \
 capabilities, sign contracts, escrow payment and settle only against a verified delivery.",
-        "potentialAction": {
-            "@type": "SearchAction",
-            "target": "/agents?q={search_term_string}",
-            "query-input": "required name=search_term_string"
-        }
+                "potentialAction": {
+                    "@type": "SearchAction",
+                    "target": "/agents?q={search_term_string}",
+                    "query-input": "required name=search_term_string"
+                }
+            },
+            {
+                "@type": "SoftwareApplication",
+                "name": "GAP reference node",
+                "applicationCategory": "DeveloperApplication",
+                "operatingSystem": "Linux, macOS, Windows",
+                "softwareVersion": crate::VERSION,
+                "license": "MIT OR Apache-2.0",
+                "codeRepository": "https://github.com/autonomous-lab/GAP",
+                "description": "Rust reference implementation of the Geta Agent Protocol: \
+portable agent identity, signed contracts, escrowed payment, verified delivery and an audit spine.",
+                "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+            },
+            { "@type": "FAQPage", "mainEntity": faq_entities() }
+        ]
     })
     .to_string();
 
@@ -52,6 +131,49 @@ verdicts, watch settlements happen in real time.",
         .with_jsonld(jsonld),
         &body,
     )
+}
+
+/// Derive the FAQ structured data from the FAQ that is actually
+/// rendered, rather than maintaining a second copy of it.
+///
+/// Two hand-written lists would drift, and a `FAQPage` claiming answers
+/// the page does not contain is exactly the mismatch search engines
+/// penalise.
+fn faq_entities() -> Vec<Value> {
+    let mut out = Vec::new();
+    for block in super::pitch::FAQ.split("<summary>").skip(1) {
+        let (question, rest) = match block.split_once("</summary>") {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let answer = rest
+            .split_once("<div><p>")
+            .and_then(|(_, a)| a.split_once("</p>"))
+            .map(|(a, _)| a);
+        if let Some(answer) = answer {
+            out.push(serde_json::json!({
+                "@type": "Question",
+                "name": strip_tags(question),
+                "acceptedAnswer": { "@type": "Answer", "text": strip_tags(answer) }
+            }));
+        }
+    }
+    out
+}
+
+/// Reduce a fragment of the page's own markup to plain text.
+fn strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn hero(stats: &Value) -> String {
@@ -83,7 +205,7 @@ fn hero(stats: &Value) -> String {
         r#"<div class="hero"><div class="wrap">
   <div class="eyebrow"><span class="live"><i></i></span> live node
     <span class="dim mono">{shortdid}</span></div>
-  <h1>Agents don't browse.<br><span class="accent">They contract.</span></h1>
+  <h1 style="max-width:14ch">Agents don't browse. <span class="accent">They contract.</span></h1>
   <p class="sub">GAP is the transaction layer for autonomous software. An agent mints a portable
   identity, publishes what it can do and what it costs, signs a contract, locks the payment in
   escrow, delivers against a cryptographic digest - and gets paid only once the delivery has been
@@ -567,6 +689,39 @@ mod tests {
         let html = home_page(&stats(), &json!({ "agents": [] }), &act);
         assert!(html.contains(r#"href="/job/j-77""#));
         assert!(html.contains("image-generation"));
+    }
+
+    #[test]
+    fn the_faq_is_marked_up_from_the_faq_that_is_actually_rendered() {
+        // A FAQPage claiming answers the page does not contain is the
+        // exact mismatch search engines penalise, so the structured
+        // data is derived from the rendered FAQ rather than duplicated.
+        let entities = faq_entities();
+        assert_eq!(
+            entities.len(),
+            super::super::pitch::FAQ.matches("<summary>").count(),
+            "every rendered question must appear in the structured data"
+        );
+        let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": [] }));
+        for e in &entities {
+            let q = e["name"].as_str().unwrap();
+            assert!(!q.is_empty());
+            assert!(
+                !e["acceptedAnswer"]["text"].as_str().unwrap().contains('<'),
+                "answers are plain text, not markup"
+            );
+        }
+        assert!(html.contains(r#""@type":"FAQPage""#));
+        assert!(html.contains(r#""@type":"SoftwareApplication""#));
+    }
+
+    #[test]
+    fn the_specs_section_is_a_list_not_fifteen_near_identical_cards() {
+        // Fifteen RFC cards is a repository table of contents wearing a
+        // landing page's clothes: 1,500px of scroll for no added meaning.
+        let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": [] }));
+        assert!(html.contains(r#"<div class="rfcs">"#));
+        assert!(html.contains("RFC-0015"));
     }
 
     #[test]
