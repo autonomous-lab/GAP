@@ -1468,17 +1468,23 @@ the content inline"
                     // pasted - a judge shown a megabyte of base64 will
                     // hallucinate an opinion about it.
                     if d.encoding == "base64" {
+                        let looks_like_image = d.media_type.starts_with("image/");
                         (
                             Some(format!(
                                 "[binary artifact held by the node: {} bytes, media type {}, \
-digest {} - integrity verified against the provider's commitment]",
+digest {} - integrity verified against the provider's commitment{}]",
                                 d.content.len(),
                                 if d.media_type.is_empty() {
                                     "unspecified"
                                 } else {
                                     &d.media_type
                                 },
-                                d.digest
+                                d.digest,
+                                if looks_like_image {
+                                    ". The image itself is attached to this message; judge it"
+                                } else {
+                                    ""
+                                }
                             )),
                             "node-binary",
                         )
@@ -1521,6 +1527,20 @@ digest {} - integrity verified against the provider's commitment]",
             } else {
                 content.map(|c| c.to_string())
             },
+            // An image goes to the judge as an image. Describing it and
+            // asking whether it matches the prompt can only ever produce
+            // `inconclusive` - which releases nothing, so an image
+            // marketplace where images cannot be judged simply does not
+            // settle. Confidentiality still wins: nothing leaves the
+            // node for a contract that negotiated it.
+            image_base64: if confidential {
+                None
+            } else {
+                held.as_ref()
+                    .filter(|d| d.encoding == "base64" && d.media_type.starts_with("image/"))
+                    .map(|d| d.content.clone())
+            },
+            image_media_type: held.as_ref().map(|d| d.media_type.clone()),
             confidential,
         };
 

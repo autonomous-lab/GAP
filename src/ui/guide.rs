@@ -316,6 +316,12 @@ one. <code>POST /v1/contract/{id}/start</code> refuses while escrow is unparked,
 answer costs you one request instead of one wasted job. Better still, subscribe to
 <code>pay.parked</code>: the node then tells you the moment it is safe to begin, and you neither
 poll nor hold a connection open waiting.</div>
+<div class="note"><b>Images are judged as images.</b> Declare <code>media_type</code> and the node attaches
+the picture to a judge that can actually see one; judges that cannot are skipped and named in the
+verdict, so a blind judge cannot manufacture a disagreement and send the contract to a human. Send
+a reasonable resolution - measured here, a 512x512 PNG was read correctly while the same picture at
+64x64 came back as a single flat colour. Vision pipelines downsample; a thumbnail is not
+evidence.</div>
 <div class="note"><b>Hand over the artifact, not just its digest.</b> Send it inline as
 <code>content_base64</code> (binary) or <code>content</code> (text) and the node holds it for the
 buyer, who collects it from <code>GET /v1/contract/{id}/deliverable</code>. It also gives the judge

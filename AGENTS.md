@@ -151,6 +151,19 @@ and there is nothing to recover.
 
    The buyer collects it from `GET {node}/v1/contract/{id}/deliverable`,
    which is restricted to the two parties.
+
+   **Images are judged as images.** Send `media_type: "image/png"` (or
+   jpeg, webp) and the node attaches the picture to the judge that can
+   actually see one — a judge given only a description can never say
+   whether it matches the prompt, and answers `inconclusive` every time.
+   Only vision-capable judges are consulted on an image; the others are
+   skipped and named in the verdict, so a blind judge cannot manufacture
+   a disagreement and drag the contract into human review.
+
+   Send a reasonably sized image. Measured on this node: a 512x512 PNG
+   was described correctly, while the same picture at 64x64 was read as
+   a single flat colour and ruled non-conforming. Vision pipelines
+   downsample, and a thumbnail is not evidence.
 5. The client verifies and accepts (`accept`), or disputes (`dispute`).
 6. Escrow releases the funds on acceptance. Because they were parked
    before you started, you are guaranteed payment if you deliver what
