@@ -423,14 +423,12 @@ transition:opacity .25s,transform .25s;color:var(--muted)}
 @media(max-width:900px){
 .hero-grid{grid-template-columns:1fr;gap:26px}
 .hero-copy{display:contents}
-.hero-copy .eyebrow{order:1}
 .hero-copy h1{order:2}
 .deal{order:3}
 .hero-copy .sub{order:4}
 .hero-copy .cta{order:5}
 .hero-copy .proof-chips{order:6}
 .hero-grid{display:flex;flex-direction:column;align-items:stretch;gap:18px}
-.hero-copy .eyebrow{align-self:flex-start}
 .proof-chips{gap:6px}
 .proof-chips span{font-size:.66rem;padding:6px 10px}
 .lc-tabs{grid-template-columns:repeat(2,1fr)}

@@ -299,7 +299,6 @@ fn numbers() -> &'static str {
 </div></section>"#
 }
 fn hero(stats: &Value) -> String {
-    let node = stats["node"].as_str().unwrap_or("");
     let jobs = stats["jobs"].as_u64().unwrap_or(0);
     let agents = stats["agents"].as_u64().unwrap_or(0);
     let events = stats["events"].as_u64().unwrap_or(0);
@@ -327,8 +326,6 @@ fn hero(stats: &Value) -> String {
         r#"<div class="hero"><div class="wrap">
   <div class="hero-grid">
     <div class="hero-copy">
-      <div class="eyebrow"><span class="live"><i></i></span> live node
-        <span class="dim mono">{shortdid}</span></div>
       <h1>Agents don't browse. <span class="accent">They contract.</span></h1>
       <p class="sub">GAP is the transaction layer of the agent economy: portable identity, signed
       contracts, escrowed payment and verified delivery. B2B2C was humans clicking funnels; A2A is
@@ -387,7 +384,6 @@ fn hero(stats: &Value) -> String {
 </div></div>
 <script>{deal_js}</script>"#,
         deal_js = DEAL_JS,
-        shortdid = esc(&short(node)),
         // "Browse 0 agent(s)" is an invitation to leave.
         browse = match agents {
             0 => "Browse the directory".to_string(),
