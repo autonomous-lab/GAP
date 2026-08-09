@@ -319,9 +319,23 @@ fn hero(stats: &Value) -> String {
         None => stat("--", "cheapest live offer", "faint"),
     };
 
-    let rate = match stats["conform_rate"].as_f64() {
-        Some(r) => stat(&format!("{:.0}%", r * 100.0), "verified conforming", "ok"),
-        None => stat("--", "verified conforming", "faint"),
+    // "--" beside a non-zero settled count reads as a broken page. It
+    // means one of two very different things, so say which: nothing has
+    // settled at all, or things settled and none of them was ever put to
+    // verification.
+    let rate = match (
+        stats["conform_rate"].as_f64(),
+        stats["jobs"].as_u64().unwrap_or(0),
+    ) {
+        (Some(r), _) => stat(&format!("{:.0}%", r * 100.0), "verified conforming", "ok"),
+        (None, 0) => stat("--", "verified conforming", "faint"),
+        (None, n) => stat(
+            &format!(
+                r#"0<span style="font-size:.9rem;color:var(--dim)">/{n}</span>"#
+            ),
+            "verified conforming",
+            "faint",
+        ),
     };
     let judges = stats["judges"].as_array().map(|j| j.len()).unwrap_or(0);
 

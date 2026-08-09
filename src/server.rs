@@ -832,13 +832,13 @@ the content inline"
 
     /// Client accepts delivery; escrow releases automatically.
     pub fn accept_delivery(&mut self, client_token: &str, contract_id: &str) -> Result<Value> {
-        let client = self.agent_by_token(client_token)?;
+        let client = self.agent_by_token(client_token)?.identity.clone();
         let contract = self
             .contracts
             .get(contract_id)
             .cloned()
             .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
-        if contract.client != *client.identity.did() {
+        if contract.client != *client.did() {
             return Err(Error::Unauthorized("only the client may accept".into()));
         }
         if contract.state != ContractState::Delivered {
@@ -870,23 +870,62 @@ the content inline"
             }
         }
 
+        // A client may settle without ever asking for verification, and
+        // in practice they do: the observed sequence is deliver then
+        // accept, with no verify in between. That left every settled job
+        // in the public record with no ruling at all, and the node's own
+        // conformance rate undefined while jobs piled up underneath it.
+        //
+        // So when nothing has judged this delivery yet, run the
+        // deterministic tier here. It costs nothing - digest and
+        // deadline, no model call - and it is the tier the protocol
+        // calls authoritative anyway, so there is no reason for it to be
+        // optional. The subjective tier stays opt-in through /verify.
+        //
+        // It records, it does not block: the client's explicit
+        // acceptance still governs settlement. A digest mismatch is
+        // captured in the job record for the provider's reputation
+        // rather than used to overrule a buyer who has seen the work and
+        // says it is fine.
+        if !self.verdicts.contains_key(contract_id) {
+            let held = self.deliverable_of(contract_id);
+            let evidence = crate::verifier::Evidence {
+                contract_id: contract_id.to_string(),
+                capability_id: contract.capability_id.clone(),
+                // Deterministic tier only: no criteria means no judge is
+                // consulted even if one is configured.
+                acceptance_criteria: vec![],
+                deadline: contract.terms.deadline,
+                delivered_at: now_unix(),
+                declared_hash: contract.deliverable_hash.clone().unwrap_or_default(),
+                computed_hash: held.as_ref().map(|d| d.digest.clone()),
+                deliverable_excerpt: None,
+                image_base64: None,
+                image_media_type: None,
+                confidential: contract.terms.confidentiality.is_some(),
+            };
+            let verdict = crate::verifier::verify_panel(&self.node.identity, &evidence, &[], None);
+            self.verdicts.insert(contract_id.to_string(), verdict);
+        }
+
+
         // Build the signed acceptance + release envelopes.
         let acceptance = Envelope::new(
-            client.identity.did().clone(),
+            client.did().clone(),
             contract.provider.clone(),
             Kind::ExeAccept,
             json!({ "verdict": "accepted" }),
         )
         .for_contract(contract_id)
-        .sign(&client.identity);
+        .sign(&client);
         let release = Envelope::new(
-            client.identity.did().clone(),
+            client.did().clone(),
             self.node_did(),
             Kind::PayRelease,
             json!({}),
         )
         .for_contract(contract_id)
-        .sign(&client.identity);
+        .sign(&client);
 
         // On-chain path: submit release() to the GapEscrow contract.
         if let Some(relayer) = &self.relayer {
@@ -3457,6 +3496,73 @@ mod tests {
             Some(&format!("Bearer {provider_tok}")),
         );
         assert_eq!(status, 200, "funded work must be allowed to start");
+    }
+
+    #[test]
+    fn settling_without_asking_for_verification_still_records_a_verdict() {
+        // Observed in production: buyers go straight from deliver to
+        // accept-delivery, never calling /verify. Every settled job then
+        // landed in the public record with no ruling at all, and the
+        // node's conformance rate stayed undefined while jobs piled up.
+        // The deterministic tier costs nothing, so it runs anyway.
+        let arc = state();
+        let (id, client_tok, provider_tok) = funded_contract(&arc);
+        let digest = format!("sha256:{}", crate::sha256_hex(b"the work"));
+        route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/deliver"),
+            json!({ "deliverable_hash": digest, "content": "the work" })
+                .to_string()
+                .as_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        // No /verify call at all.
+        let (status, _) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/accept-delivery"),
+            b"",
+            Some(&format!("Bearer {client_tok}")),
+        );
+        assert_eq!(status, 200);
+
+        let (_, act) = route(&arc, "GET", "/v1/activity", b"", None);
+        let job = &act["jobs"][0];
+        assert!(
+            job["verdict"].is_string(),
+            "a settled job must carry a ruling: {act}"
+        );
+        assert_eq!(job["verdict"], json!("conforms"), "integrity held: {act}");
+    }
+
+    #[test]
+    fn an_automatic_verdict_records_but_never_blocks_the_buyer() {
+        // The buyer has seen the work and says it is fine. A digest the
+        // node computed on its own must land in the provider's record
+        // without overruling that - blocking here would turn a
+        // convenience into a veto nobody asked for.
+        let arc = state();
+        let (id, client_tok, provider_tok) = funded_contract(&arc);
+        // Commit to one thing, hand over nothing: the node holds no
+        // artifact, so integrity is unprovable rather than violated.
+        route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/deliver"),
+            json!({ "deliverable_hash": format!("sha256:{}", "ab".repeat(32)) })
+                .to_string()
+                .as_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        let (status, out) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/accept-delivery"),
+            b"",
+            Some(&format!("Bearer {client_tok}")),
+        );
+        assert_eq!(status, 200, "acceptance must still succeed: {out}");
     }
 
     #[test]

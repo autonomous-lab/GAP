@@ -53,9 +53,13 @@ pub fn activity_page(recent: &Value, stats: &Value) -> String {
         .max()
         .unwrap_or(0);
 
-    let rate = match stats["conform_rate"].as_f64() {
-        Some(r) => super::stat(&format!("{:.0}%", r * 100.0), "conforming", "ok"),
-        None => super::stat("--", "conforming", "faint"),
+    let rate = match (
+        stats["conform_rate"].as_f64(),
+        stats["jobs"].as_u64().unwrap_or(0),
+    ) {
+        (Some(r), _) => super::stat(&format!("{:.0}%", r * 100.0), "conforming", "ok"),
+        (None, 0) => super::stat("--", "conforming", "faint"),
+        (None, n) => super::stat(&format!("0/{n}"), "conforming", "faint"),
     };
 
     let body = format!(
