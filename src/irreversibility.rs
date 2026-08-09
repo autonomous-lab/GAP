@@ -30,9 +30,9 @@ impl IrreversibilityClass {
         match self {
             IrreversibilityClass::Reversible => 0,
             IrreversibilityClass::External => 0,
-            IrreversibilityClass::Financial => 3600,   // 1h
-            IrreversibilityClass::Legal => 86400,      // 24h
-            IrreversibilityClass::Medical => 86400,    // 24h
+            IrreversibilityClass::Financial => 3600, // 1h
+            IrreversibilityClass::Legal => 86400,    // 24h
+            IrreversibilityClass::Medical => 86400,  // 24h
         }
     }
 
@@ -65,9 +65,7 @@ impl CoolingOffTimer {
         declared_duration: Option<u64>,
     ) -> Self {
         let minimum = class.default_cooling_off();
-        let duration = declared_duration
-            .map(|d| d.max(minimum))
-            .unwrap_or(minimum);
+        let duration = declared_duration.map(|d| d.max(minimum)).unwrap_or(minimum);
         Self {
             pending_id: crate::new_id("pend"),
             class,
@@ -205,9 +203,7 @@ impl IrreversibilityGuard {
     /// Execute the action — only allowed after the window elapses.
     pub fn execute(&mut self, now: u64, signer: &AgentIdentity) -> Result<CoolingOffReceipt> {
         if self.withdrawn {
-            return Err(Error::Other(
-                "cannot execute: consent was withdrawn".into(),
-            ));
+            return Err(Error::Other("cannot execute: consent was withdrawn".into()));
         }
         if !self.timer.elapsed(now) {
             return Err(Error::Other(format!(

@@ -185,10 +185,7 @@ impl Envelope {
 
     /// Verify the envelope's signature against its `from` DID.
     pub fn verify(&self) -> Result<()> {
-        let sig_hex = self
-            .signature
-            .as_ref()
-            .ok_or(Error::BadSignature)?;
+        let sig_hex = self.signature.as_ref().ok_or(Error::BadSignature)?;
         let sig_bytes: [u8; 64] = hex::decode(sig_hex)
             .map_err(|_| Error::BadSignature)?
             .try_into()
@@ -333,7 +330,12 @@ mod tests {
             Kind::PrincipalBind,
             Kind::PrincipalUnbind,
         ] {
-            assert_eq!(Kind::parse(kind.as_str()), Some(kind), "parse({})", kind.as_str());
+            assert_eq!(
+                Kind::parse(kind.as_str()),
+                Some(kind),
+                "parse({})",
+                kind.as_str()
+            );
         }
         assert_eq!(Kind::parse("not.a.kind"), None);
         assert_eq!(Kind::parse(""), None);
@@ -356,7 +358,10 @@ mod tests {
         env.protocol = PROTOCOL.into();
 
         env.version = "99.0.0".into();
-        assert!(matches!(env.validate(300), Err(Error::UnsupportedVersion(_))));
+        assert!(matches!(
+            env.validate(300),
+            Err(Error::UnsupportedVersion(_))
+        ));
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub struct Capability {
 /// A price in GAP's monetary model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Price {
+    #[serde(deserialize_with = "crate::contract::de_f64_from_string")]
     pub amount: f64,
     pub currency: String,
     /// One of: fixed, per-unit, subscription, commission.
@@ -189,7 +190,8 @@ impl Registry {
         ann.verify()?;
         let ttl = ann.ttl_seconds;
         let expires = self.now().saturating_add(ttl);
-        self.announcements.insert(ann.agent_did.clone(), (ann, expires));
+        self.announcements
+            .insert(ann.agent_did.clone(), (ann, expires));
         Ok(())
     }
 
@@ -220,9 +222,10 @@ impl Registry {
                     return false;
                 }
                 // Name filter: at least one capability matches the name.
-                let name_ok = q.name.as_ref().is_none_or(|n| {
-                    ann.capabilities.iter().any(|c| c.name == *n)
-                });
+                let name_ok = q
+                    .name
+                    .as_ref()
+                    .is_none_or(|n| ann.capabilities.iter().any(|c| c.name == *n));
                 if !name_ok {
                     return false;
                 }
@@ -241,18 +244,18 @@ impl Registry {
                     // An announcement with no priced capability fails a
                     // price query only if the name matches that capability.
                     let no_priced_matching = candidates.is_empty()
-                        && q.name.as_ref().is_some_and(|n| {
-                            ann.capabilities.iter().any(|c| c.name == *n)
-                        });
+                        && q.name
+                            .as_ref()
+                            .is_some_and(|n| ann.capabilities.iter().any(|c| c.name == *n));
                     if !within && !no_priced_matching {
                         return false;
                     }
                 }
                 q.languages.iter().all(|l| ann.languages.contains(l))
                     && q.regions.iter().all(|r| ann.regions.contains(r))
-                    && q.required_autonomy.as_ref().is_none_or(|a| {
-                        ann.autonomy_levels.contains(a)
-                    })
+                    && q.required_autonomy
+                        .as_ref()
+                        .is_none_or(|a| ann.autonomy_levels.contains(a))
             })
             .filter(|(ann, _)| {
                 q.min_reputation.is_none_or(|min| {
@@ -364,12 +367,7 @@ mod tests {
         let mut reg = Registry::new();
         let (a, mut cap_a) = make_agent("a");
         cap_a.name = "translation".into();
-        let mut ann = Announcement::signed(
-            &a,
-            vec![cap_a],
-            vec![],
-            3600,
-        );
+        let mut ann = Announcement::signed(&a, vec![cap_a], vec![], 3600);
         ann.languages = vec!["fr".into(), "en".into()];
         ann.regions = vec!["EU".into()];
         ann.autonomy_levels = vec!["propose".into(), "execute-notify".into()];
@@ -405,12 +403,7 @@ mod tests {
     fn registry_price_filter_applies_to_matching_capability_only() {
         let mut reg = Registry::new();
         let (agent, _) = make_agent("multi");
-        let mut combined = Announcement::signed(
-            &agent,
-            vec![],
-            vec![],
-            3600,
-        );
+        let mut combined = Announcement::signed(&agent, vec![], vec![], 3600);
         combined.capabilities = vec![
             Capability {
                 id: "cap:cheap:translation".into(),

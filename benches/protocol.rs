@@ -11,15 +11,15 @@
 //! Quick: cargo bench --bench protocol -- --warm-up-time 1 --measurement-time 3
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use std::hint::black_box;
 use gap::contract::{Contract, Terms};
-use gap::payment::Escrow;
 use gap::identity::AgentIdentity;
 use gap::message::{Envelope, Kind};
+use gap::payment::Escrow;
 use gap::receipt_chain::ChainLedger;
 use gap::storage::sqlite::SqliteStorage;
 use gap::storage::Storage;
 use serde_json::json;
+use std::hint::black_box;
 
 fn terms() -> Terms {
     Terms {
@@ -71,7 +71,13 @@ fn bench_contract(c: &mut Criterion) {
     let ctr = Contract::propose(&client, provider.did().clone(), "cap:p:analyze", t, true);
     g.bench_function("sign_and_accept", |b| {
         b.iter(|| {
-            let c = Contract::propose(&client, provider.did().clone(), "cap:p:analyze", terms(), true);
+            let c = Contract::propose(
+                &client,
+                provider.did().clone(),
+                "cap:p:analyze",
+                terms(),
+                true,
+            );
             black_box(c.accept_by_provider(&provider).ok())
         })
     });
@@ -86,7 +92,13 @@ fn bench_escrow(c: &mut Criterion) {
     let client = AgentIdentity::generate();
     let provider = AgentIdentity::generate();
     let node = AgentIdentity::generate();
-    let ctr = Contract::propose(&client, provider.did().clone(), "cap:p:analyze", terms(), true);
+    let ctr = Contract::propose(
+        &client,
+        provider.did().clone(),
+        "cap:p:analyze",
+        terms(),
+        true,
+    );
     let ctr = ctr.accept_by_provider(&provider).unwrap();
     let mut escrow = Escrow::new(node.clone());
     escrow.register(ctr.clone()).unwrap();
@@ -152,16 +164,16 @@ fn bench_storage_sqlite(c: &mut Criterion) {
     let mut storage = SqliteStorage::open(":memory:").unwrap();
     g.bench_function("append_event", |b| {
         b.iter(|| {
-            storage
-                .append_event("work.done", json!({ "t": 1 }))
-                .ok();
+            storage.append_event("work.done", json!({ "t": 1 })).ok();
             black_box(())
         })
     });
     // Pre-fill so reads hit a populated table.
     let mut storage2 = SqliteStorage::open(":memory:").unwrap();
     for i in 0..10_000 {
-        storage2.append_event("work.done", json!({ "i": i })).unwrap();
+        storage2
+            .append_event("work.done", json!({ "i": i }))
+            .unwrap();
     }
     g.bench_function("read_events_100", |b| {
         b.iter(|| black_box(storage2.events_after(0, 100)))

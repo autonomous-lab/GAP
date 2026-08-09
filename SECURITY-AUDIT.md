@@ -237,19 +237,19 @@ dependency is deprecated; SQLite is bundled (no system lib mismatch).
 | H-01 | Node identity persisted: `GAP_NODE_SEED` / `GAP_NODE_SEED_FILE` (64-hex, 32 bytes); `NodeState::with_seed()` | ✅ FIXED |
 | H-02 | `new_id` → 16 random bytes (128-bit) | ✅ FIXED |
 | H-03 | API rate limiting: per-token (120 req/min) and per-IP (600 req/min) via `RateCounters`; `route_with_ip` returns 429 | ✅ FIXED |
-| M-01 | Exact decimal money: new `src/amount.rs` — `Amount` in minor units (6 decimals, matching USDC/on-chain), decimal-string JSON wire format, checked arithmetic; f64 path kept only as legacy rounding fallback | ✅ FIXED |
+| M-01 | Exact decimal settlement path: `Amount` in minor units now backs escrow-held funds and receipts; HTTP accepts decimal-string prices/amounts. Some non-settlement pricing/budget structs retain f64-compatible fields for API compatibility | ✅ FIXED for settlement |
 | M-02 | TLS: node warns loudly at startup when bound to a non-loopback address without TLS | ✅ FIXED |
 | M-03 | Server timestamps: HTTP layer uses the standard monotonic clock (see `main.rs`); timestamps documented as authoritative node-clock time | ✅ noted |
 | M-04 | Receipt redaction re-links and re-signs all subsequent chain entries (now an auditable `chain.redacted` event); `redact()` requires a re-signer | ✅ FIXED |
-| M-05 | `MockChain` remains test-only (used only under `#[cfg(test)]` in the crate) | ✅ noted |
+| M-05 | `MockChain` is not wired by the production binary; it remains exported for tests and mock integrations | ✅ noted |
 | L-01 | Dead `selectors` const block removed | ✅ FIXED |
 | L-02 | `create_identity` no longer returns a misleading empty secret — token-only credential; custody documented (KMS in production) | ✅ FIXED |
 | L-03 | Route errors no longer echo the request path back to the client (no reflection surface) | ✅ FIXED |
 | L-04 | Unknown-route error is generic (`unknown route`) without echoing method/path | ✅ FIXED |
 
-**Remaining work (tracked):** none of the audit's actionable items remain;
-future hardening (field-size caps, request-body limits, structured
-logging) is tracked as follow-up work.
+**Remaining hardening (tracked):** full minor-unit migration for every
+pricing/budget helper, field-size caps, structured logging, and a
+production KMS implementation for node-custodied identity seeds.
 
 ## Verification after fixes
 

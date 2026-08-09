@@ -71,6 +71,7 @@ pub struct Step {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepTerms {
     #[serde(default)]
+    #[serde(deserialize_with = "crate::contract::de_opt_f64_from_string")]
     pub price_amount: Option<f64>,
     #[serde(default)]
     pub price_model: Option<String>,
@@ -110,6 +111,7 @@ fn default_failure() -> FailureMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Budget {
     #[serde(default)]
+    #[serde(deserialize_with = "crate::contract::de_opt_f64_from_string")]
     pub max_total: Option<f64>,
     #[serde(default)]
     pub currency: String,
@@ -182,10 +184,7 @@ impl Workflow {
         let mut ids = std::collections::HashSet::new();
         for step in &self.steps {
             if !ids.insert(step.step_id.clone()) {
-                return Err(Error::Other(format!(
-                    "duplicate step id: {}",
-                    step.step_id
-                )));
+                return Err(Error::Other(format!("duplicate step id: {}", step.step_id)));
             }
             if step.needs.contains(&step.step_id) {
                 return Err(Error::Other(format!(
@@ -271,9 +270,7 @@ impl Workflow {
                             }
                         }
                         _ => {
-                            return Err(Error::Other(format!(
-                                "malformed binding: {inner}"
-                            )));
+                            return Err(Error::Other(format!("malformed binding: {inner}")));
                         }
                     }
                 } else {
@@ -432,8 +429,19 @@ impl WorkflowEngine {
             .count()
     }
 
+    pub fn state_of(&self, step_id: &str) -> StepState {
+        self.step_states
+            .get(step_id)
+            .copied()
+            .unwrap_or(StepState::Pending)
+    }
+
     fn set_state(&mut self, step_id: &str, state: StepState) -> Result<()> {
-        let current = self.step_states.get(step_id).copied().unwrap_or(StepState::Pending);
+        let current = self
+            .step_states
+            .get(step_id)
+            .copied()
+            .unwrap_or(StepState::Pending);
         let ok = match (current, state) {
             (StepState::Pending, StepState::Provisioning) => true,
             (StepState::Pending, StepState::Running) => true, // provisioning optional
@@ -441,7 +449,10 @@ impl WorkflowEngine {
             (StepState::Pending, StepState::Delivered) => true, // direct delivery
             (StepState::Running, StepState::Delivered) => true,
             (StepState::Delivered, StepState::Accepted) => true,
-            (StepState::Pending | StepState::Provisioning | StepState::Running, StepState::Failed) => true,
+            (
+                StepState::Pending | StepState::Provisioning | StepState::Running,
+                StepState::Failed,
+            ) => true,
             (StepState::Failed, StepState::Skipped) => true,
             _ => false,
         };
@@ -540,10 +551,16 @@ mod tests {
         let mut inputs: HashMap<String, Value> = HashMap::new();
         inputs.insert("topic".into(), json!("quantum computing"));
         let mut scrape = step("scrape", vec![]);
-        scrape.inputs.insert("query".into(), "${workflow.topic}".into());
-        scrape.outputs.insert("raw".into(), "steps.scrape.deliverable".into());
+        scrape
+            .inputs
+            .insert("query".into(), "${workflow.topic}".into());
+        scrape
+            .outputs
+            .insert("raw".into(), "steps.scrape.deliverable".into());
         let mut analyze = step("analyze", vec!["scrape"]);
-        analyze.inputs.insert("data".into(), "${steps.scrape.raw}".into());
+        analyze
+            .inputs
+            .insert("data".into(), "${steps.scrape.raw}".into());
         let wf = Workflow::create(
             &sponsor,
             "pipeline",
@@ -557,7 +574,8 @@ mod tests {
 
         // Unknown output reference.
         let mut bad = step("x", vec![]);
-        bad.inputs.insert("in".into(), "${steps.scrape.nope}".into());
+        bad.inputs
+            .insert("in".into(), "${steps.scrape.nope}".into());
         let wf2 = Workflow::create(
             &sponsor,
             "bad-binding",
@@ -574,10 +592,14 @@ mod tests {
         let mut outs = HashMap::new();
         outs.insert("raw".into(), json!("lead: alice@example.com"));
         engine.deliver("scrape", outs).unwrap();
-        let resolved = engine.resolve_binding("${steps.scrape.raw}", &inputs).unwrap();
+        let resolved = engine
+            .resolve_binding("${steps.scrape.raw}", &inputs)
+            .unwrap();
         assert_eq!(resolved, json!("lead: alice@example.com"));
         // Workflow input resolution.
-        let resolved2 = engine.resolve_binding("${workflow.topic}", &inputs).unwrap();
+        let resolved2 = engine
+            .resolve_binding("${workflow.topic}", &inputs)
+            .unwrap();
         assert_eq!(resolved2, json!("quantum computing"));
         // Unknown binding fails.
         assert!(engine.resolve_binding("${steps.ghost.x}", &inputs).is_err());

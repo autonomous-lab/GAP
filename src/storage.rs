@@ -53,6 +53,25 @@ pub struct AnnouncementRecord {
     pub expires_at: u64,
 }
 
+/// A persisted node-custodied identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityRecord {
+    pub token: String,
+    pub did: String,
+    pub seed_hex: String,
+    pub created_at: u64,
+}
+
+/// A persisted escrow materialized state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EscrowRecord {
+    pub contract_id: String,
+    pub state: String,
+    pub held: String,
+    pub currency: String,
+    pub updated_at: u64,
+}
+
 /// The storage abstraction. Implementations MUST be safe to call from
 /// the runtime; errors map to [`Error`].
 pub trait Storage: Send {
@@ -74,14 +93,38 @@ pub trait Storage: Send {
     /// List contracts in a given state.
     fn contracts_in_state(&self, state: &str) -> Result<Vec<ContractRecord>>;
 
+    /// List all materialized contracts.
+    fn list_contracts(&self) -> Result<Vec<ContractRecord>>;
+
     /// Upsert an announcement.
     fn upsert_announcement(&mut self, record: &AnnouncementRecord) -> Result<()>;
 
     /// Read an announcement by agent DID.
     fn get_announcement(&self, agent_did: &str) -> Result<Option<AnnouncementRecord>>;
 
+    /// List all materialized announcements.
+    fn list_announcements(&self) -> Result<Vec<AnnouncementRecord>>;
+
     /// Remove expired announcements. Returns the number removed.
     fn reap_expired(&mut self) -> Result<usize>;
+
+    /// Upsert a node-custodied identity.
+    fn upsert_identity(&mut self, record: &IdentityRecord) -> Result<()>;
+
+    /// Read an identity by bearer token.
+    fn get_identity_by_token(&self, token: &str) -> Result<Option<IdentityRecord>>;
+
+    /// List all node-custodied identities.
+    fn list_identities(&self) -> Result<Vec<IdentityRecord>>;
+
+    /// Upsert an escrow's materialized state.
+    fn upsert_escrow(&mut self, record: &EscrowRecord) -> Result<()>;
+
+    /// Read an escrow by contract id.
+    fn get_escrow(&self, contract_id: &str) -> Result<Option<EscrowRecord>>;
+
+    /// List all escrow materialized states.
+    fn list_escrows(&self) -> Result<Vec<EscrowRecord>>;
 }
 
 /// Validate an event before persistence.
@@ -146,9 +189,17 @@ pub(crate) mod test_helpers {
         let mut rec2 = rec.clone();
         rec2.state = "accepted".into();
         storage.upsert_contract(&rec2).unwrap();
-        assert_eq!(storage.get_contract("urn:gap:ctr:1").unwrap().unwrap().state, "accepted");
+        assert_eq!(
+            storage
+                .get_contract("urn:gap:ctr:1")
+                .unwrap()
+                .unwrap()
+                .state,
+            "accepted"
+        );
         assert_eq!(storage.contracts_in_state("accepted").unwrap().len(), 1);
         assert_eq!(storage.contracts_in_state("signed").unwrap().len(), 0);
+        assert_eq!(storage.list_contracts().unwrap().len(), 1);
 
         // 4. Announcement upsert + read + expiry.
         let ann = AnnouncementRecord {
@@ -158,6 +209,7 @@ pub(crate) mod test_helpers {
         };
         storage.upsert_announcement(&ann).unwrap();
         assert!(storage.get_announcement("did:gap:agent").unwrap().is_some());
+        assert_eq!(storage.list_announcements().unwrap().len(), 1);
         // Not expired yet.
         assert_eq!(storage.reap_expired().unwrap(), 0);
         // Expire it and reap.
@@ -168,5 +220,38 @@ pub(crate) mod test_helpers {
         storage.upsert_announcement(&ann2).unwrap();
         assert_eq!(storage.reap_expired().unwrap(), 1);
         assert!(storage.get_announcement("did:gap:agent").unwrap().is_none());
+
+        // 5. Identity persistence.
+        let ident = IdentityRecord {
+            token: "gat_test".into(),
+            did: "did:gap:agent".into(),
+            seed_hex: "00".repeat(32),
+            created_at: 1000,
+        };
+        storage.upsert_identity(&ident).unwrap();
+        assert_eq!(
+            storage
+                .get_identity_by_token("gat_test")
+                .unwrap()
+                .unwrap()
+                .did,
+            "did:gap:agent"
+        );
+        assert_eq!(storage.list_identities().unwrap().len(), 1);
+
+        // 6. Escrow persistence.
+        let escrow = EscrowRecord {
+            contract_id: "urn:gap:ctr:1".into(),
+            state: "parked".into(),
+            held: "5.000000".into(),
+            currency: "EUR".into(),
+            updated_at: 1001,
+        };
+        storage.upsert_escrow(&escrow).unwrap();
+        assert_eq!(
+            storage.get_escrow("urn:gap:ctr:1").unwrap().unwrap().held,
+            "5.000000"
+        );
+        assert_eq!(storage.list_escrows().unwrap().len(), 1);
     }
 }

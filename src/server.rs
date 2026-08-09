@@ -14,9 +14,10 @@ use crate::identity::AgentIdentity;
 use crate::message::{now_unix, Envelope, Kind};
 use crate::payment::Escrow;
 use crate::relayer::{Chain, Relayer};
-use crate::storage::Storage;
+use crate::storage::{AnnouncementRecord, ContractRecord, EscrowRecord, IdentityRecord, Storage};
 use crate::sybil::RateCounters;
-use serde_json::{Value, json};
+use crate::workflow::{Budget, FailureMode, Workflow, WorkflowEngine};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -50,6 +51,8 @@ pub struct NodeState {
     contracts: HashMap<String, Contract>,
     /// contract_id -> escrow instance.
     escrows: HashMap<String, Escrow>,
+    /// workflow_id -> workflow manifest and engine state.
+    workflows: HashMap<String, (Workflow, WorkflowEngine)>,
     /// Optional on-chain relayer (when configured, escrow goes on-chain).
     relayer: Option<Relayer>,
     /// The audit spine.
@@ -64,6 +67,8 @@ pub struct NodeState {
     token_cap: u32,
     /// Per-IP cap (requests per minute); default 600.
     ip_cap: u32,
+    /// Optional admin token required for node-arbitrated settlement.
+    admin_token: Option<String>,
 }
 
 impl NodeState {
@@ -91,20 +96,107 @@ impl NodeState {
             Some(seed_bytes) => AgentIdentity::from_seed(&seed_bytes),
             None => AgentIdentity::generate(),
         };
+        let mut agents = HashMap::new();
+        let mut agents_by_did = HashMap::new();
+        for rec in storage.list_identities().unwrap_or_default() {
+            if let Ok(seed_bytes) = decode_seed_hex(&rec.seed_hex) {
+                let agent_identity = AgentIdentity::from_seed(&seed_bytes);
+                let did = agent_identity.did().to_string();
+                agents.insert(
+                    rec.token.clone(),
+                    RegisteredAgent {
+                        identity: agent_identity,
+                        announcement: None,
+                    },
+                );
+                agents_by_did.insert(did, rec.token);
+            }
+        }
+
+        let mut registry = Registry::new();
+        for rec in storage.list_announcements().unwrap_or_default() {
+            if let Ok(ann) = serde_json::from_str::<Announcement>(&rec.announcement_json) {
+                let _ = registry.announce(ann);
+            }
+        }
+
+        let mut contracts = HashMap::new();
+        for rec in storage.list_contracts().unwrap_or_default() {
+            if let Ok(mut contract) = serde_json::from_str::<Contract>(&rec.contract_json) {
+                if let Ok(state) = ContractState::parse(&rec.state) {
+                    contract.state = state;
+                }
+                contracts.insert(contract.contract_id.clone(), contract);
+            }
+        }
+
+        let mut escrows = HashMap::new();
+        for rec in storage.list_escrows().unwrap_or_default() {
+            if let Some(contract) = contracts.get(&rec.contract_id).cloned() {
+                if let (Ok(state), Ok(held)) = (
+                    crate::payment::EscrowState::parse(&rec.state),
+                    crate::amount::Amount::parse(&rec.held),
+                ) {
+                    if let Ok(escrow) =
+                        Escrow::restore(identity.clone(), contract, state, held, rec.currency)
+                    {
+                        escrows.insert(rec.contract_id, escrow);
+                    }
+                }
+            }
+        }
+
         Self {
             node: NodeIdentity { identity },
-            agents: HashMap::new(),
-            agents_by_did: HashMap::new(),
-            registry: Registry::new(),
-            contracts: HashMap::new(),
-            escrows: HashMap::new(),
+            agents,
+            agents_by_did,
+            registry,
+            contracts,
+            escrows,
+            workflows: HashMap::new(),
             relayer: None,
             storage,
             rate_limits: std::collections::HashMap::new(),
             ip_limits: std::collections::HashMap::new(),
             token_cap,
             ip_cap,
+            admin_token: None,
         }
+    }
+
+    /// Configure the node-arbitration admin token.
+    pub fn set_admin_token(&mut self, token: impl Into<String>) {
+        self.admin_token = Some(token.into());
+    }
+
+    fn persist_contract(&mut self, contract: &Contract) {
+        let record = ContractRecord {
+            contract_id: contract.contract_id.clone(),
+            client: contract.client.to_string(),
+            provider: contract.provider.to_string(),
+            capability_id: contract.capability_id.clone(),
+            state: contract.state.wire_name().into(),
+            contract_json: serde_json::to_string(contract).unwrap_or_else(|_| "{}".into()),
+            updated_at: now_unix(),
+        };
+        let _ = self.storage.upsert_contract(&record);
+    }
+
+    fn persist_escrow(
+        &mut self,
+        contract_id: &str,
+        state: crate::payment::EscrowState,
+        held: crate::amount::Amount,
+        currency: &str,
+    ) {
+        let record = EscrowRecord {
+            contract_id: contract_id.into(),
+            state: state.wire_name().into(),
+            held: held.to_string_decimal(),
+            currency: currency.into(),
+            updated_at: now_unix(),
+        };
+        let _ = self.storage.upsert_escrow(&record);
     }
 
     /// Enforce per-token and per-IP rate limits before processing a
@@ -174,6 +266,7 @@ impl NodeState {
         let identity = AgentIdentity::generate();
         let did = identity.did().to_string();
         let token = self.issue_token();
+        let seed_hex = identity.seed_hex();
         self.agents.insert(
             token.clone(),
             RegisteredAgent {
@@ -182,6 +275,12 @@ impl NodeState {
             },
         );
         self.agents_by_did.insert(did.clone(), token.clone());
+        let _ = self.storage.upsert_identity(&IdentityRecord {
+            token: token.clone(),
+            did: did.clone(),
+            seed_hex,
+            created_at: now_unix(),
+        });
         (did, token)
     }
 
@@ -205,7 +304,7 @@ impl NodeState {
             .agents
             .get_mut(token)
             .ok_or_else(|| Error::Unauthorized("invalid bearer token".into()))?;
-        let ann = Announcement::signed(
+        let mut ann = Announcement::signed(
             &agent.identity,
             capabilities,
             vec![Reachability {
@@ -214,11 +313,21 @@ impl NodeState {
             }],
             ttl_seconds,
         );
+        ann.languages = _languages;
+        ann.regions = _regions;
+        ann.resign(&agent.identity);
         ann.verify()?;
         self.registry.announce(ann.clone())?;
         let id = format!("urn:gap:ann:{}", &ann.agent_did.to_string()[..16]);
         agent.announcement = Some(ann);
-        self.record("cap.announced", json!({ "agent": token }));
+        if let Some(saved) = &agent.announcement {
+            let _ = self.storage.upsert_announcement(&AnnouncementRecord {
+                agent_did: saved.agent_did.to_string(),
+                announcement_json: serde_json::to_string(saved).unwrap_or_else(|_| "{}".into()),
+                expires_at: now_unix().saturating_add(saved.ttl_seconds),
+            });
+        }
+        self.record("cap.announced", json!({ "agent_did": self.agent_by_token(token).map(|a| a.identity.did().to_string()).unwrap_or_default() }));
         Ok(id)
     }
 
@@ -246,14 +355,10 @@ impl NodeState {
                 "provider {provider_did} not registered on this node"
             )));
         }
-        let contract = Contract::propose(
-            &client.identity,
-            provider,
-            capability_id,
-            terms,
-            use_escrow,
-        );
+        let contract =
+            Contract::propose(&client.identity, provider, capability_id, terms, use_escrow);
         let id = contract.contract_id.clone();
+        self.persist_contract(&contract);
         self.contracts.insert(id.clone(), contract);
         self.record("ctr.proposed", json!({ "contract_id": id }));
         Ok(id)
@@ -269,6 +374,9 @@ impl NodeState {
             .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
         let signed = contract.accept_by_provider(&provider.identity)?;
         self.contracts.insert(contract_id.into(), signed);
+        if let Some(saved) = self.contracts.get(contract_id).cloned() {
+            self.persist_contract(&saved);
+        }
         self.record("ctr.signed", json!({ "contract_id": contract_id }));
         Ok(())
     }
@@ -288,9 +396,18 @@ impl NodeState {
         if contract.provider != provider_did {
             return Err(Error::Unauthorized("only the provider may deliver".into()));
         }
+        if contract.escrow && !self.escrows.contains_key(contract_id) && self.relayer.is_none() {
+            return Err(Error::EscrowViolation(
+                "escrow must be parked before delivery".into(),
+            ));
+        }
+        if deliverable_hash.trim().is_empty() {
+            return Err(Error::Other("deliverable_hash required".into()));
+        }
         contract.transition(ContractState::Executing)?;
         contract.transition(ContractState::Delivered)?;
-        let _ = deliverable_hash;
+        let saved = contract.clone();
+        self.persist_contract(&saved);
         self.record("exe.delivered", json!({ "contract_id": contract_id }));
         Ok(())
     }
@@ -305,6 +422,12 @@ impl NodeState {
             .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
         if contract.client != *client.identity.did() {
             return Err(Error::Unauthorized("only the client may accept".into()));
+        }
+        if contract.state != ContractState::Delivered {
+            return Err(Error::InvalidTransition {
+                from: contract.state.wire_name().into(),
+                to: "accepted".into(),
+            });
         }
 
         // Build the signed acceptance + release envelopes.
@@ -329,16 +452,27 @@ impl NodeState {
         if let Some(relayer) = &self.relayer {
             let hash = Self::contract_hash(contract_id);
             relayer.release(&hash)?;
-            self.record("pay.released.onchain", json!({ "contract_id": contract_id }));
+            self.record(
+                "pay.released.onchain",
+                json!({ "contract_id": contract_id }),
+            );
             let contract = self
                 .contracts
                 .get_mut(contract_id)
                 .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
             contract.transition(ContractState::Accepted)?;
+            let saved = contract.clone();
+            self.persist_contract(&saved);
+            self.persist_escrow(
+                contract_id,
+                crate::payment::EscrowState::Released,
+                crate::amount::Amount::ZERO,
+                "USDC",
+            );
             self.record("exe.accepted", json!({ "contract_id": contract_id }));
             return Ok(json!({
                 "state": "accepted",
-                "settlement": { "amount": 0.0, "currency": "USDC", "chain": "onchain" }
+                "settlement": { "amount": "0.000000", "currency": "USDC", "chain": "onchain" }
             }));
         }
 
@@ -356,6 +490,14 @@ impl NodeState {
             .get_mut(contract_id)
             .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
         contract.transition(ContractState::Accepted)?;
+        let saved = contract.clone();
+        self.persist_contract(&saved);
+        self.persist_escrow(
+            contract_id,
+            crate::payment::EscrowState::Released,
+            crate::amount::Amount::ZERO,
+            &currency,
+        );
 
         self.record("exe.accepted", json!({ "contract_id": contract_id }));
         Ok(json!({
@@ -365,7 +507,12 @@ impl NodeState {
     }
 
     /// Client parks funds into escrow for a contract.
-    pub fn escrow_park(&mut self, client_token: &str, contract_id: &str, amount: &crate::amount::Amount) -> Result<()> {
+    pub fn escrow_park(
+        &mut self,
+        client_token: &str,
+        contract_id: &str,
+        amount: &crate::amount::Amount,
+    ) -> Result<()> {
         let client = self.agent_by_token(client_token)?;
         let contract = self
             .contracts
@@ -392,23 +539,37 @@ impl NodeState {
             let arb_addr = relayer.key_for(&self.node_did().to_string()).address();
             let amount_units = amount.minor_units(); // exact minor units
             relayer.park(&hash, &provider_addr, &arb_addr, amount_units)?;
-            self.record("pay.parked.onchain", json!({ "contract_id": contract_id, "amount": amount }));
+            self.persist_escrow(
+                contract_id,
+                crate::payment::EscrowState::Parked,
+                *amount,
+                "USDC",
+            );
+            self.record(
+                "pay.parked.onchain",
+                json!({ "contract_id": contract_id, "amount": amount }),
+            );
             return Ok(());
         }
 
         // Off-chain path (reference escrow).
-        let amount_f64 = amount.minor_units() as f64 / crate::amount::SCALE as f64;
         let instruction = Envelope::new(
             client.identity.did().clone(),
             self.node_did(),
             Kind::PayPark,
-            json!({ "amount": amount_f64 }),
+            json!({ "amount": amount.to_string_decimal() }),
         )
         .for_contract(contract_id)
         .sign(&client.identity);
-        let mut escrow = Escrow::new(AgentIdentity::generate());
+        let mut escrow = Escrow::new(self.node.identity.clone());
         escrow.register(contract)?;
         escrow.park(&instruction)?;
+        self.persist_escrow(
+            contract_id,
+            escrow.state(),
+            escrow.held(),
+            escrow.currency(),
+        );
         self.escrows.insert(contract_id.into(), escrow);
         self.record(
             "pay.parked",
@@ -433,7 +594,10 @@ impl NodeState {
             ));
         }
         let _ = client;
-        self.record("pay.released.confirmed", json!({ "contract_id": contract_id }));
+        self.record(
+            "pay.released.confirmed",
+            json!({ "contract_id": contract_id }),
+        );
         Ok(json!({ "state": "released", "contract_id": contract_id }))
     }
 
@@ -448,6 +612,12 @@ impl NodeState {
         if contract.client != *client.identity.did() {
             return Err(Error::Unauthorized("only the client may refund".into()));
         }
+        if contract.state != ContractState::Signed {
+            return Err(Error::InvalidTransition {
+                from: contract.state.wire_name().into(),
+                to: "refunded".into(),
+            });
+        }
         let instruction = Envelope::new(
             client.identity.did().clone(),
             self.node_did(),
@@ -461,6 +631,16 @@ impl NodeState {
             .get_mut(contract_id)
             .ok_or_else(|| Error::EscrowViolation("no escrow for contract".into()))?;
         let receipt = escrow.refund(&instruction)?;
+        let mut contract = contract;
+        contract.transition(ContractState::Cancelled)?;
+        self.contracts.insert(contract_id.into(), contract.clone());
+        self.persist_contract(&contract);
+        self.persist_escrow(
+            contract_id,
+            crate::payment::EscrowState::Refunded,
+            crate::amount::Amount::ZERO,
+            &receipt.currency,
+        );
         self.record(
             "pay.refunded",
             json!({ "contract_id": contract_id, "amount": receipt.amount }),
@@ -469,7 +649,12 @@ impl NodeState {
     }
 
     /// Client disputes a contract; funds move to `disputed`.
-    pub fn contract_dispute(&mut self, client_token: &str, contract_id: &str, reason: &str) -> Result<Value> {
+    pub fn contract_dispute(
+        &mut self,
+        client_token: &str,
+        contract_id: &str,
+        reason: &str,
+    ) -> Result<Value> {
         let client = self.agent_by_token(client_token)?;
         let contract = self
             .contracts
@@ -478,6 +663,12 @@ impl NodeState {
             .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
         if contract.client != *client.identity.did() {
             return Err(Error::Unauthorized("only the client may dispute".into()));
+        }
+        if contract.state != ContractState::Delivered {
+            return Err(Error::InvalidTransition {
+                from: contract.state.wire_name().into(),
+                to: "disputed".into(),
+            });
         }
         let instruction = Envelope::new(
             client.identity.did().clone(),
@@ -492,6 +683,13 @@ impl NodeState {
             .get_mut(contract_id)
             .ok_or_else(|| Error::EscrowViolation("no escrow for contract".into()))?;
         let receipt = escrow.dispute(&instruction)?;
+        let escrow_state = escrow.state();
+        let escrow_held = escrow.held();
+        let mut contract = contract;
+        contract.transition(ContractState::Disputed)?;
+        self.contracts.insert(contract_id.into(), contract.clone());
+        self.persist_contract(&contract);
+        self.persist_escrow(contract_id, escrow_state, escrow_held, &receipt.currency);
         self.record(
             "ctr.disputed",
             json!({ "contract_id": contract_id, "reason": reason }),
@@ -501,7 +699,12 @@ impl NodeState {
 
     /// Arbitrator (the node) executes a signed ruling: splits disputed
     /// funds between client and provider. Fractions must sum to 1.0.
-    pub fn escrow_rule(&mut self, contract_id: &str, client_share: f64, provider_share: f64) -> Result<Value> {
+    pub fn escrow_rule(
+        &mut self,
+        contract_id: &str,
+        client_share: f64,
+        provider_share: f64,
+    ) -> Result<Value> {
         let ruling = Envelope::new(
             self.node_did(),
             self.node_did(),
@@ -516,6 +719,17 @@ impl NodeState {
             .get_mut(contract_id)
             .ok_or_else(|| Error::EscrowViolation("no escrow for contract".into()))?;
         let receipt = escrow.rule(&ruling, &node_did)?;
+        if let Some(contract) = self.contracts.get_mut(contract_id) {
+            contract.transition(ContractState::Ruled)?;
+            let saved = contract.clone();
+            self.persist_contract(&saved);
+        }
+        self.persist_escrow(
+            contract_id,
+            crate::payment::EscrowState::Ruled,
+            crate::amount::Amount::ZERO,
+            &receipt.currency,
+        );
         self.record(
             "pay.ruled",
             json!({ "contract_id": contract_id, "client_share": client_share, "provider_share": provider_share }),
@@ -525,6 +739,93 @@ impl NodeState {
             "client_share": client_share,
             "provider_share": provider_share,
             "amount": receipt.amount,
+        }))
+    }
+
+    /// Create and validate a signed workflow manifest for the sponsor.
+    pub fn create_workflow(&mut self, sponsor_token: &str, body: &Value) -> Result<Value> {
+        let sponsor = self.agent_by_token(sponsor_token)?;
+        let name = body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("workflow");
+        let inputs: HashMap<String, Value> = body
+            .get("inputs")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let steps = body
+            .get("steps")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .ok_or_else(|| Error::Other("workflow steps required".into()))?;
+        let budget: Option<Budget> = body
+            .get("budget")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let on_failure: FailureMode = body
+            .get("on_failure")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or(FailureMode::Abort);
+        let expires_in = body
+            .get("expires_in_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(86_400);
+        let workflow = Workflow::create(
+            &sponsor.identity,
+            name,
+            inputs,
+            steps,
+            budget,
+            on_failure,
+            expires_in,
+        );
+        workflow.validate()?;
+        let id = workflow.workflow_id.clone();
+        self.workflows
+            .insert(id.clone(), (workflow, WorkflowEngine::new()));
+        self.record("wf.created", json!({ "workflow_id": id }));
+        Ok(json!({ "workflow_id": id, "state": "pending" }))
+    }
+
+    /// Return a workflow's materialized step status.
+    pub fn workflow_status(&self, workflow_id: &str) -> Result<Value> {
+        let (workflow, engine) = self
+            .workflows
+            .get(workflow_id)
+            .ok_or_else(|| Error::Other(format!("unknown workflow: {workflow_id}")))?;
+        let steps: Vec<Value> = workflow
+            .steps
+            .iter()
+            .map(|step| {
+                json!({
+                    "step_id": step.step_id,
+                    "state": engine.state_of(&step.step_id),
+                    "needs": step.needs,
+                    "capability": step.capability,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "workflow_id": workflow.workflow_id,
+            "state": workflow.state,
+            "steps": steps,
+        }))
+    }
+
+    /// Export the caller's portable node-held data.
+    pub fn identity_export(&mut self, token: &str) -> Result<Value> {
+        let did = self.agent_by_token(token)?.identity.did().to_string();
+        let contracts: Vec<_> = self
+            .contracts
+            .values()
+            .filter(|c| c.client.to_string() == did || c.provider.to_string() == did)
+            .cloned()
+            .collect();
+        let events = self.storage.events_after(0, 1000).unwrap_or_default();
+        self.record("id.exported", json!({ "did": did }));
+        Ok(json!({
+            "did": did,
+            "contracts": contracts,
+            "events": events,
+            "exported_at": now_unix(),
         }))
     }
 
@@ -579,7 +880,8 @@ pub fn route_with_ip(
     // Parse the JSON body BEFORE taking the state lock: with the worker
     // pool this keeps the global lock's critical section minimal
     // (parsing and serialization are the parallelizable parts).
-    let path = path.split('?').next().unwrap_or(path);
+    let raw_path = path;
+    let path = raw_path.split('?').next().unwrap_or(raw_path);
     let body: Value = if body.is_empty() {
         Value::Null
     } else {
@@ -596,7 +898,12 @@ pub fn route_with_ip(
 
     let mut guard = match state.lock() {
         Ok(g) => g,
-        Err(_) => return (500, json!({ "error": { "code": "internal", "message": "state lock poisoned" } })),
+        Err(_) => {
+            return (
+                500,
+                json!({ "error": { "code": "internal", "message": "state lock poisoned" } }),
+            )
+        }
     };
 
     // Rate limiting first (audit H-03): 429 when over limit.
@@ -633,18 +940,20 @@ pub fn route_with_ip(
                 .get("regions")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
-            let ttl = body.get("ttl_seconds").and_then(|v| v.as_u64()).unwrap_or(86400);
+            let ttl = body
+                .get("ttl_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(86400);
             match (token, caps.is_empty()) {
                 (Some(t), false) => guard
                     .announce(t, caps, languages, regions, ttl)
-                    .map(|id| json!({ "announcement_id": id }))
-                    ,
+                    .map(|id| json!({ "announcement_id": id })),
                 (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
                 (_, true) => Err(Error::Other("capabilities required".into())),
             }
         }
         ("GET", "/v1/discover") => {
-            let q = parse_query(&body, path);
+            let q = parse_query(&body, raw_path);
             let results = guard.discover(&q);
             Ok(json!({ "results": results }))
         }
@@ -652,7 +961,10 @@ pub fn route_with_ip(
         // ---- contracts ----
         ("POST", "/v1/contract/propose") => {
             let provider = body.get("provider").and_then(|v| v.as_str()).unwrap_or("");
-            let capability_id = body.get("capability_id").and_then(|v| v.as_str()).unwrap_or("");
+            let capability_id = body
+                .get("capability_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let terms_parsed: Option<Terms> = body
                 .get("terms")
                 .and_then(|t| serde_json::from_value(t.clone()).ok());
@@ -660,29 +972,43 @@ pub fn route_with_ip(
             match (token, terms_parsed) {
                 (Some(t), Some(terms)) => guard
                     .propose_contract(t, provider, capability_id, terms, escrow)
-                    .map(|id| json!({ "contract_id": id, "state": "draft" }))
-                    ,
+                    .map(|id| json!({ "contract_id": id, "state": "draft" })),
                 (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
                 (_, None) => Err(Error::Other("terms required".into())),
             }
         }
         (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/accept") => {
-            let id = p.trim_start_matches("/v1/contract/").trim_end_matches("/accept");
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/accept");
             match token {
-                Some(t) => guard.accept_contract(t, id).map(|_| json!({ "state": "signed" })),
+                Some(t) => guard
+                    .accept_contract(t, id)
+                    .map(|_| json!({ "state": "signed" })),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
         (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/deliver") => {
-            let id = p.trim_start_matches("/v1/contract/").trim_end_matches("/deliver");
-            let hash = body.get("deliverable_hash").and_then(|v| v.as_str()).unwrap_or("");
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/deliver");
+            let hash = body
+                .get("deliverable_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             match token {
-                Some(t) => guard.deliver(t, id, hash).map(|_| json!({ "state": "delivered" })),
+                Some(t) => guard
+                    .deliver(t, id, hash)
+                    .map(|_| json!({ "state": "delivered" })),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
-        (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/accept-delivery") => {
-            let id = p.trim_start_matches("/v1/contract/").trim_end_matches("/accept-delivery");
+        (m, p)
+            if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/accept-delivery") =>
+        {
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/accept-delivery");
             match token {
                 Some(t) => guard.accept_delivery(t, id),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
@@ -693,9 +1019,12 @@ pub fn route_with_ip(
             match guard.contracts.get(id) {
                 Some(c) => Ok(json!({
                     "contract_id": c.contract_id,
-                    // Lowercase wire state, consistent with the other
-                    // routes ("draft", "signed", …).
                     "state": c.state.wire_name(),
+                    "contract": c,
+                    "events": guard.storage.events_after(0, 100).unwrap_or_default()
+                        .into_iter()
+                        .filter(|e| e.payload.get("contract_id").and_then(|v| v.as_str()) == Some(id))
+                        .collect::<Vec<_>>(),
                 })),
                 None => Err(Error::UnknownContract(id.into())),
             }
@@ -703,11 +1032,12 @@ pub fn route_with_ip(
 
         // ---- escrow ----
         ("POST", "/v1/escrow/park") => {
-            let id = body.get("contract_id").and_then(|v| v.as_str()).unwrap_or("");
+            let id = body
+                .get("contract_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let amount = match body.get("amount") {
-                Some(v) if v.is_string() => {
-                    crate::amount::Amount::parse(v.as_str().unwrap_or(""))
-                }
+                Some(v) if v.is_string() => crate::amount::Amount::parse(v.as_str().unwrap_or("")),
                 Some(v) if v.is_number() => Ok(crate::amount::Amount::from_f64_rounding(
                     v.as_f64().unwrap_or(0.0),
                 )),
@@ -727,48 +1057,96 @@ pub fn route_with_ip(
             // Authenticated endpoint: the audit spine is tamper-evident
             // evidence; anonymous read access would leak every contract
             // event (found by the exhaustive route tests).
-            let authed = token.map(|t| guard.agent_by_token(t).is_ok()).unwrap_or(false);
+            let authed = token
+                .map(|t| guard.agent_by_token(t).is_ok())
+                .unwrap_or(false);
             if !authed {
                 Err(Error::Unauthorized("authentication required".into()))
             } else {
-                let events = guard
-                    .storage
-                    .events_after(0, 100)
-                    .unwrap_or_default();
+                let params = parse_url_params(raw_path);
+                let after = params
+                    .get("after")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(100)
+                    .min(1000);
+                let events = guard.storage.events_after(after, limit).unwrap_or_default();
                 Ok(json!({ "events": events }))
             }
         }
 
         // ---- escrow: explicit settlement routes ----
         ("POST", "/v1/escrow/release") => {
-            let id = body.get("contract_id").and_then(|v| v.as_str()).unwrap_or("");
+            let id = body
+                .get("contract_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             match token {
                 Some(t) => guard.escrow_release(t, id),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
         ("POST", "/v1/escrow/refund") => {
-            let id = body.get("contract_id").and_then(|v| v.as_str()).unwrap_or("");
+            let id = body
+                .get("contract_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             match token {
                 Some(t) => guard.escrow_refund(t, id),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
         ("POST", "/v1/escrow/rule") => {
-            let id = body.get("contract_id").and_then(|v| v.as_str()).unwrap_or("");
+            let id = body
+                .get("contract_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let split = body.get("split").cloned().unwrap_or_default();
             let client_share = split.get("client").and_then(|v| v.as_f64()).unwrap_or(-1.0);
-            let provider_share = split.get("provider").and_then(|v| v.as_f64()).unwrap_or(-1.0);
-            guard.escrow_rule(id, client_share, provider_share)
+            let provider_share = split
+                .get("provider")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(-1.0);
+            match (&guard.admin_token, token) {
+                (Some(admin), Some(t)) if admin == t => {
+                    guard.escrow_rule(id, client_share, provider_share)
+                }
+                (None, _) => Err(Error::Unauthorized("admin token not configured".into())),
+                _ => Err(Error::Unauthorized("admin token required".into())),
+            }
         }
         (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/dispute") => {
-            let id = p.trim_start_matches("/v1/contract/").trim_end_matches("/dispute");
-            let reason = body.get("reason").and_then(|v| v.as_str()).unwrap_or("unspecified");
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/dispute");
+            let reason = body
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unspecified");
             match token {
                 Some(t) => guard.contract_dispute(t, id, reason),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
+
+        // ---- workflows ----
+        ("POST", "/v1/workflows") => match token {
+            Some(t) => guard.create_workflow(t, &body),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
+        ("GET", p) if p.starts_with("/v1/workflows/") => {
+            let id = p.trim_start_matches("/v1/workflows/");
+            guard.workflow_status(id)
+        }
+
+        // ---- portability ----
+        ("POST", "/v1/identity/export") => match token {
+            Some(t) => guard.identity_export(t),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
 
         _ => Err(Error::Other("unknown route".into())),
     };
@@ -785,7 +1163,10 @@ pub fn route_with_ip(
                 Error::EscrowViolation(_) => "escrow_violation",
                 _ => "invalid_request",
             };
-            (400, json!({ "error": { "code": code, "message": e.to_string() } }))
+            (
+                400,
+                json!({ "error": { "code": code, "message": e.to_string() } }),
+            )
         }
     }
 }
@@ -805,21 +1186,97 @@ fn parse_query(body: &Value, path: &str) -> Query {
     if let Some(a) = body.get("required_autonomy").and_then(|v| v.as_str()) {
         q.required_autonomy = Some(a.into());
     }
+    if let Some(langs) = body
+        .get("languages")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+    {
+        q.languages = langs;
+    }
+    if let Some(regions) = body
+        .get("regions")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+    {
+        q.regions = regions;
+    }
+    if let Some(max) = body.get("max_results").and_then(|v| v.as_u64()) {
+        q.max_results = (max as usize).min(1000);
+    }
     // Also parse from the query string (curl-style).
-    if let Some(qs) = path.split('?').nth(1) {
-        for pair in qs.split('&') {
-            let mut it = pair.split('=');
-            let (k, v) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
-            match k {
-                "name" => q.name = Some(v.into()),
-                "max_price" => q.max_price = v.parse().ok(),
-                "min_reputation" => q.min_reputation = v.parse().ok(),
-                "required_autonomy" => q.required_autonomy = Some(v.into()),
-                _ => {}
+    for (k, v) in parse_url_params(path) {
+        match k.as_str() {
+            "name" => q.name = Some(v),
+            "max_price" => q.max_price = v.parse().ok(),
+            "min_reputation" => q.min_reputation = v.parse().ok(),
+            "required_autonomy" => q.required_autonomy = Some(v),
+            "languages" => q.languages = split_csv(&v),
+            "regions" => q.regions = split_csv(&v),
+            "max_results" => {
+                if let Ok(max) = v.parse::<usize>() {
+                    q.max_results = max.min(1000);
+                }
             }
+            _ => {}
         }
     }
     q
+}
+
+fn parse_url_params(path: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Some(qs) = path.split('?').nth(1) {
+        for pair in qs.split('&').filter(|p| !p.is_empty()) {
+            let mut it = pair.splitn(2, '=');
+            let k = percent_decode(it.next().unwrap_or(""));
+            let v = percent_decode(it.next().unwrap_or(""));
+            out.insert(k, v);
+        }
+    }
+    out
+}
+
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = &value[i + 1..i + 3];
+                if let Ok(b) = u8::from_str_radix(hex, 16) {
+                    out.push(b);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn decode_seed_hex(seed_hex: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(seed_hex).map_err(|_| Error::Other("invalid identity seed".into()))?;
+    bytes
+        .try_into()
+        .map_err(|_| Error::Other("invalid identity seed length".into()))
 }
 
 /// Build a canned Terms from a JSON value (helper for the demo node).
@@ -890,7 +1347,13 @@ mod tests {
         );
         // Unknown provider still rejected.
         let bad = json!({ "provider": "did:gap:unknown", "capability_id": "cap:x", "terms": body["terms"], "escrow": false });
-        let (s, _) = route(&arc, "POST", "/v1/contract/propose", &bad.to_string().into_bytes(), Some(&auth));
+        let (s, _) = route(
+            &arc,
+            "POST",
+            "/v1/contract/propose",
+            &bad.to_string().into_bytes(),
+            Some(&auth),
+        );
         assert_eq!(s, 400);
     }
 
@@ -914,7 +1377,13 @@ mod tests {
             autonomy: vec!["propose".into(), "execute-notify".into()],
         }];
         let body = json!({ "capabilities": caps, "ttl_seconds": 3600 });
-        let (status, _) = route(arc, "POST", "/v1/announce", &body.to_string().into_bytes(), Some(&format!("Bearer {token}")));
+        let (status, _) = route(
+            arc,
+            "POST",
+            "/v1/announce",
+            &body.to_string().into_bytes(),
+            Some(&format!("Bearer {token}")),
+        );
         assert_eq!(status, 200);
     }
 
@@ -942,12 +1411,88 @@ mod tests {
     }
 
     #[test]
+    fn discover_query_string_filters_results() {
+        let arc = state();
+        let token_a = register(&arc);
+        let token_b = register(&arc);
+
+        let cap_a = Capability {
+            id: "cap:a:lead".into(),
+            name: "lead-generation".into(),
+            description: "leads".into(),
+            input: json!({}),
+            output: json!({}),
+            price: Some(DiscoveryPrice {
+                amount: 0.05,
+                currency: "EUR".into(),
+                model: "fixed".into(),
+            }),
+            autonomy: vec!["propose".into()],
+        };
+        let cap_b = Capability {
+            id: "cap:b:analysis".into(),
+            name: "analysis".into(),
+            description: "analysis".into(),
+            input: json!({}),
+            output: json!({}),
+            price: Some(DiscoveryPrice {
+                amount: 1.0,
+                currency: "EUR".into(),
+                model: "fixed".into(),
+            }),
+            autonomy: vec!["propose".into()],
+        };
+        let body_a = json!({ "capabilities": [cap_a], "languages": ["fr"], "regions": ["EU"] });
+        let body_b = json!({ "capabilities": [cap_b], "languages": ["en"], "regions": ["US"] });
+        assert_eq!(
+            route(
+                &arc,
+                "POST",
+                "/v1/announce",
+                &body_a.to_string().into_bytes(),
+                Some(&format!("Bearer {token_a}"))
+            )
+            .0,
+            200
+        );
+        assert_eq!(
+            route(
+                &arc,
+                "POST",
+                "/v1/announce",
+                &body_b.to_string().into_bytes(),
+                Some(&format!("Bearer {token_b}"))
+            )
+            .0,
+            200
+        );
+
+        let (s, v) = route(
+            &arc,
+            "GET",
+            "/v1/discover?name=analysis&languages=en&regions=US&max_results=1",
+            &[],
+            None,
+        );
+        assert_eq!(s, 200);
+        let results = v["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["capabilities"][0]["name"], "analysis");
+    }
+
+    #[test]
     fn announce_requires_auth_and_caps() {
         let arc = state();
         let (s, _) = route(&arc, "POST", "/v1/announce", b"{}".as_ref(), None);
         assert_eq!(s, 400);
         let token = register(&arc);
-        let (s2, v2) = route(&arc, "POST", "/v1/announce", b"{}".as_ref(), Some(&format!("Bearer {token}")));
+        let (s2, v2) = route(
+            &arc,
+            "POST",
+            "/v1/announce",
+            b"{}".as_ref(),
+            Some(&format!("Bearer {token}")),
+        );
         assert_eq!(s2, 400);
         assert_eq!(v2["error"]["code"], "invalid_request");
     }
@@ -957,7 +1502,10 @@ mod tests {
         let arc = state();
         let client_tok = register(&arc);
         let provider_tok = register(&arc);
-        let provider_did = arc.lock().unwrap().agents[&provider_tok].identity.did().to_string();
+        let provider_did = arc.lock().unwrap().agents[&provider_tok]
+            .identity
+            .did()
+            .to_string();
 
         // Provider announces an analysis capability.
         let caps = vec![Capability {
@@ -966,11 +1514,21 @@ mod tests {
             description: "summarize".into(),
             input: json!({}),
             output: json!({}),
-            price: Some(DiscoveryPrice { amount: 1.0, currency: "EUR".into(), model: "fixed".into() }),
+            price: Some(DiscoveryPrice {
+                amount: 1.0,
+                currency: "EUR".into(),
+                model: "fixed".into(),
+            }),
             autonomy: vec!["propose".into()],
         }];
         let body = json!({ "capabilities": caps });
-        let (s, _) = route(&arc, "POST", "/v1/announce", &body.to_string().into_bytes(), Some(&format!("Bearer {provider_tok}")));
+        let (s, _) = route(
+            &arc,
+            "POST",
+            "/v1/announce",
+            &body.to_string().into_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
         assert_eq!(s, 200);
 
         // Client proposes.
@@ -979,38 +1537,213 @@ mod tests {
             deliverable: json!({}),
             acceptance_criteria: vec!["ok".into()],
             deadline: now_unix() + 3600,
-            price: Price { amount: 1.0, currency: "EUR".into(), model: "fixed".into(), cap: Some(5.0) },
+            price: Price {
+                amount: 1.0,
+                currency: "EUR".into(),
+                model: "fixed".into(),
+                cap: Some(5.0),
+            },
             autonomy: "propose".into(),
             confidentiality: None,
         };
         let body = json!({ "provider": provider_did, "capability_id": "cap:p:analyze", "terms": terms, "escrow": true });
-        let (s, v) = route(&arc, "POST", "/v1/contract/propose", &body.to_string().into_bytes(), Some(&format!("Bearer {client_tok}")));
+        let (s, v) = route(
+            &arc,
+            "POST",
+            "/v1/contract/propose",
+            &body.to_string().into_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
         assert_eq!(s, 200, "propose failed: {v}");
         let contract_id = v["contract_id"].as_str().unwrap().to_string();
 
         // Provider accepts (contract becomes signed).
-        let (s, _) = route(&arc, "POST", &format!("/v1/contract/{contract_id}/accept"), &[], Some(&format!("Bearer {provider_tok}")));
+        let (s, _) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{contract_id}/accept"),
+            &[],
+            Some(&format!("Bearer {provider_tok}")),
+        );
         assert_eq!(s, 200, "accept failed");
 
         // Park escrow (client) — after both signatures.
         let body = json!({ "contract_id": contract_id, "amount": 1.0 });
-        let (s, _) = route(&arc, "POST", "/v1/escrow/park", &body.to_string().into_bytes(), Some(&format!("Bearer {client_tok}")));
+        let (s, _) = route(
+            &arc,
+            "POST",
+            "/v1/escrow/park",
+            &body.to_string().into_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
         assert_eq!(s, 200, "park failed");
 
         // Provider delivers.
         let body = json!({ "deliverable_hash": "sha256:abc" });
-        let (s, _) = route(&arc, "POST", &format!("/v1/contract/{contract_id}/deliver"), &body.to_string().into_bytes(), Some(&format!("Bearer {provider_tok}")));
+        let (s, _) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{contract_id}/deliver"),
+            &body.to_string().into_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
         assert_eq!(s, 200, "deliver failed");
 
         // Client accepts delivery -> escrow releases.
-        let (s, v) = route(&arc, "POST", &format!("/v1/contract/{contract_id}/accept-delivery"), &[], Some(&format!("Bearer {client_tok}")));
+        let (s, v) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{contract_id}/accept-delivery"),
+            &[],
+            Some(&format!("Bearer {client_tok}")),
+        );
         assert_eq!(s, 200, "accept-delivery failed: {v}");
         assert_eq!(v["state"], "accepted");
 
         // Audit spine has events (authenticated endpoint).
-        let (s, v) = route(&arc, "GET", "/v1/audit", &[], Some(&format!("Bearer {client_tok}")));
+        let (s, v) = route(
+            &arc,
+            "GET",
+            "/v1/audit",
+            &[],
+            Some(&format!("Bearer {client_tok}")),
+        );
         assert_eq!(s, 200);
         assert!(!v["events"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn node_restores_identity_contract_and_escrow_from_sqlite() {
+        let path = format!("/tmp/gap-node-restore-{}.db", crate::new_id("db"));
+        let terms = Terms {
+            input: json!({}),
+            deliverable: json!({}),
+            acceptance_criteria: vec!["ok".into()],
+            deadline: now_unix() + 3600,
+            price: Price {
+                amount: 1.0,
+                currency: "EUR".into(),
+                model: "fixed".into(),
+                cap: Some(5.0),
+            },
+            autonomy: "propose".into(),
+            confidentiality: None,
+        };
+        let (client_tok, provider_tok, contract_id) = {
+            let arc = Arc::new(Mutex::new(NodeState::with_rate_limits(
+                Box::new(SqliteStorage::open(&path).unwrap()),
+                None,
+                100_000,
+                100_000,
+            )));
+            let client_tok = register(&arc);
+            let provider_tok = register(&arc);
+            let provider_did = arc.lock().unwrap().agents[&provider_tok]
+                .identity
+                .did()
+                .to_string();
+            let body = json!({ "provider": provider_did, "capability_id": "cap:p", "terms": terms, "escrow": true });
+            let (s, v) = route(
+                &arc,
+                "POST",
+                "/v1/contract/propose",
+                &body.to_string().into_bytes(),
+                Some(&format!("Bearer {client_tok}")),
+            );
+            assert_eq!(s, 200, "propose failed: {v}");
+            let contract_id = v["contract_id"].as_str().unwrap().to_string();
+            assert_eq!(
+                route(
+                    &arc,
+                    "POST",
+                    &format!("/v1/contract/{contract_id}/accept"),
+                    &[],
+                    Some(&format!("Bearer {provider_tok}"))
+                )
+                .0,
+                200
+            );
+            let body = json!({ "contract_id": contract_id, "amount": "1.00" });
+            assert_eq!(
+                route(
+                    &arc,
+                    "POST",
+                    "/v1/escrow/park",
+                    &body.to_string().into_bytes(),
+                    Some(&format!("Bearer {client_tok}"))
+                )
+                .0,
+                200
+            );
+            (client_tok, provider_tok, contract_id)
+        };
+
+        let arc = Arc::new(Mutex::new(NodeState::with_rate_limits(
+            Box::new(SqliteStorage::open(&path).unwrap()),
+            None,
+            100_000,
+            100_000,
+        )));
+        let body = json!({ "deliverable_hash": "sha256:restored" });
+        assert_eq!(
+            route(
+                &arc,
+                "POST",
+                &format!("/v1/contract/{contract_id}/deliver"),
+                &body.to_string().into_bytes(),
+                Some(&format!("Bearer {provider_tok}"))
+            )
+            .0,
+            200
+        );
+        let (s, v) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{contract_id}/accept-delivery"),
+            &[],
+            Some(&format!("Bearer {client_tok}")),
+        );
+        assert_eq!(s, 200, "accept after restore failed: {v}");
+        assert_eq!(v["settlement"]["amount"], "1.000000");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}-wal"));
+        let _ = std::fs::remove_file(format!("{path}-shm"));
+    }
+
+    #[test]
+    fn workflow_routes_create_and_read_status() {
+        let arc = state();
+        let token = register(&arc);
+        let body = json!({
+            "name": "pipeline",
+            "inputs": { "topic": "gap" },
+            "steps": [
+                { "step_id": "scrape", "capability": "cap:scrape", "inputs": { "query": "${workflow.topic}" }, "outputs": { "raw": "steps.scrape.deliverable" } },
+                { "step_id": "analyze", "capability": "cap:analyze", "needs": ["scrape"], "inputs": { "data": "${steps.scrape.raw}" } }
+            ],
+            "budget": { "max_total": 5.0, "currency": "EUR" },
+            "on_failure": "abort"
+        });
+        let (s, v) = route(
+            &arc,
+            "POST",
+            "/v1/workflows",
+            &body.to_string().into_bytes(),
+            Some(&format!("Bearer {token}")),
+        );
+        assert_eq!(s, 200, "workflow create failed: {v}");
+        let workflow_id = v["workflow_id"].as_str().unwrap();
+        let (s, v) = route(
+            &arc,
+            "GET",
+            &format!("/v1/workflows/{workflow_id}"),
+            &[],
+            Some(&format!("Bearer {token}")),
+        );
+        assert_eq!(s, 200, "workflow status failed: {v}");
+        assert_eq!(v["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(v["steps"][0]["state"], "pending");
     }
 
     #[test]
@@ -1033,13 +1766,23 @@ mod tests {
         let auth = Some(format!("Bearer {token}"));
         let mut saw_429 = false;
         for _ in 0..130 {
-            let (s, _) = route_with_ip(&arc, "GET", "/v1/audit", &[], auth.as_deref(), Some("10.0.0.1"));
+            let (s, _) = route_with_ip(
+                &arc,
+                "GET",
+                "/v1/audit",
+                &[],
+                auth.as_deref(),
+                Some("10.0.0.1"),
+            );
             if s == 429 {
                 saw_429 = true;
                 break;
             }
         }
-        assert!(saw_429, "expected a 429 after exceeding the per-token rate cap");
+        assert!(
+            saw_429,
+            "expected a 429 after exceeding the per-token rate cap"
+        );
     }
 
     #[test]
@@ -1047,7 +1790,10 @@ mod tests {
         let arc = state();
         let (s, v) = route(&arc, "DELETE", "/v1/whatever", &[], None);
         assert_eq!(s, 400);
-        assert!(v["error"]["message"].as_str().unwrap().contains("unknown route"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown route"));
     }
 
     #[test]
@@ -1064,7 +1810,10 @@ mod tests {
 
         let client_tok = register(&arc);
         let provider_tok = register(&arc);
-        let provider_did = arc.lock().unwrap().agents[&provider_tok].identity.did().to_string();
+        let provider_did = arc.lock().unwrap().agents[&provider_tok]
+            .identity
+            .did()
+            .to_string();
 
         // Provider announces.
         let caps = vec![Capability {
@@ -1073,11 +1822,21 @@ mod tests {
             description: "summarize".into(),
             input: json!({}),
             output: json!({}),
-            price: Some(DiscoveryPrice { amount: 1.0, currency: "EUR".into(), model: "fixed".into() }),
+            price: Some(DiscoveryPrice {
+                amount: 1.0,
+                currency: "EUR".into(),
+                model: "fixed".into(),
+            }),
             autonomy: vec!["propose".into()],
         }];
         let body = json!({ "capabilities": caps });
-        let (s, _) = route(&arc, "POST", "/v1/announce", &body.to_string().into_bytes(), Some(&format!("Bearer {provider_tok}")));
+        let (s, _) = route(
+            &arc,
+            "POST",
+            "/v1/announce",
+            &body.to_string().into_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
         assert_eq!(s, 200);
 
         // Propose + accept + park (on-chain) + deliver + accept-delivery (on-chain release).
@@ -1086,33 +1845,74 @@ mod tests {
             deliverable: json!({}),
             acceptance_criteria: vec!["ok".into()],
             deadline: now_unix() + 3600,
-            price: Price { amount: 1.0, currency: "EUR".into(), model: "fixed".into(), cap: Some(5.0) },
+            price: Price {
+                amount: 1.0,
+                currency: "EUR".into(),
+                model: "fixed".into(),
+                cap: Some(5.0),
+            },
             autonomy: "propose".into(),
             confidentiality: None,
         };
         let body = json!({ "provider": provider_did, "capability_id": "cap:p:analyze", "terms": terms, "escrow": true });
-        let (s, v) = route(&arc, "POST", "/v1/contract/propose", &body.to_string().into_bytes(), Some(&format!("Bearer {client_tok}")));
+        let (s, v) = route(
+            &arc,
+            "POST",
+            "/v1/contract/propose",
+            &body.to_string().into_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
         assert_eq!(s, 200, "propose failed: {v}");
         let contract_id = v["contract_id"].as_str().unwrap().to_string();
 
-        let (s, _) = route(&arc, "POST", &format!("/v1/contract/{contract_id}/accept"), &[], Some(&format!("Bearer {provider_tok}")));
+        let (s, _) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{contract_id}/accept"),
+            &[],
+            Some(&format!("Bearer {provider_tok}")),
+        );
         assert_eq!(s, 200, "accept failed");
 
         let body = json!({ "contract_id": contract_id, "amount": 1.0 });
-        let (s, _) = route(&arc, "POST", "/v1/escrow/park", &body.to_string().into_bytes(), Some(&format!("Bearer {client_tok}")));
+        let (s, _) = route(
+            &arc,
+            "POST",
+            "/v1/escrow/park",
+            &body.to_string().into_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
         assert_eq!(s, 200, "on-chain park failed");
 
         let body = json!({ "deliverable_hash": "sha256:abc" });
-        let (s, _) = route(&arc, "POST", &format!("/v1/contract/{contract_id}/deliver"), &body.to_string().into_bytes(), Some(&format!("Bearer {provider_tok}")));
+        let (s, _) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{contract_id}/deliver"),
+            &body.to_string().into_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
         assert_eq!(s, 200, "deliver failed");
 
-        let (s, v) = route(&arc, "POST", &format!("/v1/contract/{contract_id}/accept-delivery"), &[], Some(&format!("Bearer {client_tok}")));
+        let (s, v) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{contract_id}/accept-delivery"),
+            &[],
+            Some(&format!("Bearer {client_tok}")),
+        );
         assert_eq!(s, 200, "accept-delivery failed: {v}");
         assert_eq!(v["state"], "accepted");
         assert_eq!(v["settlement"]["chain"], "onchain");
 
         // Audit records the on-chain events (authenticated endpoint).
-        let (s, v) = route(&arc, "GET", "/v1/audit", &[], Some(&format!("Bearer {client_tok}")));
+        let (s, v) = route(
+            &arc,
+            "GET",
+            "/v1/audit",
+            &[],
+            Some(&format!("Bearer {client_tok}")),
+        );
         assert_eq!(s, 200);
         let events = v["events"].as_array().unwrap();
         assert!(events.iter().any(|e| e["kind"] == "pay.parked.onchain"));

@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// The zero hash used as the first link of every chain.
-pub const ZERO_HASH: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+pub const ZERO_HASH: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// A chain link: index + hash of the previous receipt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -313,7 +314,10 @@ mod tests {
         assert!(ledger.verify_chain().is_ok());
         assert_eq!(ledger.entries()[1].payload["redacted"], true);
         // The redaction event itself is chained at the end.
-        assert_eq!(ledger.entries().last().unwrap().payload["event"], "chain.redacted");
+        assert_eq!(
+            ledger.entries().last().unwrap().payload["event"],
+            "chain.redacted"
+        );
     }
 
     #[test]

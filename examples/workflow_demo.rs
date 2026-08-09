@@ -30,7 +30,12 @@ const CAP_SCRAPE: &str = "cap:data:scrape";
 const CAP_ANALYZE: &str = "cap:analysis:summarize";
 const CAP_PUBLISH: &str = "cap:content:publish";
 
-fn announce(registry: &mut Registry, agent: &AgentIdentity, cap_id: &str, cap_name: &str) -> Result<()> {
+fn announce(
+    registry: &mut Registry,
+    agent: &AgentIdentity,
+    cap_id: &str,
+    cap_name: &str,
+) -> Result<()> {
     let cap = Capability {
         id: cap_id.into(),
         name: cap_name.into(),
@@ -110,8 +115,12 @@ fn main() -> Result<()> {
         terms: None,
         retryable: false,
     };
-    scrape.inputs.insert("query".into(), "${workflow.topic}".into());
-    scrape.outputs.insert("raw".into(), "steps.scrape.deliverable".into());
+    scrape
+        .inputs
+        .insert("query".into(), "${workflow.topic}".into());
+    scrape
+        .outputs
+        .insert("raw".into(), "steps.scrape.deliverable".into());
 
     let mut analyze = Step {
         step_id: "analyze".into(),
@@ -122,8 +131,12 @@ fn main() -> Result<()> {
         terms: None,
         retryable: false,
     };
-    analyze.inputs.insert("data".into(), "${steps.scrape.raw}".into());
-    analyze.outputs.insert("summary".into(), "steps.analyze.deliverable".into());
+    analyze
+        .inputs
+        .insert("data".into(), "${steps.scrape.raw}".into());
+    analyze
+        .outputs
+        .insert("summary".into(), "steps.analyze.deliverable".into());
 
     let publish = Step {
         step_id: "publish".into(),
@@ -178,7 +191,10 @@ fn main() -> Result<()> {
                 _ => "publisher",
             };
 
-            println!("\n[step] {:<9} ← {} ({})", step.step_id, provider_name, step.capability);
+            println!(
+                "\n[step] {:<9} ← {} ({})",
+                step.step_id, provider_name, step.capability
+            );
 
             // 1. Find the provider via discovery.
             let provider_name_query = match step.step_id.as_str() {
@@ -285,9 +301,16 @@ fn main() -> Result<()> {
         .resolve_binding("${steps.analyze.deliverable}", &workflow.inputs)
         .unwrap_or_else(|_| json!("(workflow output)"));
     println!("\n=== WORKFLOW COMPLETED ===");
-    println!("steps accepted: {}/{}", engine.accepted_count(&workflow), workflow.steps.len());
+    println!(
+        "steps accepted: {}/{}",
+        engine.accepted_count(&workflow),
+        workflow.steps.len()
+    );
     println!("final summary : {summary}");
-    println!("sqlite events : {} events persisted", SqliteStorage::open(db_path)?.event_count()?);
+    println!(
+        "sqlite events : {} events persisted",
+        SqliteStorage::open(db_path)?.event_count()?
+    );
     let _ = std::fs::remove_file(db_path);
     println!("\nDemo complete — every artifact signed, escrowed, and persisted.");
     Ok(())

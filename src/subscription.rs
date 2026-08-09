@@ -238,11 +238,7 @@ impl SubscriptionManager {
     }
 
     /// Start a subscription (issue token + record consent).
-    pub fn start(
-        &mut self,
-        provider: &AgentIdentity,
-        params: StartParams,
-    ) -> Result<Subscription> {
+    pub fn start(&mut self, provider: &AgentIdentity, params: StartParams) -> Result<Subscription> {
         params.consent.verify()?;
         let start = now_unix();
         let sub = Subscription::issue(
@@ -285,7 +281,9 @@ impl SubscriptionManager {
         // Budget check at the subscriber level (simplified: the caller
         // passes the tree-aggregated remaining budget).
         if budget_remaining <= 0.0 {
-            return Err(Error::AutonomyViolation("insufficient budget for renewal".into()));
+            return Err(Error::AutonomyViolation(
+                "insufficient budget for renewal".into(),
+            ));
         }
         let start = sub.period_end;
         let end = start + period_days * 86400;
@@ -301,7 +299,9 @@ impl SubscriptionManager {
     pub fn suspend(&mut self, subscription_id: &str) -> Result<()> {
         let idx = self.find(subscription_id)?;
         if self.subscriptions[idx].state != SubscriptionState::Active {
-            return Err(Error::Other("only active subscriptions can be suspended".into()));
+            return Err(Error::Other(
+                "only active subscriptions can be suspended".into(),
+            ));
         }
         self.subscriptions[idx].state = SubscriptionState::Suspended;
         Ok(())
@@ -339,11 +339,7 @@ impl SubscriptionManager {
 mod tests {
     use super::*;
 
-    fn consent(
-        principal: &AgentIdentity,
-        sub_id: &str,
-        amount: f64,
-    ) -> ConsentReceipt {
+    fn consent(principal: &AgentIdentity, sub_id: &str, amount: f64) -> ConsentReceipt {
         ConsentReceipt {
             consent_id: crate::new_id("cons"),
             principal: principal.did().clone(),
@@ -392,17 +388,13 @@ mod tests {
             .unwrap();
         assert!(receipt.verify().is_ok());
         // Over budget -> denied.
-        assert!(
-            manager
-                .evaluate_consent(&principal, "urn:gap:sub:x", 150.0, "EUR", 100.0, true)
-                .is_err()
-        );
+        assert!(manager
+            .evaluate_consent(&principal, "urn:gap:sub:x", 150.0, "EUR", 100.0, true)
+            .is_err());
         // Auto-consent not allowed -> denied.
-        assert!(
-            manager
-                .evaluate_consent(&principal, "urn:gap:sub:x", 9.99, "EUR", 100.0, false)
-                .is_err()
-        );
+        assert!(manager
+            .evaluate_consent(&principal, "urn:gap:sub:x", 9.99, "EUR", 100.0, false)
+            .is_err());
     }
 
     #[test]

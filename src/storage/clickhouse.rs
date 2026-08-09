@@ -19,7 +19,10 @@
 //! [`HttpTransport`] trait, so tests can use a mock transport while
 //! production uses a real HTTP client (ureq).
 
-use super::{AnnouncementRecord, ContractRecord, EventRecord, Storage, validate_event};
+use super::{
+    validate_event, AnnouncementRecord, ContractRecord, EscrowRecord, EventRecord, IdentityRecord,
+    Storage,
+};
 use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -103,7 +106,9 @@ impl HttpTransport for UreqTransport {
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -163,6 +168,21 @@ CREATE TABLE IF NOT EXISTS gap_announcements (
     announcement_json String,
     expires_at UInt64
 ) ENGINE = ReplacingMergeTree(expires_at) ORDER BY agent_did;
+
+CREATE TABLE IF NOT EXISTS gap_identities (
+    token String,
+    did String,
+    seed_hex String,
+    created_at UInt64
+) ENGINE = ReplacingMergeTree(created_at) ORDER BY token;
+
+CREATE TABLE IF NOT EXISTS gap_escrows (
+    contract_id String,
+    state String,
+    held String,
+    currency String,
+    updated_at UInt64
+) ENGINE = ReplacingMergeTree(updated_at) ORDER BY contract_id;
 "#;
 
 /// ClickHouse-backed storage.
@@ -172,6 +192,8 @@ pub struct ClickHouseStorage<T: HttpTransport + Send> {
     /// reads in real time; the sequencer keeps the hot state).
     contracts: Mutex<HashMap<String, ContractRecord>>,
     announcements: Mutex<HashMap<String, AnnouncementRecord>>,
+    identities: Mutex<HashMap<String, IdentityRecord>>,
+    escrows: Mutex<HashMap<String, EscrowRecord>>,
     events: Mutex<Vec<EventRecord>>,
     /// The atomicity gate for escrow-style operations.
     pub sequencer: Sequencer<()>,
@@ -183,6 +205,8 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             transport,
             contracts: Mutex::new(HashMap::new()),
             announcements: Mutex::new(HashMap::new()),
+            identities: Mutex::new(HashMap::new()),
+            escrows: Mutex::new(HashMap::new()),
             events: Mutex::new(vec![]),
             sequencer: Sequencer::new(()),
         }
@@ -288,6 +312,14 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .collect())
     }
 
+    fn list_contracts(&self) -> Result<Vec<ContractRecord>> {
+        let contracts = self
+            .contracts
+            .lock()
+            .map_err(|_| Error::Other("contracts lock poisoned".into()))?;
+        Ok(contracts.values().cloned().collect())
+    }
+
     fn upsert_announcement(&mut self, record: &AnnouncementRecord) -> Result<()> {
         let mut announcements = self
             .announcements
@@ -314,6 +346,14 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
         Ok(announcements.get(agent_did).cloned())
     }
 
+    fn list_announcements(&self) -> Result<Vec<AnnouncementRecord>> {
+        let announcements = self
+            .announcements
+            .lock()
+            .map_err(|_| Error::Other("announcements lock poisoned".into()))?;
+        Ok(announcements.values().cloned().collect())
+    }
+
     fn reap_expired(&mut self) -> Result<usize> {
         let now = crate::message::now_unix();
         let mut announcements = self
@@ -327,6 +367,75 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
         let params = [QueryParam::new("now", now.to_string())];
         let _ = self.transport.post_params(q, &params);
         Ok(removed)
+    }
+
+    fn upsert_identity(&mut self, record: &IdentityRecord) -> Result<()> {
+        let mut identities = self
+            .identities
+            .lock()
+            .map_err(|_| Error::Other("identities lock poisoned".into()))?;
+        identities.insert(record.token.clone(), record.clone());
+        let q = "INSERT INTO gap_identities (token, did, seed_hex, created_at) \
+                 VALUES ({token:String}, {did:String}, {seed_hex:String}, {created_at:UInt64})";
+        let params = [
+            QueryParam::new("token", &record.token),
+            QueryParam::new("did", &record.did),
+            QueryParam::new("seed_hex", &record.seed_hex),
+            QueryParam::new("created_at", record.created_at.to_string()),
+        ];
+        let _ = self.transport.post_params(q, &params);
+        Ok(())
+    }
+
+    fn get_identity_by_token(&self, token: &str) -> Result<Option<IdentityRecord>> {
+        let identities = self
+            .identities
+            .lock()
+            .map_err(|_| Error::Other("identities lock poisoned".into()))?;
+        Ok(identities.get(token).cloned())
+    }
+
+    fn list_identities(&self) -> Result<Vec<IdentityRecord>> {
+        let identities = self
+            .identities
+            .lock()
+            .map_err(|_| Error::Other("identities lock poisoned".into()))?;
+        Ok(identities.values().cloned().collect())
+    }
+
+    fn upsert_escrow(&mut self, record: &EscrowRecord) -> Result<()> {
+        let mut escrows = self
+            .escrows
+            .lock()
+            .map_err(|_| Error::Other("escrows lock poisoned".into()))?;
+        escrows.insert(record.contract_id.clone(), record.clone());
+        let q = "INSERT INTO gap_escrows (contract_id, state, held, currency, updated_at) \
+                 VALUES ({contract_id:String}, {state:String}, {held:String}, {currency:String}, {updated_at:UInt64})";
+        let params = [
+            QueryParam::new("contract_id", &record.contract_id),
+            QueryParam::new("state", &record.state),
+            QueryParam::new("held", &record.held),
+            QueryParam::new("currency", &record.currency),
+            QueryParam::new("updated_at", record.updated_at.to_string()),
+        ];
+        let _ = self.transport.post_params(q, &params);
+        Ok(())
+    }
+
+    fn get_escrow(&self, contract_id: &str) -> Result<Option<EscrowRecord>> {
+        let escrows = self
+            .escrows
+            .lock()
+            .map_err(|_| Error::Other("escrows lock poisoned".into()))?;
+        Ok(escrows.get(contract_id).cloned())
+    }
+
+    fn list_escrows(&self) -> Result<Vec<EscrowRecord>> {
+        let escrows = self
+            .escrows
+            .lock()
+            .map_err(|_| Error::Other("escrows lock poisoned".into()))?;
+        Ok(escrows.values().cloned().collect())
     }
 }
 
@@ -380,7 +489,9 @@ mod tests {
             .unwrap();
         let t = &storage.transport;
         assert!(!t.param_queries.borrow().is_empty());
-        assert!(t.param_queries.borrow()[0].0.contains("INSERT INTO gap_events"));
+        assert!(t.param_queries.borrow()[0]
+            .0
+            .contains("INSERT INTO gap_events"));
     }
 
     #[test]
@@ -396,15 +507,33 @@ mod tests {
         {
             let (query, params) = &storage.transport.param_queries.borrow()[0];
             // The query text must NOT contain the hostile strings.
-            assert!(!query.contains("DROP TABLE"), "query must not embed hostile kind: {query}");
-            assert!(!query.contains("DELETE FROM"), "query must not embed hostile payload: {query}");
+            assert!(
+                !query.contains("DROP TABLE"),
+                "query must not embed hostile kind: {query}"
+            );
+            assert!(
+                !query.contains("DELETE FROM"),
+                "query must not embed hostile payload: {query}"
+            );
             // The query must use placeholders.
-            assert!(query.contains("{kind:String}"), "query must use bound placeholder: {query}");
-            assert!(query.contains("{payload:String}"), "query must use bound placeholder: {query}");
+            assert!(
+                query.contains("{kind:String}"),
+                "query must use bound placeholder: {query}"
+            );
+            assert!(
+                query.contains("{payload:String}"),
+                "query must use bound placeholder: {query}"
+            );
             // The hostile values travel as bound parameters.
-            let kind_param = params.iter().find(|p| p.name == "kind").expect("kind param");
+            let kind_param = params
+                .iter()
+                .find(|p| p.name == "kind")
+                .expect("kind param");
             assert_eq!(kind_param.value, hostile_kind);
-            let payload_param = params.iter().find(|p| p.name == "payload").expect("payload param");
+            let payload_param = params
+                .iter()
+                .find(|p| p.name == "payload")
+                .expect("payload param");
             assert!(payload_param.value.contains("DELETE FROM"));
         }
 
@@ -421,9 +550,15 @@ mod tests {
         storage.upsert_contract(&rec).unwrap();
         {
             let (query, params) = &storage.transport.param_queries.borrow()[1];
-            assert!(!query.contains("DROP"), "contract query must not embed hostile id: {query}");
+            assert!(
+                !query.contains("DROP"),
+                "contract query must not embed hostile id: {query}"
+            );
             assert!(query.contains("{contract_id:String}"));
-            let id_param = params.iter().find(|p| p.name == "contract_id").expect("contract_id param");
+            let id_param = params
+                .iter()
+                .find(|p| p.name == "contract_id")
+                .expect("contract_id param");
             assert_eq!(id_param.value, rec.contract_id);
         }
     }

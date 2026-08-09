@@ -40,7 +40,9 @@ fn main() {
         let base = format!("http://127.0.0.1:{port}");
         // Serve in the background (worker pool, like main.rs).
         let workers: usize = std::env::var("GAP_BENCH_WORKERS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
         let server = std::sync::Arc::new(server);
         for _ in 0..workers {
             let state2 = state.clone();
@@ -60,19 +62,27 @@ fn main() {
                 let mut body = Vec::new();
                 let _ = request.as_reader().read_to_end(&mut body);
                 let client_ip = request.remote_addr().map(|a| a.ip().to_string());
-                let (status, json_body) =
-                    route_with_ip(&state2, &method, &url, &body, auth.as_deref(), client_ip.as_deref());
+                let (status, json_body) = route_with_ip(
+                    &state2,
+                    &method,
+                    &url,
+                    &body,
+                    auth.as_deref(),
+                    client_ip.as_deref(),
+                );
                 let payload = json_body.to_string();
                 let _ = request.respond(
                     Response::from_string(payload)
                         .with_status_code(status)
-                        .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap()),
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Type", "application/json")
+                                .unwrap(),
+                        ),
                 );
             });
         }
         base
     });
-
 
     // Warm up: create identities (client + provider), announce the
     // provider's capability, then benchmark propose flows.
@@ -96,7 +106,10 @@ fn main() {
         .send(announce.to_string())
         .expect("announce");
     assert!(resp.status() == 200, "announce failed: {}", resp.status());
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let propose_body = json!({
         "provider": provider.1,
         "capability_id": "cap:p:bench",
@@ -110,10 +123,18 @@ fn main() {
             "confidentiality": null
         },
         "escrow": false
-    }).to_string();
+    })
+    .to_string();
 
     println!("GAP node HTTP benchmark — {seconds}s per run, node on {base}");
-    println!("CPU: {}/{} cores, platform: {}", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0), num_cpus(), os_name());
+    println!(
+        "CPU: {}/{} cores, platform: {}",
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0),
+        num_cpus(),
+        os_name()
+    );
     println!();
 
     let mut table = String::from("| concurrency | endpoint | req/s | p50 (ms) | p99 (ms) | errors |\n|---|---|---|---|---|---|\n");
@@ -123,11 +144,21 @@ fn main() {
             ("GET /health", format!("{base}/health"), None),
             ("GET /v1/audit", format!("{base}/v1/audit"), None),
             ("POST /v1/identity", format!("{base}/v1/identity"), None),
-            ("POST /v1/contract/propose", format!("{base}/v1/contract/propose"), Some(propose_body.clone())),
+            (
+                "POST /v1/contract/propose",
+                format!("{base}/v1/contract/propose"),
+                Some(propose_body.clone()),
+            ),
         ] {
             let authed = label.starts_with("GET /v1") || label.starts_with("POST");
-            let (rps, p50, p99, errors) =
-                run_phase(&endpoint, concurrency, seconds, authed, &token, body.as_deref());
+            let (rps, p50, p99, errors) = run_phase(
+                &endpoint,
+                concurrency,
+                seconds,
+                authed,
+                &token,
+                body.as_deref(),
+            );
             println!("c={concurrency:2}  {label:<24} {rps:>9.0} req/s  p50={p50:>6.2}ms  p99={p99:>7.2}ms  errors={errors}");
             table.push_str(&format!(
                 "| {concurrency} | {label} | {rps:.0} | {p50:.2} | {p99:.2} | {errors} |\n"
@@ -237,7 +268,12 @@ fn run_phase(
     lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p50 = percentile(&lat, 0.50);
     let p99 = percentile(&lat, 0.99);
-    (total as f64 / elapsed, p50, p99, errs.load(Ordering::Relaxed))
+    (
+        total as f64 / elapsed,
+        p50,
+        p99,
+        errs.load(Ordering::Relaxed),
+    )
 }
 
 fn percentile(sorted: &[f64], q: f64) -> f64 {

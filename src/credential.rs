@@ -109,7 +109,11 @@ impl Credential {
     /// Create a projection (selective disclosure): a subset of claims
     /// re-signed by the SUBJECT, carrying the issuer's original
     /// signature hash so verifiers can bind it to the original.
-    pub fn project(&self, subject: &AgentIdentity, claims_subset: &[&str]) -> Result<ProjectedCredential> {
+    pub fn project(
+        &self,
+        subject: &AgentIdentity,
+        claims_subset: &[&str],
+    ) -> Result<ProjectedCredential> {
         if self.subject != *subject.did() {
             return Err(Error::Unauthorized(
                 "only the subject may project a credential".into(),
@@ -271,9 +275,7 @@ mod tests {
     #[test]
     fn projection_allows_selective_disclosure() {
         let (_, subject, c) = credential();
-        let projected = c
-            .project(&subject, &["legal_name"])
-            .unwrap();
+        let projected = c.project(&subject, &["legal_name"]).unwrap();
         projected.verify_projection().unwrap();
         assert!(projected.claims_subset.get("legal_name").is_some());
         assert!(projected.claims_subset.get("verified").is_none());
@@ -303,7 +305,10 @@ mod tests {
 
     #[test]
     fn type_names_are_stable() {
-        assert_eq!(CredentialType::PublisherVerified.as_str(), "gap.publisher_verified");
+        assert_eq!(
+            CredentialType::PublisherVerified.as_str(),
+            "gap.publisher_verified"
+        );
         assert_eq!(CredentialType::Conformance.as_str(), "gap.conformance");
     }
 }

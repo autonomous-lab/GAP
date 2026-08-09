@@ -164,18 +164,15 @@ impl CoordinatedScore {
         for (ep, _) in samples {
             *endpoints.entry(ep).or_insert(0) += 1;
         }
-        let max_share = endpoints.values().max().copied().unwrap_or(0) as f64
-            / samples.len() as f64;
+        let max_share =
+            endpoints.values().max().copied().unwrap_or(0) as f64 / samples.len() as f64;
 
         // Timing regularity: fraction of gaps within 5s of each other.
         let mut gaps: Vec<u64> = samples.windows(2).map(|w| w[1].1 - w[0].1).collect();
         gaps.sort_unstable();
         let median_gap = gaps[gaps.len() / 2].max(1);
-        let tight = gaps
-            .iter()
-            .filter(|g| g.abs_diff(median_gap) <= 5)
-            .count() as f64
-            / gaps.len() as f64;
+        let tight =
+            gaps.iter().filter(|g| g.abs_diff(median_gap) <= 5).count() as f64 / gaps.len() as f64;
 
         let score = 0.6 * max_share + 0.4 * tight;
         Self(score.clamp(0.0, 1.0))

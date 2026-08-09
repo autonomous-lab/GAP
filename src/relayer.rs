@@ -15,23 +15,6 @@ use crate::error::{Error, Result};
 use k256::ecdsa::SigningKey;
 use std::sync::Mutex;
 
-/// The GapEscrow function selectors (keccak256 of the signature).
-pub mod selectors {
-    pub const PARK: [u8; 4] = selector("park(uint256,address,address,uint256)");
-    pub const RELEASE: [u8; 4] = selector("release(uint256)");
-    pub const REFUND: [u8; 4] = selector("refund(uint256)");
-    pub const DISPUTE: [u8; 4] = selector("dispute(uint256)");
-    pub const RULE: [u8; 4] = selector("rule(uint256,uint256)");
-    pub const STATE_OF: [u8; 4] = selector("stateOf(uint256)");
-
-    const fn selector(sig: &str) -> [u8; 4] {
-        // Computed at runtime below; this const is a placeholder
-        // replaced by compute_selector in tests. Kept for docs.
-        let _ = sig;
-        [0, 0, 0, 0]
-    }
-}
-
 /// Compute a 4-byte function selector from a signature string.
 pub fn compute_selector(sig: &str) -> [u8; 4] {
     use tiny_keccak::{Hasher, Keccak};
@@ -56,7 +39,12 @@ impl AbiEncoder {
     }
 
     /// Encode `park(contractHash, provider, arbitrator, amount)`.
-    pub fn park(contract_hash: &[u8; 32], provider: &[u8; 20], arbitrator: &[u8; 20], amount: u128) -> Vec<u8> {
+    pub fn park(
+        contract_hash: &[u8; 32],
+        provider: &[u8; 20],
+        arbitrator: &[u8; 20],
+        amount: u128,
+    ) -> Vec<u8> {
         let mut calldata = Vec::with_capacity(4 + 4 * 32);
         calldata.extend_from_slice(&compute_selector("park(uint256,address,address,uint256)"));
         calldata.extend_from_slice(contract_hash);
@@ -275,7 +263,12 @@ impl Relayer {
         arbitrator: &[u8; 20],
         amount: u128,
     ) -> Result<String> {
-        self.submit(&AbiEncoder::park(contract_hash, provider, arbitrator, amount))
+        self.submit(&AbiEncoder::park(
+            contract_hash,
+            provider,
+            arbitrator,
+            amount,
+        ))
     }
 
     /// Release funds to the provider (client calls after acceptance).
@@ -300,7 +293,9 @@ impl Relayer {
 
     /// Read the on-chain escrow state (0=Empty..5=Ruled).
     pub fn state_of(&self, contract_hash: &[u8; 32]) -> Result<u8> {
-        let word = self.chain.call(&self.escrow_address, &AbiEncoder::state_of(contract_hash))?;
+        let word = self
+            .chain
+            .call(&self.escrow_address, &AbiEncoder::state_of(contract_hash))?;
         Ok(word[31])
     }
 }
@@ -321,7 +316,10 @@ impl MockChain {
 
 impl Chain for MockChain {
     fn submit(&self, to: &str, calldata: &[u8]) -> Result<String> {
-        self.txs.lock().expect("txs lock").push((to.to_string(), calldata.to_vec()));
+        self.txs
+            .lock()
+            .expect("txs lock")
+            .push((to.to_string(), calldata.to_vec()));
         // Decode the first 4 bytes to find the function, then update
         // state optimistically (the real chain would run the EVM).
         let sel = &calldata[..4];
@@ -346,7 +344,13 @@ impl Chain for MockChain {
         let hash: [u8; 32] = calldata[4..36].try_into().expect("32 bytes");
         let mut word = [0u8; 32];
         if sel == compute_selector("stateOf(uint256)") {
-            let state = self.states.lock().expect("states lock").get(&hash).copied().unwrap_or(0);
+            let state = self
+                .states
+                .lock()
+                .expect("states lock")
+                .get(&hash)
+                .copied()
+                .unwrap_or(0);
             word[31] = state;
         }
         Ok(word)
@@ -387,7 +391,10 @@ mod tests {
         let calldata = AbiEncoder::park(&h, &provider, &arb, 1_000_000u128);
         assert_eq!(calldata.len(), 4 + 4 * 32);
         // Selector first.
-        assert_eq!(&calldata[..4], &compute_selector("park(uint256,address,address,uint256)"));
+        assert_eq!(
+            &calldata[..4],
+            &compute_selector("park(uint256,address,address,uint256)")
+        );
         // Amount is the last 32 bytes, big-endian, zero-padded.
         let mut expected = [0u8; 32];
         expected[16..].copy_from_slice(&1_000_000u128.to_be_bytes());

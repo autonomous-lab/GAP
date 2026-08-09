@@ -85,9 +85,14 @@ impl Certificate {
     /// Verify the grantor signature and time validity.
     pub fn verify(&self, now: u64) -> Result<()> {
         if now < self.valid_from || now > self.valid_until {
-            return Err(Error::Uncertified("certificate expired or not yet valid".into()));
+            return Err(Error::Uncertified(
+                "certificate expired or not yet valid".into(),
+            ));
         }
-        let sig_hex = self.grantor_sig.as_ref().ok_or(Error::Uncertified("unsigned certificate".into()))?;
+        let sig_hex = self
+            .grantor_sig
+            .as_ref()
+            .ok_or(Error::Uncertified("unsigned certificate".into()))?;
         let sig_bytes: [u8; 64] = hex::decode(sig_hex)
             .map_err(|_| Error::BadSignature)?
             .try_into()
@@ -209,18 +214,26 @@ mod tests {
         let mut meta = MetaAgent::new(AgentIdentity::generate());
         meta.supervise(agent.did().clone(), Some(cert)).unwrap();
 
-        assert!(meta.check_action(agent.did(), "read.inbox", now_unix()).is_ok());
+        assert!(meta
+            .check_action(agent.did(), "read.inbox", now_unix())
+            .is_ok());
         // denied explicitly
-        assert!(meta.check_action(agent.did(), "send.external", now_unix()).is_err());
+        assert!(meta
+            .check_action(agent.did(), "send.external", now_unix())
+            .is_err());
         // not in allowed list
-        assert!(meta.check_action(agent.did(), "delete.records", now_unix()).is_err());
+        assert!(meta
+            .check_action(agent.did(), "delete.records", now_unix())
+            .is_err());
 
         let halt = meta.halt(agent.did()).unwrap();
         assert!(halt.verify().is_ok());
 
         // Unsupervised agent cannot be checked.
         let stranger = AgentIdentity::generate();
-        assert!(meta.check_action(stranger.did(), "read.inbox", now_unix()).is_err());
+        assert!(meta
+            .check_action(stranger.did(), "read.inbox", now_unix())
+            .is_err());
     }
 
     #[test]
@@ -248,7 +261,10 @@ mod tests {
 
     #[test]
     fn autonomy_level_parse_roundtrip() {
-        assert_eq!(AutonomyLevel::parse("propose").unwrap(), AutonomyLevel::Propose);
+        assert_eq!(
+            AutonomyLevel::parse("propose").unwrap(),
+            AutonomyLevel::Propose
+        );
         assert_eq!(
             AutonomyLevel::parse("execute-notify").unwrap(),
             AutonomyLevel::ExecuteNotify

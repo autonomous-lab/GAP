@@ -37,17 +37,32 @@ impl ContractState {
             ContractState::Cancelled => "cancelled",
         }
     }
+
+    pub fn parse(s: &str) -> Result<Self> {
+        Ok(match s {
+            "draft" => ContractState::Draft,
+            "signed" => ContractState::Signed,
+            "executing" => ContractState::Executing,
+            "delivered" => ContractState::Delivered,
+            "accepted" => ContractState::Accepted,
+            "disputed" => ContractState::Disputed,
+            "ruled" => ContractState::Ruled,
+            "cancelled" => ContractState::Cancelled,
+            _ => return Err(Error::Other(format!("unknown contract state: {s}"))),
+        })
+    }
 }
 
 /// Price terms.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Price {
+    #[serde(deserialize_with = "de_f64_from_string")]
     pub amount: f64,
     pub currency: String,
     /// fixed | per-unit | subscription | commission
     pub model: String,
     /// Maximum total the client will pay.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_f64_from_string")]
     pub cap: Option<f64>,
 }
 
@@ -131,10 +146,7 @@ impl Contract {
             return Err(Error::KeyMismatch);
         }
         // Verify the client's signature first (fail closed).
-        let client_sig = self
-            .client_sig
-            .as_ref()
-            .ok_or(Error::UnsignedContract)?;
+        let client_sig = self.client_sig.as_ref().ok_or(Error::UnsignedContract)?;
         crate::identity::verify_signature(
             &self.client,
             &self.canonical_bytes(),
@@ -213,6 +225,40 @@ fn decode_sig(hex_sig: &str) -> Result<crate::identity::Signature> {
         .try_into()
         .map_err(|_| Error::BadSignature)?;
     Ok(crate::identity::Signature(bytes))
+}
+
+pub(crate) fn de_f64_from_string<'de, D>(deserializer: D) -> std::result::Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(n) => n
+            .as_f64()
+            .ok_or_else(|| serde::de::Error::custom("invalid numeric value")),
+        serde_json::Value::String(s) => s.parse::<f64>().map_err(serde::de::Error::custom),
+        _ => Err(serde::de::Error::custom("value must be number or string")),
+    }
+}
+
+pub(crate) fn de_opt_f64_from_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => n
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom("invalid numeric value")),
+        Some(serde_json::Value::String(s)) => {
+            s.parse::<f64>().map(Some).map_err(serde::de::Error::custom)
+        }
+        _ => Err(serde::de::Error::custom("value must be number or string")),
+    }
 }
 
 #[cfg(test)]
@@ -321,25 +367,13 @@ mod tests {
         // Deadline already in the past (deterministic, no clock advance).
         let mut t = terms();
         t.deadline = crate::message::now_unix().saturating_sub(60);
-        let c = Contract::propose(
-            &client,
-            provider.did().clone(),
-            "cap:lead-gen",
-            t,
-            true,
-        );
+        let c = Contract::propose(&client, provider.did().clone(), "cap:lead-gen", t, true);
         assert!(c.is_expired());
 
         // Deadline in the future.
         let mut t2 = terms();
         t2.deadline = crate::message::now_unix() + 3600;
-        let c2 = Contract::propose(
-            &client,
-            provider.did().clone(),
-            "cap:lead-gen",
-            t2,
-            true,
-        );
+        let c2 = Contract::propose(&client, provider.did().clone(), "cap:lead-gen", t2, true);
         assert!(!c2.is_expired());
     }
 

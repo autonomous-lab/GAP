@@ -112,10 +112,7 @@ impl DecisionRecord {
 
     /// Verify the evaluator signature.
     pub fn verify(&self) -> Result<()> {
-        let sig_hex = self
-            .evaluator_sig
-            .as_ref()
-            .ok_or(Error::BadSignature)?;
+        let sig_hex = self.evaluator_sig.as_ref().ok_or(Error::BadSignature)?;
         let sig_bytes: [u8; 64] = hex::decode(sig_hex)
             .map_err(|_| Error::BadSignature)?
             .try_into()
@@ -269,19 +266,16 @@ impl Engine {
         DecisionRecord {
             decision_id: crate::new_id("pol"),
             evaluated_at: crate::message::now_unix(),
-            layers_evaluated: vec![
-                "L1".into(),
-                "L2".into(),
-                "L3".into(),
-                "L4".into(),
-            ],
+            layers_evaluated: vec!["L1".into(), "L2".into(), "L3".into(), "L4".into()],
             applied_rules: applied,
             outcome,
             conditions,
             explanation,
             explanation_for_principal,
             action_hash: crate::sha256_hex(
-                serde_json::to_vec(&context.data).expect("ctx serializes").as_slice(),
+                serde_json::to_vec(&context.data)
+                    .expect("ctx serializes")
+                    .as_slice(),
             ),
             evaluated_by: evaluator.did().clone(),
             evaluator_sig: None,
@@ -298,10 +292,18 @@ fn evaluate_rule(rule: &Rule, context: &ActionContext) -> Option<RuleOutcome> {
     let matched = match rule.condition.op.as_str() {
         "eq" => json_eq(field_value, &target),
         "ne" => !json_eq(field_value, &target),
-        "gt" => json_cmp(field_value, &target).map(|o| o == std::cmp::Ordering::Greater).unwrap_or(false),
-        "gte" => json_cmp(field_value, &target).map(|o| o != std::cmp::Ordering::Less).unwrap_or(false),
-        "lt" => json_cmp(field_value, &target).map(|o| o == std::cmp::Ordering::Less).unwrap_or(false),
-        "lte" => json_cmp(field_value, &target).map(|o| o != std::cmp::Ordering::Greater).unwrap_or(false),
+        "gt" => json_cmp(field_value, &target)
+            .map(|o| o == std::cmp::Ordering::Greater)
+            .unwrap_or(false),
+        "gte" => json_cmp(field_value, &target)
+            .map(|o| o != std::cmp::Ordering::Less)
+            .unwrap_or(false),
+        "lt" => json_cmp(field_value, &target)
+            .map(|o| o == std::cmp::Ordering::Less)
+            .unwrap_or(false),
+        "lte" => json_cmp(field_value, &target)
+            .map(|o| o != std::cmp::Ordering::Greater)
+            .unwrap_or(false),
         "in" => json_in(field_value, &target),
         "not_in" => !json_in(field_value, &target),
         "contains" => json_contains(field_value, &target),
@@ -318,10 +320,7 @@ fn evaluate_rule(rule: &Rule, context: &ActionContext) -> Option<RuleOutcome> {
 /// Resolve a rule value: literal, or {"ref": "path"}.
 fn resolve_value(value: &Value, context: &ActionContext) -> Value {
     if let Some(ref_path) = value.get("ref").and_then(|v| v.as_str()) {
-        context
-            .get(ref_path)
-            .cloned()
-            .unwrap_or(Value::Null)
+        context.get(ref_path).cloned().unwrap_or(Value::Null)
     } else {
         value.clone()
     }
@@ -339,9 +338,7 @@ fn json_eq(a: &Value, b: &Value) -> bool {
 
 fn json_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => {
-            x.as_f64().partial_cmp(&y.as_f64())
-        }
+        (Value::Number(x), Value::Number(y)) => x.as_f64().partial_cmp(&y.as_f64()),
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
         _ => None,
     }
@@ -373,7 +370,10 @@ mod tests {
         ctx.set("action.amount", serde_json::json!(45));
         ctx.set("action.to", serde_json::json!("did:gap:9b1e…"));
         ctx.set("principal.budget.per_day", serde_json::json!(100));
-        ctx.set("principal.embargo_list", serde_json::json!(["did:gap:evil"]));
+        ctx.set(
+            "principal.embargo_list",
+            serde_json::json!(["did:gap:evil"]),
+        );
         ctx
     }
 
@@ -466,12 +466,24 @@ mod tests {
         // L1 prohibition
         engine.add_policy(policy(
             Layer::Platform,
-            vec![rule("no_csam", Effect::Deny, "action.category", "eq", serde_json::json!("csam"))],
+            vec![rule(
+                "no_csam",
+                Effect::Deny,
+                "action.category",
+                "eq",
+                serde_json::json!("csam"),
+            )],
         ));
         // L4 would allow — but L1 fires first.
         engine.add_policy(policy(
             Layer::Personal,
-            vec![rule("allow_all", Effect::Allow, "action.category", "eq", serde_json::json!("csam"))],
+            vec![rule(
+                "allow_all",
+                Effect::Allow,
+                "action.category",
+                "eq",
+                serde_json::json!("csam"),
+            )],
         ));
         let mut ctx = context();
         ctx.ensure("action");
@@ -498,10 +510,16 @@ mod tests {
         let mut ctx = context();
         ctx.ensure("action");
         ctx.set("action.risk_class", serde_json::json!("high"));
-        let record = engine.evaluate(&ctx, &evaluator, Some("Action à risque élevé : confirmation humaine requise."));
+        let record = engine.evaluate(
+            &ctx,
+            &evaluator,
+            Some("Action à risque élevé : confirmation humaine requise."),
+        );
         assert_eq!(record.outcome, "allow_with_conditions");
         assert!(record.conditions.contains(&"high_risk".to_string()));
-        assert!(record.explanation_for_principal.contains("confirmation humaine"));
+        assert!(record
+            .explanation_for_principal
+            .contains("confirmation humaine"));
     }
 
     #[test]
@@ -510,11 +528,21 @@ mod tests {
         let mut engine = Engine::new();
         engine.add_policy(policy(
             Layer::Personal,
-            vec![rule("cap", Effect::Deny, "action.amount", "gt", serde_json::json!(50))],
+            vec![rule(
+                "cap",
+                Effect::Deny,
+                "action.amount",
+                "gt",
+                serde_json::json!(50),
+            )],
         ));
         let mut ctx = context();
         ctx.set("action.amount", serde_json::json!(500));
-        let record = engine.evaluate(&ctx, &evaluator, Some("Dépense refusée : au-delà du plafond."));
+        let record = engine.evaluate(
+            &ctx,
+            &evaluator,
+            Some("Dépense refusée : au-delà du plafond."),
+        );
         assert!(record.explanation_for_principal.contains("plafond"));
     }
 

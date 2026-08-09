@@ -94,10 +94,7 @@ impl DelegationToken {
 
     /// Verify the delegator's signature.
     pub fn verify(&self) -> Result<()> {
-        let sig_hex = self
-            .delegator_sig
-            .as_ref()
-            .ok_or(Error::BadSignature)?;
+        let sig_hex = self.delegator_sig.as_ref().ok_or(Error::BadSignature)?;
         let sig_bytes: [u8; 64] = hex::decode(sig_hex)
             .map_err(|_| Error::BadSignature)?
             .try_into()

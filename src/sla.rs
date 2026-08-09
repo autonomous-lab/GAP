@@ -166,10 +166,7 @@ impl SlaTracker {
         if relevant.is_empty() {
             return None;
         }
-        Some(
-            relevant.iter().map(|m| m.uptime_observed).sum::<f64>()
-                / relevant.len() as f64,
-        )
+        Some(relevant.iter().map(|m| m.uptime_observed).sum::<f64>() / relevant.len() as f64)
     }
 
     /// Whether the declared SLA materially diverges from measurements
@@ -182,11 +179,7 @@ impl SlaTracker {
     }
 
     /// Whether an incident was disclosed within the declared window.
-    pub fn disclosed_on_time(
-        &self,
-        incident: &IncidentReport,
-        occurred_at: u64,
-    ) -> bool {
+    pub fn disclosed_on_time(&self, incident: &IncidentReport, occurred_at: u64) -> bool {
         incident.reported_at.saturating_sub(occurred_at)
             <= self.declared.incident_disclosure_within_hours * 3600
     }
@@ -237,18 +230,14 @@ mod tests {
         // No measurements -> no divergence.
         assert!(!tracker.diverges(now));
         // Good measurements -> no divergence.
-        tracker
-            .record(measurement(&measurer, 0.9995, now))
-            .unwrap();
+        tracker.record(measurement(&measurer, 0.9995, now)).unwrap();
         tracker
             .record(measurement(&measurer, 0.9990, now - 100))
             .unwrap();
         assert!(!tracker.diverges(now));
         // Bad measurements -> divergence.
         let mut tracker2 = SlaTracker::new(sla());
-        tracker2
-            .record(measurement(&measurer, 0.98, now))
-            .unwrap();
+        tracker2.record(measurement(&measurer, 0.98, now)).unwrap();
         tracker2
             .record(measurement(&measurer, 0.97, now - 100))
             .unwrap();

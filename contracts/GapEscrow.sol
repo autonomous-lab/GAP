@@ -11,8 +11,8 @@ pragma solidity ^0.8.26;
  * can move them outside the protocol's state machine.
  *
  * Design notes:
- *  - One contract instance serves many GAP contracts, keyed by a
- *    contract hash (SHA-256 of the signed GAP contract JSON).
+ *  - One contract instance serves many GAP contracts, keyed by
+ *    keccak256 of the GAP contract id.
  *  - Payment currency is a stablecoin (USDC/EURC) held in this contract.
  *  - Authorization mirrors the GAP spec:
  *      park     — the client (holds funds)

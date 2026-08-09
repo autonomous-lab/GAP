@@ -50,7 +50,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     ann.verify()?;
     registry.announce(ann)?;
-    println!("announcement verified & registered ({} live)", registry.len());
+    println!(
+        "announcement verified & registered ({} live)",
+        registry.len()
+    );
 
     let hits = registry.query(&Query {
         name: Some("lead-generation".into()),
@@ -104,8 +107,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }],
     );
     bundle.verify(&provider, payload)?;
-    println!("delivery verified: {} ({} bytes)",
-        bundle.deliverable_hash, payload.len());
+    println!(
+        "delivery verified: {} ({} bytes)",
+        bundle.deliverable_hash,
+        payload.len()
+    );
 
     // --- 4. Settlement through escrow (signed instructions only) ---
     println!("\n[4] PAYMENT (escrow)");
@@ -148,7 +154,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 5. Reputation ---
     println!("\n[5] REPUTATION");
     provider.reputation_mut().record(true, true);
-    println!("provider success rate: {:.2}", provider.reputation().success_rate());
+    println!(
+        "provider success rate: {:.2}",
+        provider.reputation().success_rate()
+    );
 
     println!("\n=== GAP flow completed successfully ===");
     Ok(())

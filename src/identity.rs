@@ -86,6 +86,20 @@ impl AgentIdentity {
         Signature(self.signing_key.sign(msg).to_bytes())
     }
 
+    /// Export the 32-byte Ed25519 seed for node-side key custody.
+    ///
+    /// This is intentionally explicit: production deployments should
+    /// store it in a KMS-backed backend, not log it or return it from
+    /// public APIs.
+    pub fn seed_bytes(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
+    }
+
+    /// Export the seed as hex for storage backends.
+    pub fn seed_hex(&self) -> String {
+        hex::encode(self.seed_bytes())
+    }
+
     /// Verify a signature against this agent's own public key.
     pub fn verify(&self, msg: &[u8], sig: &Signature) -> bool {
         verify_signature(&self.did, msg, sig).is_ok()
@@ -119,8 +133,7 @@ pub fn verify_signature(did: &Did, msg: &[u8], sig: &Signature) -> Result<()> {
     let pk = ed25519_dalek::VerifyingKey::from_bytes(&did.pubkey())
         .map_err(|e| Error::Other(format!("invalid pubkey: {e}")))?;
     let sig = ed25519_dalek::Signature::from_bytes(&sig.0);
-    pk.verify_strict(msg, &sig)
-        .map_err(|_| Error::BadSignature)
+    pk.verify_strict(msg, &sig).map_err(|_| Error::BadSignature)
 }
 
 /// The signer capability — anything that can sign and verify.
@@ -223,10 +236,8 @@ mod tests {
         assert_eq!(r.on_time, 1);
         assert_eq!(r.success_rate(), 2.0 / 3.0);
         r.endorse(
-            Did::parse(
-                "did:gap:0000000000000000000000000000000000000000000000000000000000000000",
-            )
-            .unwrap(),
+            Did::parse("did:gap:0000000000000000000000000000000000000000000000000000000000000000")
+                .unwrap(),
             "good".into(),
         );
         assert_eq!(r.endorsements.len(), 1);

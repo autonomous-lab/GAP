@@ -80,7 +80,10 @@ mod tests {
     #[test]
     fn display_covers_all_variants() {
         assert_eq!(Error::BadSignature.to_string(), "bad signature");
-        assert_eq!(Error::KeyMismatch.to_string(), "signing key does not match did");
+        assert_eq!(
+            Error::KeyMismatch.to_string(),
+            "signing key does not match did"
+        );
         assert_eq!(
             Error::UnsupportedVersion("9.9".into()).to_string(),
             "unsupported protocol version: 9.9"
@@ -90,7 +93,11 @@ mod tests {
             "unknown contract: ctr"
         );
         assert_eq!(
-            Error::InvalidTransition { from: "a".into(), to: "b".into() }.to_string(),
+            Error::InvalidTransition {
+                from: "a".into(),
+                to: "b".into()
+            }
+            .to_string(),
             "invalid transition: a -> b"
         );
         assert_eq!(
@@ -105,10 +112,19 @@ mod tests {
             Error::EscrowViolation("y".into()).to_string(),
             "escrow violation: y"
         );
-        assert_eq!(Error::Uncertified("z".into()).to_string(), "uncertified perimeter: z");
-        assert_eq!(Error::WrongProtocol("p".into()).to_string(), "wrong protocol: p");
+        assert_eq!(
+            Error::Uncertified("z".into()).to_string(),
+            "uncertified perimeter: z"
+        );
+        assert_eq!(
+            Error::WrongProtocol("p".into()).to_string(),
+            "wrong protocol: p"
+        );
         assert_eq!(Error::StaleTimestamp.to_string(), "stale timestamp");
-        assert_eq!(Error::Unauthorized("u".into()).to_string(), "unauthorized: u");
+        assert_eq!(
+            Error::Unauthorized("u".into()).to_string(),
+            "unauthorized: u"
+        );
         assert_eq!(
             Error::UnverifiedSignature("s".into()).to_string(),
             "unverified signature: s"
@@ -119,7 +135,9 @@ mod tests {
 
     #[test]
     fn json_error_converts() {
-        let e: Error = serde_json::from_str::<serde_json::Value>("{").unwrap_err().into();
+        let e: Error = serde_json::from_str::<serde_json::Value>("{")
+            .unwrap_err()
+            .into();
         assert!(matches!(e, Error::Json(_)));
     }
 }

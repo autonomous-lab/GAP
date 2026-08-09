@@ -131,7 +131,9 @@ fn happy_path_full_economy() -> Result<()> {
 
     // 4. Escrow: park, accept, release
     world.escrow.register(contract.clone())?;
-    world.escrow.park(&park(&world.client, &world.escrow, &contract))?;
+    world
+        .escrow
+        .park(&park(&world.client, &world.escrow, &contract))?;
     assert_eq!(world.escrow.state(), EscrowState::Parked);
 
     let acceptance = Envelope::new(
@@ -176,19 +178,16 @@ fn disputed_delivery_is_arbitrated_and_ruled() -> Result<()> {
     // Provider delivers a payload that does NOT match the accepted
     // deliverable (wrong content — hash mismatch detected by client).
     let claimed = b"lead: alice@example.com, verified";
-    let bundle = ProofBundle::signed(
-        &world.provider,
-        &contract.contract_id,
-        claimed,
-        vec![],
-    );
+    let bundle = ProofBundle::signed(&world.provider, &contract.contract_id, claimed, vec![]);
     // The client re-checks against what was actually received.
     let received = b"lead: mallory@example.com, NOT verified";
     assert!(bundle.verify(&world.provider, received).is_err());
 
     // Client disputes; funds are parked and held.
     world.escrow.register(contract.clone())?;
-    world.escrow.park(&park(&world.client, &world.escrow, &contract))?;
+    world
+        .escrow
+        .park(&park(&world.client, &world.escrow, &contract))?;
     let dispute = Envelope::new(
         world.client.did().clone(),
         world.escrow_agent.did().clone(),
@@ -213,7 +212,7 @@ fn disputed_delivery_is_arbitrated_and_ruled() -> Result<()> {
     let ruled = world.escrow.rule(&ruling, world.arbitrator.did())?;
     assert_eq!(ruled.event, "pay.ruled");
     assert_eq!(world.escrow.state(), EscrowState::Ruled);
-    assert_eq!(world.escrow.held(), 0.0);
+    assert_eq!(world.escrow.held(), gap::amount::Amount::ZERO);
 
     // A ruling from an unapproved arbitrator is rejected.
     let impostor = AgentIdentity::generate();
@@ -236,7 +235,9 @@ fn disputed_delivery_is_arbitrated_and_ruled() -> Result<()> {
     )
     .accept_by_provider(&world2.provider)?;
     world2.escrow.register(contract2.clone())?;
-    world2.escrow.park(&park(&world2.client, &world2.escrow, &contract2))?;
+    world2
+        .escrow
+        .park(&park(&world2.client, &world2.escrow, &contract2))?;
     let dispute2 = Envelope::new(
         world2.client.did().clone(),
         world2.escrow_agent.did().clone(),
@@ -246,7 +247,10 @@ fn disputed_delivery_is_arbitrated_and_ruled() -> Result<()> {
     .for_contract(contract2.contract_id.clone())
     .sign(&world2.client);
     world2.escrow.dispute(&dispute2)?;
-    assert!(world2.escrow.rule(&fake_ruling, world2.arbitrator.did()).is_err());
+    assert!(world2
+        .escrow
+        .rule(&fake_ruling, world2.arbitrator.did())
+        .is_err());
 
     // Provider's reputation takes a hit (attested by the ruling).
     world.provider.reputation_mut().record(false, false);

@@ -71,8 +71,7 @@ impl Amount {
                 .map_err(|_| Error::Other(format!("amount out of range: {s}")))?
         };
         Ok(Self(
-            int
-                .checked_mul(SCALE)
+            int.checked_mul(SCALE)
                 .and_then(|v| v.checked_add(frac))
                 .ok_or_else(|| Error::Other(format!("amount overflow: {s}")))?,
         ))
@@ -121,15 +120,27 @@ impl Amount {
 }
 
 impl Serialize for Amount {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string_decimal())
     }
 }
 
 impl<'de> Deserialize<'de> for Amount {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        Amount::parse(&s).map_err(serde::de::Error::custom)
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(s) => Amount::parse(&s).map_err(serde::de::Error::custom),
+            serde_json::Value::Number(n) => n
+                .as_f64()
+                .map(Amount::from_f64_rounding)
+                .ok_or_else(|| serde::de::Error::custom("invalid numeric amount")),
+            _ => Err(serde::de::Error::custom("amount must be a decimal string")),
+        }
     }
 }
 
@@ -145,11 +156,23 @@ mod tests {
 
     #[test]
     fn parse_roundtrips() {
-        assert_eq!(Amount::parse("0.05").unwrap().to_string_decimal(), "0.050000");
-        assert_eq!(Amount::parse("10").unwrap().to_string_decimal(), "10.000000");
-        assert_eq!(Amount::parse("10.5").unwrap().to_string_decimal(), "10.500000");
+        assert_eq!(
+            Amount::parse("0.05").unwrap().to_string_decimal(),
+            "0.050000"
+        );
+        assert_eq!(
+            Amount::parse("10").unwrap().to_string_decimal(),
+            "10.000000"
+        );
+        assert_eq!(
+            Amount::parse("10.5").unwrap().to_string_decimal(),
+            "10.500000"
+        );
         assert_eq!(Amount::parse("0.000001").unwrap().minor_units(), 1);
-        assert_eq!(Amount::parse("123456789.123456").unwrap().minor_units(), 123456789123456);
+        assert_eq!(
+            Amount::parse("123456789.123456").unwrap().minor_units(),
+            123456789123456
+        );
     }
 
     #[test]

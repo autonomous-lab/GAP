@@ -10,9 +10,10 @@
 //!   GAP_SQLITE_PATH      SQLite file, default ./gap-node.db
 //!   GAP_CLICKHOUSE_URL   ClickHouse HTTP URL, e.g. http://clickhouse:8123
 //!   GAP_DB_INIT          "1" to run ClickHouse migrations at startup
+//!   GAP_ADMIN_TOKEN      bearer token required for node arbitration
 
 use gap::error::Result;
-use gap::server::{NodeState, route_with_ip};
+use gap::server::{route_with_ip, NodeState};
 use gap::storage::clickhouse::{ClickHouseStorage, UreqTransport};
 use gap::storage::sqlite::SqliteStorage;
 use gap::storage::Storage;
@@ -30,8 +31,8 @@ fn build_storage() -> Result<Box<dyn Storage>> {
             Ok(Box::new(SqliteStorage::open(&path)?))
         }
         "clickhouse" => {
-            let url = env::var("GAP_CLICKHOUSE_URL")
-                .unwrap_or_else(|_| "http://clickhouse:8123".into());
+            let url =
+                env::var("GAP_CLICKHOUSE_URL").unwrap_or_else(|_| "http://clickhouse:8123".into());
             println!("[gap-node] storage: clickhouse ({url})");
             let transport = UreqTransport::new(&url);
             let storage = ClickHouseStorage::new(transport);
@@ -55,14 +56,12 @@ fn main() -> Result<()> {
     // GAP_NODE_SEED (hex) or GAP_NODE_SEED_FILE. Without it, the node
     // DID changes on every restart.
     let seed: Option<[u8; 32]> = {
-        let hex_seed = env::var("GAP_NODE_SEED")
-            .ok()
-            .or_else(|| {
-                env::var("GAP_NODE_SEED_FILE")
-                    .ok()
-                    .and_then(|f| std::fs::read_to_string(f).ok())
-                    .map(|s| s.trim().to_string())
-            });
+        let hex_seed = env::var("GAP_NODE_SEED").ok().or_else(|| {
+            env::var("GAP_NODE_SEED_FILE")
+                .ok()
+                .and_then(|f| std::fs::read_to_string(f).ok())
+                .map(|s| s.trim().to_string())
+        });
         match hex_seed {
             Some(hex_str) => {
                 let bytes = hex::decode(hex_str.trim())
@@ -84,6 +83,12 @@ fn main() -> Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(600);
     let mut state = NodeState::with_rate_limits(storage, seed, token_cap, ip_cap);
+    if let Ok(admin_token) = env::var("GAP_ADMIN_TOKEN") {
+        state.set_admin_token(admin_token);
+        println!("[gap-node] arbitration admin token configured");
+    } else {
+        println!("[gap-node] arbitration disabled: set GAP_ADMIN_TOKEN to enable /v1/escrow/rule");
+    }
 
     // Optional on-chain escrow: when GAP_ESCROW_ADDRESS is set, escrow
     // operations go to the GapEscrow contract via the relayer.
@@ -98,7 +103,8 @@ fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(state));
 
     let server = Arc::new(
-        Server::http(&addr).map_err(|e| gap::Error::Other(format!("failed to bind {addr}: {e}")))?,
+        Server::http(&addr)
+            .map_err(|e| gap::Error::Other(format!("failed to bind {addr}: {e}")))?,
     );
     println!("[gap-node] listening on http://{addr}");
     println!("[gap-node] node DID: {}", state.lock().unwrap().node_did());
@@ -111,7 +117,10 @@ fn main() -> Result<()> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or_else(|| {
-            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8)
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(8)
         });
     println!("[gap-node] worker pool: {workers} threads");
 
@@ -150,11 +159,15 @@ fn main() -> Result<()> {
                 .find(|h| h.field.equiv("Authorization"))
                 .map(|h| h.value.as_str().to_string());
 
-            let client_ip = request
-                .remote_addr()
-                .map(|addr| addr.ip().to_string());
-            let (status, json_body) =
-                route_with_ip(&state, &method, &path, &body, auth.as_deref(), client_ip.as_deref());
+            let client_ip = request.remote_addr().map(|addr| addr.ip().to_string());
+            let (status, json_body) = route_with_ip(
+                &state,
+                &method,
+                &path,
+                &body,
+                auth.as_deref(),
+                client_ip.as_deref(),
+            );
             let json_str = json_body.to_string();
 
             let mut response = Response::from_string(json_str).with_status_code(status);

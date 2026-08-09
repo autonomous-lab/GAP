@@ -11,12 +11,14 @@ use tiny_http::{Header, Request, Response, Server};
 /// Start a real node server (worker pool of 4) on an ephemeral port.
 /// Returns the base URL. `token_cap`/`ip_cap` configure rate limits.
 fn spawn_node(token_cap: u32, ip_cap: u32) -> String {
-    let state = Arc::new(Mutex::new(NodeState::with_rate_limits(
+    let mut node = NodeState::with_rate_limits(
         Box::new(SqliteStorage::open(":memory:").unwrap()),
         None,
         token_cap,
         ip_cap,
-    )));
+    );
+    node.set_admin_token("test-admin");
+    let state = Arc::new(Mutex::new(node));
     let server = Arc::new(Server::http("127.0.0.1:0").expect("bind"));
     let base = format!(
         "http://127.0.0.1:{}",
@@ -40,8 +42,14 @@ fn spawn_node(token_cap: u32, ip_cap: u32) -> String {
             let mut body = Vec::new();
             let _ = request.as_reader().read_to_end(&mut body);
             let client_ip = request.remote_addr().map(|a| a.ip().to_string());
-            let (status, json_body) =
-                route_with_ip(&state, &method, &url, &body, auth.as_deref(), client_ip.as_deref());
+            let (status, json_body) = route_with_ip(
+                &state,
+                &method,
+                &url,
+                &body,
+                auth.as_deref(),
+                client_ip.as_deref(),
+            );
             let _ = request.respond(
                 Response::from_string(json_body.to_string())
                     .with_status_code(status)
@@ -59,7 +67,9 @@ struct Client {
 
 impl Client {
     fn new(base: &str) -> Self {
-        let config = ureq::config::Config::builder().http_status_as_error(false).build();
+        let config = ureq::config::Config::builder()
+            .http_status_as_error(false)
+            .build();
         Self {
             agent: ureq::Agent::new_with_config(config),
             base: base.to_string(),
@@ -93,11 +103,15 @@ impl Client {
         self.read(resp)
     }
 
-    fn read(&self, resp: std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> (u16, Value) {
+    fn read(
+        &self,
+        resp: std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> (u16, Value) {
         match resp {
             Ok(r) => {
                 let status = r.status().as_u16();
-                let body: Value = serde_json::from_reader(r.into_body().as_reader()).unwrap_or(Value::Null);
+                let body: Value =
+                    serde_json::from_reader(r.into_body().as_reader()).unwrap_or(Value::Null);
                 (status, body)
             }
             Err(e) => panic!("transport error: {e:?}"),
@@ -118,7 +132,7 @@ fn terms_json() -> Value {
     json!({
         "input": {}, "deliverable": {}, "acceptance_criteria": ["ok"],
         "deadline": 4_000_000_000u64,
-        "price": { "amount": 0.05, "currency": "EUR", "model": "fixed", "cap": 100.0 },
+        "price": { "amount": "0.05", "currency": "EUR", "model": "fixed", "cap": "100.0" },
         "autonomy": "propose", "confidentiality": null
     })
 }
@@ -138,7 +152,10 @@ fn all_routes_full_lifecycle() {
     // 2. GET /.well-known/gap-agent.json
     let (s, v) = c.get("/.well-known/gap-agent.json", None);
     assert_eq!(s, 200, "agent card: {v}");
-    assert!(v["agent"]["did"].as_str().is_some(), "card missing did: {v}");
+    assert!(
+        v["agent"]["did"].as_str().is_some(),
+        "card missing did: {v}"
+    );
 
     // 3. POST /v1/identity (client + provider)
     let (_client_did, client_tok) = c.identity();
@@ -179,7 +196,10 @@ fn all_routes_full_lifecycle() {
     assert_eq!(v["state"], "draft");
 
     // 8. POST /v1/contract/{id}/accept (provider)
-    let (s, v) = c.post_empty(&format!("/v1/contract/{contract_id}/accept"), Some(&provider_tok));
+    let (s, v) = c.post_empty(
+        &format!("/v1/contract/{contract_id}/accept"),
+        Some(&provider_tok),
+    );
     assert_eq!(s, 200, "accept: {v}");
     assert_eq!(v["state"], "signed");
 
@@ -201,10 +221,13 @@ fn all_routes_full_lifecycle() {
     assert_eq!(v["state"], "delivered");
 
     // 11. POST /v1/contract/{id}/accept-delivery (client) -> release
-    let (s, v) = c.post_empty(&format!("/v1/contract/{contract_id}/accept-delivery"), Some(&client_tok));
+    let (s, v) = c.post_empty(
+        &format!("/v1/contract/{contract_id}/accept-delivery"),
+        Some(&client_tok),
+    );
     assert_eq!(s, 200, "accept-delivery: {v}");
     assert_eq!(v["state"], "accepted");
-    assert_eq!(v["settlement"]["amount"], 0.05);
+    assert_eq!(v["settlement"]["amount"], "0.050000");
 
     // 12. POST /v1/escrow/release (explicit confirmation)
     let (s, v) = c.post(
@@ -220,8 +243,17 @@ fn all_routes_full_lifecycle() {
     assert_eq!(s, 200, "audit: {v}");
     let events = v["events"].as_array().expect("audit events");
     let kinds: Vec<&str> = events.iter().filter_map(|e| e["kind"].as_str()).collect();
-    for expected in ["ctr.proposed", "ctr.signed", "pay.parked", "exe.delivered", "exe.accepted"] {
-        assert!(kinds.contains(&expected), "audit missing {expected}: {kinds:?}");
+    for expected in [
+        "ctr.proposed",
+        "ctr.signed",
+        "pay.parked",
+        "exe.delivered",
+        "exe.accepted",
+    ] {
+        assert!(
+            kinds.contains(&expected),
+            "audit missing {expected}: {kinds:?}"
+        );
     }
 
     // 14. Second contract: refund path.
@@ -230,9 +262,17 @@ fn all_routes_full_lifecycle() {
     let c2 = v["contract_id"].as_str().unwrap().to_string();
     let (s, _) = c.post_empty(&format!("/v1/contract/{c2}/accept"), Some(&provider_tok));
     assert_eq!(s, 200);
-    let (s, v) = c.post("/v1/escrow/park", Some(&client_tok), json!({ "contract_id": c2, "amount": "1.00" }));
+    let (s, v) = c.post(
+        "/v1/escrow/park",
+        Some(&client_tok),
+        json!({ "contract_id": c2, "amount": "1.00" }),
+    );
     assert_eq!(s, 200, "park2: {v}");
-    let (s, v) = c.post("/v1/escrow/refund", Some(&client_tok), json!({ "contract_id": c2 }));
+    let (s, v) = c.post(
+        "/v1/escrow/refund",
+        Some(&client_tok),
+        json!({ "contract_id": c2 }),
+    );
     assert_eq!(s, 200, "refund: {v}");
     assert_eq!(v["receipt"]["event"], "pay.refunded");
 
@@ -242,7 +282,17 @@ fn all_routes_full_lifecycle() {
     let c3 = v["contract_id"].as_str().unwrap().to_string();
     let (s, _) = c.post_empty(&format!("/v1/contract/{c3}/accept"), Some(&provider_tok));
     assert_eq!(s, 200);
-    let (s, _) = c.post("/v1/escrow/park", Some(&client_tok), json!({ "contract_id": c3, "amount": "2.00" }));
+    let (s, _) = c.post(
+        "/v1/escrow/park",
+        Some(&client_tok),
+        json!({ "contract_id": c3, "amount": "2.00" }),
+    );
+    assert_eq!(s, 200);
+    let (s, _) = c.post(
+        &format!("/v1/contract/{c3}/deliver"),
+        Some(&provider_tok),
+        json!({ "deliverable_hash": "sha256:def456" }),
+    );
     assert_eq!(s, 200);
     // Client disputes with a reason code.
     let (s, v) = c.post(
@@ -255,7 +305,7 @@ fn all_routes_full_lifecycle() {
     // Arbitrator (node) rules 40/60.
     let (s, v) = c.post(
         "/v1/escrow/rule",
-        None,
+        Some("test-admin"),
         json!({ "contract_id": c3, "split": { "client": 0.4, "provider": 0.6 } }),
     );
     assert_eq!(s, 200, "rule: {v}");
@@ -273,7 +323,10 @@ fn all_routes_negative_cases() {
     // Unknown route -> generic error (L-03/L-04), no path echo.
     let (s, v) = c.get("/v1/totally-unknown", None);
     assert_eq!(s, 400);
-    assert!(!v.to_string().contains("/v1/totally-unknown"), "path echoed: {v}");
+    assert!(
+        !v.to_string().contains("/v1/totally-unknown"),
+        "path echoed: {v}"
+    );
 
     // Invalid JSON body.
     let resp = c
@@ -326,7 +379,11 @@ fn all_routes_negative_cases() {
     let cid = v["contract_id"].as_str().unwrap().to_string();
     let (s, _) = c.post_empty(&format!("/v1/contract/{cid}/accept"), Some(&provider_tok));
     assert_eq!(s, 200);
-    let (s, v) = c.post("/v1/escrow/park", Some(&client_tok), json!({ "contract_id": cid, "amount": "1.0000001" }));
+    let (s, v) = c.post(
+        "/v1/escrow/park",
+        Some(&client_tok),
+        json!({ "contract_id": cid, "amount": "1.0000001" }),
+    );
     assert_eq!(s, 400, "7-decimal amount must be rejected: {v}");
 
     // Parking without prior accept -> escrow violation.
@@ -337,20 +394,52 @@ fn all_routes_negative_cases() {
     );
     assert_eq!(s, 200);
     let cid2 = v["contract_id"].as_str().unwrap().to_string();
-    let (s, v) = c.post("/v1/escrow/park", Some(&client_tok), json!({ "contract_id": cid2, "amount": "1.00" }));
+    let (s, v) = c.post(
+        "/v1/escrow/park",
+        Some(&client_tok),
+        json!({ "contract_id": cid2, "amount": "1.00" }),
+    );
     assert_eq!(s, 400, "park before accept must fail: {v}");
     assert_eq!(v["error"]["code"], "escrow_violation");
 
     // Ruling split that does not sum to 1.0.
     let (s, _) = c.post_empty(&format!("/v1/contract/{cid2}/accept"), Some(&provider_tok));
     assert_eq!(s, 200);
-    let (s, _) = c.post("/v1/escrow/park", Some(&client_tok), json!({ "contract_id": cid2, "amount": "1.00" }));
+    let (s, _) = c.post(
+        "/v1/escrow/park",
+        Some(&client_tok),
+        json!({ "contract_id": cid2, "amount": "1.00" }),
+    );
     assert_eq!(s, 200);
-    let (s, _) = c.post(&format!("/v1/contract/{cid2}/dispute"), Some(&client_tok), json!({ "reason": "late" }));
+    let (s, v) = c.post(
+        &format!("/v1/contract/{cid2}/dispute"),
+        Some(&client_tok),
+        json!({ "reason": "late" }),
+    );
+    assert_eq!(s, 400, "dispute before delivery must fail: {v}");
+    assert_eq!(v["error"]["code"], "invalid_transition");
+    let (s, _) = c.post(
+        &format!("/v1/contract/{cid2}/deliver"),
+        Some(&provider_tok),
+        json!({ "deliverable_hash": "sha256:late" }),
+    );
+    assert_eq!(s, 200);
+    let (s, _) = c.post(
+        &format!("/v1/contract/{cid2}/dispute"),
+        Some(&client_tok),
+        json!({ "reason": "late" }),
+    );
     assert_eq!(s, 200);
     let (s, v) = c.post(
         "/v1/escrow/rule",
         None,
+        json!({ "contract_id": cid2.clone(), "split": { "client": 0.4, "provider": 0.6 } }),
+    );
+    assert_eq!(s, 400, "unauthenticated ruling must fail: {v}");
+    assert_eq!(v["error"]["code"], "unauthorized");
+    let (s, v) = c.post(
+        "/v1/escrow/rule",
+        Some("test-admin"),
         json!({ "contract_id": cid2, "split": { "client": 0.4, "provider": 0.5 } }),
     );
     assert_eq!(s, 400, "split != 1.0 must be rejected: {v}");

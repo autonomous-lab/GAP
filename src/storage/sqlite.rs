@@ -5,9 +5,12 @@
 //! sequence. This is the backend used by the example and the test
 //! suite.
 
-use super::{AnnouncementRecord, ContractRecord, EventRecord, Storage, validate_event};
+use super::{
+    validate_event, AnnouncementRecord, ContractRecord, EscrowRecord, EventRecord, IdentityRecord,
+    Storage,
+};
 use crate::error::{Error, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 /// SQLite-backed storage.
 pub struct SqliteStorage {
@@ -23,14 +26,16 @@ pub struct SqliteStorage {
 impl SqliteStorage {
     /// Open (or create) a database at `path`. Use `:memory:` for tests.
     pub fn open(path: &str) -> Result<Self> {
-        let conn = Connection::open(path)
-            .map_err(|e| Error::Other(format!("sqlite open failed: {e}")))?;
+        let conn =
+            Connection::open(path).map_err(|e| Error::Other(format!("sqlite open failed: {e}")))?;
         let mut s = Self { conn, next_seq: 0 };
         s.init()?;
         // One-time O(n) scan to seed the counter (startup only).
         let max: i64 = s
             .conn
-            .query_row("SELECT COALESCE(MAX(seq), -1) + 1 FROM events", [], |r| r.get(0))
+            .query_row("SELECT COALESCE(MAX(seq), -1) + 1 FROM events", [], |r| {
+                r.get(0)
+            })
             .map_err(|e| Error::Other(format!("sqlite seq init failed: {e}")))?;
         s.next_seq = max.max(0) as u64;
         Ok(s)
@@ -61,6 +66,19 @@ impl SqliteStorage {
                      agent_did TEXT PRIMARY KEY,
                      announcement_json TEXT NOT NULL,
                      expires_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS identities (
+                     token TEXT PRIMARY KEY,
+                     did TEXT NOT NULL UNIQUE,
+                     seed_hex TEXT NOT NULL,
+                     created_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS escrows (
+                     contract_id TEXT PRIMARY KEY,
+                     state TEXT NOT NULL,
+                     held TEXT NOT NULL,
+                     currency TEXT NOT NULL,
+                     updated_at INTEGER NOT NULL
                  );",
             )
             .map_err(|e| Error::Other(format!("sqlite init failed: {e}")))?;
@@ -88,7 +106,9 @@ impl Storage for SqliteStorage {
     fn events_after(&self, seq: u64, limit: u64) -> Result<Vec<EventRecord>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT seq, kind, at, payload FROM events WHERE seq > ?1 ORDER BY seq LIMIT ?2")
+            .prepare(
+                "SELECT seq, kind, at, payload FROM events WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+            )
             .map_err(|e| Error::Other(format!("sqlite prepare failed: {e}")))?;
         let rows = stmt
             .query_map(params![seq as i64, limit as i64], |row| {
@@ -96,8 +116,13 @@ impl Storage for SqliteStorage {
                     seq: row.get::<_, i64>(0)? as u64,
                     kind: row.get(1)?,
                     at: row.get::<_, i64>(2)? as u64,
-                    payload: serde_json::from_str(&row.get::<_, String>(3)?)
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e)))?,
+                    payload: serde_json::from_str(&row.get::<_, String>(3)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
                 })
             })
             .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;
@@ -198,6 +223,34 @@ impl Storage for SqliteStorage {
         Ok(out)
     }
 
+    fn list_contracts(&self) -> Result<Vec<ContractRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT contract_id, client, provider, capability_id, state, contract_json, updated_at
+                 FROM contracts ORDER BY updated_at, contract_id",
+            )
+            .map_err(|e| Error::Other(format!("sqlite prepare failed: {e}")))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ContractRecord {
+                    contract_id: row.get(0)?,
+                    client: row.get(1)?,
+                    provider: row.get(2)?,
+                    capability_id: row.get(3)?,
+                    state: row.get(4)?,
+                    contract_json: row.get(5)?,
+                    updated_at: row.get::<_, i64>(6)? as u64,
+                })
+            })
+            .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;
+        let mut out = vec![];
+        for row in rows {
+            out.push(row.map_err(|e| Error::Other(format!("sqlite row failed: {e}")))?);
+        }
+        Ok(out)
+    }
+
     fn upsert_announcement(&mut self, record: &AnnouncementRecord) -> Result<()> {
         self.conn
             .execute(
@@ -237,13 +290,171 @@ impl Storage for SqliteStorage {
         }
     }
 
+    fn list_announcements(&self) -> Result<Vec<AnnouncementRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT agent_did, announcement_json, expires_at FROM announcements ORDER BY expires_at, agent_did")
+            .map_err(|e| Error::Other(format!("sqlite prepare failed: {e}")))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(AnnouncementRecord {
+                    agent_did: row.get(0)?,
+                    announcement_json: row.get(1)?,
+                    expires_at: row.get::<_, i64>(2)? as u64,
+                })
+            })
+            .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;
+        let mut out = vec![];
+        for row in rows {
+            out.push(row.map_err(|e| Error::Other(format!("sqlite row failed: {e}")))?);
+        }
+        Ok(out)
+    }
+
     fn reap_expired(&mut self) -> Result<usize> {
         let now = crate::message::now_unix() as i64;
         let n = self
             .conn
-            .execute("DELETE FROM announcements WHERE expires_at <= ?1", params![now])
+            .execute(
+                "DELETE FROM announcements WHERE expires_at <= ?1",
+                params![now],
+            )
             .map_err(|e| Error::Other(format!("sqlite reap failed: {e}")))?;
         Ok(n)
+    }
+
+    fn upsert_identity(&mut self, record: &IdentityRecord) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO identities (token, did, seed_hex, created_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(token) DO UPDATE SET
+                     did = excluded.did,
+                     seed_hex = excluded.seed_hex,
+                     created_at = excluded.created_at",
+                params![
+                    record.token,
+                    record.did,
+                    record.seed_hex,
+                    record.created_at as i64,
+                ],
+            )
+            .map_err(|e| Error::Other(format!("sqlite upsert identity failed: {e}")))?;
+        Ok(())
+    }
+
+    fn get_identity_by_token(&self, token: &str) -> Result<Option<IdentityRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT token, did, seed_hex, created_at FROM identities WHERE token = ?1")
+            .map_err(|e| Error::Other(format!("sqlite prepare failed: {e}")))?;
+        let mut rows = stmt
+            .query_map(params![token], |row| {
+                Ok(IdentityRecord {
+                    token: row.get(0)?,
+                    did: row.get(1)?,
+                    seed_hex: row.get(2)?,
+                    created_at: row.get::<_, i64>(3)? as u64,
+                })
+            })
+            .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;
+        match rows.next() {
+            Some(Ok(r)) => Ok(Some(r)),
+            Some(Err(e)) => Err(Error::Other(format!("sqlite row failed: {e}"))),
+            None => Ok(None),
+        }
+    }
+
+    fn list_identities(&self) -> Result<Vec<IdentityRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT token, did, seed_hex, created_at FROM identities ORDER BY created_at, did",
+            )
+            .map_err(|e| Error::Other(format!("sqlite prepare failed: {e}")))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(IdentityRecord {
+                    token: row.get(0)?,
+                    did: row.get(1)?,
+                    seed_hex: row.get(2)?,
+                    created_at: row.get::<_, i64>(3)? as u64,
+                })
+            })
+            .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;
+        let mut out = vec![];
+        for row in rows {
+            out.push(row.map_err(|e| Error::Other(format!("sqlite row failed: {e}")))?);
+        }
+        Ok(out)
+    }
+
+    fn upsert_escrow(&mut self, record: &EscrowRecord) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO escrows (contract_id, state, held, currency, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(contract_id) DO UPDATE SET
+                     state = excluded.state,
+                     held = excluded.held,
+                     currency = excluded.currency,
+                     updated_at = excluded.updated_at",
+                params![
+                    record.contract_id,
+                    record.state,
+                    record.held,
+                    record.currency,
+                    record.updated_at as i64,
+                ],
+            )
+            .map_err(|e| Error::Other(format!("sqlite upsert escrow failed: {e}")))?;
+        Ok(())
+    }
+
+    fn get_escrow(&self, contract_id: &str) -> Result<Option<EscrowRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT contract_id, state, held, currency, updated_at FROM escrows WHERE contract_id = ?1")
+            .map_err(|e| Error::Other(format!("sqlite prepare failed: {e}")))?;
+        let mut rows = stmt
+            .query_map(params![contract_id], |row| {
+                Ok(EscrowRecord {
+                    contract_id: row.get(0)?,
+                    state: row.get(1)?,
+                    held: row.get(2)?,
+                    currency: row.get(3)?,
+                    updated_at: row.get::<_, i64>(4)? as u64,
+                })
+            })
+            .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;
+        match rows.next() {
+            Some(Ok(r)) => Ok(Some(r)),
+            Some(Err(e)) => Err(Error::Other(format!("sqlite row failed: {e}"))),
+            None => Ok(None),
+        }
+    }
+
+    fn list_escrows(&self) -> Result<Vec<EscrowRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT contract_id, state, held, currency, updated_at FROM escrows ORDER BY updated_at, contract_id")
+            .map_err(|e| Error::Other(format!("sqlite prepare failed: {e}")))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(EscrowRecord {
+                    contract_id: row.get(0)?,
+                    state: row.get(1)?,
+                    held: row.get(2)?,
+                    currency: row.get(3)?,
+                    updated_at: row.get::<_, i64>(4)? as u64,
+                })
+            })
+            .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;
+        let mut out = vec![];
+        for row in rows {
+            out.push(row.map_err(|e| Error::Other(format!("sqlite row failed: {e}")))?);
+        }
+        Ok(out)
     }
 }
 

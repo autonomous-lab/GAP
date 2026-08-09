@@ -117,7 +117,10 @@ impl Runtime {
 
     /// Look up a contract by id.
     pub fn contract(&self, id: &str) -> Option<&Contract> {
-        self.contracts.iter().map(|(c, _)| c).find(|c| c.contract_id == id)
+        self.contracts
+            .iter()
+            .map(|(c, _)| c)
+            .find(|c| c.contract_id == id)
     }
 
     /// Mark a contract state transition.
@@ -309,12 +312,8 @@ mod tests {
         provider.set_escrow(escrow);
 
         // Client proposes; provider accepts; both bind.
-        let contract = client_runtime.propose_contract(
-            provider.did(),
-            "cap:lead-gen",
-            terms(),
-            true,
-        )?;
+        let contract =
+            client_runtime.propose_contract(provider.did(), "cap:lead-gen", terms(), true)?;
         let contract = provider.accept_contract(contract)?;
         assert_eq!(contract.state, ContractState::Signed);
 
@@ -350,11 +349,7 @@ mod tests {
             ContractState::Accepted
         );
         assert_eq!(
-            client
-                .escrow
-                .as_ref()
-                .map(|e| e.state())
-                .unwrap(),
+            client.escrow.as_ref().map(|e| e.state()).unwrap(),
             crate::payment::EscrowState::Released
         );
         Ok(())
@@ -384,7 +379,9 @@ mod tests {
     #[test]
     fn runtime_transition_unknown_contract_fails() {
         let mut runtime = Runtime::new(AgentIdentity::generate());
-        assert!(runtime.transition("urn:gap:ctr:nope", ContractState::Signed).is_err());
+        assert!(runtime
+            .transition("urn:gap:ctr:nope", ContractState::Signed)
+            .is_err());
     }
 
     #[test]
@@ -397,12 +394,8 @@ mod tests {
         let mut escrow = Escrow::new(escrow_agent.clone());
         provider.set_escrow(escrow);
 
-        let contract = client_runtime.propose_contract(
-            provider.did(),
-            "cap:lead-gen",
-            terms(),
-            true,
-        )?;
+        let contract =
+            client_runtime.propose_contract(provider.did(), "cap:lead-gen", terms(), true)?;
         let contract = provider.accept_contract(contract)?;
 
         let mut client = client_runtime;
@@ -418,12 +411,18 @@ mod tests {
         client.transition(&contract.contract_id, ContractState::Executing)?;
         client.transition(&contract.contract_id, ContractState::Delivered)?;
         client.dispute_delivery(&contract.contract_id, "nonconforming")?;
-        assert_eq!(client.contract(&contract.contract_id).unwrap().state, ContractState::Disputed);
+        assert_eq!(
+            client.contract(&contract.contract_id).unwrap().state,
+            ContractState::Disputed
+        );
 
         // Client is also the arbitrator here (single-actor test); ruling
         // returns 100% to the client.
         client.submit_ruling(&contract.contract_id, 1.0, 0.0)?;
-        assert_eq!(client.contract(&contract.contract_id).unwrap().state, ContractState::Ruled);
+        assert_eq!(
+            client.contract(&contract.contract_id).unwrap().state,
+            ContractState::Ruled
+        );
         Ok(())
     }
 

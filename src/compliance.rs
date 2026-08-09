@@ -205,7 +205,9 @@ pub fn gate(
         decision = GateDecision::Deny;
     // 2. Chinese wall
     } else if context.is_walled(source_scope, dest_scope) {
-        reasons.push(format!("Chinese wall between {source_scope} and {dest_scope}"));
+        reasons.push(format!(
+            "Chinese wall between {source_scope} and {dest_scope}"
+        ));
         decision = GateDecision::Deny;
     // 3. NDA coverage
     } else if !context.nda_covers(destination, data_classes, now) {
@@ -276,7 +278,10 @@ mod tests {
             vec![],
             vec![],
             vec![ChineseWall {
-                between: vec!["scope:consulting:clientA".into(), "scope:consulting:clientB".into()],
+                between: vec![
+                    "scope:consulting:clientA".into(),
+                    "scope:consulting:clientB".into(),
+                ],
                 reason: "competing_clients".into(),
             }],
         );
@@ -303,11 +308,27 @@ mod tests {
         );
         let classes: Vec<String> = vec!["financials".into(), "strategy".into()];
         // Covered -> allow.
-        let verdict = gate(&ctx, &counterparty, &classes, "a", "b", now_unix(), &evaluator);
+        let verdict = gate(
+            &ctx,
+            &counterparty,
+            &classes,
+            "a",
+            "b",
+            now_unix(),
+            &evaluator,
+        );
         assert_eq!(verdict.decision, GateDecision::Allow);
         // Uncovered class -> deny.
         let uncovered: Vec<String> = vec!["personnel".into()];
-        let verdict2 = gate(&ctx, &counterparty, &uncovered, "a", "b", now_unix(), &evaluator);
+        let verdict2 = gate(
+            &ctx,
+            &counterparty,
+            &uncovered,
+            "a",
+            "b",
+            now_unix(),
+            &evaluator,
+        );
         assert_eq!(verdict2.decision, GateDecision::Deny);
     }
 
@@ -319,20 +340,22 @@ mod tests {
         n.valid_until = now_unix() - 100; // expired
         let ctx = context(vec![n], vec![], vec![]);
         let classes: Vec<String> = vec!["financials".into()];
-        let verdict = gate(&ctx, &counterparty, &classes, "a", "b", now_unix(), &evaluator);
+        let verdict = gate(
+            &ctx,
+            &counterparty,
+            &classes,
+            "a",
+            "b",
+            now_unix(),
+            &evaluator,
+        );
         assert_eq!(verdict.decision, GateDecision::Deny);
     }
 
     #[test]
     fn context_signature_detects_tampering() {
         let subject = AgentIdentity::generate();
-        let mut ctx = ComplianceContext::create(
-            &subject,
-            "scope:x",
-            vec![],
-            vec![],
-            vec![],
-        );
+        let mut ctx = ComplianceContext::create(&subject, "scope:x", vec![], vec![], vec![]);
         assert!(ctx.verify().is_ok());
         ctx.scope_id = "scope:evil".into();
         assert!(ctx.verify().is_err());

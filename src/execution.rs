@@ -115,7 +115,9 @@ mod tests {
         );
         assert!(bundle.verify(&provider, payload).is_ok());
         // tampered payload
-        assert!(bundle.verify(&provider, b"lead: mallory@example.com").is_err());
+        assert!(bundle
+            .verify(&provider, b"lead: mallory@example.com")
+            .is_err());
         // Distributed verification by DID only.
         assert!(bundle.verify_against(provider.did(), payload).is_ok());
         // A verifier with the wrong DID fails.
@@ -127,12 +129,7 @@ mod tests {
     fn proof_bundle_missing_signature_fails() {
         let provider = AgentIdentity::generate();
         let payload = b"data";
-        let mut bundle = ProofBundle::signed(
-            &provider,
-            "urn:gap:ctr:test",
-            payload,
-            vec![],
-        );
+        let mut bundle = ProofBundle::signed(&provider, "urn:gap:ctr:test", payload, vec![]);
         bundle.provider_sig = None;
         assert!(bundle.verify(&provider, payload).is_err());
     }

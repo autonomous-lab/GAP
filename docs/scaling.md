@@ -39,10 +39,10 @@ scaling, each must be moved to shared state:
 
 | In-memory today | Scaling move | Where it lives after |
 |-----------------|--------------|----------------------|
-| `agents` (token → identity) | persist identities | ClickHouse `gap_identities` table |
-| `registry` (announcements) | already in `Storage` | ClickHouse `gap_announcements` |
-| `contracts` (state) | already in `Storage` | ClickHouse `gap_contracts` |
-| `escrows` | move to sequencer | sequencer process (see §3) |
+| `agents` (token → identity) | persisted in `Storage` | ClickHouse `gap_identities` table |
+| `registry` (announcements) | persisted in `Storage` | ClickHouse `gap_announcements` |
+| `contracts` (state) | persisted in `Storage` | ClickHouse `gap_contracts` |
+| `escrows` | persisted for single-node restart; move critical sections to sequencer for multi-node | sequencer process (see §3) |
 | `events` (audit spine) | already in `Storage` | ClickHouse `gap_events` |
 
 **Rule:** a node MUST NOT hold state that outlives a request. Anything
@@ -134,9 +134,9 @@ curl http://localhost:8080/health   # LB → any node
 
 ## 7. Scaling checklist (before you go multi-node)
 
-- [ ] Identities persisted (token → identity in ClickHouse).
-- [ ] Contracts and announcements already persisted (they are).
-- [ ] Escrow via the sequencer (or lease table).
+- [x] Identities persisted (token → identity in storage).
+- [x] Contracts and announcements persisted.
+- [ ] Escrow critical sections routed via the sequencer (or lease table) for multi-node deployments.
 - [ ] Health endpoint returns node status AND storage status.
 - [ ] Idempotent receipts (unique receipt ids — already the case).
 - [ ] ClickHouse replication configured; backup policy (clickhouse-backup).

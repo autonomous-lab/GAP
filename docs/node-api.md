@@ -30,7 +30,7 @@ peer nodes).
 
 ### `POST /v1/identity`
 
-Create a new identity (or recover an existing one with a secret).
+Create a new node-custodied identity.
 
 ```json
 { "action": "create" }
@@ -41,14 +41,14 @@ Create a new identity (or recover an existing one with a secret).
 ```json
 {
   "did": "did:gap:9f2c…",
-  "token": "gat_…",
-  "secret": "hex-secret-32-bytes"
+  "token": "gat_…"
 }
 ```
 
 - `token` — bearer token for all authenticated calls.
-- `secret` — the Ed25519 seed; the node keeps a hardware-backed copy
-  and signs on your behalf. Show it once; store it safely.
+- The node stores the Ed25519 seed server-side for key custody. A
+  production deployment backs this with a KMS or equivalent secret
+  store; the seed is not returned by the public API.
 
 **Errors:** `400` invalid request, `409` identity exists.
 
@@ -145,7 +145,7 @@ closed), then signs as provider.
 
 **200:** `{ "contract_id": "…", "state": "signed" }`
 
-### `POST /v1/contract/{id}/counter`
+### `POST /v1/contract/{id}/counter` *(planned)*
 
 Provider counter-offers with revised terms. Counter replaces the
 proposal; the client re-evaluates.
@@ -210,8 +210,9 @@ Client-driven refund (parked or disputed state). **200:** receipt
 
 ### `POST /v1/escrow/rule`
 
-Arbitrator's signed ruling; the node executes the split (must sum to
-1.0). **200:** receipt `pay.ruled`.
+Node-arbitrated ruling; requires `Authorization: Bearer <admin-token>`
+matching `GAP_ADMIN_TOKEN`. The split must sum to 1.0. **200:**
+receipt `pay.ruled`.
 
 ## 5bis. Rate limiting
 
@@ -252,6 +253,10 @@ a multi-node deployment shares limits at the load balancer.
 }
 ```
 
+Creates, validates, and signs the workflow manifest. Full automatic
+provider provisioning is an orchestration milestone; the current node
+stores the manifest and exposes per-step initial status.
+
 **200:** `{ "workflow_id": "urn:gap:wf:…", "state": "pending" }`
 
 ### `GET /v1/workflows/{id}`
@@ -270,8 +275,7 @@ not public data.
 
 ### `POST /v1/identity/export`
 
-Full ledger export (GDPR right to portability): contracts, receipts,
-reputation, events. Signed by the node.
+Portable export of the caller's node-held contracts and audit events.
 
 ## 8. Error model
 
@@ -297,8 +301,10 @@ A node claiming GAP-node conformance MUST:
 2. Serve `/.well-known/gap-agent.json` self-signed.
 3. Enforce signed instructions on every mutation (never trust the
    body alone).
-4. Enforce escrow rules: park ≤ cap, release only after acceptance,
-   refund only from parked/disputed.
+4. Enforce escrow rules: park ≤ cap, require parked escrow before
+   delivery, release only after delivered acceptance, refund only
+   before execution/cancellation, and restrict arbitration to the
+   configured admin token.
 5. Reject over-budget contracts (tree-aggregated).
 6. Persist every event to the audit spine.
 7. Return chained receipts on every settlement.
