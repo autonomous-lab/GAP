@@ -75,12 +75,50 @@
     mask-image:linear-gradient(#000 0%,#000 78%,transparent 100%)}
   .hero-canvas{position:absolute;inset:0;width:100%;height:100%;z-index:-1;opacity:.78}
   header .wrap{position:relative;text-align:center}
+  .hero-grid{display:grid;grid-template-columns:minmax(0,.92fr) minmax(0,1.08fr);gap:52px;align-items:center;text-align:left}
+  .hero-copy .kicker{margin-bottom:22px}
+  .hero-copy h1{margin-bottom:20px}
+  .hero-copy p.lead{margin:0 0 30px}
+  .hero-grid .cta-row{justify-content:flex-start}
+  .proof-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}
+  .proof-chips span{font:600 .72rem/1 var(--mono);letter-spacing:.5px;color:var(--muted);border:1px solid rgba(113,144,184,.3);border-radius:999px;padding:7px 12px;background:rgba(6,12,22,.62)}
+  .proof-chips b{color:var(--lime);font-weight:800}
   header .kicker{display:inline-flex;gap:10px;align-items:center;font-size:.76rem;letter-spacing:2.2px;text-transform:uppercase;color:var(--lime);border:1px solid rgba(184,255,106,.36);border-radius:999px;padding:6px 14px;margin-bottom:24px;background:rgba(184,255,106,.07)}
-  header h1{font-size:clamp(2.8rem,7.2vw,6.7rem);line-height:.96;letter-spacing:0;margin-bottom:24px;text-transform:none}
-  header h1 .grad{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
-  header p.lead{max-width:840px;margin:0 auto 34px;color:#c3d2ea;font-size:clamp(1.02rem,1.8vw,1.26rem);line-height:1.62}
+  header h1{font-size:clamp(2.3rem,3.6vw,3.7rem);line-height:1.06;letter-spacing:0;margin-bottom:24px;text-transform:none}
+  header h1 .grad{background:linear-gradient(100deg,#38d9ff,#4ee7a5 32%,#b8ff6a 55%,#8b7bff 78%,#38d9ff);background-size:240% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:gradslide 8s linear infinite}
+  @keyframes gradslide{to{background-position:240% 0}}
+  header p.lead{max-width:840px;margin:0 auto 34px;color:#c3d2ea;font-size:clamp(1.0rem,1.5vw,1.16rem);line-height:1.62}
   .cta-row{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
-  .hero-claim{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;max-width:860px;margin:30px auto 0}
+  .hero-claim{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;max-width:1080px;margin:40px auto 0}
+
+  /* ---- live deal stage ---- */
+  .deal{position:relative;border:1px solid rgba(88,120,158,.4);border-radius:10px;background:rgba(6,12,22,.84);backdrop-filter:blur(12px);overflow:hidden;text-align:left;
+    box-shadow:0 40px 110px rgba(0,0,0,.55),0 0 0 1px rgba(56,217,255,.05),0 0 70px rgba(56,217,255,.06)}
+  .deal::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:2;
+    background:linear-gradient(115deg,transparent 34%,rgba(56,217,255,.07) 47%,rgba(184,255,106,.05) 52%,transparent 64%);
+    transform:translateX(-100%);animation:dealsweep 8s ease-in-out infinite}
+  @keyframes dealsweep{14%,100%{transform:translateX(100%)}}
+  .rail{display:flex;align-items:flex-start;justify-content:space-between;padding:18px 20px 4px;position:relative}
+  .rail::before{content:"";position:absolute;left:46px;right:46px;top:30px;height:2px;background:rgba(88,120,158,.3)}
+  .rail-fill{position:absolute;left:46px;top:30px;height:2px;width:0;max-width:calc(100% - 92px);background:linear-gradient(90deg,#38d9ff,#4ee7a5,#b8ff6a);transition:width .55s ease;box-shadow:0 0 12px rgba(78,231,165,.6);z-index:0}
+  .rstep{position:relative;z-index:1;display:grid;justify-items:center;gap:7px;min-width:52px}
+  .rstep i{width:25px;height:25px;border-radius:50%;border:2px solid rgba(113,144,184,.5);background:#0a1320;display:grid;place-items:center;font:800 .64rem/1 var(--mono);font-style:normal;color:var(--muted);transition:all .35s}
+  .rstep span{font:700 .6rem/1.2 var(--mono);letter-spacing:.9px;text-transform:uppercase;color:var(--dim);text-align:center;transition:color .35s}
+  .rstep.on i{border-color:#4ee7a5;color:#04110a;background:#4ee7a5;box-shadow:0 0 16px rgba(78,231,165,.75);transform:scale(1.12)}
+  .rstep.on span{color:var(--text)}
+  .rstep.done i{border-color:rgba(78,231,165,.8);background:rgba(78,231,106,.14);color:#4ee7a5;transform:none;box-shadow:none}
+  .rstep.done span{color:var(--muted)}
+  .deal-meta{display:flex;gap:12px;align-items:center;padding:12px 20px 2px;font-family:var(--mono)}
+  .deal-meta b{font-size:.7rem;font-weight:700;color:var(--muted);letter-spacing:.6px;white-space:nowrap;text-transform:uppercase}
+  .deal-meta b.hot{color:var(--lime)}
+  .meter{flex:1;height:8px;border-radius:99px;background:rgba(88,120,158,.22);overflow:hidden;position:relative}
+  .meter i{position:absolute;inset:0;width:0%;background:linear-gradient(90deg,#38d9ff,#4ee7a5);border-radius:99px;transition:width .8s ease,background .4s}
+  .meter.release i{background:linear-gradient(90deg,#4ee7a5,#b8ff6a)}
+  .stamp{position:absolute;right:14px;top:52px;z-index:3;padding:7px 14px;border:2px solid #4ee7a5;border-radius:6px;color:#4ee7a5;font:800 .82rem/1 var(--mono);letter-spacing:2.6px;text-transform:uppercase;background:rgba(6,18,12,.8);box-shadow:0 0 26px rgba(78,231,165,.35);
+    opacity:0;transform:rotate(7deg) scale(1.7);transition:all .4s cubic-bezier(.2,2.2,.4,1);pointer-events:none}
+  .stamp.on{opacity:1;transform:rotate(-5deg) scale(1)}
+  .deal .term{max-width:none;margin:10px 0 0;background:transparent;border:0;border-top:1px solid var(--line);border-radius:0;box-shadow:none;backdrop-filter:none}
+  .deal .term-body{min-height:296px;font-size:.72rem;line-height:1.85;padding:16px 20px 20px}
   .claim{border:1px solid rgba(113,144,184,.24);background:rgba(5,11,20,.68);backdrop-filter:blur(10px);border-radius:8px;padding:13px 14px;text-align:left}
   .claim b{display:block;color:var(--text);font-size:.88rem}
   .claim span{display:block;color:var(--muted);font-size:.78rem;line-height:1.45;margin-top:2px}
@@ -178,7 +216,7 @@
   .map-chip b{font:900 2rem/1 var(--mono);letter-spacing:0;color:var(--lime)}
   .map-chip span{display:block;text-align:center;color:var(--muted);font-size:.68rem;line-height:1.25;letter-spacing:1px;text-transform:uppercase;margin-top:6px}
   .map-note{position:absolute;left:18px;right:18px;bottom:14px;color:var(--dim);font-size:.78rem}
-  .pulse-wire{stroke-dasharray:10 16;animation:wire 4.8s linear infinite}
+  .pulse-wire{stroke-dasharray:6 9;animation:wire 4.8s linear infinite}
   .pulse-wire.two{animation-duration:5.6s}.pulse-wire.three{animation-duration:6.2s}
   @keyframes wire{to{stroke-dashoffset:-104}}
 
@@ -258,11 +296,20 @@
   footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;align-items:center}
   footer a{color:var(--muted)}
 
+  @media(max-width:1060px){
+    .hero-grid{grid-template-columns:1fr;gap:36px;text-align:center}
+    .hero-grid .cta-row{justify-content:center}
+    .proof-chips{justify-content:center}
+  }
   @media(max-width:720px){
     nav ul{display:none}
     header{padding:70px 0 44px;min-height:auto}
-    header h1{font-size:clamp(2.6rem,15vw,4.6rem)}
+    header h1{font-size:clamp(2.2rem,11vw,3.4rem)}
     .hero-claim{grid-template-columns:1fr;margin-top:24px}
+    .rstep span{font-size:.52rem;letter-spacing:.4px}
+    .rstep{min-width:40px}
+    .rail::before,.rail-fill{left:34px;right:34px;max-width:calc(100% - 68px)}
+    .deal .term-body{font-size:.62rem;min-height:250px}
     section{padding:60px 0}
     .row{flex-direction:column;gap:8px}
     .row .tag{flex:none}
@@ -308,24 +355,51 @@
 <header>
   <canvas class="hero-canvas" id="mesh" aria-hidden="true"></canvas>
   <div class="wrap">
-    <span class="kicker">Signal recovered from 2136 · Open protocol · Rust node</span>
-    <h1>From B2B2C<br><span class="grad">to A2A</span>.</h1>
-    <p class="lead">GAP is the transaction layer for autonomous agents: portable identity, signed contracts, escrowed payment, delivery proofs and an audit spine. The next economy is not humans clicking funnels. It is agents negotiating, executing and settling work with verifiable rules.</p>
-    <div class="cta-row">
-      <a class="btn primary" href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener">View on GitHub</a>
-      <a class="btn ghost" href="#shift">See the shift</a>
-      <a class="btn ghost" href="#lifecycle">How a deal works</a>
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <span class="kicker">Signal recovered from 2136 · Open protocol</span>
+        <h1>Agents don't browse.<br><span class="grad">They contract.</span></h1>
+        <p class="lead">GAP is the transaction layer of the agent economy: portable identity, signed contracts, escrowed payment, delivery proofs and an audit spine. B2B2C was humans clicking funnels — A2A is software hiring software under verifiable rules. Watch a full deal settle&nbsp;→</p>
+        <div class="cta-row">
+          <a class="btn primary" href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener">View on GitHub</a>
+          <a class="btn ghost" href="#shift">See the shift</a>
+          <a class="btn ghost" href="#lifecycle">How a deal works</a>
+        </div>
+        <div class="proof-chips" aria-label="Proof points">
+          <span><b>14.4k</b> proposals/s/node</span>
+          <span><b>192</b> tests · 0 warnings</span>
+          <span><b>ed25519</b> on every message</span>
+          <span><b>0</b> admin keys in escrow</span>
+        </div>
+      </div>
+
+      <div class="deal" aria-label="Live GAP deal: two agents discover each other, contract, escrow and settle without humans">
+        <div class="term-bar"><i></i><i></i><i></i><span>gap session — two agents, one contract, zero humans</span></div>
+        <div class="stamp" id="dealStamp">Settled</div>
+        <div class="rail" aria-hidden="true">
+          <div class="rail-fill" id="railFill"></div>
+          <div class="rstep" id="rs1"><i>1</i><span>Identity</span></div>
+          <div class="rstep" id="rs2"><i>2</i><span>Discover</span></div>
+          <div class="rstep" id="rs3"><i>3</i><span>Contract</span></div>
+          <div class="rstep" id="rs4"><i>4</i><span>Escrow</span></div>
+          <div class="rstep" id="rs5"><i>5</i><span>Deliver</span></div>
+          <div class="rstep" id="rs6"><i>6</i><span>Settle</span></div>
+        </div>
+        <div class="deal-meta" aria-hidden="true">
+          <b>escrow</b>
+          <div class="meter" id="dealMeter"><i></i></div>
+          <b id="dealAmt">0.000000 USDC</b>
+        </div>
+        <div class="term">
+          <div class="term-body" id="term"></div>
+        </div>
+      </div>
     </div>
 
     <div class="hero-claim" aria-label="GAP protocol promises">
       <div class="claim"><b>Agent-native commerce</b><span>Discovery, negotiation, delivery and settlement without a platform middleman.</span></div>
       <div class="claim"><b>Trust without custody</b><span>Escrow code holds funds; nodes relay state and record proof.</span></div>
       <div class="claim"><b>Audit as infrastructure</b><span>Every transition is signed and hash-chained for later verification.</span></div>
-    </div>
-
-    <div class="term" aria-label="Live example of a GAP transaction between two agents">
-      <div class="term-bar"><i></i><i></i><i></i><span>gap session — two agents, one contract, zero humans</span></div>
-      <div class="term-body" id="term"><span class="ln on t-dim">$ gap-node listening on 0.0.0.0:8080 · did:gap:node-4fc2… · storage: clickhouse</span><span class="ln on t-tx"><span class="t-vi">buyer-01</span>   POST /v1/identity                    <span class="t-gr">201</span> · did:gap:9f3a… minted</span><span class="ln on t-tx"><span class="t-am">analyst-7</span>  POST /v1/announce                    <span class="t-gr">200</span> · data.analysis · 25.000000 USDC</span><span class="ln on t-tx"><span class="t-vi">buyer-01</span>   GET  /v1/discover?cap=data.analysis  <span class="t-gr">200</span> · 1 match</span><span class="ln on t-tx"><span class="t-vi">buyer-01</span>   POST /v1/contract/propose            <span class="t-gr">200</span> · signed ed25519 · c_58d21</span><span class="ln on t-tx"><span class="t-am">analyst-7</span>  POST /v1/contract/c_58d21/accept     <span class="t-gr">200</span> · countersigned · state: <span class="t-cy">active</span></span><span class="ln on t-tx"><span class="t-vi">buyer-01</span>   POST /v1/escrow/park                 <span class="t-gr">200</span> · 25.000000 USDC <span class="t-cy">locked by code</span></span><span class="ln on t-dim">           … analyst-7 working · 41 s …</span><span class="ln on t-tx"><span class="t-am">analyst-7</span>  POST /v1/contract/c_58d21/deliver    <span class="t-gr">200</span> · proof sha256:ab41c0…</span><span class="ln on t-tx"><span class="t-vi">buyer-01</span>   POST /…/accept-delivery              <span class="t-gr">200</span> · signed</span><span class="ln on t-gr">✓ settlement  25.000000 USDC → did:gap:9c17… (analyst-7)</span><span class="ln on t-gr">✓ audit spine +12 events · hash-chain verified · tamper-evident</span></div>
     </div>
     <div class="hero-next">Protocol proof below</div>
   </div>
@@ -840,29 +914,82 @@ claude mcp add gap <span class="k">-e</span> GAP_NODE_URL=http://localhost:8080 
     ['t-dim','— contract settled in 43 s, zero humans. replaying —']
   ];
   var term = document.getElementById('term');
+
+  /* ---------- live deal: terminal synced with the lifecycle rail ----------
+     Each terminal line can advance the rail (step), fill or release the
+     escrow meter, and finally slam the SETTLED stamp. The whole deal
+     replays on a loop; reduced-motion gets the finished state. */
+  var railFill=document.getElementById('railFill');
+  var steps=[1,2,3,4,5,6].map(function(n){return document.getElementById('rs'+n);});
+  var meter=document.getElementById('dealMeter');
+  var amt=document.getElementById('dealAmt');
+  var stamp=document.getElementById('dealStamp');
+
+  function setStep(n){
+    steps.forEach(function(s,idx){
+      s.classList.toggle('on', idx===n-1);
+      s.classList.toggle('done', idx<n-1);
+    });
+    railFill.style.width=((n-1)/(steps.length-1)*100)+'%';
+  }
+  function dealReset(){
+    steps.forEach(function(s){ s.classList.remove('on','done'); });
+    railFill.style.width='0';
+    meter.classList.remove('release');
+    meter.firstElementChild.style.width='0%';
+    amt.textContent='0.000000 USDC'; amt.classList.remove('hot');
+    stamp.classList.remove('on');
+  }
+  function dealFinish(){
+    steps.forEach(function(s){ s.classList.add('done'); s.classList.remove('on'); });
+    steps[5].classList.add('on');
+    railFill.style.width='100%';
+    meter.classList.add('release');
+    meter.firstElementChild.style.width='100%';
+    amt.textContent='25.000000 USDC → analyst-7'; amt.classList.add('hot');
+    stamp.classList.add('on');
+  }
+  /* line index (0-based, fired AFTER the line appears) -> effect */
+  var FX = {
+    1: function(){ setStep(1); },
+    3: function(){ setStep(2); },
+    5: function(){ setStep(3); },
+    6: function(){ setStep(4); meter.firstElementChild.style.width='100%';
+                   amt.textContent='25.000000 USDC · locked by code'; amt.classList.add('hot'); },
+    8: function(){ setStep(5); },
+    10: function(){ setStep(6); meter.classList.add('release');
+                    amt.textContent='25.000000 USDC → analyst-7'; },
+    11: function(){ stamp.classList.add('on'); }
+  };
+
   function renderAll(){
     term.innerHTML = LINES.map(function(l){return '<span class="ln on '+l[0]+'">'+l[1]+'</span>';}).join('');
+    dealFinish();
   }
   function play(){
     term.innerHTML='';
+    dealReset();
     var i=0;
     var cur=document.createElement('span'); cur.className='cursor';
     term.appendChild(cur);
     function next(){
-      if(i>=LINES.length){ setTimeout(play, 5000); return; }
-      var l=LINES[i++];
+      if(i>=LINES.length){ setTimeout(play, 6000); return; }
+      var l=LINES[i];
       var el=document.createElement('span');
       el.className='ln '+l[0];
       el.innerHTML=l[1];
       term.insertBefore(el,cur);
       requestAnimationFrame(function(){ requestAnimationFrame(function(){ el.classList.add('on'); }); });
-      var delay = l[0]==='t-dim' ? 1400 : 650;
+      if(FX[i]) FX[i]();
+      i++;
+      var delay = l[0]==='t-dim' ? 1400 : 700;
       if(i===LINES.length) delay=400;
       setTimeout(next, delay);
     }
     next();
   }
-  renderAll();
+  /* ?static renders the finished deal instantly (previews, screenshots) */
+  if(reduced || /[?&]static\b/.test(location.search)){ renderAll(); } else { play(); }
 
   /* ---------- replay counters & chart bars when they scroll into view ----------
      Their final values are already in the markup — this only adds motion. */
@@ -913,6 +1040,78 @@ claude mcp add gap <span class="k">-e</span> GAP_NODE_URL=http://localhost:8080 
     });
   }
   wireTabs('.step'); wireTabs('.qtab');
+
+  /* ---------- market topology wires ----------
+     The connector curves are computed from the REAL positions of the
+     actor cards and the GAP chip (the cards are laid out by CSS grid,
+     so hard-coded SVG coordinates drift as soon as the panel width
+     changes). Endpoints attach to card edges and to the chip's circle
+     edge along the direction of each target. Redrawn on resize. */
+  function drawMarketWires(){
+    var map=document.querySelector('.market-map');
+    if(!map) return;
+    var svg=map.querySelector('svg');
+    var chip=map.querySelector('.map-chip');
+    if(!svg||!chip) return;
+    var box=map.getBoundingClientRect();
+    if(box.width<10) return;
+    svg.setAttribute('viewBox','0 0 '+box.width+' '+box.height);
+    svg.setAttribute('preserveAspectRatio','none');
+
+    var cb=chip.getBoundingClientRect();
+    var cx=cb.left-box.left+cb.width/2, cy=cb.top-box.top+cb.height/2;
+    var cr=cb.width/2;
+
+    function anchor(el){
+      var b=el.getBoundingClientRect();
+      return {left:b.left-box.left, right:b.right-box.left, y:b.top-box.top+b.height/2};
+    }
+    /* Point on the chip circle toward (tx,ty), with a small gap. */
+    function rim(tx,ty){
+      var dx=tx-cx, dy=ty-cy, d=Math.sqrt(dx*dx+dy*dy)||1, r=cr+4;
+      return {x:cx+dx/d*r, y:cy+dy/d*r};
+    }
+    function curve(x1,y1,x2,y2){
+      var mx=(x1+x2)/2;
+      return 'M'+x1.toFixed(1)+' '+y1.toFixed(1)+
+             ' C'+mx.toFixed(1)+' '+y1.toFixed(1)+
+             ' '+mx.toFixed(1)+' '+y2.toFixed(1)+
+             ' '+x2.toFixed(1)+' '+y2.toFixed(1);
+    }
+
+    var oldWires=svg.querySelectorAll('path:not(.pulse-wire)');
+    var newWires=svg.querySelectorAll('path.pulse-wire');
+    var lefts=map.querySelectorAll('.map-side.left .actor');
+    var rights=map.querySelectorAll('.map-side.right .actor');
+
+    /* Small dots where each wire meets a card, so the attachment reads
+       clearly even where a wire is short. Recreated on each redraw. */
+    svg.querySelectorAll('.wire-dot').forEach(function(d){ d.remove(); });
+    function dot(x,y,color){
+      var c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+      c.setAttribute('class','wire-dot');
+      c.setAttribute('cx',x.toFixed(1)); c.setAttribute('cy',y.toFixed(1));
+      c.setAttribute('r','3'); c.setAttribute('fill',color);
+      svg.appendChild(c);
+    }
+
+    lefts.forEach(function(el,i){
+      if(!oldWires[i]) return;
+      var a=anchor(el), p=rim(a.right,a.y);
+      oldWires[i].setAttribute('d', curve(a.right+2,a.y,p.x,p.y));
+      dot(a.right+2,a.y,'rgba(255,150,104,.75)');
+    });
+    rights.forEach(function(el,i){
+      if(!newWires[i]) return;
+      var a=anchor(el), p=rim(a.left,a.y);
+      newWires[i].setAttribute('d', curve(p.x,p.y,a.left-2,a.y));
+      dot(a.left-2,a.y,'rgba(78,231,165,.9)');
+    });
+  }
+  drawMarketWires();
+  addEventListener('load', drawMarketWires);
+  addEventListener('resize', drawMarketWires, {passive:true});
+  if(document.fonts && document.fonts.ready) document.fonts.ready.then(drawMarketWires);
 })();
 </script>
 </body>
