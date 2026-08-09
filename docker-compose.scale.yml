@@ -2,11 +2,15 @@
 #
 # Usage:
 #   docker compose -f docker-compose.scale.yml up --build
-#   curl http://localhost:8080/health      # LB → any node
-#   curl http://localhost:8080/v1/identity # through the LB
+#   curl http://172.17.0.1:8080/health      # LB → any node
+#   curl http://172.17.0.1:8080/v1/identity # through the LB
 #
 # Architecture (see docs/scaling.md):
 #   agents → HAProxy → {gap-node ×3} → ClickHouse (shared state)
+#
+# Ports bind to the Docker bridge address (172.17.0.1) rather than
+# 0.0.0.0: a reverse proxy in front decides what reaches the internet
+# and terminates TLS. State is bind-mounted under ./data.
 #
 # NOTE: for real production scaling, identities must be persisted to
 # ClickHouse (see docs/scaling.md §2). This compose demonstrates the
@@ -16,68 +20,72 @@
 services:
   lb:
     image: haproxy:3.0-alpine
-    container_name: gap-lb
     ports:
-      - "8080:8080"
-      - "8404:8404"   # HAProxy stats page
+      - "172.17.0.1:8080:8080"
+      - "172.17.0.1:8404:8404"   # HAProxy stats page
     volumes:
       - ./deploy/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
       - gap-node-1
       - gap-node-2
       - gap-node-3
-    restart: unless-stopped
+    restart: always
 
   gap-node-1:
     build: .
-    container_name: gap-node-1
     environment:
       GAP_ADDR: "0.0.0.0:8080"
       GAP_STORAGE: "clickhouse"
       GAP_CLICKHOUSE_URL: "http://clickhouse:8123"
       GAP_DB_INIT: "1"
+      GAP_PUBLIC_URL: "http://172.17.0.1:8080"
     depends_on:
       clickhouse:
         condition: service_healthy
-    restart: unless-stopped
+    volumes:
+      - ./data/gap-node-1:/data
+    restart: always
     # No host ports: only reachable through the LB.
 
   gap-node-2:
     build: .
-    container_name: gap-node-2
     environment:
       GAP_ADDR: "0.0.0.0:8080"
       GAP_STORAGE: "clickhouse"
       GAP_CLICKHOUSE_URL: "http://clickhouse:8123"
       GAP_DB_INIT: "1"
+      GAP_PUBLIC_URL: "http://172.17.0.1:8080"
     depends_on:
       clickhouse:
         condition: service_healthy
-    restart: unless-stopped
+    volumes:
+      - ./data/gap-node-2:/data
+    restart: always
 
   gap-node-3:
     build: .
-    container_name: gap-node-3
     environment:
       GAP_ADDR: "0.0.0.0:8080"
       GAP_STORAGE: "clickhouse"
       GAP_CLICKHOUSE_URL: "http://clickhouse:8123"
       GAP_DB_INIT: "1"
+      GAP_PUBLIC_URL: "http://172.17.0.1:8080"
     depends_on:
       clickhouse:
         condition: service_healthy
-    restart: unless-stopped
+    volumes:
+      - ./data/gap-node-3:/data
+    restart: always
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
-    container_name: gap-clickhouse
     ports:
-      - "8123:8123"   # HTTP interface
-      - "9000:9000"   # native protocol
+      - "172.17.0.1:8123:8123"   # HTTP interface
+      - "172.17.0.1:9000:9000"   # native protocol
     volumes:
       # System logs disabled — they grow forever otherwise.
       - ./deploy/clickhouse/system-logs.xml:/etc/clickhouse-server/config.d/system-logs.xml:ro
-      - clickhouse-data:/var/lib/clickhouse
+      - ./data/clickhouse:/var/lib/clickhouse
     ulimits:
       nofile:
         soft: 262144
@@ -87,7 +95,4 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-    restart: unless-stopped
-
-volumes:
-  clickhouse-data:
+    restart: always

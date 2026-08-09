@@ -43,6 +43,7 @@ GAP/
 ├── BENCHMARK.md       # Full benchmark report (protocol + HTTP layers)
 ├── SECURITY-AUDIT.md  # Adversarial audit + applied fixes
 ├── LICENSE-MIT / LICENSE-APACHE  # Dual license
+├── .env.example       # Every environment variable, documented
 ├── adapters/mcp/      # ★ MCP adapter: the node as tools for any MCP agent
 ├── sdk/               # Client SDKs (TypeScript + Python, dependency-free)
 ├── docs/landing/      # The public landing page (mirror of the hosted site)
@@ -325,6 +326,16 @@ Set `GAP_PUBLIC_URL` so the sitemap emits absolute URLs.
   identity and reputation are portable (they belong to the DID, not
   the node).
 
+### Configuration
+
+Every environment variable the node reads is documented in
+[`.env.example`](./.env.example) — copy it to `.env` and edit. All are
+optional: with no environment at all the node runs on SQLite, binds
+`0.0.0.0:8080` and verifies integrity without a judge. In production
+you want at least `GAP_NODE_SEED` (so the node keeps its DID across
+restarts), `GAP_MASTER_KEY` (encryption at rest for custodied seeds)
+and `GAP_ADMIN_TOKEN` (arbitration and the `/admin` console).
+
 ### Run the node with Docker
 
 ```bash
@@ -334,8 +345,14 @@ docker run -p 8080:8080 -v gap-data:/data gap-node
 
 # Full stack: node + ClickHouse
 docker compose up --build
-curl http://localhost:8080/health
+curl http://172.17.0.1:8080/health
 ```
+
+Ports bind to the Docker bridge (`172.17.0.1`) rather than `0.0.0.0`,
+so nothing is published on the public interface and a reverse proxy in
+front decides what is exposed and terminates TLS. State is
+bind-mounted under `./data/` instead of living in named volumes — you
+can back it up, inspect it and move it with the repository.
 
 The compose stack runs the node against **ClickHouse** (storage layer),
 with ClickHouse system logs disabled — they grow without bound by
@@ -366,8 +383,8 @@ pretending to judge.
 ```bash
 # Load balancer + 3 node replicas + ClickHouse
 docker compose -f docker-compose.scale.yml up --build
-curl http://localhost:8080/health   # LB → any node
-curl http://localhost:8404/stats    # HAProxy stats
+curl http://172.17.0.1:8080/health   # LB → any node
+curl http://172.17.0.1:8404/stats    # HAProxy stats
 ```
 
 Nodes are stateless replicas sharing ClickHouse; the load balancer

@@ -1,5 +1,6 @@
-/target
-node_modules
-contracts/*.sol.js
-__pycache__/
 *.pyc
+.env
+/target
+__pycache__/
+contracts/*.sol.js
+node_modules

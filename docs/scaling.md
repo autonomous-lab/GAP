@@ -129,7 +129,7 @@ ClickHouse. Bring it up with:
 
 ```bash
 docker compose -f docker-compose.scale.yml up --build
-curl http://localhost:8080/health   # LB → any node
+curl http://172.17.0.1:8080/health   # LB → any node
 ```
 
 ## 7. Scaling checklist (before you go multi-node)

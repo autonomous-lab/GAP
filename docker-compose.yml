@@ -2,39 +2,45 @@
 #
 # Usage:
 #   docker compose up --build
-#   curl http://localhost:8080/health
+#   curl http://172.17.0.1:8080/health
 #
 # The node defaults to ClickHouse storage when GAP_STORAGE=clickhouse.
 # GAP_DB_INIT=1 runs the schema migration at startup.
+#
+# Ports bind to the Docker bridge address (172.17.0.1), not 0.0.0.0:
+# nothing is published on the public interface, so a reverse proxy in
+# front decides what is exposed and terminates TLS. State lives in
+# bind-mounted ./data, which you can back up, inspect and move with the
+# repository instead of hunting for a named volume.
 
 services:
   gap-node:
     build: .
-    container_name: gap-node
     ports:
-      - "8080:8080"
+      - "172.17.0.1:8080:8080"
     environment:
       GAP_ADDR: "0.0.0.0:8080"
       GAP_STORAGE: "clickhouse"
       GAP_CLICKHOUSE_URL: "http://clickhouse:8123"
       GAP_DB_INIT: "1"
+      # Absolute URLs in sitemap.xml — set this to your public origin.
+      GAP_PUBLIC_URL: "http://172.17.0.1:8080"
     depends_on:
       clickhouse:
         condition: service_healthy
     volumes:
-      - gap-data:/data
-    restart: unless-stopped
+      - ./data/gap-node:/data
+    restart: always
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
-    container_name: gap-clickhouse
     ports:
-      - "8123:8123"   # HTTP interface (used by the node)
-      - "9000:9000"   # native protocol (admin/analytics)
+      - "172.17.0.1:8123:8123"   # HTTP interface (used by the node)
+      - "172.17.0.1:9000:9000"   # native protocol (admin/analytics)
     volumes:
       # System logs are disabled/kept tiny — they grow forever otherwise.
       - ./deploy/clickhouse/system-logs.xml:/etc/clickhouse-server/config.d/system-logs.xml:ro
-      - clickhouse-data:/var/lib/clickhouse
+      - ./data/clickhouse:/var/lib/clickhouse
     ulimits:
       nofile:
         soft: 262144
@@ -44,8 +50,4 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-    restart: unless-stopped
-
-volumes:
-  gap-data:
-  clickhouse-data:
+    restart: always
