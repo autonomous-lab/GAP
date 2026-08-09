@@ -215,7 +215,7 @@ fn build_storage() -> Result<Box<dyn Storage>> {
             let url =
                 env::var("GAP_CLICKHOUSE_URL").unwrap_or_else(|_| "http://clickhouse:8123".into());
             println!("[gap-node] storage: clickhouse ({url})");
-            let transport = UreqTransport::new(&url);
+            let transport = UreqTransport::from_env(&url);
             let storage = ClickHouseStorage::new(transport);
             if env::var("GAP_DB_INIT").as_deref() == Ok("1") {
                 storage.migrate()?;

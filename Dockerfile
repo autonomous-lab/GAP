@@ -33,10 +33,20 @@ RUN mkdir -p src && \
     printf 'fn main() {}\n' > src/main.rs && \
     printf 'pub fn _stub() {}\n' > src/lib.rs && \
     cargo build --release 2>/dev/null; true
-# Copy the real sources (Cargo rebuilds what changed by content hash).
+# Copy the real sources.
 COPY src ./src
 COPY examples ./examples
-RUN cargo build --release
+# Docker COPY preserves the mtimes from the build context, and those can
+# be OLDER than the stub written above. Cargo decides freshness by
+# mtime, concludes nothing changed, and ships the 531 KB stub binary -
+# a node that starts, prints nothing and exits 0. Touching the sources
+# forces the real build.
+RUN find src examples benches -name '*.rs' -exec touch {} + && \
+    cargo build --release && \
+    # Fail loudly here rather than shipping an empty binary again.
+    # GAP_STORAGE is an env-var name read by main.rs, so it is present
+    # verbatim in any real build and absent from a stub.
+    grep -q "GAP_STORAGE" target/release/gap
 
 # Stage 2: minimal runtime image.
 #

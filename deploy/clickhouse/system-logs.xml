@@ -1,85 +1,37 @@
 <!--
   ClickHouse system-log control
+
   By default ClickHouse writes internal system logs (query_log,
   query_thread_log, part_log, trace_log, metric_log, ...) which grow
-  without bound. This config:
-  - disables the most prolific logs entirely (Null engine),
-  - keeps only what is operationally useful, with a 7-day TTL.
+  without bound. The node's audit spine is GAP's own log, so these are
+  redundant here.
+
+  Disabling is done with remove="1", which deletes the whole section
+  from the merged config. Overriding <engine> instead does NOT work:
+  the default config already sets partition_by for these tables, and
+  ClickHouse refuses the combination with
+    Code: 36 ... PARTITION BY parameters should be specified directly
+    inside 'engine' and 'partition_by' setting doesn't make sense
+  which is exactly how this file kept the server from starting.
+
   Mounted at /etc/clickhouse-server/config.d/system-logs.xml in the
   compose file; ClickHouse merges it into the main config at startup.
 -->
 <clickhouse>
-    <!-- Disable the chatty logs: they grow forever and we do not need them.
-         The node's audit spine is GAP's own log; ClickHouse system logs
-         are redundant here. -->
-    <query_log>
-        <database>system</database>
-        <table>query_log</table>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-        <engine>ENGINE = Null</engine>
-    </query_log>
+    <query_log remove="1"/>
+    <query_thread_log remove="1"/>
+    <query_views_log remove="1"/>
+    <part_log remove="1"/>
+    <trace_log remove="1"/>
+    <text_log remove="1"/>
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <session_log remove="1"/>
 
-    <query_thread_log>
-        <database>system</database>
-        <table>query_thread_log</table>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-        <engine>ENGINE = Null</engine>
-    </query_thread_log>
-
-    <query_views_log>
-        <database>system</database>
-        <table>query_views_log</table>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-        <engine>ENGINE = Null</engine>
-    </query_views_log>
-
-    <part_log>
-        <database>system</database>
-        <table>part_log</table>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-        <engine>ENGINE = Null</engine>
-    </part_log>
-
-    <trace_log>
-        <database>system</database>
-        <table>trace_log</table>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-        <engine>ENGINE = Null</engine>
-    </trace_log>
-
-    <text_log>
-        <database>system</database>
-        <table>text_log</table>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-        <engine>ENGINE = Null</engine>
-    </text_log>
-
-    <metric_log>
-        <database>system</database>
-        <table>metric_log</table>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-        <engine>ENGINE = Null</engine>
-    </metric_log>
-
-    <asynchronous_metric_log>
-        <database>system</database>
-        <table>asynchronous_metric_log</table>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-        <engine>ENGINE = Null</engine>
-    </asynchronous_metric_log>
-
-    <session_log>
-        <database>system</database>
-        <table>session_log</table>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-        <engine>ENGINE = Null</engine>
-    </session_log>
-
-    <!-- Keep error log but bound it: 7 days, then purged. -->
+    <!-- Keep the error log, but bound it: 7 days, then purged. Only the
+         TTL is overridden, so the default engine and partitioning stay
+         consistent. -->
     <error_log>
-        <database>system</database>
-        <table>error_log</table>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
     </error_log>
 </clickhouse>

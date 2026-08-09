@@ -73,12 +73,44 @@ pub trait HttpTransport: Send {
 /// A real transport using `ureq`.
 pub struct UreqTransport {
     base_url: String,
+    /// Credentials, sent as headers rather than embedded in the URL:
+    /// a password in a URL ends up in access logs, proxy logs and error
+    /// messages. Recent ClickHouse images generate a random password
+    /// for `default` when none is configured, so a node with no
+    /// credentials is simply refused with AUTHENTICATION_FAILED.
+    user: Option<String>,
+    password: Option<String>,
 }
 
 impl UreqTransport {
     pub fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
+            user: None,
+            password: None,
+        }
+    }
+
+    /// Authenticate as `user`. An empty password is still sent, because
+    /// ClickHouse distinguishes "no credentials" from "empty password".
+    pub fn with_credentials(mut self, user: &str, password: &str) -> Self {
+        self.user = Some(user.to_string());
+        self.password = Some(password.to_string());
+        self
+    }
+
+    /// Build the transport from the environment.
+    pub fn from_env(base_url: &str) -> Self {
+        let t = Self::new(base_url);
+        match (
+            std::env::var("GAP_CLICKHOUSE_USER").ok(),
+            std::env::var("GAP_CLICKHOUSE_PASSWORD").ok(),
+        ) {
+            (None, None) => t,
+            (user, password) => t.with_credentials(
+                &user.unwrap_or_else(|| "default".into()),
+                &password.unwrap_or_default(),
+            ),
         }
     }
 }
@@ -94,7 +126,13 @@ impl HttpTransport for UreqTransport {
     }
 
     fn post_url(&self, url: &str) -> Result<String> {
-        let mut resp = ureq::post(url)
+        let mut req = ureq::post(url);
+        if let (Some(user), Some(password)) = (&self.user, &self.password) {
+            req = req
+                .header("X-ClickHouse-User", user)
+                .header("X-ClickHouse-Key", password);
+        }
+        let mut resp = req
             .send_empty()
             .map_err(|e| Error::Other(format!("clickhouse request failed: {e}")))?;
         resp.body_mut()
@@ -213,9 +251,33 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
     }
 
     /// Create tables on the cluster.
+    /// Create the schema.
+    ///
+    /// ClickHouse's HTTP interface refuses multi-statement queries
+    /// ("Multi-statements are not allowed"), so the DDL is split and
+    /// sent one statement at a time. Sending it as one blob failed with
+    /// a 400 the first time this ever ran against a real server.
     pub fn migrate(&self) -> Result<()> {
-        self.transport.post(DDL)?;
+        for statement in Self::statements(DDL) {
+            self.transport.post(&statement)?;
+        }
         Ok(())
+    }
+
+    /// Split a DDL script into individual statements, ignoring blank
+    /// lines and `--` comments.
+    pub fn statements(ddl: &str) -> Vec<String> {
+        ddl.split(';')
+            .map(|s| {
+                s.lines()
+                    .filter(|l| !l.trim_start().starts_with("--"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .trim()
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 }
 
@@ -597,5 +659,34 @@ mod tests {
         assert_eq!(urlencode("a b"), "a%20b");
         assert_eq!(urlencode("a'b"), "a%27b");
         assert_eq!(urlencode("simple"), "simple");
+    }
+
+    #[test]
+    fn migration_is_split_into_single_statements() {
+        // ClickHouse HTTP refuses multi-statement queries outright, so
+        // the whole DDL blob was rejected with a 400 the first time it
+        // met a real server.
+        let stmts = ClickHouseStorage::<MockTransport>::statements(DDL);
+        assert!(
+            stmts.len() >= 4,
+            "expected one statement per table, got {}",
+            stmts.len()
+        );
+        for s in &stmts {
+            assert!(
+                !s.contains(';'),
+                "statement still contains a separator: {s}"
+            );
+            assert!(s.to_uppercase().contains("CREATE TABLE"));
+        }
+    }
+
+    #[test]
+    fn statement_splitting_ignores_comments_and_blank_lines() {
+        let ddl = "-- a comment\nCREATE TABLE a (x UInt64) ENGINE=Memory;\n\n-- another\nCREATE TABLE b (y UInt64) ENGINE=Memory;\n";
+        let stmts = ClickHouseStorage::<MockTransport>::statements(ddl);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].starts_with("CREATE TABLE a"));
+        assert!(stmts[1].starts_with("CREATE TABLE b"));
     }
 }

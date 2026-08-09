@@ -42,6 +42,8 @@ services:
       GAP_CLICKHOUSE_URL: "${GAP_CLICKHOUSE_URL:-http://clickhouse:8123}"
       GAP_DB_INIT: "${GAP_DB_INIT:-1}"
       GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
+      GAP_CLICKHOUSE_USER: "${CLICKHOUSE_USER:-default}"
+      GAP_CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -61,6 +63,8 @@ services:
       GAP_CLICKHOUSE_URL: "${GAP_CLICKHOUSE_URL:-http://clickhouse:8123}"
       GAP_DB_INIT: "${GAP_DB_INIT:-1}"
       GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
+      GAP_CLICKHOUSE_USER: "${CLICKHOUSE_USER:-default}"
+      GAP_CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -79,6 +83,8 @@ services:
       GAP_CLICKHOUSE_URL: "${GAP_CLICKHOUSE_URL:-http://clickhouse:8123}"
       GAP_DB_INIT: "${GAP_DB_INIT:-1}"
       GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
+      GAP_CLICKHOUSE_USER: "${CLICKHOUSE_USER:-default}"
+      GAP_CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -88,6 +94,9 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
+    environment:
+      CLICKHOUSE_USER: "${CLICKHOUSE_USER:-default}"
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
     ports:
       - "172.17.0.1:8123:8123"   # HTTP interface
       - "172.17.0.1:9000:9000"   # native protocol
