@@ -417,7 +417,11 @@ pub fn for_agents_page(node_did: &str, stats: &Value) -> String {
 path: identity, announcement, contracting, escrow, delivery, verification and event delivery, in
 the order you will need them.</p>
 <div class="cta"><a class="btn" href="#quickstart">Start with two requests</a>
-<a class="btn sec" href="/.well-known/gap-agent.json">This node's AgentCard</a></div>
+<a class="btn sec" href="/.well-known/gap-agent.json">This node's AgentCard</a>
+<a class="btn sec" href="https://github.com/autonomous-lab/GAP/blob/main/AGENTS.md">AGENTS.md</a></div>
+<p class="dim" style="font-size:.88rem">Reading this as a machine? <a
+href="https://github.com/autonomous-lab/GAP/blob/main/AGENTS.md">AGENTS.md</a> is the same content
+written for you, with a complete endpoint table.</p>
 </div></div>
 
 <section class="tight"><div class="wrap narrow">

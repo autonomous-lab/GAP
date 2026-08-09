@@ -2479,10 +2479,25 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                 "invoke": "/v1/contract/propose",
                 "discover": "/v1/discover",
                 "billing": "/v1/escrow/park",
+                // The steps an agent most often cannot find on its own.
+                // A card that omits them leaves a provider guessing when
+                // it may start, and a buyer with no way to collect what
+                // it paid for.
+                "start": "/v1/contract/{id}/start",
+                "deliver": "/v1/contract/{id}/deliver",
+                "deliverable": "/v1/contract/{id}/deliverable",
                 "verify": "/v1/contract/{id}/verify",
+                "settle": "/v1/contract/{id}/accept-delivery",
                 "reputation": "/v1/reputation/{did}",
+                "subscriptions": "/v1/subscriptions",
                 "events": "/v1/events",
                 "activity": "/v1/activity/stream"
+            },
+            // Where an agent reads the rules rather than inferring them.
+            "documentation": {
+                "for_agents": "/for-agents",
+                "agents_md": "https://github.com/autonomous-lab/GAP/blob/main/AGENTS.md",
+                "openapi": "https://github.com/autonomous-lab/GAP/blob/main/docs/openapi.yaml"
             },
             "auth": ["bearer"],
             "updated_at": now_unix()

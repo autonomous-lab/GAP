@@ -550,3 +550,56 @@ fn an_agent_can_withdraw_and_leaves_a_tombstone() {
         "a withdrawn agent must stop being discoverable"
     );
 }
+
+/// Every endpoint AGENTS.md advertises must exist in the router.
+///
+/// AGENTS.md is read by machines that cannot ask a follow-up question.
+/// Its endpoint table had drifted: it was missing `/start`,
+/// `/deliverable` and `/verify` entirely, and an agent scanning it for
+/// "how do I fetch the result" concluded, correctly from what it read,
+/// that there was no way. Documenting an endpoint that does not exist is
+/// the same failure in the other direction.
+#[test]
+fn agents_md_documents_only_endpoints_that_exist() {
+    let doc = include_str!("../AGENTS.md");
+    let router = include_str!("../src/server.rs");
+
+    let mut checked = 0;
+    for line in doc.lines().filter(|l| l.starts_with("| `")) {
+        let path = match line.split('`').nth(1) {
+            Some(p) => p,
+            None => continue,
+        };
+        let path = match path.split_once(' ') {
+            Some((_method, rest)) => rest,
+            None => continue,
+        };
+        // Trim the query-string illustration and the {id} placeholders,
+        // then look for the literal the router matches on.
+        let path = path.split('?').next().unwrap_or(path);
+        let needle = match path.find("/{") {
+            None => path.to_string(),
+            Some(i) => {
+                let prefix = &path[..i];
+                // Whatever follows the placeholder is what the router
+                // dispatches on: /v1/contract/{id}/deliver -> "/deliver".
+                match path[i + 1..].find('/') {
+                    Some(j) => path[i + 1 + j..].to_string(),
+                    // Placeholder at the end: the router matches the
+                    // prefix WITH its trailing slash, as in
+                    // starts_with("/v1/reputation/").
+                    None => format!("{prefix}/"),
+                }
+            }
+        };
+        assert!(
+            router.contains(&format!("\"{needle}\"")),
+            "AGENTS.md documents {path}, but the router has no {needle:?}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 25,
+        "only {checked} endpoints checked - has the table moved?"
+    );
+}
