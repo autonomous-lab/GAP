@@ -18,6 +18,7 @@ use crate::storage::{AnnouncementRecord, ContractRecord, EscrowRecord, IdentityR
 use crate::sybil::RateCounters;
 use crate::workflow::{Budget, FailureMode, Workflow, WorkflowEngine};
 use serde_json::{json, Value};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -659,9 +660,11 @@ impl NodeState {
         provider_token: &str,
         contract_id: &str,
         deliverable_hash: &str,
+        deliverable_uri: Option<&str>,
     ) -> Result<()> {
         let provider_did = self.agent_by_token(provider_token)?.identity.did().clone();
         self.check_veto(&provider_did, contract_id)?;
+        let funded = self.escrow_is_funded(contract_id);
         let contract = self
             .contracts
             .get_mut(contract_id)
@@ -669,9 +672,14 @@ impl NodeState {
         if contract.provider != provider_did {
             return Err(Error::Unauthorized("only the provider may deliver".into()));
         }
-        if contract.escrow && !self.escrows.contains_key(contract_id) && self.relayer.is_none() {
+        // The backstop. `exe.start` now refuses first, so reaching this
+        // means the provider skipped the optional start call - it should
+        // still not hand over work nobody has paid for.
+        if contract.escrow && !funded {
             return Err(Error::EscrowViolation(
-                "escrow must be parked before delivery".into(),
+                "escrow is not parked: the client has not secured payment for this contract. \
+Call POST /v1/contract/{id}/start before working - it refuses while unfunded"
+                    .into(),
             ));
         }
         if deliverable_hash.trim().is_empty() {
@@ -680,6 +688,13 @@ impl NodeState {
         // Keep the commitment: verification later checks what the client
         // actually received against this exact digest.
         contract.deliverable_hash = Some(deliverable_hash.to_string());
+        // An optional retrieval location for artifacts too large to pass
+        // inline. It is a convenience, never an authority - the digest
+        // is what the verifier checks, so pointing at bytes that do not
+        // hash to it fails verification exactly as it should.
+        if let Some(uri) = deliverable_uri.map(str::trim).filter(|u| !u.is_empty()) {
+            contract.deliverable_uri = Some(uri.to_string());
+        }
         // `exe.start` is optional (spec 04 §4.2): a provider that
         // announced its plan is already Executing, one that went
         // straight to delivery still needs the intermediate step.
@@ -1650,6 +1665,16 @@ impl NodeState {
         Ok(json!({ "contract_id": contract_id, "state": "cancelled", "escrow_refunded": refunded }))
     }
 
+    /// Is this contract's payment actually secured?
+    ///
+    /// One predicate, used by both `exe.start` and `exe.deliver`, so the
+    /// two can never drift into disagreeing about whether it is safe to
+    /// work. An on-chain relayer counts as funded: settlement lives in
+    /// the contract rather than in this node's escrow map.
+    pub fn escrow_is_funded(&self, contract_id: &str) -> bool {
+        self.escrows.contains_key(contract_id) || self.relayer.is_some()
+    }
+
     /// `exe.start` — the provider announces it has begun, with a plan
     /// and an ETA (spec 04 §4.2). Until now a contract jumped straight
     /// from signed to delivered and the client was blind in between.
@@ -1661,12 +1686,28 @@ impl NodeState {
     ) -> Result<Value> {
         let did = self.agent_by_token(provider_token)?.identity.did().clone();
         self.check_veto(&did, contract_id)?;
+        let funded = self.escrow_is_funded(contract_id);
         let contract = self
             .contracts
             .get_mut(contract_id)
             .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
         if contract.provider != did {
             return Err(Error::Unauthorized("only the provider may start".into()));
+        }
+        // Refuse to start unfunded work.
+        //
+        // Escrow used to be checked only at delivery, which meant a
+        // provider could accept, spend real compute producing the
+        // deliverable, and discover at the last step that the client
+        // had never parked the money. The cost had already been paid by
+        // then and there was no way to recover it. The guard belongs
+        // where the spending starts, not where it ends.
+        if contract.escrow && !funded {
+            return Err(Error::EscrowViolation(
+                "escrow is not parked: do not start work yet. Wait for the escrow.parked \
+event (or poll GET /v1/contract/{id} until escrow_funded is true)"
+                    .into(),
+            ));
         }
         contract.transition(ContractState::Executing)?;
         let saved = contract.clone();
@@ -2154,6 +2195,64 @@ impl NodeState {
         }))
     }
 
+    /// Headline numbers for the public home page.
+    ///
+    /// Every field is derived from state this node actually holds — no
+    /// figure here is a placeholder. A node that has settled nothing
+    /// reports zeros and the page says so, because a marketplace that
+    /// inflates its own volume is exactly the thing this protocol
+    /// exists to make unnecessary.
+    pub fn public_stats(&self) -> Value {
+        let anns = self.registry.query(&Query::default());
+        let capabilities: usize = anns.iter().map(|a| a.capabilities.len()).sum();
+        // The lowest advertised price, which is the point: GAP is built
+        // so that a job worth 0.05 is still worth contracting for.
+        let cheapest = anns
+            .iter()
+            .flat_map(|a| a.capabilities.iter())
+            .filter_map(|c| c.price.as_ref())
+            .min_by(|a, b| a.amount.partial_cmp(&b.amount).unwrap_or(Ordering::Equal));
+
+        let records: Vec<&JobRecord> = self.jobs.values().flatten().collect();
+        let total = records.len() as u64;
+        let judged = records.iter().filter(|r| r.verdict.is_some()).count() as u64;
+        let conforming = records
+            .iter()
+            .filter(|r| r.verdict.as_deref() == Some("conforms"))
+            .count() as u64;
+        let on_time = records.iter().filter(|r| r.on_time).count() as u64;
+        let remedied = records.iter().filter(|r| r.remedied).count() as u64;
+
+        let judges: Vec<String> = [
+            self.verifier.as_ref().map(|v| v.name()),
+            self.verifier_b.as_ref().map(|v| v.name()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        json!({
+            "node": self.node_did().to_string(),
+            "version": crate::VERSION,
+            "agents": anns.len(),
+            "capabilities": capabilities,
+            "cheapest": cheapest.map(|p| json!({ "amount": p.amount, "currency": p.currency })),
+            "contracts": self.contracts.len(),
+            "jobs": total,
+            "judged": judged,
+            "conforming": conforming,
+            // Rates are None rather than 1.0 when nothing has settled:
+            // a fresh node claiming a 100% success rate would be a lie
+            // told by a division.
+            "conform_rate": (judged > 0).then(|| conforming as f64 / judged as f64),
+            "on_time_rate": (total > 0).then(|| on_time as f64 / total as f64),
+            "remedied": remedied,
+            "escalated": self.escalations.len(),
+            "judges": judges,
+            "events": self.storage.event_count().unwrap_or(0),
+        })
+    }
+
     /// The most recent settlements, newest first. Same projection as
     /// the cursor form — one shape, so the page and the live stream can
     /// never disagree about what a settlement looks like.
@@ -2229,7 +2328,17 @@ pub fn route_html(
 
     let html = |b: String| Some((200u16, "text/html; charset=utf-8", b));
     match clean {
+        // The home page is not the directory. A visitor who has never
+        // heard of GAP needs the mechanism explained before a list of
+        // strangers means anything to them - and a crawler needs the
+        // page to say what this site is.
         "/" => {
+            let stats = guard.public_stats();
+            let dir = guard.public_directory();
+            let recent = guard.public_activity(6);
+            html(crate::ui::home_page(&stats, &dir, &recent))
+        }
+        "/agents" => {
             let params = parse_url_params(path);
             let q = params.get("q").cloned().unwrap_or_default();
             let min_score = params.get("min_score").and_then(|v| v.parse::<f64>().ok());
@@ -2244,7 +2353,21 @@ pub fn route_html(
         }
         "/activity" => {
             let recent = guard.public_activity(50);
-            html(crate::ui::activity_page(&recent))
+            let stats = guard.public_stats();
+            html(crate::ui::activity_page(&recent, &stats))
+        }
+        "/how-it-works" => {
+            let stats = guard.public_stats();
+            html(crate::ui::how_it_works_page(&stats))
+        }
+        "/for-agents" => {
+            let did = guard.node_did().to_string();
+            let stats = guard.public_stats();
+            html(crate::ui::for_agents_page(&did, &stats))
+        }
+        "/for-humans" => {
+            let stats = guard.public_stats();
+            html(crate::ui::for_humans_page(&stats))
         }
         "/docs" => {
             let did = guard.node_did().to_string();
@@ -2254,10 +2377,13 @@ pub fn route_html(
         "/robots.txt" => Some((200, "text/plain; charset=utf-8", crate::ui::robots(&base))),
         "/sitemap.xml" => {
             let dir = guard.public_directory();
+            // Jobs are listed too: each settled verdict is a page worth
+            // indexing on its own, and it is the evidence behind a score.
+            let activity = guard.public_activity(5000);
             Some((
                 200,
                 "application/xml; charset=utf-8",
-                crate::ui::sitemap(&base, &dir),
+                crate::ui::sitemap(&base, &dir, &activity),
             ))
         }
         "/admin" => {
@@ -2275,7 +2401,8 @@ pub fn route_html(
             let e = guard.escalations();
             let d = guard.public_directory();
             let a = guard.public_activity(1000);
-            html(crate::ui::admin_page(&e, &d, &a))
+            let s = guard.public_stats();
+            html(crate::ui::admin_page(&e, &d, &a, &s))
         }
         p if p.starts_with("/job/") => {
             let job_ref = percent_decode(p.trim_start_matches("/job/"));
@@ -2501,9 +2628,18 @@ pub fn route_with_ip(
                 .get("deliverable_hash")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            // Accept both spellings: `uri` is what the examples and the
+            // OpenAPI description use, `deliverable_uri` mirrors the
+            // hash field. Silently ignoring the one an agent happened to
+            // pick is how a provider ends up believing it handed over an
+            // artifact that never arrived.
+            let uri = body
+                .get("deliverable_uri")
+                .or_else(|| body.get("uri"))
+                .and_then(|v| v.as_str());
             match token {
                 Some(t) => guard
-                    .deliver(t, id, hash)
+                    .deliver(t, id, hash, uri)
                     .map(|_| json!({ "state": "delivered" })),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
@@ -2525,6 +2661,13 @@ pub fn route_with_ip(
                 Some(c) => Ok(json!({
                     "contract_id": c.contract_id,
                     "state": c.state.wire_name(),
+                    // Whether it is safe to start working. `state` alone
+                    // never answered that question, so a provider had to
+                    // guess - and the ones that guessed wrong paid for
+                    // the compute before finding out.
+                    "escrow_required": c.escrow,
+                    "escrow_funded": guard.escrow_is_funded(id),
+                    "provider_may_start": !c.escrow || guard.escrow_is_funded(id),
                     "contract": c,
                     "events": guard.storage.events_after(0, 100).unwrap_or_default()
                         .into_iter()
@@ -2958,6 +3101,157 @@ mod tests {
         Arc::new(Mutex::new(NodeState::new(Box::new(
             SqliteStorage::open(":memory:").unwrap(),
         ))))
+    }
+
+    /// Client, provider, and a signed contract that requires escrow.
+    /// Returns (contract id, client token, provider token).
+    fn signed_contract(arc: &Arc<Mutex<NodeState>>) -> (String, String, String) {
+        let (_, client_tok) = arc.lock().unwrap().create_identity();
+        let (provider_did, provider_tok) = arc.lock().unwrap().create_identity();
+        let now = crate::message::now_unix();
+        let body = json!({
+            "provider": provider_did, "capability_id": "cap:img",
+            "terms": {
+                "input": {}, "deliverable": {}, "acceptance_criteria": ["ok"],
+                "deadline": now + 3600,
+                "price": { "amount": 0.2, "currency": "EUR", "model": "fixed", "cap": 1.0 },
+                "autonomy": "propose", "confidentiality": null
+            },
+            "escrow": true
+        });
+        let (status, out) = route(
+            arc,
+            "POST",
+            "/v1/contract/propose",
+            body.to_string().as_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
+        assert_eq!(status, 200, "propose failed: {out}");
+        let id = out["contract_id"].as_str().unwrap().to_string();
+        let (status, out) = route(
+            arc,
+            "POST",
+            &format!("/v1/contract/{id}/accept"),
+            b"{}",
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_eq!(status, 200, "accept failed: {out}");
+        (id, client_tok, provider_tok)
+    }
+
+    #[test]
+    fn a_provider_cannot_start_work_before_escrow_is_parked() {
+        // The bug this pins: escrow was only checked at DELIVERY, so a
+        // provider could accept, spend real compute producing the
+        // artifact, and only then be told nobody had funded the deal.
+        // The money it burned getting there was unrecoverable.
+        let arc = state();
+        let (id, client_tok, provider_tok) = signed_contract(&arc);
+
+        let (status, out) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/start"),
+            b"{}",
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_ne!(status, 200, "starting unfunded work must fail");
+        let msg = out.to_string();
+        assert!(
+            msg.contains("escrow is not parked"),
+            "and must say why: {msg}"
+        );
+        assert!(
+            msg.contains("do not start work yet"),
+            "the error has to be actionable, not merely accurate: {msg}"
+        );
+
+        // Fund it, and the same call now succeeds.
+        let (status, out) = route(
+            &arc,
+            "POST",
+            "/v1/escrow/park",
+            json!({ "contract_id": id, "amount": "0.20" })
+                .to_string()
+                .as_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
+        assert_eq!(status, 200, "park failed: {out}");
+        let (status, _) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/start"),
+            b"{}",
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_eq!(status, 200, "funded work must be allowed to start");
+    }
+
+    #[test]
+    fn a_contract_says_whether_it_is_safe_to_start_working() {
+        // `state` alone never answered that question, so providers
+        // guessed. Now the projection answers it outright.
+        let arc = state();
+        let (id, client_tok, _provider_tok) = signed_contract(&arc);
+
+        let (status, out) = route(&arc, "GET", &format!("/v1/contract/{id}"), b"", None);
+        assert_eq!(status, 200);
+        assert_eq!(out["escrow_required"], json!(true));
+        assert_eq!(out["escrow_funded"], json!(false));
+        assert_eq!(out["provider_may_start"], json!(false));
+
+        route(
+            &arc,
+            "POST",
+            "/v1/escrow/park",
+            json!({ "contract_id": id, "amount": "0.20" })
+                .to_string()
+                .as_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
+        let (_, out) = route(&arc, "GET", &format!("/v1/contract/{id}"), b"", None);
+        assert_eq!(out["escrow_funded"], json!(true));
+        assert_eq!(out["provider_may_start"], json!(true));
+    }
+
+    #[test]
+    fn delivery_records_a_retrieval_url_for_artifacts_too_large_to_inline() {
+        // A provider that sent `uri` used to have it silently dropped,
+        // so it believed it had handed over an artifact the client had
+        // no way to fetch.
+        let arc = state();
+        let (id, client_tok, provider_tok) = signed_contract(&arc);
+        route(
+            &arc,
+            "POST",
+            "/v1/escrow/park",
+            json!({ "contract_id": id, "amount": "0.20" })
+                .to_string()
+                .as_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
+
+        let (status, out) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/deliver"),
+            json!({
+                "deliverable_hash": "sha256:abc123",
+                "uri": "https://cdn.example/artifact.png"
+            })
+            .to_string()
+            .as_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_eq!(status, 200, "deliver failed: {out}");
+
+        let (_, view) = route(&arc, "GET", &format!("/v1/contract/{id}"), b"", None);
+        assert_eq!(
+            view["contract"]["deliverable_uri"],
+            json!("https://cdn.example/artifact.png"),
+            "the URL a provider supplied must survive to the client"
+        );
+        assert_eq!(view["contract"]["deliverable_hash"], json!("sha256:abc123"));
     }
 
     #[test]

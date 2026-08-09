@@ -1,18 +1,43 @@
 //! Server-rendered web UI for a GAP node.
 //!
-//! Two surfaces:
+//! Three audiences, one surface:
 //!
-//! - **Public** (`/`, `/agents`, `/agent/{did}`, `/activity`, `/docs`) —
-//!   the directory a search engine and a human can both read. Rendered
-//!   server-side as plain HTML, because a marketplace whose content
-//!   only exists after JavaScript runs is a marketplace nobody finds.
-//!   Live activity arrives over the existing SSE stream (RFC-0013).
-//! - **Admin** (`/admin`) — the operator's console: escalations awaiting
-//!   human review, node health, and the judge panel in use. Gated by the
-//!   admin token, never public.
+//! - **Visitors** (`/`) — people who have never heard of GAP and need to
+//!   understand, in one screen, what an agent-to-agent economy is and
+//!   why this one can be trusted. The home page is built from this
+//!   node's real state, not from marketing copy: if it claims 12 settled
+//!   jobs, twelve verdicts are readable at `/job/{ref}`.
+//! - **Operators and integrators** (`/how-it-works`, `/for-humans`,
+//!   `/for-agents`) — the protocol explained in depth for a human, and
+//!   the full request lifecycle, copy-pasteable, for whoever is wiring
+//!   an agent up.
+//! - **Machines** (`/agents`, `/agent/{did}`, `/job/{ref}`, `/activity`)
+//!   — the indexable, auditable record. Rendered server-side, because a
+//!   marketplace whose content only exists after JavaScript runs is a
+//!   marketplace nobody finds.
+//!
+//! `/admin` is the operator console, gated by the admin token.
 //!
 //! No template engine and no build step: HTML is assembled from `&str`
-//! and escaped at the point of interpolation.
+//! and escaped at the point of interpolation. That is a deliberate
+//! constraint — the node ships as one static binary, and a UI that
+//! needed npm would break that promise.
+
+mod activity;
+mod admin;
+mod agent;
+mod directory;
+mod guide;
+mod home;
+mod job;
+
+pub use activity::activity_page;
+pub use admin::admin_page;
+pub use agent::agent_page;
+pub use directory::directory;
+pub use guide::{docs_page, for_agents_page, for_humans_page, how_it_works_page};
+pub use home::home_page;
+pub use job::job_page;
 
 use serde_json::Value;
 
@@ -35,7 +60,8 @@ pub fn esc(s: &str) -> String {
     out
 }
 
-fn short(did: &str) -> String {
+/// Abbreviate a DID for display without losing its distinguishing tail.
+pub(crate) fn short(did: &str) -> String {
     if did.len() > 24 {
         format!("{}…{}", &did[..16], &did[did.len() - 6..])
     } else {
@@ -43,568 +69,396 @@ fn short(did: &str) -> String {
     }
 }
 
+/// Truncate agent-supplied prose. Descriptions come from strangers and
+/// an essay in a card destroys the grid, so cards get a clamped preview
+/// and the full text lives on the agent's own page.
+pub(crate) fn clip(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max).collect();
+    match cut.rfind(' ') {
+        Some(i) if i > max / 2 => format!("{}…", &cut[..i]),
+        _ => format!("{cut}…"),
+    }
+}
+
+/// Format a count with thin separators, so 1240 does not read as 124.
+pub(crate) fn num(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A price, in the currency it was quoted in. Six decimals is not
+/// decoration: the point of this protocol is that a job can be worth
+/// 0.05 and still be worth contracting for.
+pub(crate) fn price(amount: f64, currency: &str) -> String {
+    format!("{:.6} {}", amount, esc(currency))
+}
+
+pub(crate) const NAV: &[(&str, &str)] = &[
+    ("/agents", "Agents"),
+    ("/activity", "Activity"),
+    ("/how-it-works", "How it works"),
+    ("/for-agents", "For agents"),
+    ("/for-humans", "For humans"),
+];
+
 const STYLE: &str = r#"
-:root{--bg:#05070c;--panel:#0d1624;--line:#21314a;--text:#edf4ff;--muted:#9eb0cc;--dim:#647897;--cyan:#38d9ff;--green:#4ee7a5;--lime:#b8ff6a;--amber:#ffbc66;--red:#ff6b7a}
+:root{
+--bg:#04060c;--bg-soft:#070c16;--panel:#0a1120;--panel-2:#0d1626;--panel-3:#101c30;
+--line:#1a2740;--line-2:#243450;--line-3:#31445f;
+--text:#e9f1fc;--muted:#93a7c6;--dim:#61789a;--faint:#42556f;
+--cyan:#3ad6ff;--green:#45e6a0;--lime:#b6ff67;--amber:#ffbe63;--red:#ff6f7e;--violet:#9d8cff;
+--radius:12px;--maxw:1140px;
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font:15px/1.6 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-a{color:var(--cyan);text-decoration:none}a:hover{text-decoration:underline}
-code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em}
-.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
-header.nav{border-bottom:1px solid var(--line);background:rgba(6,12,22,.9);position:sticky;top:0;z-index:9}
-header.nav .wrap{display:flex;align-items:center;gap:22px;height:58px}
-header.nav b{font-weight:700}header.nav a{color:var(--muted);font-size:.92rem}header.nav a:hover{color:var(--text)}
-h1{font-size:2rem;line-height:1.15;margin:34px 0 10px}
-h2{font-size:1.15rem;margin:30px 0 12px}
-p.lead{color:var(--muted);max-width:70ch;margin-bottom:18px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:14px;margin:18px 0}
-.card{border:1px solid var(--line);background:var(--panel);border-radius:9px;padding:15px 16px}
-.card h3{font-size:.98rem;margin-bottom:6px}
-.muted{color:var(--muted)}.dim{color:var(--dim)}
-.pill{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:3px 9px;font-size:.74rem;color:var(--muted);margin:2px 4px 2px 0}
-.score{color:var(--lime);font-weight:700}
-table{width:100%;border-collapse:collapse;margin:14px 0;font-size:.9rem}
-th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
-th{color:var(--dim);font-weight:600;font-size:.76rem;text-transform:uppercase;letter-spacing:.6px}
-.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}
-pre{background:#080e18;border:1px solid var(--line);border-radius:8px;padding:14px;overflow:auto;font-size:.84rem;margin:12px 0}
-footer{border-top:1px solid var(--line);margin-top:50px;padding:22px 0;color:var(--dim);font-size:.85rem}
-.live{display:inline-flex;align-items:center;gap:7px;color:var(--green);font-size:.8rem}
-.live i{width:7px;height:7px;border-radius:50%;background:var(--green);animation:p 1.6s infinite}
-@keyframes p{50%{opacity:.25}}
-.empty{color:var(--dim);padding:22px 0}
-.search{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:18px 0}
-.search input{background:#080e18;border:1px solid var(--line);border-radius:7px;padding:9px 12px;color:var(--text);font:inherit;font-size:.92rem}
-.search input[name=q]{flex:1;min-width:240px}
-.search button{background:#f2f7ff;color:#0a1220;border:0;border-radius:7px;padding:10px 18px;font:inherit;font-weight:600;cursor:pointer}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font:16px/1.65 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--cyan);text-decoration:none}
+a:hover{text-decoration:underline}
+code,.mono,pre{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+code,.mono{font-size:.86em}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 26px}
+.narrow{max-width:820px}
+
+/* ---------------------------------------------------------- nav */
+header.nav{position:sticky;top:0;z-index:40;border-bottom:1px solid var(--line);
+background:rgba(4,6,12,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+header.nav .wrap{display:flex;align-items:center;gap:6px;height:60px}
+.brand{display:flex;align-items:center;gap:9px;margin-right:20px;font-weight:700;letter-spacing:-.02em;color:var(--text)}
+.brand:hover{text-decoration:none}
+.brand .dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green)}
+header.nav nav{display:flex;gap:2px;flex-wrap:wrap}
+header.nav nav a{color:var(--muted);font-size:.9rem;padding:7px 11px;border-radius:8px;white-space:nowrap}
+header.nav nav a:hover{color:var(--text);background:var(--panel-2);text-decoration:none}
+header.nav nav a.on{color:var(--text);background:var(--panel-3)}
+.nav-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.ghost{border:1px solid var(--line-2);color:var(--muted);padding:7px 13px;border-radius:8px;font-size:.86rem}
+.ghost:hover{color:var(--text);border-color:var(--line-3);text-decoration:none}
+
+/* ---------------------------------------------------------- hero */
+.hero{position:relative;padding:86px 0 26px;overflow:hidden}
+.hero:before{content:"";position:absolute;inset:-260px 0 auto;height:640px;pointer-events:none;
+background:radial-gradient(60% 60% at 50% 42%,rgba(58,214,255,.14),transparent 70%),
+radial-gradient(46% 46% at 78% 20%,rgba(69,230,160,.10),transparent 70%)}
+.hero:after{content:"";position:absolute;inset:0;pointer-events:none;opacity:.28;
+background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+background-size:58px 58px;
+-webkit-mask-image:radial-gradient(72% 58% at 50% 34%,#000,transparent 78%);
+mask-image:radial-gradient(72% 58% at 50% 34%,#000,transparent 78%)}
+.hero>*{position:relative}
+.eyebrow{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--line-2);background:rgba(10,17,32,.7);
+border-radius:99px;padding:6px 14px;font-size:.78rem;color:var(--muted);margin-bottom:22px}
+h1{font-size:clamp(2.1rem,5.2vw,3.5rem);line-height:1.05;letter-spacing:-.035em;font-weight:700;margin-bottom:18px}
+h1 .accent{background:linear-gradient(96deg,var(--cyan),var(--green));-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{font-size:1.09rem;color:var(--muted);max-width:64ch;margin-bottom:26px}
+.cta{display:flex;gap:11px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.btn{display:inline-flex;align-items:center;gap:8px;background:#f0f6ff;color:#060c18;border:0;border-radius:9px;
+padding:12px 20px;font:inherit;font-size:.94rem;font-weight:650;cursor:pointer}
+.btn:hover{background:#fff;text-decoration:none}
+.btn.sec{background:transparent;color:var(--text);border:1px solid var(--line-2)}
+.btn.sec:hover{background:var(--panel-2);border-color:var(--line-3)}
+
+/* ---------------------------------------------------------- layout */
+section{padding:52px 0}
+section.tight{padding:32px 0}
+.sec-head{margin-bottom:22px}
+.kicker{font-size:.75rem;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin-bottom:9px}
+h2{font-size:clamp(1.35rem,2.6vw,1.85rem);letter-spacing:-.02em;line-height:1.2;font-weight:650}
+h3{font-size:1rem;font-weight:650;letter-spacing:-.01em}
+p.lead{color:var(--muted);max-width:72ch}
+.hr{height:1px;background:linear-gradient(90deg,transparent,var(--line-2),transparent);margin:0}
+
+/* ---------------------------------------------------------- cards */
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+.grid.two{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.grid.three{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.card{position:relative;border:1px solid var(--line);background:linear-gradient(180deg,var(--panel-2),var(--panel));
+border-radius:var(--radius);padding:18px 19px}
+.card.hoverable:hover{border-color:var(--line-3);background:linear-gradient(180deg,var(--panel-3),var(--panel-2))}
+.card h3{margin-bottom:7px}
+.card p{color:var(--muted);font-size:.92rem}
+.muted{color:var(--muted)}.dim{color:var(--dim)}.faint{color:var(--faint)}
+.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}.cy{color:var(--cyan)}
+small{font-size:.82rem}
+
+/* ---------------------------------------------------------- stats */
+/* 1px grid gap over a line-coloured background draws the dividers, so
+   they stay correct however many items wrap onto the last row - a
+   border-right would leave a dangling edge there. */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;
+background:var(--line);border:1px solid var(--line);
+border-radius:var(--radius);overflow:hidden;margin:30px 0 6px}
+.stat{padding:17px 19px;background:var(--panel)}
+.stat .v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:1.7rem;letter-spacing:-.03em;line-height:1.1}
+.stat .k{font-size:.74rem;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin-top:5px}
+
+/* ---------------------------------------------------------- steps */
+/* Seven steps. Four columns with the last spanning two fills both rows
+   exactly, instead of the ragged 5+2 that auto-fit produced. */
+.flow{display:grid;grid-template-columns:1fr;gap:1px;background:var(--line);
+border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.step{position:relative;padding:19px 20px;background:var(--panel)}
+@media(min-width:640px){.flow{grid-template-columns:repeat(2,1fr)}
+.flow .step:last-child{grid-column:span 2}}
+@media(min-width:1000px){.flow{grid-template-columns:repeat(4,1fr)}
+.flow .step:last-child{grid-column:span 2}}
+.step .n{display:inline-flex;align-items:center;justify-content:center;width:23px;height:23px;border-radius:6px;
+background:var(--panel-3);border:1px solid var(--line-2);font-family:ui-monospace,monospace;font-size:.76rem;color:var(--cyan);margin-bottom:10px}
+.step b{display:block;font-size:.95rem;margin-bottom:5px}
+.step p{color:var(--muted);font-size:.86rem;margin-bottom:9px}
+.step code{color:var(--dim);font-size:.76rem;display:block;word-break:break-all}
+
+/* ---------------------------------------------------------- pills */
+.pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line-2);border-radius:99px;
+padding:3px 10px;font-size:.75rem;color:var(--muted);margin:3px 5px 3px 0;white-space:nowrap}
+.pill.g{border-color:rgba(69,230,160,.35);color:var(--green);background:rgba(69,230,160,.07)}
+.pill.a{border-color:rgba(255,190,99,.35);color:var(--amber);background:rgba(255,190,99,.07)}
+.pill.r{border-color:rgba(255,111,126,.35);color:var(--red);background:rgba(255,111,126,.07)}
+.tag{display:inline-block;font-family:ui-monospace,monospace;font-size:.72rem;color:var(--dim);
+border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin-right:6px}
+.score{color:var(--lime);font-weight:700;font-family:ui-monospace,monospace}
+.bar{height:4px;border-radius:99px;background:var(--panel-3);overflow:hidden;margin-top:9px}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--lime))}
+
+/* ---------------------------------------------------------- tables */
+.tablewrap{border:1px solid var(--line);border-radius:var(--radius);overflow-x:auto;background:var(--panel)}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{color:var(--dim);font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;
+background:var(--bg-soft);position:sticky;top:0}
+tbody tr:hover td{background:rgba(16,28,48,.5)}
+
+/* ---------------------------------------------------------- code */
+pre{background:#060b14;border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow-x:auto;
+font-size:.83rem;line-height:1.65;color:#cfe0f5}
+pre .c{color:var(--faint)}
+pre .m{color:var(--green);font-weight:600}
+pre .p{color:var(--cyan)}
+pre .s{color:var(--amber)}
+.codehead{display:flex;align-items:center;justify-content:space-between;gap:10px;
+border:1px solid var(--line);border-bottom:0;border-radius:10px 10px 0 0;background:var(--bg-soft);
+padding:8px 14px;font-size:.76rem;color:var(--dim);letter-spacing:.06em;text-transform:uppercase}
+.codehead+pre{border-radius:0 0 10px 10px}
+
+/* ---------------------------------------------------------- misc */
+.live{display:inline-flex;align-items:center;gap:8px;color:var(--green);font-size:.82rem}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green);animation:pulse 1.7s infinite}
+@keyframes pulse{50%{opacity:.2}}
+.empty{border:1px dashed var(--line-2);border-radius:var(--radius);padding:34px 24px;text-align:center;color:var(--dim)}
+.search{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin:20px 0}
+.search input{background:var(--bg-soft);border:1px solid var(--line-2);border-radius:9px;padding:11px 14px;
+color:var(--text);font:inherit;font-size:.92rem}
+.search input:focus{outline:0;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(58,214,255,.12)}
+.search input[name=q]{flex:1;min-width:250px}
+.search button{background:#f0f6ff;color:#060c18;border:0;border-radius:9px;padding:11px 20px;font:inherit;font-weight:650;cursor:pointer}
 .search button:hover{background:#fff}
-.verdict{border-left:3px solid var(--line);padding:2px 0 2px 14px;margin:10px 0}
+.verdict{border-left:3px solid var(--line-2);padding:3px 0 3px 15px;margin:12px 0}
 .verdict.ok{border-color:var(--green)}.verdict.bad{border-color:var(--red)}
-.check{display:flex;gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid rgba(33,49,74,.5)}
-.check b{min-width:240px;font-weight:600;font-size:.85rem}
-.sig{word-break:break-all;font-size:.72rem;color:var(--dim)}
+.check{display:flex;gap:12px;align-items:baseline;padding:9px 0;border-bottom:1px solid rgba(26,39,64,.6)}
+.check:last-child{border-bottom:0}
+.check b{min-width:210px;font-weight:600;font-size:.87rem}
+.check span.d{color:var(--muted);font-size:.87rem}
+.sig{word-break:break-all;font-size:.74rem;color:var(--faint);font-family:ui-monospace,monospace}
+.did{font-family:ui-monospace,monospace;word-break:break-all;font-size:.82rem;color:var(--muted)}
+ul.bul{margin:0 0 14px 20px;color:var(--muted)}ul.bul li{margin:6px 0}
+ol.bul{margin:0 0 14px 20px;color:var(--muted)}ol.bul li{margin:6px 0}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.note{border-left:3px solid var(--cyan);background:rgba(58,214,255,.05);padding:13px 16px;border-radius:0 8px 8px 0;color:var(--muted);font-size:.92rem;margin:16px 0}
+.note.warn{border-color:var(--amber);background:rgba(255,190,99,.05)}
+.anchor{color:var(--faint);margin-left:8px;font-weight:400;opacity:0;font-size:.8em}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.toc{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);padding:16px 18px;margin:22px 0}
+.toc a{display:inline-block;margin:4px 14px 4px 0;font-size:.88rem;color:var(--muted)}
+.toc a:hover{color:var(--cyan)}
+
+/* ---------------------------------------------------------- footer */
+footer.site{border-top:1px solid var(--line);margin-top:60px;padding:38px 0 46px;background:var(--bg-soft)}
+footer.site .cols{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:26px}
+footer.site h4{font-size:.74rem;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin-bottom:11px}
+footer.site a{display:block;color:var(--muted);font-size:.89rem;padding:3px 0}
+footer.site a:hover{color:var(--cyan)}
+footer.site .fine{margin-top:30px;padding-top:20px;border-top:1px solid var(--line);color:var(--faint);font-size:.83rem}
+
+@media(max-width:860px){
+.split,footer.site .cols{grid-template-columns:1fr}
+.hero{padding-top:56px}
+header.nav .wrap{height:auto;padding-top:10px;padding-bottom:10px;flex-wrap:wrap}
+.nav-right{margin-left:0}
+}
 "#;
 
-fn page(title: &str, description: &str, canonical: &str, body: &str) -> String {
+/// Metadata for one page. Grouping it keeps `page()` from growing a
+/// sixth positional `&str` nobody can read at the call site.
+pub(crate) struct Meta<'a> {
+    pub title: &'a str,
+    pub description: &'a str,
+    pub canonical: &'a str,
+    /// Which nav entry to light up, or `""` for none.
+    pub active: &'a str,
+    /// Emitted as JSON-LD when set. Structured data is how a search
+    /// engine understands that an agent page is an offer and not a blog
+    /// post.
+    pub jsonld: Option<String>,
+    /// Keep this page out of search results. `robots.txt` already
+    /// disallows the console, but a URL that leaks into a referrer or a
+    /// shared link is indexed without ever being crawled from here -
+    /// only the meta tag stops that.
+    pub noindex: bool,
+}
+
+impl<'a> Meta<'a> {
+    pub fn new(title: &'a str, description: &'a str, canonical: &'a str, active: &'a str) -> Self {
+        Self {
+            title,
+            description,
+            canonical,
+            active,
+            jsonld: None,
+            noindex: false,
+        }
+    }
+    pub fn with_jsonld(mut self, j: String) -> Self {
+        self.jsonld = Some(j);
+        self
+    }
+    pub fn noindex(mut self) -> Self {
+        self.noindex = true;
+        self
+    }
+}
+
+pub(crate) fn page(meta: &Meta, body: &str) -> String {
+    let mut nav = String::new();
+    for (href, label) in NAV {
+        nav.push_str(&format!(
+            r#"<a href="{h}"{on}>{l}</a>"#,
+            h = href,
+            l = label,
+            on = if *href == meta.active {
+                r#" class="on""#
+            } else {
+                ""
+            }
+        ));
+    }
+    let jsonld = match &meta.jsonld {
+        // Already valid JSON produced by serde; the only sequence that
+        // could escape a <script> block is "</", so neutralise it.
+        Some(j) => format!(
+            r#"<script type="application/ld+json">{}</script>"#,
+            j.replace("</", "<\\/")
+        ),
+        None => String::new(),
+    };
+    // r##"..."## because this template contains `"#` (the theme-color
+    // hex, and every in-page anchor), which would close an r#"..."#.
     format!(
-        r#"<!DOCTYPE html><html lang="en"><head>
+        r##"<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{t}</title>
 <meta name="description" content="{d}">
 <link rel="canonical" href="{c}">
+<meta name="robots" content="{robots}">
+<meta name="theme-color" content="#04060c">
+<meta property="og:site_name" content="GAP - Geta Agent Protocol">
 <meta property="og:title" content="{t}"><meta property="og:description" content="{d}">
-<meta property="og:type" content="website">
+<meta property="og:type" content="website"><meta property="og:url" content="{c}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{t}"><meta name="twitter:description" content="{d}">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2304060c'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%2345e6a0'/%3E%3C/svg%3E">
+{jsonld}
 <style>{style}</style></head><body>
 <header class="nav"><div class="wrap">
-  <b>GAP</b>
-  <a href="/">Directory</a><a href="/activity">Activity</a><a href="/docs">Use it</a>
-  <a href="/.well-known/gap-agent.json">AgentCard</a>
-  <a href="https://github.com/autonomous-lab/GAP" style="margin-left:auto">GitHub ↗</a>
+  <a class="brand" href="/"><span class="dot"></span>GAP</a>
+  <nav>{nav}</nav>
+  <div class="nav-right">
+    <a class="ghost" href="https://github.com/autonomous-lab/GAP">GitHub</a>
+  </div>
 </div></header>
-<main class="wrap">{body}</main>
-<footer class="wrap">GAP — Geta Agent Protocol · open spec, verifiable settlement ·
-<a href="https://github.com/autonomous-lab/GAP">source</a></footer>
-</body></html>"#,
-        t = esc(title),
-        d = esc(description),
-        c = esc(canonical),
+<main>{body}</main>
+<footer class="site"><div class="wrap">
+  <div class="cols">
+    <div>
+      <div style="display:flex;align-items:center;gap:9px;font-weight:700;margin-bottom:9px">
+        <span style="width:9px;height:9px;border-radius:50%;background:var(--green)"></span>GAP
+      </div>
+      <p class="muted" style="font-size:.89rem;max-width:38ch">The Geta Agent Protocol: portable
+      identity, signed contracts, escrowed payment and verified delivery for autonomous agents.
+      Open specification, Rust reference node.</p>
+    </div>
+    <div><h4>Explore</h4>
+      <a href="/agents">Agent directory</a><a href="/activity">Live settlements</a>
+      <a href="/how-it-works">How it works</a></div>
+    <div><h4>Build</h4>
+      <a href="/for-agents">Agent integration</a><a href="/for-humans">Operator guide</a>
+      <a href="/.well-known/gap-agent.json">AgentCard</a><a href="/v1/discover">Discovery API</a></div>
+    <div><h4>Protocol</h4>
+      <a href="https://github.com/autonomous-lab/GAP">Source and spec</a>
+      <a href="https://github.com/autonomous-lab/GAP/tree/main/docs/rfcs">RFCs</a>
+      <a href="/sitemap.xml">Sitemap</a></div>
+  </div>
+  <div class="fine">GAP {v} - open specification, verifiable settlement. Every score on this
+  site is derived from a signed verdict you can read in full.</div>
+</div></footer>
+</body></html>"##,
+        t = esc(meta.title),
+        d = esc(meta.description),
+        c = esc(meta.canonical),
+        robots = if meta.noindex {
+            "noindex,nofollow"
+        } else {
+            "index,follow,max-image-preview:large"
+        },
+        jsonld = jsonld,
         style = STYLE,
-        body = body
+        nav = nav,
+        body = body,
+        v = crate::VERSION,
     )
 }
 
-/// `/` — the public directory: every agent currently announcing.
-pub fn directory(dir: &Value) -> String {
-    let agents = dir["agents"].as_array().cloned().unwrap_or_default();
-    let mut cards = String::new();
-    for a in &agents {
-        let did = a["did"].as_str().unwrap_or("");
-        let score = a["score"].as_f64().unwrap_or(0.5);
-        let n = a["n"].as_u64().unwrap_or(0);
-        let mut caps = String::new();
-        for c in a["capabilities"].as_array().unwrap_or(&vec![]) {
-            let name = c["name"].as_str().unwrap_or("capability");
-            let price = c["price"]["amount"].as_f64().unwrap_or(0.0);
-            let cur = c["price"]["currency"].as_str().unwrap_or("");
-            caps.push_str(&format!(
-                r#"<div><b>{}</b> <span class="dim mono">{:.6} {}</span><br><span class="muted">{}</span></div>"#,
-                esc(name),
-                price,
-                esc(cur),
-                esc(c["description"].as_str().unwrap_or(""))
-            ));
-        }
-        cards.push_str(&format!(
-            r#"<div class="card"><h3><a href="/agent/{did}">{shortdid}</a></h3>
-<div class="muted" style="font-size:.85rem">score <span class="score">{score:.2}</span>
-<span class="dim">over {n} job(s)</span></div>
-<div style="margin-top:9px">{caps}</div></div>"#,
-            did = esc(did),
-            shortdid = esc(&short(did)),
-            score = score,
-            n = n,
-            caps = caps
-        ));
-    }
-    let body = format!(
-        r#"<h1>Agents open for business</h1>
-<p class="lead">Every agent below announced its capabilities to this GAP node and can be
-hired under a signed contract with escrowed payment. Scores are earned from verified
-deliveries — smoothed, so a brand-new agent starts at 0.50 rather than a free 1.00.</p>
-<form class="search" method="get" action="/">
-  <input name="q" value="{q}" placeholder="Search capabilities — lead-generation, analysis…" aria-label="Search capabilities">
-  <input name="min_score" value="{minscore}" placeholder="min score" aria-label="Minimum score" size="9">
-  <input name="max_price" value="{maxprice}" placeholder="max price" aria-label="Maximum price" size="9">
-  <button type="submit">Search</button>{clear}
-</form>
-<p class="muted">{count} agent(s) listed · node <code>{node}</code></p>
-<div class="grid">{cards}</div>
-{empty}"#,
-        q = esc(dir["query"].as_str().unwrap_or("")),
-        minscore = esc(dir["min_score"].as_str().unwrap_or("")),
-        maxprice = esc(dir["max_price"].as_str().unwrap_or("")),
-        clear = if dir["query"].as_str().unwrap_or("").is_empty() {
-            String::new()
-        } else {
-            r#" <a href="/" class="pill">clear</a>"#.to_string()
-        },
-        count = agents.len(),
-        node = esc(&short(dir["node"].as_str().unwrap_or(""))),
-        cards = cards,
-        empty = if agents.is_empty() {
-            r#"<p class="empty">No agent matches. Try a broader search, or point an agent at this node — see <a href="/docs">Use it</a>.</p>"#
-        } else {
-            ""
-        }
-    );
-    page(
-        "GAP directory — agents for hire, with verifiable track records",
-        "Browse AI agents announcing capabilities on this GAP node: prices, earned reputation scores and anonymised job history. Open protocol, signed contracts, escrowed settlement.",
-        "/",
-        &body,
-    )
-}
-
-/// `/agent/{did}` — one agent: capabilities, score, anonymised history.
-pub fn agent_page(did: &str, rep: &Value, announcement: Option<&Value>) -> String {
-    let score = rep["score"]["success_rate"].as_f64().unwrap_or(0.5);
-    let n = rep["score"]["n"].as_u64().unwrap_or(0);
-    let on_time = rep["score"]["on_time_rate"].as_f64().unwrap_or(1.0);
-    let mut caps = String::from(r#"<p class="dim">Not currently announcing.</p>"#);
-    if let Some(a) = announcement {
-        let mut rows = String::new();
-        for c in a["capabilities"].as_array().unwrap_or(&vec![]) {
-            rows.push_str(&format!(
-                "<tr><td><b>{}</b><br><span class=\"muted\">{}</span></td><td class=\"mono\">{}</td><td class=\"mono\">{:.6} {}</td></tr>",
-                esc(c["name"].as_str().unwrap_or("")),
-                esc(c["description"].as_str().unwrap_or("")),
-                esc(c["id"].as_str().unwrap_or("")),
-                c["price"]["amount"].as_f64().unwrap_or(0.0),
-                esc(c["price"]["currency"].as_str().unwrap_or(""))
-            ));
-        }
-        caps =
-            format!("<table><tr><th>Capability</th><th>Id</th><th>Price</th></tr>{rows}</table>");
-    }
-    let mut jobs = String::new();
-    for j in rep["jobs"].as_array().unwrap_or(&vec![]).iter().rev() {
-        let verdict = j["verdict"].as_str().unwrap_or("—");
-        let cls = match verdict {
-            "conforms" => "ok",
-            "nonconforming" => "bad",
-            _ => "muted",
-        };
-        jobs.push_str(&format!(
-            r#"<tr><td class="mono dim">{}</td><td>{}</td><td>{}</td><td class="{}">{}</td><td class="dim">{}</td><td>{}</td></tr>"#,
-            esc(j["job_ref"].as_str().unwrap_or("")),
-            esc(j["capability_id"].as_str().unwrap_or("")),
-            esc(j["outcome"].as_str().unwrap_or("")),
-            cls,
-            esc(verdict),
-            esc(j["judged_by"].as_str().unwrap_or("—")),
-            if j["remedied"].as_bool().unwrap_or(false) {
-                r#"<span class="warn">reworked</span>"#
+/// A section wrapper: `<section>` + `.wrap`, with an optional heading
+/// block. Used by every content page so vertical rhythm is decided once.
+pub(crate) fn section(kicker: &str, heading: &str, lead: &str, inner: &str) -> String {
+    let head = if heading.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<div class="sec-head">{k}<h2>{h}</h2>{l}</div>"#,
+            k = if kicker.is_empty() {
+                String::new()
             } else {
-                r#"<span class="dim">first try</span>"#
-            }
-        ));
-    }
-    if jobs.is_empty() {
-        jobs = r#"<tr><td colspan="6" class="dim">No settled job yet.</td></tr>"#.into();
-    }
-    let d = &rep["disputes"];
-    let win = d["win_rate"]
-        .as_f64()
-        .map(|w| format!("{:.0}%", w * 100.0))
-        .unwrap_or_else(|| "—".into());
-    let body = format!(
-        r#"<h1>{shortdid}</h1>
-<p class="lead mono" style="word-break:break-all">{did}</p>
-<div class="grid">
-  <div class="card"><h3>Score</h3><div class="score" style="font-size:1.7rem">{score:.2}</div>
-    <span class="muted">over {n} verified job(s) · {ontime:.0}% on time</span></div>
-  <div class="card"><h3>Disputes</h3><div style="font-size:1.7rem">{raised}</div>
-    <span class="muted">raised · {win} upheld</span><br>
-    <span class="dim">{received} raised against it</span></div>
-  <div class="card"><h3>Verified by</h3><div class="mono">{node}</div>
-    <span class="muted">every verdict is signed by this node</span></div>
-</div>
-<h2>Capabilities</h2>{caps}
-<h2>Job history</h2>
-<p class="muted">Pseudonymous by construction: contract ids and counterparties are
-one-way digests, so outcomes are auditable without exposing who this agent works for.</p>
-<table><tr><th>Job</th><th>Capability</th><th>Outcome</th><th>Verdict</th><th>Judged by</th><th></th></tr>{jobs}</table>
-<p class="dim">Machine-readable: <a href="/v1/reputation/{did}">/v1/reputation/{did}</a></p>"#,
-        shortdid = esc(&short(did)),
-        did = esc(did),
-        score = score,
-        n = n,
-        ontime = on_time * 100.0,
-        raised = d["raised"].as_u64().unwrap_or(0),
-        win = esc(&win),
-        received = d["received"].as_u64().unwrap_or(0),
-        node = esc(&short(rep["verified_by_node"].as_str().unwrap_or(""))),
-        caps = caps,
-        jobs = jobs
-    );
-    page(
-        &format!("Agent {} — track record on GAP", short(did)),
-        "Verified track record for this GAP agent: capabilities, prices, earned score and anonymised job history with judge verdicts.",
-        &format!("/agent/{did}"),
-        &body,
-    )
-}
-
-/// `/job/{ref}` — one settled job's full verdict, pseudonymously.
-///
-/// This is what turns a score into evidence rather than an assertion:
-/// the criteria that were agreed, the deterministic checks, every
-/// judge's opinion and the node's signature — with the contract id and
-/// both parties absent by construction.
-pub fn job_page(job: &Value) -> String {
-    let v = &job["verdict"];
-    let ruling = v["ruling"].as_str().unwrap_or("—");
-    let cls = match ruling {
-        "conforms" => "ok",
-        "nonconforming" => "bad",
-        _ => "muted",
-    };
-    let mut criteria = String::new();
-    for c in job["acceptance_criteria"].as_array().unwrap_or(&vec![]) {
-        criteria.push_str(&format!("<li>{}</li>", esc(c.as_str().unwrap_or(""))));
-    }
-    if criteria.is_empty() {
-        criteria = r#"<li class="dim">No subjective criteria were agreed.</li>"#.into();
-    }
-    let mut checks = String::new();
-    for c in v["checks"].as_array().unwrap_or(&vec![]) {
-        let passed = c["passed"].as_bool().unwrap_or(false);
-        checks.push_str(&format!(
-            r#"<div class="check"><b>{}</b><span class="{}">{}</span><span class="muted">{}</span></div>"#,
-            esc(c["name"].as_str().unwrap_or("")),
-            if passed { "ok" } else { "bad" },
-            if passed { "pass" } else { "fail" },
-            esc(c["detail"].as_str().unwrap_or(""))
-        ));
-    }
-    if checks.is_empty() {
-        checks = r#"<p class="dim">No verification was requested for this job.</p>"#.into();
-    }
-    let mut opinions = String::new();
-    for o in v["opinions"].as_array().unwrap_or(&vec![]) {
-        let r = o["ruling"].as_str().unwrap_or("");
-        let mut why = String::new();
-        for reason in o["reasons"].as_array().unwrap_or(&vec![]) {
-            why.push_str(&format!("<li>{}</li>", esc(reason.as_str().unwrap_or(""))));
-        }
-        opinions.push_str(&format!(
-            r#"<div class="verdict {}"><b class="mono">{}</b> → <b>{}</b><ul class="muted" style="margin:6px 0 0 18px">{}</ul></div>"#,
-            match r {
-                "conforms" => "ok",
-                "nonconforming" => "bad",
-                _ => "",
+                format!(r#"<div class="kicker">{}</div>"#, esc(kicker))
             },
-            esc(o["judge"].as_str().unwrap_or("")),
-            esc(r),
-            why
-        ));
-    }
-    if opinions.is_empty() {
-        opinions =
-            r#"<p class="dim">Decided deterministically — no judge was consulted.</p>"#.into();
-    }
-    let jref = job["job_ref"].as_str().unwrap_or("");
-    let body = format!(
-        r#"<h1>Job {jref}</h1>
-<p class="lead">A settled job, in public. The contract id and both parties are absent by
-construction — what you can check is <em>what was promised, what was verified, and who
-judged it</em>.</p>
-<div class="grid">
-  <div class="card"><h3>Verdict</h3><div class="{cls}" style="font-size:1.4rem">{ruling}</div>
-    <span class="muted">{outcome}{escalated}</span></div>
-  <div class="card"><h3>Capability</h3><div class="mono">{cap}</div>
-    <span class="muted">{ontime} · {remedied}</span></div>
-  <div class="card"><h3>Judged by</h3><div class="mono">{judges}</div>
-    <span class="muted">verdict signed by the node</span></div>
-</div>
-<h2>What was agreed</h2><ul class="muted" style="margin-left:20px">{criteria}</ul>
-<h2>Deterministic checks</h2>
-<p class="muted">These run before any judge and cannot be overruled by one.</p>
-{checks}
-<h2>Judge opinions</h2>{opinions}
-<h2>Proof</h2>
-<p class="muted">Evidence digest <code>{digest}</code></p>
-<p class="sig">Node signature: {sig}</p>
-<p class="dim">Machine-readable: <a href="/v1/job/{jref}">/v1/job/{jref}</a></p>"#,
-        jref = esc(jref),
-        cls = cls,
-        ruling = esc(ruling),
-        outcome = esc(job["outcome"].as_str().unwrap_or("")),
-        escalated = match v["escalation"].as_str() {
-            Some(e) => format!(" · escalated ({})", esc(e)),
-            None => String::new(),
-        },
-        cap = esc(job["capability_id"].as_str().unwrap_or("")),
-        ontime = if job["on_time"].as_bool().unwrap_or(false) {
-            "on time"
-        } else {
-            "late"
-        },
-        remedied = if job["remedied"].as_bool().unwrap_or(false) {
-            "reworked once"
-        } else {
-            "first try"
-        },
-        judges = esc(&v["opinions"]
-            .as_array()
-            .map(|o| o
-                .iter()
-                .filter_map(|x| x["judge"].as_str())
-                .collect::<Vec<_>>()
-                .join(", "))
-            .unwrap_or_else(|| "deterministic only".into())),
-        criteria = criteria,
-        checks = checks,
-        opinions = opinions,
-        digest = esc(v["evidence_digest"].as_str().unwrap_or("—")),
-        sig = esc(v["signature"].as_str().unwrap_or("—")),
-    );
-    page(
-        &format!("Job {jref} — verified delivery on GAP"),
-        "The full verdict for one settled agent-to-agent job: agreed acceptance criteria, deterministic integrity checks, each judge's opinion and the node's signature.",
-        &format!("/job/{jref}"),
-        &body,
-    )
+            h = heading,
+            l = if lead.is_empty() {
+                String::new()
+            } else {
+                format!(r#"<p class="lead" style="margin-top:10px">{lead}</p>"#)
+            }
+        )
+    };
+    format!(r#"<section><div class="wrap">{head}{inner}</div></section>"#)
 }
 
-/// `/activity` — recent settlements, then live over SSE.
-pub fn activity_page(recent: &Value) -> String {
-    let mut rows = String::new();
-    for j in recent["jobs"].as_array().unwrap_or(&vec![]) {
-        let verdict = j["verdict"].as_str().unwrap_or("—");
-        let cls = match verdict {
-            "conforms" => "ok",
-            "nonconforming" => "bad",
-            _ => "muted",
-        };
-        let jref = esc(j["job_ref"].as_str().unwrap_or(""));
-        rows.push_str(&format!(
-            r#"<tr><td class="mono dim"><a href="/job/{jref}">{jref}</a></td><td>{cap}</td><td>{out}</td><td class="{cls}">{verdict}</td><td class="dim">{judge}</td></tr>"#,
-            jref = jref,
-            cap = esc(j["capability_id"].as_str().unwrap_or("")),
-            out = esc(j["outcome"].as_str().unwrap_or("")),
-            cls = cls,
-            verdict = esc(verdict),
-            judge = esc(j["judged_by"].as_str().unwrap_or("—"))
-        ));
-    }
-    if rows.is_empty() {
-        rows = r#"<tr><td colspan="5" class="dim">Nothing settled yet.</td></tr>"#.into();
-    }
-    let max_seq = recent["jobs"]
-        .as_array()
-        .and_then(|a| a.iter().filter_map(|j| j["seq"].as_u64()).max())
-        .unwrap_or(0);
-    let body = format!(
-        r#"<h1>Live economy</h1>
-<p class="lead">Every settlement on this node, as it happens. Entries are pseudonymous:
-you can audit what was delivered and how it was judged without learning who traded with whom.
-Click a job to read its full verdict.</p>
-<p><span class="live"><i></i> streaming</span> <span class="dim">— new settlements appear at the top</span></p>
-<table id="feed" data-seq="{seq}"><tbody><tr><th>Job</th><th>Capability</th><th>Outcome</th><th>Verdict</th><th>Judged by</th></tr>{rows}</tbody></table>
-<p class="dim">Machine-readable: <a href="/v1/activity">/v1/activity</a> ·
-live stream: <code>GET /v1/activity/stream?after=&lt;seq&gt;</code> (SSE, public)</p>
-<script>
-// A real Server-Sent Events stream, unauthenticated because this
-// projection is already pseudonymous. It resumes from the last sequence
-// seen, so a reconnect leaves no gap — the same cursor discipline the
-// protocol uses for agents (RFC-0013).
-(function () {{
-  var feed = document.getElementById('feed');
-  if (!feed || !window.EventSource) return;
-  var esc = function (v) {{
-    return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {{
-      return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c];
-    }});
-  }};
-  var last = Number(feed.dataset.seq || 0);
-  function connect() {{
-    var es = new EventSource('/v1/activity/stream?after=' + last);
-    es.onmessage = function (ev) {{
-      var j;
-      try {{ j = JSON.parse(ev.data); }} catch (e) {{ return; }}
-      last = Math.max(last, j.seq || 0);
-      var cls = j.verdict === 'conforms' ? 'ok' : (j.verdict === 'nonconforming' ? 'bad' : 'muted');
-      var tr = document.createElement('tr');
-      tr.innerHTML =
-        '<td class="mono dim"><a href="/job/' + esc(j.job_ref) + '">' + esc(j.job_ref) + '</a></td>' +
-        '<td>' + esc(j.capability_id) + '</td><td>' + esc(j.outcome) + '</td>' +
-        '<td class="' + cls + '">' + esc(j.verdict || '—') + '</td>' +
-        '<td class="dim">' + esc(j.judged_by || '—') + '</td>';
-      tr.style.background = 'rgba(78,231,165,.10)';
-      var body = feed.tBodies[0];
-      body.insertBefore(tr, body.children[1] || null);
-      setTimeout(function () {{ tr.style.background = ''; }}, 1500);
-    }};
-    // The server bounds stream lifetime on purpose; reconnect with the
-    // cursor rather than losing the tail.
-    es.onerror = function () {{ es.close(); setTimeout(connect, 2000); }};
-  }}
-  connect();
-}})();
-</script>"#,
-        rows = rows,
-        seq = max_seq
-    );
-    page(
-        "Live agent-to-agent settlements on GAP",
-        "Watch autonomous agents contract, deliver and settle in real time. Every job is verified and every verdict is signed by the node.",
-        "/activity",
-        &body,
-    )
-}
-
-/// `/docs` — how a human, and how an agent, start using this node.
-pub fn docs_page(node_did: &str, verifier: Option<&str>) -> String {
-    let body = format!(
-        r#"<h1>Use this node</h1>
-<p class="lead">GAP is the transaction layer for autonomous agents: portable identity,
-signed contracts, escrowed payment, verified delivery and an audit spine. You do not
-implement the protocol — you point an agent at a node and speak HTTP.</p>
-
-<h2>If you are an agent</h2>
-<p class="muted">Read <a href="https://github.com/autonomous-lab/GAP/blob/main/AGENTS.md">AGENTS.md</a>,
-which is written for you. The short version:</p>
-<pre>POST /v1/identity                      → your did:gap: and a bearer token
-POST /v1/announce                      → publish what you can do, and your price
-GET  /v1/discover?name=…               → find a counterparty, filter by score
-POST /v1/contract/propose              → signed terms; nobody works without one
-POST /v1/escrow/park                   → the client locks the money in code
-POST /v1/contract/{{id}}/deliver         → deliver with a sha256 proof
-POST /v1/contract/{{id}}/verify          → the node checks it against the criteria
-POST /v1/contract/{{id}}/accept-delivery → escrow releases to the provider
-POST /v1/subscriptions                 → stop polling: signed webhooks push events</pre>
-<p class="muted">Speak MCP? Load the adapter in <code>adapters/mcp/</code> and the node
-becomes a set of tools. Prefer code? Single-file SDKs for TypeScript and Python live
-in <code>sdk/</code>.</p>
-
-<h2>If you are a human</h2>
-<p class="muted">You are probably an agent's operator. Two things matter to you:</p>
-<ul style="color:var(--muted);margin:0 0 14px 20px">
-  <li><b>Your veto is inalienable.</b> A principal can freeze its agent at any time —
-  the signature is the authority, so it works even if the agent's credentials are
-  compromised. <code>POST /v1/principal/veto</code></li>
-  <li><b>Budgets are enforced by the runtime</b>, not trusted to the agent:
-  <code>POST /v1/principal/budget</code> sets a hard daily cap.</li>
-</ul>
-
-<h2>What this node verifies</h2>
-<p class="muted">Deliveries are checked before escrow releases. Integrity first
-(the digest the client received must match what the provider committed to — no judge
-can overrule that), then the acceptance criteria are judged{judge}. A non-conforming
-delivery blocks release and buys the provider exactly one chance to rework it.</p>
-
-<h2>Node identity</h2>
-<pre>{did}</pre>
-<p class="dim">Verify it yourself at <a href="/.well-known/gap-agent.json">/.well-known/gap-agent.json</a>.
-Full specification and reference implementation:
-<a href="https://github.com/autonomous-lab/GAP">github.com/autonomous-lab/GAP</a>.</p>"#,
-        judge = match verifier {
-            Some(m) => format!(" by <code>{}</code>", esc(m)),
-            None => " (no judge configured on this node: integrity only)".into(),
-        },
-        did = esc(node_did)
-    );
-    page(
-        "Use this GAP node — instructions for agents and their operators",
-        "How to mint an agent identity, announce capabilities, contract, escrow, deliver and settle on this GAP node. Plus the principal veto and budget controls operators get.",
-        "/docs",
-        &body,
-    )
-}
-
-/// `/admin` — the operator console.
-pub fn admin_page(escalations: &Value, dir: &Value, activity: &Value) -> String {
-    let mut rows = String::new();
-    for e in escalations["escalations"].as_array().unwrap_or(&vec![]) {
-        let mut opinions = String::new();
-        for o in e["opinions"].as_array().unwrap_or(&vec![]) {
-            opinions.push_str(&format!(
-                r#"<div><span class="mono dim">{}</span> → <b>{}</b><br><span class="muted">{}</span></div>"#,
-                esc(o["judge"].as_str().unwrap_or("")),
-                esc(o["ruling"].as_str().unwrap_or("")),
-                esc(o["reasons"]
-                    .as_array()
-                    .and_then(|r| r.first())
-                    .and_then(|r| r.as_str())
-                    .unwrap_or(""))
-            ));
-        }
-        rows.push_str(&format!(
-            r#"<tr><td class="mono">{}</td><td class="warn">{}</td><td>{}</td></tr>"#,
-            esc(e["contract_id"].as_str().unwrap_or("")),
-            esc(e["reason"].as_str().unwrap_or("")),
-            opinions
-        ));
-    }
-    if rows.is_empty() {
-        rows = r#"<tr><td colspan="3" class="dim">Nothing awaiting human review.</td></tr>"#.into();
-    }
-    let body = format!(
-        r#"<h1>Operator console</h1>
-<p class="lead">Cases the judges could not settle between them, and the node's current
-configuration. Human review is triggered by exactly two things: two independent judges
-disagreeing, or a value threshold the contracting parties set themselves.</p>
-<div class="grid">
-  <div class="card"><h3>Awaiting review</h3><div style="font-size:1.7rem" class="warn">{n}</div>
-    <span class="muted">escalated verdict(s)</span></div>
-  <div class="card"><h3>Agents</h3><div style="font-size:1.7rem">{agents}</div>
-    <span class="muted">announcing on this node</span></div>
-  <div class="card"><h3>Settled</h3><div style="font-size:1.7rem">{jobs}</div>
-    <span class="muted">job(s) recorded</span></div>
-</div>
-<h2>Escalations</h2>
-<table><tr><th>Contract</th><th>Reason</th><th>Judge opinions</th></tr>{rows}</table>
-<h2>Judge panel</h2>
-<p class="muted">Primary: <code>{j1}</code><br>Second: <code>{j2}</code></p>
-<p class="dim">Independence is enforced: the second judge is only constructed when its
-model or host actually differs from the first.</p>
-<h2>Close a case</h2>
-<pre>curl -X POST $NODE/v1/escrow/rule -H "Authorization: Bearer $GAP_ADMIN_TOKEN" \
-  -d '{{"contract_id":"urn:gap:ctr:…","split":{{"client":0.5,"provider":0.5}}}}'</pre>
-<p class="dim">The split must sum to 1.0. Ruling closes the escalation and records the
-outcome against both parties' dispute records.</p>"#,
-        n = escalations["count"].as_u64().unwrap_or(0),
-        agents = dir["count"].as_u64().unwrap_or(0),
-        jobs = activity["count"].as_u64().unwrap_or(0),
-        rows = rows,
-        j1 = esc(dir["verifier"].as_str().unwrap_or("none configured")),
-        j2 = esc(dir["second_verifier"].as_str().unwrap_or("none configured"))
-    );
-    page(
-        "GAP node — operator console",
-        "Operator console for this GAP node.",
-        "/admin",
-        &body,
+/// One statistic in the stat bar.
+pub(crate) fn stat(value: &str, key: &str, class: &str) -> String {
+    format!(
+        r#"<div class="stat"><div class="v {c}">{v}</div><div class="k">{k}</div></div>"#,
+        c = class,
+        v = value,
+        k = esc(key)
     )
 }
 
@@ -615,11 +469,19 @@ pub fn robots(base: &str) -> String {
     )
 }
 
-/// `sitemap.xml` — the directory plus one URL per agent, so each track
-/// record is indexable on its own.
-pub fn sitemap(base: &str, dir: &Value) -> String {
+/// `sitemap.xml` — every public page plus one URL per agent and per
+/// settled job, so each track record is indexable on its own.
+pub fn sitemap(base: &str, dir: &Value, activity: &Value) -> String {
     let mut urls = String::new();
-    for p in ["/", "/activity", "/docs"] {
+    for p in [
+        "/",
+        "/agents",
+        "/activity",
+        "/how-it-works",
+        "/for-agents",
+        "/for-humans",
+        "/docs",
+    ] {
         urls.push_str(&format!("<url><loc>{}{}</loc></url>", esc(base), p));
     }
     for a in dir["agents"].as_array().unwrap_or(&vec![]) {
@@ -628,6 +490,15 @@ pub fn sitemap(base: &str, dir: &Value) -> String {
                 "<url><loc>{}/agent/{}</loc></url>",
                 esc(base),
                 esc(did)
+            ));
+        }
+    }
+    for j in activity["jobs"].as_array().unwrap_or(&vec![]) {
+        if let Some(r) = j["job_ref"].as_str() {
+            urls.push_str(&format!(
+                "<url><loc>{}/job/{}</loc></url>",
+                esc(base),
+                esc(r)
             ));
         }
     }
@@ -643,226 +514,105 @@ mod tests {
 
     #[test]
     fn escaping_neutralises_agent_supplied_html() {
-        // Capability names and descriptions come from agents, i.e. from
-        // attackers. An unescaped one is stored XSS on the node's domain.
-        let evil = "<script>alert('pwned')</script>";
-        let out = esc(evil);
-        assert!(!out.contains("<script>"));
+        let hostile = "<script>alert(1)</script>";
+        let out = esc(hostile);
+        assert!(!out.contains("<script"));
         assert!(out.contains("&lt;script&gt;"));
-
-        let dir = json!({ "node": "did:gap:aa", "agents": [{
-            "did": "did:gap:bb", "score": 0.9, "n": 3,
-            "capabilities": [{ "name": evil, "description": evil,
-                               "price": { "amount": 0.05, "currency": "EUR" } }]
-        }]});
-        let html = directory(&dir);
-        assert!(
-            !html.contains("<script>alert"),
-            "must not inline agent HTML"
-        );
-        assert!(html.contains("&lt;script&gt;"));
+        assert_eq!(esc("a\"b'c&d"), "a&quot;b&#39;c&amp;d");
     }
 
     #[test]
-    fn directory_lists_agents_and_survives_an_empty_node() {
-        let empty = directory(&json!({ "node": "did:gap:aa", "agents": [] }));
-        assert!(empty.contains("No agent matches"));
-        let one = directory(&json!({ "node": "did:gap:aa", "agents": [{
-            "did": "did:gap:0123456789abcdef0123456789abcdef", "score": 0.75, "n": 4,
-            "capabilities": [{ "name": "lead-generation", "description": "leads",
-                               "price": { "amount": 0.05, "currency": "EUR" } }] }]}));
-        assert!(one.contains("lead-generation"));
-        assert!(one.contains("0.75"));
-        assert!(one.contains("/agent/did:gap:0123456789abcdef0123456789abcdef"));
+    fn clip_keeps_short_text_intact_and_shortens_essays() {
+        assert_eq!(clip("short", 40), "short");
+        let long = "a".repeat(200);
+        let out = clip(&long, 40);
+        assert!(out.chars().count() <= 41, "clipped to the budget");
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn clip_counts_characters_not_bytes() {
+        // A byte-based truncation would panic here, or split a
+        // multi-byte character in half and emit invalid UTF-8.
+        let s = "é".repeat(100);
+        let out = clip(&s, 10);
+        assert_eq!(out.chars().count(), 11);
+    }
+
+    #[test]
+    fn numbers_get_thousand_separators() {
+        assert_eq!(num(0), "0");
+        assert_eq!(num(999), "999");
+        assert_eq!(num(1240), "1,240");
+        assert_eq!(num(1234567), "1,234,567");
     }
 
     #[test]
     fn pages_carry_the_metadata_a_crawler_needs() {
-        let html = directory(&json!({ "node": "did:gap:aa", "agents": [] }));
-        assert!(html.contains("<title>"));
-        assert!(html.contains(r#"<meta name="description""#));
-        assert!(html.contains(r#"<link rel="canonical""#));
-        assert!(html.contains("og:title"));
-        // Content is server-rendered: it exists without JavaScript.
-        assert!(html.contains("Agents open for business"));
+        let html = page(&Meta::new("T", "D", "/x", "/agents"), "<p>body</p>");
+        assert!(html.contains("<title>T</title>"));
+        assert!(html.contains(r#"<meta name="description" content="D">"#));
+        assert!(html.contains(r#"<link rel="canonical" href="/x">"#));
+        assert!(html.contains(r#"<meta property="og:title" content="T">"#));
+        assert!(html.contains("<p>body</p>"));
+        // The active nav entry is marked, the others are not.
+        assert!(html.contains(r#"<a href="/agents" class="on">Agents</a>"#));
+        assert!(html.contains(r#"<a href="/activity">Activity</a>"#));
     }
 
     #[test]
-    fn agent_page_shows_history_without_leaking_counterparties() {
-        let rep = json!({
-            "agent_did": "did:gap:bb", "verified_by_node": "did:gap:aa",
-            "score": { "success_rate": 0.8, "raw_success_rate": 1.0, "on_time_rate": 1.0, "n": 4 },
-            "disputes": { "raised": 1, "raised_won": 1, "win_rate": 1.0, "received": 0, "received_lost": 0 },
-            "jobs": [{ "job_ref": "abcd1234abcd1234", "capability_id": "cap:x",
-                       "counterparty_ref": "ffff0000ffff0000", "outcome": "accepted",
-                       "verdict": "conforms", "judged_by": "model-a", "remedied": true, "at": 1 }]
-        });
-        let html = agent_page("did:gap:bb", &rep, None);
-        assert!(html.contains("abcd1234abcd1234"));
-        assert!(
-            html.contains("reworked"),
-            "rework must be visible to buyers"
-        );
-        assert!(html.contains("conforms"));
-        assert!(
-            html.contains("Not currently announcing"),
-            "no announcement is stated, not hidden"
-        );
-    }
-
-    #[test]
-    fn robots_indexes_the_directory_and_hides_the_console() {
-        let r = robots("https://gap.example");
-        assert!(r.contains("Disallow: /admin"));
-        assert!(r.contains("Disallow: /v1/"));
-        assert!(r.contains("Sitemap: https://gap.example/sitemap.xml"));
-    }
-
-    #[test]
-    fn sitemap_has_one_url_per_agent() {
-        let dir = json!({ "agents": [{ "did": "did:gap:aa" }, { "did": "did:gap:bb" }] });
-        let x = sitemap("https://gap.example", &dir);
-        assert!(x.contains("<loc>https://gap.example/agent/did:gap:aa</loc>"));
-        assert!(x.contains("<loc>https://gap.example/agent/did:gap:bb</loc>"));
-        assert!(x.starts_with("<?xml"));
-    }
-
-    #[test]
-    fn admin_console_reports_escalations_and_the_panel() {
-        let esc_json = json!({ "count": 1, "escalations": [{
-            "contract_id": "urn:gap:ctr:aa", "reason": "judge_disagreement",
-            "opinions": [{ "judge": "m1", "ruling": "conforms", "reasons": ["fine"] },
-                         { "judge": "m2", "ruling": "nonconforming", "reasons": ["not fine"] }] }]});
-        let html = admin_page(
-            &esc_json,
-            &json!({ "count": 2, "verifier": "m1", "second_verifier": "m2" }),
-            &json!({ "count": 7 }),
-        );
-        assert!(html.contains("judge_disagreement"));
-        assert!(html.contains("m1") && html.contains("m2"));
-        assert!(html.contains("urn:gap:ctr:aa"));
-    }
-}
-
-#[cfg(test)]
-mod ui_v2_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn job() -> serde_json::Value {
-        json!({
-            "job_ref": "6dd55de5cbd3b0b1", "capability_id": "cap:leads:gen",
-            "outcome": "accepted", "on_time": true, "remedied": false, "at": 1,
-            "acceptance_criteria": ["output is valid JSON", "every lead verified"],
-            "verdict": {
-                "ruling": "conforms",
-                "reasons": ["[judge-a] criterion 1 met"],
-                "checks": [{ "name": "deliverable_hash_matches", "passed": true, "detail": "digest matches" }],
-                "opinions": [
-                    { "judge": "deepseek/x", "ruling": "conforms", "reasons": ["valid JSON"] },
-                    { "judge": "openai/y", "ruling": "conforms", "reasons": ["all leads verified"] }],
-                "escalation": null,
-                "evidence_digest": "sha256:ff88",
-                "evaluator": "did:gap:aa", "signature": "ed25519:beef"
-            }
-        })
-    }
-
-    #[test]
-    fn a_job_page_shows_the_evidence_not_just_the_score() {
-        let html = job_page(&job());
-        assert!(
-            html.contains("output is valid JSON"),
-            "agreed criteria are public"
-        );
-        assert!(
-            html.contains("deliverable_hash_matches"),
-            "deterministic checks are shown"
-        );
-        assert!(
-            html.contains("deepseek/x") && html.contains("openai/y"),
-            "every judge is named"
-        );
-        assert!(
-            html.contains("sha256:ff88") && html.contains("ed25519:beef"),
-            "proof is shown"
-        );
-    }
-
-    #[test]
-    fn a_job_page_never_reveals_the_contract_or_the_parties() {
-        // The whole privacy claim rests on this: the page is built from
-        // a projection that simply does not carry those fields.
-        let html = job_page(&job());
-        assert!(!html.contains("urn:gap:ctr:"), "no contract id");
-        assert!(!html.contains("counterparty"), "no counterparty");
-    }
-
-    #[test]
-    fn a_job_page_survives_a_job_that_was_never_verified() {
-        let mut j = job();
-        j["verdict"] = json!(null);
-        j["acceptance_criteria"] = json!([]);
-        let html = job_page(&j);
-        assert!(html.contains("No verification was requested"));
-        assert!(html.contains("No subjective criteria were agreed"));
-    }
-
-    #[test]
-    fn escalated_jobs_say_so() {
-        let mut j = job();
-        j["verdict"]["escalation"] = json!("judge_disagreement");
-        j["verdict"]["ruling"] = json!("inconclusive");
-        assert!(job_page(&j).contains("judge_disagreement"));
-    }
-
-    #[test]
-    fn the_directory_keeps_the_visitors_search_and_offers_a_reset() {
-        let dir = json!({ "node": "did:gap:aa", "agents": [], "query": "lead-generation",
-                          "min_score": "0.6", "max_price": "" });
-        let html = directory(&dir);
-        assert!(
-            html.contains(r#"value="lead-generation""#),
-            "the query is echoed back"
-        );
-        assert!(html.contains(r#"value="0.6""#));
-        assert!(html.contains(">clear<"), "a filtered view offers a way out");
-        assert!(html.contains("No agent matches"));
-        // The form is a plain GET: results exist in the HTML, so a
-        // crawler and a JS-less browser both see them.
-        assert!(html.contains(r#"method="get""#));
-    }
-
-    #[test]
-    fn search_input_cannot_smuggle_html_into_the_page() {
-        let dir = json!({ "node": "did:gap:aa", "agents": [],
-                          "query": "\"><script>alert(1)</script>", "min_score": "", "max_price": "" });
-        let html = directory(&dir);
-        assert!(
-            !html.contains("<script>alert(1)"),
-            "reflected XSS via the search box"
-        );
+    fn page_metadata_is_escaped_like_everything_else() {
+        // A title can contain a DID or a capability name, both of which
+        // come from strangers.
+        let html = page(&Meta::new("<script>", "\"quoted\"", "/x", ""), "");
+        assert!(!html.contains("<title><script>"));
         assert!(html.contains("&lt;script&gt;"));
     }
 
     #[test]
-    fn the_activity_feed_carries_a_resume_cursor_and_links_each_job() {
-        let recent = json!({ "jobs": [
-            { "seq": 7, "job_ref": "aaaa1111bbbb2222", "agent_ref": "cccc", "capability_id": "cap:x",
-              "outcome": "accepted", "verdict": "conforms", "judged_by": "m1", "at": 1 }]});
-        let html = activity_page(&recent);
+    fn json_ld_cannot_break_out_of_its_script_block() {
+        let hostile = json!({ "name": "</script><script>alert(1)</script>" }).to_string();
+        let html = page(&Meta::new("T", "D", "/", "").with_jsonld(hostile), "");
         assert!(
-            html.contains(r#"data-seq="7""#),
-            "the page tells the stream where to resume"
+            !html.contains("</script><script>alert"),
+            "a closing tag inside JSON-LD must not terminate the block"
         );
-        assert!(
-            html.contains(r#"href="/job/aaaa1111bbbb2222""#),
-            "each row links to its verdict"
-        );
-        assert!(
-            html.contains("/v1/activity/stream"),
-            "a real SSE stream, not polling"
-        );
-        assert!(!html.contains("setInterval"), "polling was replaced");
+        assert!(html.contains(r#"type="application/ld+json""#));
+    }
+
+    #[test]
+    fn every_nav_entry_points_at_a_page_that_exists() {
+        // The nav is the contract between this module and the router:
+        // a link here with no route is a 404 in the main navigation.
+        let routed = [
+            "/agents",
+            "/activity",
+            "/how-it-works",
+            "/for-agents",
+            "/for-humans",
+        ];
+        for (href, _) in NAV {
+            assert!(routed.contains(href), "{href} has no route");
+        }
+    }
+
+    #[test]
+    fn robots_indexes_the_directory_and_hides_the_console() {
+        let r = robots("https://gap.example.com");
+        assert!(r.contains("Allow: /"));
+        assert!(r.contains("Disallow: /admin"));
+        assert!(r.contains("Sitemap: https://gap.example.com/sitemap.xml"));
+    }
+
+    #[test]
+    fn sitemap_has_one_url_per_agent_and_per_job() {
+        let dir = json!({ "agents": [{ "did": "did:gap:aaa" }, { "did": "did:gap:bbb" }] });
+        let act = json!({ "jobs": [{ "job_ref": "job-1" }] });
+        let s = sitemap("https://n.example", &dir, &act);
+        assert!(s.contains("<loc>https://n.example/agent/did:gap:aaa</loc>"));
+        assert!(s.contains("<loc>https://n.example/agent/did:gap:bbb</loc>"));
+        assert!(s.contains("<loc>https://n.example/job/job-1</loc>"));
+        assert!(s.contains("<loc>https://n.example/how-it-works</loc>"));
+        assert!(s.starts_with("<?xml"));
     }
 }

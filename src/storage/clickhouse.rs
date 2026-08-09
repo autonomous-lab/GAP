@@ -223,6 +223,16 @@ CREATE TABLE IF NOT EXISTS gap_escrows (
 ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY contract_id;
 "#;
 
+/// What [`ClickHouseStorage::hydrate`] read back from the cluster.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HydrateSummary {
+    pub events: usize,
+    pub contracts: usize,
+    pub announcements: usize,
+    pub identities: usize,
+    pub escrows: usize,
+}
+
 /// ClickHouse-backed storage.
 pub struct ClickHouseStorage<T: HttpTransport + Send> {
     transport: T,
@@ -264,6 +274,102 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
         Ok(())
     }
 
+    /// Load persisted state back into the in-memory mirrors.
+    ///
+    /// The mirrors are what every read goes through, and they start
+    /// empty - so without this call ClickHouse was a write-only sink.
+    /// Everything was durably stored and nothing was ever read back:
+    /// a restart emptied the agent directory, invalidated every bearer
+    /// token, and restarted the event sequence at 1 on top of rows that
+    /// already existed.
+    ///
+    /// `FINAL` is required: the tables are `ReplacingMergeTree`, so
+    /// without it a row updated twice comes back twice and the older
+    /// version can win.
+    ///
+    /// `output_format_json_quote_64bit_integers=0` is required too -
+    /// ClickHouse quotes 64-bit integers in JSON by default, which does
+    /// not deserialize into `u64`.
+    pub fn hydrate(&self) -> Result<HydrateSummary> {
+        let mut summary = HydrateSummary::default();
+
+        for rec in self.select::<EventRecord>("SELECT seq, kind, at, payload FROM gap_events")? {
+            self.events
+                .lock()
+                .map_err(|_| Error::Other("events lock poisoned".into()))?
+                .push(rec);
+        }
+        {
+            // Sorted by seq so `events_after` (which filters a Vec in
+            // order) and the next sequence number are both correct.
+            let mut events = self
+                .events
+                .lock()
+                .map_err(|_| Error::Other("events lock poisoned".into()))?;
+            events.sort_by_key(|e| e.seq);
+            summary.events = events.len();
+        }
+
+        for rec in self.select::<ContractRecord>(
+            "SELECT contract_id, client, provider, capability_id, state, contract_json, \
+             updated_at FROM gap_contracts FINAL",
+        )? {
+            self.contracts
+                .lock()
+                .map_err(|_| Error::Other("contracts lock poisoned".into()))?
+                .insert(rec.contract_id.clone(), rec);
+            summary.contracts += 1;
+        }
+
+        for rec in self.select::<AnnouncementRecord>(
+            "SELECT agent_did, announcement_json, expires_at FROM gap_announcements FINAL",
+        )? {
+            self.announcements
+                .lock()
+                .map_err(|_| Error::Other("announcements lock poisoned".into()))?
+                .insert(rec.agent_did.clone(), rec);
+            summary.announcements += 1;
+        }
+
+        for rec in self.select::<IdentityRecord>(
+            "SELECT token, did, seed_hex, created_at FROM gap_identities FINAL",
+        )? {
+            self.identities
+                .lock()
+                .map_err(|_| Error::Other("identities lock poisoned".into()))?
+                .insert(rec.token.clone(), rec);
+            summary.identities += 1;
+        }
+
+        for rec in self.select::<EscrowRecord>(
+            "SELECT contract_id, state, held, currency, updated_at FROM gap_escrows FINAL",
+        )? {
+            self.escrows
+                .lock()
+                .map_err(|_| Error::Other("escrows lock poisoned".into()))?
+                .insert(rec.contract_id.clone(), rec);
+            summary.escrows += 1;
+        }
+
+        Ok(summary)
+    }
+
+    /// Run a SELECT and deserialize one record per line.
+    ///
+    /// A single unparseable row is skipped rather than failing the whole
+    /// load: one malformed record must not stop a node from booting.
+    fn select<R: serde::de::DeserializeOwned>(&self, query: &str) -> Result<Vec<R>> {
+        let q = format!(
+            "{query} FORMAT JSONEachRow SETTINGS output_format_json_quote_64bit_integers=0"
+        );
+        let body = self.transport.post(&q)?;
+        Ok(body
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<R>(l).ok())
+            .collect())
+    }
+
     /// Split a DDL script into individual statements, ignoring blank
     /// lines and `--` comments.
     pub fn statements(ddl: &str) -> Vec<String> {
@@ -290,7 +396,13 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .map_err(|_| Error::Other("events lock poisoned".into()))?;
         // 1-based: seq 0 is reserved so that a cursor of `after=0`
         // means "everything" (RFC-0013 §3.2 rule 14).
-        let seq = events.len() as u64 + 1;
+        //
+        // Derived from the highest sequence present, not from the row
+        // count: after a hydrate those can differ (a deduplicating
+        // engine, a gap, a partial read), and `len + 1` would then
+        // re-issue a sequence that already exists - silently forking the
+        // audit spine and hiding events from every cursor-based reader.
+        let seq = events.iter().map(|e| e.seq).max().unwrap_or(0) + 1;
         let at = crate::message::now_unix();
         events.push(EventRecord {
             seq,
@@ -537,6 +649,119 @@ mod tests {
                 .push((query.to_string(), params.to_vec()));
             Ok(String::new())
         }
+    }
+
+    /// A transport that answers SELECTs with canned JSONEachRow lines,
+    /// keyed by the table named in the query.
+    struct ReplayTransport {
+        rows: std::collections::HashMap<&'static str, String>,
+    }
+
+    impl HttpTransport for ReplayTransport {
+        fn post(&self, query: &str) -> Result<String> {
+            for (table, body) in &self.rows {
+                if query.contains(table) {
+                    return Ok(body.clone());
+                }
+            }
+            Ok(String::new())
+        }
+        fn base_url(&self) -> String {
+            "http://mock".into()
+        }
+        fn post_url(&self, _url: &str) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn hydrate_reads_persisted_state_back_into_the_mirrors() {
+        // The bug this pins: every read went through in-memory mirrors
+        // that started empty, so ClickHouse was a write-only sink. A
+        // restart emptied the agent directory and invalidated every
+        // bearer token, while the rows sat in the cluster untouched.
+        let mut rows = std::collections::HashMap::new();
+        rows.insert(
+            "gap_events",
+            "{\"seq\":2,\"kind\":\"ctr.accept\",\"at\":100,\"payload\":{\"a\":1}}\n\
+             {\"seq\":1,\"kind\":\"ctr.propose\",\"at\":99,\"payload\":{\"a\":0}}\n"
+                .to_string(),
+        );
+        rows.insert(
+            "gap_identities",
+            "{\"token\":\"t1\",\"did\":\"did:gap:aa\",\"seed_hex\":\"ab\",\"created_at\":1}\n"
+                .to_string(),
+        );
+        rows.insert(
+            "gap_announcements",
+            "{\"agent_did\":\"did:gap:aa\",\"announcement_json\":\"{}\",\"expires_at\":9}\n"
+                .to_string(),
+        );
+        let storage = ClickHouseStorage::new(ReplayTransport { rows });
+
+        let h = storage.hydrate().unwrap();
+        assert_eq!(h.events, 2);
+        assert_eq!(h.identities, 1);
+        assert_eq!(h.announcements, 1);
+
+        // Reads now see the restored state.
+        assert_eq!(storage.event_count().unwrap(), 2);
+        assert_eq!(storage.list_identities().unwrap().len(), 1);
+        assert!(storage.get_identity_by_token("t1").unwrap().is_some());
+
+        // Events come back in sequence order, whatever order the
+        // cluster returned them in - `events_after` filters a Vec in
+        // place and would otherwise silently skip the tail.
+        let after = storage.events_after(0, 10).unwrap();
+        assert_eq!(after.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn appending_after_a_hydrate_continues_the_sequence_instead_of_repeating_it() {
+        // A restored spine with a gap: two rows, highest seq 7. Counting
+        // rows would issue 3 and overwrite history that already exists.
+        let mut rows = std::collections::HashMap::new();
+        rows.insert(
+            "gap_events",
+            "{\"seq\":1,\"kind\":\"a\",\"at\":1,\"payload\":{}}\n\
+             {\"seq\":7,\"kind\":\"b\",\"at\":2,\"payload\":{}}\n"
+                .to_string(),
+        );
+        let mut storage = ClickHouseStorage::new(ReplayTransport { rows });
+        storage.hydrate().unwrap();
+        let seq = storage
+            .append_event("ctr.signed", serde_json::json!({ "id": "c1" }))
+            .unwrap();
+        assert_eq!(seq, 8, "must continue past the highest existing sequence");
+    }
+
+    #[test]
+    fn hydrate_asks_for_unquoted_integers_and_deduplicated_rows() {
+        // Two ClickHouse defaults that silently corrupt a reload:
+        // 64-bit integers arrive quoted (and fail to parse into u64),
+        // and a ReplacingMergeTree returns superseded rows without
+        // FINAL.
+        let storage = ClickHouseStorage::new(MockTransport::default());
+        let _ = storage.hydrate();
+        let queries = storage.transport.queries.borrow();
+        assert!(queries.iter().any(|q| q.contains("gap_contracts FINAL")));
+        assert!(queries
+            .iter()
+            .all(|q| q.contains("output_format_json_quote_64bit_integers=0")));
+    }
+
+    #[test]
+    fn a_single_corrupt_row_does_not_stop_a_node_from_booting() {
+        let mut rows = std::collections::HashMap::new();
+        rows.insert(
+            "gap_identities",
+            "{\"token\":\"good\",\"did\":\"did:gap:aa\",\"seed_hex\":\"ab\",\"created_at\":1}\n\
+             {not json at all}\n"
+                .to_string(),
+        );
+        let storage = ClickHouseStorage::new(ReplayTransport { rows });
+        let h = storage.hydrate().unwrap();
+        assert_eq!(h.identities, 1, "the readable row still loads");
     }
 
     #[test]

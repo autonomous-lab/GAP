@@ -120,6 +120,12 @@ pub struct Contract {
     /// and then discarded, leaving nothing to check against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliverable_hash: Option<String>,
+    /// Where the client fetches the artifact, when it is too large to
+    /// hand over inline. The digest above still governs: whatever is
+    /// retrieved from here must hash to it, so a mutable URL cannot be
+    /// swapped for different bytes after the fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable_uri: Option<String>,
     /// Rework attempts already spent (spec 03 §3.5 `ctr.remedy`).
     /// Capped at one: a second chance is fair, an unlimited retry loop
     /// lets a provider grind against the judges until one passes.
@@ -149,6 +155,7 @@ impl Contract {
             provider_sig: None,
             created_at: crate::message::now_unix(),
             deliverable_hash: None,
+            deliverable_uri: None,
             remedies_used: 0,
             state: ContractState::Draft,
         };

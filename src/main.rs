@@ -221,6 +221,20 @@ fn build_storage() -> Result<Box<dyn Storage>> {
                 storage.migrate()?;
                 println!("[gap-node] clickhouse schema migrated");
             }
+            // Read the cluster back into the in-memory mirrors that
+            // every read goes through. Skipping this made ClickHouse a
+            // write-only sink: durable, and never consulted again.
+            match storage.hydrate() {
+                Ok(h) => println!(
+                    "[gap-node] clickhouse hydrated: {} event(s), {} identity(ies), \
+{} announcement(s), {} contract(s), {} escrow(s)",
+                    h.events, h.identities, h.announcements, h.contracts, h.escrows
+                ),
+                // A node that cannot read its own history should say so
+                // loudly and still start: refusing to boot would turn a
+                // degraded cluster into an outage.
+                Err(e) => eprintln!("[gap-node] WARNING: clickhouse hydrate failed: {e}"),
+            }
             Ok(Box::new(storage))
         }
         other => Err(gap::Error::Other(format!(
@@ -305,6 +319,16 @@ fn main() -> Result<()> {
         });
     println!("[gap-node] worker pool: {workers} threads");
 
+    // Maximum request body: 5 MB, enough to carry a modest artifact
+    // inline (a base64 image, say). Above it the answer is not a bigger
+    // buffer - it is to host the file and deliver its URL, so the node
+    // never becomes a file server it was not designed to be.
+    let max_body: u64 = env::var("GAP_MAX_BODY_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5 * 1024 * 1024);
+    println!("[gap-node] max request body: {max_body} bytes");
+
     // Audit M-02: warn loudly when the node is exposed without TLS.
     let exposed = addr.starts_with("0.0.0.0") || addr.starts_with("::");
     if exposed {
@@ -344,13 +368,43 @@ fn main() -> Result<()> {
                 Ok(r) => r,
                 Err(_) => break,
             };
-            // Read the body (limit to a sane size).
+            // Read the body, bounded.
+            //
+            // This used to `.take(LIMIT)` and carry on, which does not
+            // reject an oversized body - it TRUNCATES it. The caller
+            // then got a JSON parse error for a payload that was
+            // perfectly well formed when it left, and no hint that size
+            // was the problem. An agent hit exactly that delivering an
+            // image and spent its time shrinking the PNG by trial and
+            // error, because the node's answer pointed at the wrong
+            // thing entirely.
+            //
+            // Read one byte past the limit: if it arrives, the body was
+            // too big, and we say so with the status that means it.
             let mut body = Vec::new();
             request
                 .as_reader()
-                .take(1024 * 1024)
+                .take(max_body + 1)
                 .read_to_end(&mut body)
                 .ok();
+            if body.len() as u64 > max_body {
+                let msg = serde_json::json!({
+                    "error": "payload too large",
+                    "limit_bytes": max_body,
+                    "hint": "host the artifact yourself and deliver a URL instead of the bytes: \
+POST /v1/contract/{id}/deliver with {\"deliverable_hash\":\"sha256:...\",\
+\"deliverable_uri\":\"https://...\"}. The digest still governs - whatever the client \
+retrieves from that URL must hash to it.",
+                })
+                .to_string();
+                let response = Response::from_string(msg)
+                    .with_status_code(413)
+                    .with_header(
+                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                    );
+                let _ = request.respond(response);
+                continue;
+            }
 
             let method = request.method().as_str().to_string();
             let path = request.url().to_string();
