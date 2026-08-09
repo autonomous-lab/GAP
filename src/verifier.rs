@@ -94,6 +94,38 @@ pub struct Evidence {
     pub confidential: bool,
 }
 
+/// One judge's independent opinion (RFC-0015).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Opinion {
+    pub judge: String,
+    pub ruling: Ruling,
+    pub reasons: Vec<String>,
+}
+
+/// Why a verdict needs a human, when it does.
+///
+/// Human review is expensive and does not scale to machine-speed
+/// commerce, so it is triggered by evidence of genuine difficulty —
+/// never by volume of complaints (RFC-0015 §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Escalation {
+    /// Independent judges reached different rulings: the case is
+    /// genuinely ambiguous, which is exactly what a human is for.
+    JudgeDisagreement,
+    /// The parties themselves set a value above which a human looks.
+    ValueThreshold,
+}
+
+impl Escalation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Escalation::JudgeDisagreement => "judge_disagreement",
+            Escalation::ValueThreshold => "value_threshold",
+        }
+    }
+}
+
 /// A signed verdict, appended to the audit spine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Verdict {
@@ -103,9 +135,17 @@ pub struct Verdict {
     pub reasons: Vec<String>,
     /// The deterministic tier, always present.
     pub checks: Vec<Check>,
-    /// Which judge produced the subjective part, if any.
+    /// Which judge produced the subjective part, if any. With a panel,
+    /// the judges that agreed, comma-separated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Every judge's independent opinion (RFC-0015). Empty when tier 1
+    /// decided on its own.
+    #[serde(default)]
+    pub opinions: Vec<Opinion>,
+    /// Set when this verdict must be seen by a human before it is final.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<Escalation>,
     /// SHA-256 of the exact evidence submitted — makes the verdict
     /// reproducible and detects after-the-fact edits.
     pub evidence_digest: String,
@@ -153,9 +193,15 @@ impl Verdict {
         serde_json::to_vec(&v).expect("verdict serializes")
     }
 
-    /// Whether this verdict alone may release escrow.
+    /// Whether this verdict alone may release escrow. An escalated
+    /// verdict never does: it is provisional until a human closes it.
     pub fn releases_funds(&self) -> bool {
-        self.ruling == Ruling::Conforms
+        self.ruling == Ruling::Conforms && self.escalation.is_none()
+    }
+
+    /// Whether a human still has to look at this case.
+    pub fn awaits_human(&self) -> bool {
+        self.escalation.is_some()
     }
 }
 
@@ -248,8 +294,32 @@ pub trait Verifier: Send + Sync {
     fn name(&self) -> String;
 }
 
-/// Run the full pipeline and produce a signed verdict.
+/// Run the full pipeline with a single judge (compatibility shim).
 pub fn verify(node: &AgentIdentity, evidence: &Evidence, judge: Option<&dyn Verifier>) -> Verdict {
+    let panel: Vec<&dyn Verifier> = judge.into_iter().collect();
+    verify_panel(node, evidence, &panel, None)
+}
+
+/// Run the full pipeline with a **panel** of independent judges
+/// (RFC-0015) and produce a signed verdict.
+///
+/// A judgement costs a fraction of a cent — measured at ~0.008 cents,
+/// about 0.15% of a five-cent contract — so asking two independent
+/// judges on *every* delivery is cheaper than processing one human
+/// complaint. That inverts the usual design: instead of arbitrating
+/// disputes after the fact, the panel surfaces ambiguity before anyone
+/// complains, and **disagreement between judges is what summons a
+/// human**. Human volume then tracks genuine difficulty, not the number
+/// of agents who feel like objecting.
+///
+/// `escalate` forces human review regardless of the ruling (a value
+/// threshold the parties negotiated).
+pub fn verify_panel(
+    node: &AgentIdentity,
+    evidence: &Evidence,
+    judges: &[&dyn Verifier],
+    escalate: Option<Escalation>,
+) -> Verdict {
     let (checks, decided) = precheck(evidence);
     let mut reasons: Vec<String> = checks
         .iter()
@@ -257,48 +327,85 @@ pub fn verify(node: &AgentIdentity, evidence: &Evidence, judge: Option<&dyn Veri
         .map(|c| c.detail.clone())
         .collect();
     let mut model = None;
+    let mut opinions: Vec<Opinion> = Vec::new();
+    let mut escalation = escalate;
 
     let ruling = match decided {
+        // Tier 1 is authoritative: no panel is consulted.
         Some(r) => {
             if r == Ruling::Conforms && reasons.is_empty() {
                 reasons.push("deterministic checks passed; no subjective criteria agreed".into());
             }
             r
         }
-        None => match judge {
-            // Confidentiality outranks convenience: a contract under an
-            // NDA or a compliance context never has its content shipped
-            // to a third-party model. It falls to human arbitration.
-            _ if evidence.confidential => {
-                reasons.push(
-                    "contract is confidential: content withheld from any external judge; \
-                     integrity checks passed, subjective criteria need human arbitration"
-                        .into(),
-                );
-                Ruling::Inconclusive
-            }
-            Some(j) => {
-                model = Some(j.name());
-                match j.judge(evidence) {
-                    Ok((r, mut why)) => {
-                        reasons.append(&mut why);
-                        r
-                    }
-                    Err(e) => {
-                        reasons.push(format!("judge unavailable: {e}"));
-                        Ruling::Inconclusive
-                    }
+        None if evidence.confidential => {
+            reasons.push(
+                "contract is confidential: content withheld from any external judge; \
+                 integrity checks passed, subjective criteria are for the client to judge"
+                    .into(),
+            );
+            // Deliberately NOT escalated: forcing an operator to read
+            // every NDA contract would neither scale nor be welcome —
+            // it is the client's confidential material and its call.
+            Ruling::Inconclusive
+        }
+        None if judges.is_empty() => {
+            reasons.push(
+                "no judge configured: integrity verified, subjective criteria not assessed".into(),
+            );
+            Ruling::Inconclusive
+        }
+        None => {
+            for judge in judges {
+                match judge.judge(evidence) {
+                    Ok((ruling, why)) => opinions.push(Opinion {
+                        judge: judge.name(),
+                        ruling,
+                        reasons: why,
+                    }),
+                    Err(e) => opinions.push(Opinion {
+                        judge: judge.name(),
+                        ruling: Ruling::Inconclusive,
+                        reasons: vec![format!("judge unavailable: {e}")],
+                    }),
                 }
             }
-            None => {
-                reasons.push(
-                    "no judge configured: integrity verified, subjective criteria not assessed"
-                        .into(),
-                );
+            let first = opinions[0].ruling;
+            let unanimous = opinions.iter().all(|o| o.ruling == first);
+            model = Some(
+                opinions
+                    .iter()
+                    .map(|o| o.judge.clone())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            for o in &opinions {
+                for r in &o.reasons {
+                    reasons.push(format!("[{}] {}", o.judge, r));
+                }
+            }
+            if unanimous {
+                first
+            } else {
+                // Independent judges disagreeing IS the signal that this
+                // case is hard. Fail closed and hand it to a human.
+                reasons.push(format!(
+                    "independent judges disagreed ({}); escalated for human review",
+                    opinions
+                        .iter()
+                        .map(|o| format!("{}={}", o.judge, o.ruling.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                escalation = Some(Escalation::JudgeDisagreement);
                 Ruling::Inconclusive
             }
-        },
+        }
     };
+
+    if escalation == Some(Escalation::ValueThreshold) {
+        reasons.push("contract value is above the negotiated human-review threshold".into());
+    }
 
     let mut verdict = Verdict {
         contract_id: evidence.contract_id.clone(),
@@ -306,6 +413,8 @@ pub fn verify(node: &AgentIdentity, evidence: &Evidence, judge: Option<&dyn Veri
         reasons,
         checks,
         model,
+        opinions,
+        escalation,
         evidence_digest: evidence_digest(evidence),
         evaluated_at: crate::message::now_unix(),
         evaluator: node.did().to_string(),
@@ -326,6 +435,10 @@ pub struct VerifierConfig {
     /// than whichever host is cheapest that minute — an auditor needs to
     /// know who ran the judgement.
     pub provider: Option<String>,
+    /// Reasoning effort for models that support it (`low` | `medium` |
+    /// `high`). Worth spending on the second judge: it is the one whose
+    /// disagreement summons a human, so its errors are expensive.
+    pub effort: Option<String>,
     pub max_excerpt: usize,
     pub timeout_secs: u64,
 }
@@ -345,6 +458,9 @@ impl VerifierConfig {
             provider: std::env::var("GAP_VERIFIER_PROVIDER")
                 .ok()
                 .filter(|p| !p.trim().is_empty()),
+            effort: std::env::var("GAP_VERIFIER_EFFORT")
+                .ok()
+                .filter(|e| !e.trim().is_empty()),
             max_excerpt: std::env::var("GAP_VERIFIER_MAX_CHARS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -391,9 +507,46 @@ impl OpenRouterVerifier {
         Self { config }
     }
 
-    /// Build the judge from the environment, if configured.
+    /// Build the primary judge from the environment, if configured.
     pub fn from_env() -> Option<Self> {
         VerifierConfig::from_env().map(Self::new)
+    }
+
+    /// Build the **second** judge (RFC-0015) from `GAP_VERIFIER_MODEL_B`
+    /// / `GAP_VERIFIER_PROVIDER_B`, sharing the primary's key and
+    /// endpoint.
+    ///
+    /// Returns `None` unless a distinct model or provider is set:
+    /// asking the same model on the same host twice produces correlated
+    /// errors and a false sense of corroboration.
+    pub fn second_from_env() -> Option<Self> {
+        let primary = VerifierConfig::from_env()?;
+        let model = std::env::var("GAP_VERIFIER_MODEL_B")
+            .ok()
+            .filter(|m| !m.trim().is_empty());
+        let provider = std::env::var("GAP_VERIFIER_PROVIDER_B")
+            .ok()
+            .filter(|p| !p.trim().is_empty());
+        if model.is_none() && provider.is_none() {
+            return None;
+        }
+        let differs = model
+            .as_deref()
+            .map(|m| m != primary.model)
+            .unwrap_or(false)
+            || provider.as_deref() != primary.provider.as_deref();
+        if !differs {
+            return None;
+        }
+        Some(Self::new(VerifierConfig {
+            model: model.unwrap_or_else(|| primary.model.clone()),
+            provider: provider.or_else(|| primary.provider.clone()),
+            effort: std::env::var("GAP_VERIFIER_EFFORT_B")
+                .ok()
+                .filter(|e| !e.trim().is_empty())
+                .or_else(|| primary.effort.clone()),
+            ..primary
+        }))
     }
 
     /// The user message: evidence only, with the untrusted excerpt
@@ -490,6 +643,9 @@ impl Verifier for OpenRouterVerifier {
                 "order": [provider],
                 "allow_fallbacks": false
             });
+        }
+        if let Some(effort) = &self.config.effort {
+            body["reasoning"] = serde_json::json!({ "effort": effort });
         }
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_secs(
@@ -725,6 +881,7 @@ mod tests {
             model: "test-model".into(),
             endpoint: DEFAULT_ENDPOINT.into(),
             provider: None,
+            effort: None,
             max_excerpt: 40,
             timeout_secs: 5,
         };

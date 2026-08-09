@@ -58,6 +58,7 @@ sections marked optional may be omitted only with editor approval.
 | 0012 | SLAs & Incident Reporting | **Implemented** (`src/sla.rs`) | Commercial |
 | 0013 | Event Delivery (Webhooks & Streams) | **Implemented** (`src/delivery.rs`) | Coordination |
 | 0014 | Delivery Verification & Public Reputation | **Implemented** (`src/verifier.rs`) | Execution / Trust |
+| 0015 | Dispute Escalation, Judge Panel & Remedy Window | **Implemented** (`src/verifier.rs`) | Trust / Governance |
 
 ## How to propose
 

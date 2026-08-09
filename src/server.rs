@@ -50,12 +50,49 @@ pub struct JobRecord {
     pub counterparty_ref: String,
     /// accepted | disputed | ruled
     pub outcome: String,
+    /// Whether the work had to be reworked before it was accepted.
+    /// Published because a buyer deserves to know the difference
+    /// between right-first-time and right-on-the-second-try.
+    pub remedied: bool,
     /// The verifier's ruling, when one was produced.
     pub verdict: Option<String>,
     /// Which judge ruled, when one did.
     pub judged_by: Option<String>,
     pub on_time: bool,
     pub at: u64,
+}
+
+/// An agent's dispute record (RFC-0015 §3.3).
+///
+/// Counting raw disputes would punish the honest agent that bad
+/// counterparties keep challenging, and it would hand anyone a griefing
+/// weapon: dispute a competitor's every contract to tarnish it. The
+/// signal of abuse is **disputing and being wrong**, so the published
+/// figure is a win rate, and disputes merely received are tracked
+/// separately.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct DisputeStats {
+    /// Disputes this agent opened.
+    pub raised: u64,
+    /// …of which an arbitrator ruled in its favour.
+    pub raised_won: u64,
+    /// Disputes opened against this agent.
+    pub received: u64,
+    /// …of which it lost.
+    pub received_lost: u64,
+}
+
+impl DisputeStats {
+    /// Share of this agent's own disputes that were upheld. A careful
+    /// buyer scores high; a freeloader who challenges everything scores
+    /// low. `None` until it has actually disputed something.
+    pub fn win_rate(&self) -> Option<f64> {
+        if self.raised == 0 {
+            None
+        } else {
+            Some(self.raised_won as f64 / self.raised as f64)
+        }
+    }
 }
 
 fn pseudonym(input: &str) -> String {
@@ -106,6 +143,13 @@ pub struct NodeState {
     verdicts: HashMap<String, crate::verifier::Verdict>,
     /// Per-agent job history, the raw material of reputation (RFC-0014 §5).
     jobs: HashMap<String, Vec<JobRecord>>,
+    /// Per-agent dispute record (RFC-0015).
+    disputes: HashMap<String, DisputeStats>,
+    /// Second, independent judge (RFC-0015): a different model on a
+    /// different host, so the two do not share a failure mode.
+    verifier_b: Option<Box<dyn crate::verifier::Verifier>>,
+    /// Verdicts awaiting a human: contract_id -> why.
+    escalations: HashMap<String, crate::verifier::Escalation>,
     /// Delivery subscriptions, id -> subscription (RFC-0013).
     subscriptions: HashMap<String, crate::delivery::Subscription>,
     /// Pending webhook deliveries, drained outside the state lock.
@@ -239,8 +283,12 @@ impl NodeState {
             vault,
             verifier: crate::verifier::OpenRouterVerifier::from_env()
                 .map(|v| Box::new(v) as Box<dyn crate::verifier::Verifier>),
+            verifier_b: crate::verifier::OpenRouterVerifier::second_from_env()
+                .map(|v| Box::new(v) as Box<dyn crate::verifier::Verifier>),
             verdicts: HashMap::new(),
             jobs: HashMap::new(),
+            disputes: HashMap::new(),
+            escalations: HashMap::new(),
             subscriptions: HashMap::new(),
             outbox: Vec::new(),
         }
@@ -597,6 +645,15 @@ impl NodeState {
                     v.reasons.first().cloned().unwrap_or_default()
                 )));
             }
+            // An escalated case is provisional: a human closes it
+            // (RFC-0015). Releasing early would make the escalation
+            // decorative.
+            if let Some(e) = v.escalation {
+                return Err(Error::EscrowViolation(format!(
+                    "verdict escalated for human review ({}); await arbitration",
+                    e.as_str()
+                )));
+            }
         }
 
         // Build the signed acceptance + release envelopes.
@@ -864,6 +921,18 @@ impl NodeState {
             .ok_or_else(|| Error::EscrowViolation("no escrow for contract".into()))?;
         let receipt = escrow.dispute(&instruction)?;
         let escrow_state = escrow.state();
+        // Track both sides: raising a dispute is not itself a fault
+        // (that depends on the outcome), and receiving one must never
+        // damage an agent by itself — otherwise disputing a competitor
+        // becomes a cheap way to tarnish it (RFC-0015 §3.3).
+        self.disputes
+            .entry(contract.client.to_string())
+            .or_default()
+            .raised += 1;
+        self.disputes
+            .entry(contract.provider.to_string())
+            .or_default()
+            .received += 1;
         let escrow_held = escrow.held();
         let mut contract = contract;
         contract.transition(ContractState::Disputed)?;
@@ -926,6 +995,19 @@ impl NodeState {
                 "ruled",
                 false,
             );
+            // The outcome is what makes a dispute honest or abusive.
+            if client_share > provider_share {
+                self.disputes
+                    .entry(c.client.to_string())
+                    .or_default()
+                    .raised_won += 1;
+                self.disputes
+                    .entry(c.provider.to_string())
+                    .or_default()
+                    .received_lost += 1;
+            }
+            // A human has now ruled: the case is closed.
+            self.escalations.remove(contract_id);
         }
         Ok(json!({
             "state": "ruled",
@@ -1098,6 +1180,11 @@ impl NodeState {
         self.verifier = Some(verifier);
     }
 
+    /// Attach the second, independent judge (RFC-0015).
+    pub fn set_second_verifier(&mut self, verifier: Box<dyn crate::verifier::Verifier>) {
+        self.verifier_b = Some(verifier);
+    }
+
     /// Whether a judge is configured (reported by the agent card).
     pub fn has_verifier(&self) -> bool {
         self.verifier.is_some()
@@ -1155,8 +1242,38 @@ impl NodeState {
             confidential,
         };
 
+        // The parties may negotiate a value above which a human looks,
+        // whatever the judges concluded; otherwise the operator default.
+        let threshold = contract
+            .terms
+            .human_review_above
+            .clone()
+            .or_else(|| std::env::var("GAP_HUMAN_REVIEW_ABOVE").ok())
+            .and_then(|v| crate::amount::Amount::parse(&v).ok());
+        let value = crate::amount::Amount::from_f64_rounding(
+            contract
+                .terms
+                .price
+                .cap
+                .unwrap_or(contract.terms.price.amount),
+        );
+        let escalate = match threshold {
+            Some(t) if value >= t => Some(crate::verifier::Escalation::ValueThreshold),
+            _ => None,
+        };
+
+        let mut panel: Vec<&dyn crate::verifier::Verifier> = Vec::new();
+        if let Some(v) = self.verifier.as_deref() {
+            panel.push(v);
+        }
+        if let Some(v) = self.verifier_b.as_deref() {
+            panel.push(v);
+        }
         let verdict =
-            crate::verifier::verify(&self.node.identity, &evidence, self.verifier.as_deref());
+            crate::verifier::verify_panel(&self.node.identity, &evidence, &panel, escalate);
+        if let Some(e) = verdict.escalation {
+            self.escalations.insert(contract_id.to_string(), e);
+        }
         self.verdicts
             .insert(contract_id.to_string(), verdict.clone());
         self.record(
@@ -1165,10 +1282,79 @@ impl NodeState {
                 "contract_id": contract_id,
                 "ruling": verdict.ruling.as_str(),
                 "model": verdict.model,
+                "escalation": verdict.escalation.map(|e| e.as_str()),
+                "opinions": verdict.opinions.len(),
                 "evidence_digest": verdict.evidence_digest,
             }),
         );
         Ok(serde_json::to_value(&verdict).unwrap_or_default())
+    }
+
+    /// Maximum rework attempts (spec 03 §3.5). One.
+    pub const MAX_REMEDIES: u8 = 1;
+
+    /// `ctr.remedy` — the provider fixes the work and resubmits, once.
+    ///
+    /// A failed verification should not end the deal: the honest case
+    /// is a provider that misread a criterion and can correct it in
+    /// seconds. But the retry must be bounded — with unlimited
+    /// attempts a provider can grind against the judges until a
+    /// borderline reading passes, which turns verification into a
+    /// slot machine.
+    pub fn remedy(
+        &mut self,
+        provider_token: &str,
+        contract_id: &str,
+        deliverable_hash: &str,
+    ) -> Result<Value> {
+        let provider_did = self.agent_by_token(provider_token)?.identity.did().clone();
+        let verdict_was_bad = self
+            .verdicts
+            .get(contract_id)
+            .map(|v| v.ruling == crate::verifier::Ruling::Nonconforming)
+            .unwrap_or(false);
+        let contract = self
+            .contracts
+            .get_mut(contract_id)
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.provider != provider_did {
+            return Err(Error::Unauthorized("only the provider may remedy".into()));
+        }
+        if !verdict_was_bad {
+            return Err(Error::Other(
+                "nothing to remedy: no non-conforming verdict on this contract".into(),
+            ));
+        }
+        if contract.remedies_used >= Self::MAX_REMEDIES {
+            return Err(Error::Other(format!(
+                "remedy already used ({} allowed); the remedy window is closed — dispute or refund",
+                Self::MAX_REMEDIES
+            )));
+        }
+        if deliverable_hash.trim().is_empty() {
+            return Err(Error::Other("deliverable_hash required".into()));
+        }
+        contract.remedies_used += 1;
+        contract.deliverable_hash = Some(deliverable_hash.to_string());
+        if contract.state == ContractState::Disputed {
+            contract.transition(ContractState::Delivered)?;
+        }
+        let saved = contract.clone();
+        let remaining = Self::MAX_REMEDIES - saved.remedies_used;
+        self.persist_contract(&saved);
+        // The stale verdict must go: it judged the previous artifact.
+        self.verdicts.remove(contract_id);
+        self.escalations.remove(contract_id);
+        self.record(
+            "ctr.remedied",
+            json!({ "contract_id": contract_id, "attempts_left": remaining }),
+        );
+        Ok(json!({
+            "state": saved.state.wire_name(),
+            "remedies_used": saved.remedies_used,
+            "attempts_left": remaining,
+            "note": "resubmitted; ask for verification again"
+        }))
     }
 
     /// The verdict recorded for a contract, if any.
@@ -1186,12 +1372,18 @@ impl NodeState {
         outcome: &str,
         on_time: bool,
     ) {
+        let remedied = self
+            .contracts
+            .get(contract_id)
+            .map(|c| c.remedies_used > 0)
+            .unwrap_or(false);
         let verdict = self.verdicts.get(contract_id);
         let record = JobRecord {
             job_ref: pseudonym(contract_id),
             capability_id: capability_id.to_string(),
             counterparty_ref: pseudonym(&counterparty.to_string()),
             outcome: outcome.to_string(),
+            remedied,
             verdict: verdict.map(|v| v.ruling.as_str().to_string()),
             judged_by: verdict.and_then(|v| v.model.clone()),
             on_time,
@@ -1220,6 +1412,7 @@ impl NodeState {
                 None => (0, 0, 0, 0),
             };
         let jobs = self.jobs.get(&key).cloned().unwrap_or_default();
+        let d = self.disputes.get(&key).cloned().unwrap_or_default();
         let smoothed = (successes as f64 + 1.0) / (executions as f64 + 2.0);
         Ok(json!({
             "agent_did": key,
@@ -1231,9 +1424,37 @@ impl NodeState {
                 "note": "success_rate is Laplace-smoothed: a new agent scores 0.5, not 1.0"
             },
             "endorsements": endorsements,
+            "disputes": {
+                "raised": d.raised,
+                "raised_won": d.raised_won,
+                "win_rate": d.win_rate(),
+                "received": d.received,
+                "received_lost": d.received_lost,
+                "note": "win_rate is the abuse signal: disputing often and losing is what counts against an agent, not being disputed"
+            },
             "jobs": jobs,
             "verified_by_node": self.node_did().to_string(),
         }))
+    }
+
+    /// Cases waiting on a human (RFC-0015). Admin-only: this is the
+    /// operator's work queue, not public data.
+    pub fn escalations(&self) -> Value {
+        let items: Vec<Value> = self
+            .escalations
+            .iter()
+            .map(|(cid, why)| {
+                let v = self.verdicts.get(cid);
+                json!({
+                    "contract_id": cid,
+                    "reason": why.as_str(),
+                    "ruling": v.map(|v| v.ruling.as_str()),
+                    "opinions": v.map(|v| v.opinions.clone()),
+                    "evidence_digest": v.map(|v| v.evidence_digest.clone()),
+                })
+            })
+            .collect();
+        json!({ "escalations": items, "count": items.len() })
     }
 
     /// Register a delivery subscription for the authenticated agent.
@@ -1740,7 +1961,20 @@ pub fn route_with_ip(
             guard.workflow_status(id)
         }
 
-        // ---- verification & reputation (RFC-0014) ----
+        // ---- verification & reputation (RFC-0014 / RFC-0015) ----
+        (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/remedy") => {
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/remedy");
+            let hash = body
+                .get("deliverable_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match token {
+                Some(t) => guard.remedy(t, id, hash),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
         (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/verify") => {
             let id = p
                 .trim_start_matches("/v1/contract/")
@@ -1751,6 +1985,11 @@ pub fn route_with_ip(
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
+        ("GET", "/v1/escalations") => match (&guard.admin_token, token) {
+            (Some(admin), Some(t)) if admin == t => Ok(guard.escalations()),
+            (None, _) => Err(Error::Unauthorized("admin token not configured".into())),
+            _ => Err(Error::Unauthorized("admin token required".into())),
+        },
         ("GET", p) if p.starts_with("/v1/reputation/") => {
             let did = percent_decode(p.trim_start_matches("/v1/reputation/"));
             guard.reputation_of(&did)
@@ -2208,6 +2447,7 @@ mod tests {
             },
             autonomy: "propose".into(),
             confidentiality: None,
+            human_review_above: None,
         };
         let body = json!({ "provider": provider_did, "capability_id": "cap:p:analyze", "terms": terms, "escrow": true });
         let (s, v) = route(
@@ -2357,6 +2597,7 @@ mod tests {
             },
             autonomy: "propose".into(),
             confidentiality: None,
+            human_review_above: None,
         };
         let (client_tok, provider_tok, contract_id) = {
             let arc = Arc::new(Mutex::new(NodeState::with_rate_limits(
@@ -2582,6 +2823,7 @@ mod tests {
             },
             autonomy: "propose".into(),
             confidentiality: None,
+            human_review_above: None,
         };
         let body = json!({ "provider": provider_did, "capability_id": "cap:p:analyze", "terms": terms, "escrow": true });
         let (s, v) = route(

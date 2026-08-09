@@ -80,6 +80,11 @@ pub struct Terms {
     pub price: Price,
     /// One of: propose, execute-notify, execute-certified.
     pub autonomy: String,
+    /// Contract value above which a human reviews the verdict before
+    /// escrow moves, whatever the judges concluded (RFC-0015). Exact
+    /// decimal string; unset falls back to the node's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_review_above: Option<String>,
     #[serde(default)]
     pub confidentiality: Option<String>,
 }
@@ -111,6 +116,11 @@ pub struct Contract {
     /// and then discarded, leaving nothing to check against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliverable_hash: Option<String>,
+    /// Rework attempts already spent (spec 03 §3.5 `ctr.remedy`).
+    /// Capped at one: a second chance is fair, an unlimited retry loop
+    /// lets a provider grind against the judges until one passes.
+    #[serde(default)]
+    pub remedies_used: u8,
     #[serde(skip)]
     pub state: ContractState,
 }
@@ -135,6 +145,7 @@ impl Contract {
             provider_sig: None,
             created_at: crate::message::now_unix(),
             deliverable_hash: None,
+            remedies_used: 0,
             state: ContractState::Draft,
         };
         let canonical = c.canonical_bytes();
@@ -285,6 +296,7 @@ mod tests {
             },
             autonomy: "execute-notify".into(),
             confidentiality: None,
+            human_review_above: None,
         }
     }
 

@@ -378,3 +378,425 @@ fn reputation_of_an_unknown_agent_is_empty_not_an_error() {
     let (s, _) = route(&state, "GET", "/v1/reputation/not-a-did", &[], None);
     assert_eq!(s, 400);
 }
+
+// ---------------------------------------------------------------- RFC-0015
+
+/// Build a node with a two-judge panel whose rulings the test controls.
+fn node_with_panel(
+    a: Ruling,
+    b: Ruling,
+) -> (Arc<Mutex<NodeState>>, Arc<MockVerifier>, Arc<MockVerifier>) {
+    struct Named(Arc<MockVerifier>, &'static str);
+    impl gap::verifier::Verifier for Named {
+        fn judge(&self, e: &gap::verifier::Evidence) -> gap::error::Result<(Ruling, Vec<String>)> {
+            self.0.judge(e)
+        }
+        fn name(&self) -> String {
+            self.1.to_string()
+        }
+    }
+    let mut state = NodeState::with_rate_limits(
+        Box::new(SqliteStorage::open(":memory:").unwrap()),
+        None,
+        1_000_000,
+        1_000_000,
+    );
+    let ja = Arc::new(MockVerifier::new(a));
+    let jb = Arc::new(MockVerifier::new(b));
+    state.set_verifier(Box::new(Named(ja.clone(), "judge-a")));
+    state.set_second_verifier(Box::new(Named(jb.clone(), "judge-b")));
+    state.set_admin_token("test-admin");
+    (Arc::new(Mutex::new(state)), ja, jb)
+}
+
+#[test]
+fn agreeing_judges_produce_one_ruling_and_release() {
+    let (state, ja, jb) = node_with_panel(Ruling::Conforms, Ruling::Conforms);
+    let (_c, ct) = register(&state);
+    let (pd, pt) = register(&state);
+    let cid = delivered(&state, &ct, &pt, &pd, &sha(CONTENT), false);
+
+    let (_, v) = post(
+        &state,
+        &format!("/v1/contract/{cid}/verify"),
+        &json!({ "content": CONTENT }),
+        &ct,
+    );
+    assert_eq!(v["ruling"], "conforms");
+    assert!(v["escalation"].is_null(), "unanimity needs no human");
+    assert_eq!(v["opinions"].as_array().unwrap().len(), 2);
+    assert_eq!(ja.calls().len(), 1);
+    assert_eq!(jb.calls().len(), 1);
+
+    let (s, _) = post(
+        &state,
+        &format!("/v1/contract/{cid}/accept-delivery"),
+        &json!({}),
+        &ct,
+    );
+    assert_eq!(s, 200);
+}
+
+#[test]
+fn disagreeing_judges_escalate_to_a_human_and_hold_the_money() {
+    // This is the whole point of the panel: independent judges
+    // disagreeing IS the signal that a human is needed.
+    let (state, _, _) = node_with_panel(Ruling::Conforms, Ruling::Nonconforming);
+    let (_c, ct) = register(&state);
+    let (pd, pt) = register(&state);
+    let cid = delivered(&state, &ct, &pt, &pd, &sha(CONTENT), false);
+
+    let (_, v) = post(
+        &state,
+        &format!("/v1/contract/{cid}/verify"),
+        &json!({ "content": CONTENT }),
+        &ct,
+    );
+    assert_eq!(v["ruling"], "inconclusive", "fail closed on disagreement");
+    assert_eq!(v["escalation"], "judge_disagreement");
+    let both: Vec<&str> = v["opinions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["ruling"].as_str().unwrap())
+        .collect();
+    assert!(both.contains(&"conforms") && both.contains(&"nonconforming"));
+
+    // Escalated cases do not settle until a human closes them.
+    let (s, v) = post(
+        &state,
+        &format!("/v1/contract/{cid}/accept-delivery"),
+        &json!({}),
+        &ct,
+    );
+    assert_ne!(s, 200);
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("human review"));
+
+    // And it lands in the operator's queue.
+    let (s, q) = route(
+        &state,
+        "GET",
+        "/v1/escalations",
+        &[],
+        Some(&bearer("test-admin")),
+    );
+    assert_eq!(s, 200);
+    assert_eq!(q["count"], 1);
+    assert_eq!(q["escalations"][0]["reason"], "judge_disagreement");
+    assert_eq!(q["escalations"][0]["contract_id"], cid);
+}
+
+#[test]
+fn the_escalation_queue_is_operator_only() {
+    let (state, _, _) = node_with_panel(Ruling::Conforms, Ruling::Conforms);
+    let (_c, ct) = register(&state);
+    for auth in [None, Some(bearer(&ct))] {
+        let (s, _) = route(&state, "GET", "/v1/escalations", &[], auth.as_deref());
+        assert_eq!(s, 401, "the queue is not public");
+    }
+}
+
+#[test]
+fn a_negotiated_value_threshold_summons_a_human_even_on_agreement() {
+    let (state, _, _) = node_with_panel(Ruling::Conforms, Ruling::Conforms);
+    let (_c, ct) = register(&state);
+    let (pd, pt) = register(&state);
+
+    // The parties themselves set the bar, in the contract.
+    let terms = json!({
+        "input": {}, "deliverable": {},
+        "acceptance_criteria": ["each lead has a verified email"],
+        "deadline": 4_102_444_800u64,
+        "price": { "amount": 5.0, "currency": "EUR", "model": "fixed", "cap": 5.0 },
+        "autonomy": "propose",
+        "human_review_above": "1.00"
+    });
+    let (_, v) = post(
+        &state,
+        "/v1/contract/propose",
+        &json!({ "provider": pd, "capability_id": "cap:x", "terms": terms, "escrow": true }),
+        &ct,
+    );
+    let cid = v["contract_id"].as_str().unwrap().to_string();
+    post(
+        &state,
+        &format!("/v1/contract/{cid}/accept"),
+        &json!({}),
+        &pt,
+    );
+    post(
+        &state,
+        "/v1/escrow/park",
+        &json!({ "contract_id": cid, "amount": "5.00" }),
+        &ct,
+    );
+    post(
+        &state,
+        &format!("/v1/contract/{cid}/deliver"),
+        &json!({ "deliverable_hash": sha(CONTENT) }),
+        &pt,
+    );
+
+    let (_, v) = post(
+        &state,
+        &format!("/v1/contract/{cid}/verify"),
+        &json!({ "content": CONTENT }),
+        &ct,
+    );
+    assert_eq!(v["ruling"], "conforms", "the judges still agree");
+    assert_eq!(
+        v["escalation"], "value_threshold",
+        "but the money is big enough that a human looks"
+    );
+    let (s, _) = post(
+        &state,
+        &format!("/v1/contract/{cid}/accept-delivery"),
+        &json!({}),
+        &ct,
+    );
+    assert_ne!(s, 200, "held until a human closes it");
+}
+
+#[test]
+fn dispute_stats_measure_being_wrong_not_being_disputed() {
+    let (state, _, _) = node_with_panel(Ruling::Conforms, Ruling::Conforms);
+    let (client_did, ct) = register(&state);
+    let (pd, pt) = register(&state);
+    let cid = delivered(&state, &ct, &pt, &pd, &sha(CONTENT), false);
+    let (s, _) = post(
+        &state,
+        &format!("/v1/contract/{cid}/dispute"),
+        &json!({ "reason": "nonconforming" }),
+        &ct,
+    );
+    assert_eq!(s, 200);
+
+    // The arbitrator sides with the provider: the client's dispute fails.
+    let (s, _) = post(
+        &state,
+        "/v1/escrow/rule",
+        &json!({ "contract_id": cid, "split": { "client": 0.0, "provider": 1.0 } }),
+        "test-admin",
+    );
+    assert_eq!(s, 200);
+
+    let (_, client_rep) = route(
+        &state,
+        "GET",
+        &format!("/v1/reputation/{client_did}"),
+        &[],
+        None,
+    );
+    let d = &client_rep["disputes"];
+    assert_eq!(d["raised"], 1);
+    assert_eq!(d["raised_won"], 0);
+    assert_eq!(
+        d["win_rate"], 0.0,
+        "disputing and losing is the abuse signal"
+    );
+
+    // The provider merely received a dispute and won it: nothing counts
+    // against it. Otherwise disputing a competitor would be a free way
+    // to tarnish it.
+    let (_, prov_rep) = route(&state, "GET", &format!("/v1/reputation/{pd}"), &[], None);
+    assert_eq!(prov_rep["disputes"]["received"], 1);
+    assert_eq!(prov_rep["disputes"]["received_lost"], 0);
+    assert!(prov_rep["disputes"]["win_rate"].is_null());
+}
+
+#[test]
+fn a_won_dispute_counts_for_the_agent_that_raised_it() {
+    let (state, _, _) = node_with_panel(Ruling::Conforms, Ruling::Conforms);
+    let (client_did, ct) = register(&state);
+    let (pd, pt) = register(&state);
+    let cid = delivered(&state, &ct, &pt, &pd, &sha(CONTENT), false);
+    post(
+        &state,
+        &format!("/v1/contract/{cid}/dispute"),
+        &json!({ "reason": "nonconforming" }),
+        &ct,
+    );
+    post(
+        &state,
+        "/v1/escrow/rule",
+        &json!({ "contract_id": cid, "split": { "client": 1.0, "provider": 0.0 } }),
+        "test-admin",
+    );
+    let (_, rep) = route(
+        &state,
+        "GET",
+        &format!("/v1/reputation/{client_did}"),
+        &[],
+        None,
+    );
+    assert_eq!(rep["disputes"]["raised_won"], 1);
+    assert_eq!(rep["disputes"]["win_rate"], 1.0);
+    let (_, prov) = route(&state, "GET", &format!("/v1/reputation/{pd}"), &[], None);
+    assert_eq!(prov["disputes"]["received_lost"], 1);
+}
+
+#[test]
+fn human_arbitration_clears_the_escalation() {
+    let (state, _, _) = node_with_panel(Ruling::Conforms, Ruling::Nonconforming);
+    let (_c, ct) = register(&state);
+    let (pd, pt) = register(&state);
+    let cid = delivered(&state, &ct, &pt, &pd, &sha(CONTENT), false);
+    post(
+        &state,
+        &format!("/v1/contract/{cid}/verify"),
+        &json!({ "content": CONTENT }),
+        &ct,
+    );
+    post(
+        &state,
+        &format!("/v1/contract/{cid}/dispute"),
+        &json!({ "reason": "ambiguous" }),
+        &ct,
+    );
+    let (s, _) = post(
+        &state,
+        "/v1/escrow/rule",
+        &json!({ "contract_id": cid, "split": { "client": 0.5, "provider": 0.5 } }),
+        "test-admin",
+    );
+    assert_eq!(s, 200);
+    let (_, q) = route(
+        &state,
+        "GET",
+        "/v1/escalations",
+        &[],
+        Some(&bearer("test-admin")),
+    );
+    assert_eq!(q["count"], 0, "a human ruled: the case is closed");
+}
+
+#[test]
+fn a_failed_delivery_gets_exactly_one_second_chance() {
+    // spec 03 §3.5: `ctr.remedy` — rework within the remedy window.
+    let (state, ja, jb) = node_with_panel(Ruling::Nonconforming, Ruling::Nonconforming);
+    let (_c, ct) = register(&state);
+    let (pd, pt) = register(&state);
+    let cid = delivered(&state, &ct, &pt, &pd, &sha(CONTENT), false);
+
+    let (_, v) = post(
+        &state,
+        &format!("/v1/contract/{cid}/verify"),
+        &json!({ "content": CONTENT }),
+        &ct,
+    );
+    assert_eq!(v["ruling"], "nonconforming");
+
+    // The provider fixes it and resubmits.
+    const FIXED: &str =
+        r#"{"leads":[{"email":"a@x.com","verified":true},{"email":"b@y.com","verified":true}]}"#;
+    let (s, v) = post(
+        &state,
+        &format!("/v1/contract/{cid}/remedy"),
+        &json!({ "deliverable_hash": sha(FIXED) }),
+        &pt,
+    );
+    assert_eq!(s, 200, "remedy: {v}");
+    assert_eq!(v["attempts_left"], 0);
+
+    // The stale verdict is gone, so release is no longer blocked by it.
+    ja.set_ruling(Ruling::Conforms);
+    jb.set_ruling(Ruling::Conforms);
+    let (_, v) = post(
+        &state,
+        &format!("/v1/contract/{cid}/verify"),
+        &json!({ "content": FIXED }),
+        &ct,
+    );
+    assert_eq!(v["ruling"], "conforms", "the reworked artifact passes");
+    let (s, _) = post(
+        &state,
+        &format!("/v1/contract/{cid}/accept-delivery"),
+        &json!({}),
+        &ct,
+    );
+    assert_eq!(s, 200);
+
+    // The track record is honest about the rework.
+    let (_, rep) = route(&state, "GET", &format!("/v1/reputation/{pd}"), &[], None);
+    assert_eq!(rep["jobs"][0]["remedied"], true);
+}
+
+#[test]
+fn the_second_chance_is_the_only_chance() {
+    let (state, _, _) = node_with_panel(Ruling::Nonconforming, Ruling::Nonconforming);
+    let (_c, ct) = register(&state);
+    let (pd, pt) = register(&state);
+    let cid = delivered(&state, &ct, &pt, &pd, &sha(CONTENT), false);
+    post(
+        &state,
+        &format!("/v1/contract/{cid}/verify"),
+        &json!({ "content": CONTENT }),
+        &ct,
+    );
+    let (s, _) = post(
+        &state,
+        &format!("/v1/contract/{cid}/remedy"),
+        &json!({ "deliverable_hash": sha("attempt 2") }),
+        &pt,
+    );
+    assert_eq!(s, 200);
+    // Fails again…
+    post(
+        &state,
+        &format!("/v1/contract/{cid}/verify"),
+        &json!({ "content": "attempt 2" }),
+        &ct,
+    );
+    // …and there is no third attempt: unlimited retries would let a
+    // provider grind against the judges until one reading passes.
+    let (s, v) = post(
+        &state,
+        &format!("/v1/contract/{cid}/remedy"),
+        &json!({ "deliverable_hash": sha("attempt 3") }),
+        &pt,
+    );
+    assert_ne!(s, 200);
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("already used"));
+}
+
+#[test]
+fn remedy_is_provider_only_and_needs_a_failure_to_fix() {
+    let (state, _, _) = node_with_panel(Ruling::Conforms, Ruling::Conforms);
+    let (_c, ct) = register(&state);
+    let (pd, pt) = register(&state);
+    let cid = delivered(&state, &ct, &pt, &pd, &sha(CONTENT), false);
+
+    // Nothing has failed: there is nothing to remedy.
+    let (s, v) = post(
+        &state,
+        &format!("/v1/contract/{cid}/remedy"),
+        &json!({ "deliverable_hash": sha("x") }),
+        &pt,
+    );
+    assert_ne!(s, 200);
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("nothing to remedy"));
+
+    // And the client cannot resubmit work on the provider's behalf.
+    post(
+        &state,
+        &format!("/v1/contract/{cid}/verify"),
+        &json!({ "content": "mismatch" }),
+        &ct,
+    );
+    let (s, _) = post(
+        &state,
+        &format!("/v1/contract/{cid}/remedy"),
+        &json!({ "deliverable_hash": sha("x") }),
+        &ct,
+    );
+    assert_eq!(s, 401);
+}

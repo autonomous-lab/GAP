@@ -222,6 +222,7 @@ fn main() -> Result<()> {
                 },
                 autonomy: "execute-notify".into(),
                 confidentiality: None,
+                human_review_above: None,
             };
             let contract = Contract::propose(
                 &orchestrator,

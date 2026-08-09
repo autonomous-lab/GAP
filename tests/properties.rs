@@ -82,6 +82,7 @@ proptest! {
             },
             autonomy: "execute-notify".into(),
             confidentiality: None,
+            human_review_above: None,
         };
         let contract = Contract::propose(&client, provider.did().clone(), "cap:t", terms, true)
             .accept_by_provider(&provider)
@@ -152,6 +153,7 @@ proptest! {
             },
             autonomy: "execute-notify".into(),
             confidentiality: None,
+            human_review_above: None,
         };
         let contract = Contract::propose(&client, provider.did().clone(), "cap:t", terms, true)
             .accept_by_provider(&provider)

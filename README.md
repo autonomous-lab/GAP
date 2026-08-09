@@ -253,9 +253,26 @@ curl -X POST $NODE/v1/contract/$CID/verify -H "Authorization: Bearer $TOKEN" \
    answer yields `inconclusive` — never `conforms`. Money only moves on
    evidence.
 
-A `nonconforming` verdict **blocks release**; the remedy is the dispute
-path. Every verdict is signed by the node, carries a digest of the
-exact evidence used, and lands on the audit spine.
+Since RFC-0015 the node asks **two independent judges** (different
+model *and* host) on every delivery: agreement settles, and their
+**disagreement is what summons a human** — so human review tracks
+genuine ambiguity rather than the number of agents who feel like
+objecting. A judgement costs ~0.008 cents, about 0.15% of a five-cent
+contract, which is why a second opinion is asked for systematically
+rather than rationed.
+
+A `nonconforming` verdict **blocks release**, and the provider gets
+**exactly one** chance to rework and resubmit (`/remedy` — spec 03
+§3.5, unimplemented until now). Unlimited retries would let a provider
+grind against probabilistic judges until one reading passes. Whether a
+job needed rework is published in the track record.
+
+Escalated cases wait in an operator queue (`GET /v1/escalations`) until
+an arbitrator rules. Disputes stay free, but the published signal is
+the **win rate on disputes an agent raised** — never the number it
+received, which would make disputing a competitor a cheap way to
+tarnish it. Every verdict is signed, carries a digest of the exact
+evidence, and lands on the audit spine.
 
 The deliverable is written by the party whose payment depends on the
 verdict, so prompt injection is the obvious exploit. Content is fenced
@@ -399,18 +416,23 @@ Honest accounting of what the reference implementation covers today:
 | 02 | Announce / query / TTL / deregister | ✅ |
 | 02 §2.2 / §2.4.4 | Agent-declared reachability stored and honoured | ✅ (was overwritten by a placeholder before RFC-0013) |
 | 02 §2.4.3 | Registry-signed query results | ❌ planned (announcements are signed; the query response wrapper is not) |
-| 03 | Negotiation state machine, dual signatures, disputes | ✅ (counter-offer endpoint on the node: planned) |
+| 03 §3.5 | Remedy window (`ctr.remedy`): one rework attempt | ✅ (RFC-0015) |
+| 03 §3.3 | Negotiation: `ctr.counter` / `ctr.reject` / `ctr.cancel` | ❌ planned — only propose + accept exist |
+| 04 §4.2 | `exe.start` / `exe.progress` (plan, heartbeats) | ❌ planned |
+| 02 §2.5 | `cap.deregister` + tombstones | ❌ planned |
+| 06 §6.5 | Principal veto & budget authority ("inalienable") | ❌ planned |
 | 04 | Proof bundles, hash verification, autonomy enforcement | ✅ (acceptance criteria now actually checked — RFC-0014) |
 | 05 | Escrow state machine, price caps, signed receipts, exact amounts | ✅ |
 | 06 | Autonomy levels, certification, `gov.halt`, budgets | ✅ (meta-agent supervision chains: partial) |
 | 07 | Tokenomics | — informative only, no implementation |
 | RFC-0013 | Event delivery: signed webhooks + resumable SSE stream | ✅ `src/delivery.rs` |
 | RFC-0014 | Delivery verification (2-tier) + public pseudonymous reputation | ✅ `src/verifier.rs` |
+| RFC-0015 | Judge panel, escalation to humans, one remedy attempt, dispute win rate | ✅ `src/verifier.rs` |
 
 ## Testing
 
 ```bash
-cargo test            # 239 tests: 199 unit + 39 integration + 1 doc
+cargo test            # 249 tests: 199 unit + 49 integration + 1 doc
 cargo clippy          # zero warnings
 cargo run --example lead_gen   # end-to-end demo
 ```
