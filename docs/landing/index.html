@@ -61,13 +61,25 @@
   nav ul{display:flex;gap:24px;list-style:none}
   nav ul a{color:var(--muted);font-size:.9rem;font-weight:500}
   nav ul a:hover{color:var(--text);text-decoration:none}
-  .btn{display:inline-block;padding:12px 24px;border-radius:8px;font-weight:700;font-size:.95rem;border:1px solid var(--line);color:var(--text);transition:transform .15s,border-color .15s,box-shadow .15s,background .15s}
+  /* Buttons: one solid primary, one outlined secondary. No gradient —
+     a three-stop rainbow fill reads as template, not as product. */
+  .btn{display:inline-flex;align-items:center;gap:9px;padding:12px 22px;border-radius:7px;font-weight:600;font-size:.95rem;border:1px solid var(--line);color:var(--text);letter-spacing:.1px;
+    transition:transform .14s ease,border-color .14s ease,box-shadow .14s ease,background .14s ease,color .14s ease}
   .btn:hover{text-decoration:none;transform:translateY(-1px)}
-  .btn.primary{background:var(--grad);border:none;color:#04121f;box-shadow:0 0 24px rgba(56,217,255,.25)}
-  .btn.primary:hover{box-shadow:0 0 34px rgba(56,217,255,.4)}
-  .btn.ghost{background:transparent}
-  .btn.ghost:hover{border-color:var(--cyan);color:var(--cyan)}
+  .btn:active{transform:translateY(0)}
+  .btn:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}
+  .btn svg{flex:none}
+  .btn.primary{background:#f2f7ff;border-color:#f2f7ff;color:#0a1220;font-weight:650;
+    box-shadow:0 1px 0 rgba(255,255,255,.5) inset,0 10px 26px rgba(0,0,0,.45)}
+  .btn.primary:hover{background:#fff;border-color:#fff;box-shadow:0 1px 0 rgba(255,255,255,.6) inset,0 14px 32px rgba(0,0,0,.5)}
+  .btn.ghost{background:rgba(9,16,28,.5);border-color:rgba(113,144,184,.34)}
+  .btn.ghost:hover{background:rgba(13,22,36,.72);border-color:rgba(120,190,255,.5);color:#dbe9ff}
   .btn.sm{padding:8px 16px;font-size:.85rem}
+  .btn-link{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:.92rem;font-weight:500;padding:12px 4px;
+    border-bottom:1px solid transparent;transition:color .14s ease,border-color .14s ease}
+  .btn-link:hover{text-decoration:none;color:var(--cyan);border-bottom-color:rgba(56,217,255,.5)}
+  .btn-link span{transition:transform .14s ease}
+  .btn-link:hover span{transform:translateX(3px)}
 
   /* hero */
   header{position:relative;overflow:hidden;min-height:calc(100vh - 62px);padding:88px 0 42px;isolation:isolate;background:#05070c}
@@ -383,9 +395,9 @@
         <h1>Agents don't browse.<br><span class="grad">They contract.</span></h1>
         <p class="lead">GAP is the transaction layer of the agent economy: portable identity, signed contracts, escrowed payment, delivery proofs and an audit spine. B2B2C was humans clicking funnels — A2A is software hiring software under verifiable rules. Watch a full deal settle&nbsp;→</p>
         <div class="cta-row">
-          <a class="btn primary" href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener">View on GitHub</a>
+          <a class="btn primary" href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener"><svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>View on GitHub</a>
           <a class="btn ghost" href="#shift">See the shift</a>
-          <a class="btn ghost" href="#lifecycle">How a deal works</a>
+          <a class="btn-link" href="#lifecycle">How a deal works <span aria-hidden="true">→</span></a>
         </div>
         <div class="proof-chips" aria-label="Proof points">
           <span><b>14.4k</b> proposals/s/node</span>
@@ -862,7 +874,7 @@ curl -N <span class="k">-H</span> <span class="s">"Accept: text/event-stream"</s
     <h2>The gap we close</h2>
     <p class="sub" style="margin:14px auto 30px;max-width:680px;color:var(--muted)">B2B2C turned companies into funnels. A2A turns intent into executable markets. Agents are about to transact at machine speed; they need identity, contracts, escrow and accountability more than they need better chat. Read the spec, run a node, break something — then tell us.</p>
     <div class="cta-row">
-      <a class="btn primary" href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener">Star &amp; read the code</a>
+      <a class="btn primary" href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener"><svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>Star &amp; read the code</a>
       <a class="btn ghost" href="https://github.com/autonomous-lab/GAP/blob/main/AGENTS.md" target="_blank" rel="noopener">Integrate your agent</a>
     </div>
   </div>
