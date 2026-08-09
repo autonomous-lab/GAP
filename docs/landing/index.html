@@ -118,7 +118,15 @@
     opacity:0;transform:rotate(7deg) scale(1.7);transition:all .4s cubic-bezier(.2,2.2,.4,1);pointer-events:none}
   .stamp.on{opacity:1;transform:rotate(-5deg) scale(1)}
   .deal .term{max-width:none;margin:10px 0 0;background:transparent;border:0;border-top:1px solid var(--line);border-radius:0;box-shadow:none;backdrop-filter:none}
-  .deal .term-body{min-height:296px;font-size:.72rem;line-height:1.85;padding:16px 20px 20px}
+  /* Fixed height + internal scroll: the log must never resize the card
+     as lines stream in (it reflowed the whole hero column). */
+  .deal .term-body{height:300px;min-height:0;overflow-y:auto;overscroll-behavior:contain;
+    font-size:.72rem;line-height:1.85;padding:16px 20px 20px;
+    scrollbar-width:thin;scrollbar-color:rgba(88,120,158,.5) transparent}
+  .deal .term-body::-webkit-scrollbar{width:6px}
+  .deal .term-body::-webkit-scrollbar-track{background:transparent}
+  .deal .term-body::-webkit-scrollbar-thumb{background:rgba(88,120,158,.45);border-radius:99px}
+  .deal .term-body::-webkit-scrollbar-thumb:hover{background:rgba(120,155,196,.65)}
   .claim{border:1px solid rgba(113,144,184,.24);background:rgba(5,11,20,.68);backdrop-filter:blur(10px);border-radius:8px;padding:13px 14px;text-align:left}
   .claim b{display:block;color:var(--text);font-size:.88rem}
   .claim span{display:block;color:var(--muted);font-size:.78rem;line-height:1.45;margin-top:2px}
@@ -309,7 +317,7 @@
     .rstep span{font-size:.52rem;letter-spacing:.4px}
     .rstep{min-width:40px}
     .rail::before,.rail-fill{left:34px;right:34px;max-width:calc(100% - 68px)}
-    .deal .term-body{font-size:.62rem;min-height:250px}
+    .deal .term-body{font-size:.62rem;height:240px}
     section{padding:60px 0}
     .row{flex-direction:column;gap:8px}
     .row .tag{flex:none}
@@ -979,12 +987,18 @@ curl -N <span class="k">-H</span> <span class="s">"Accept: text/event-stream"</s
     11: function(){ stamp.classList.add('on'); }
   };
 
+  /* The log is a fixed-height scroller, so keep the newest line in
+     view instead of letting the card grow. */
+  function followTail(){ term.scrollTop = term.scrollHeight; }
+
   function renderAll(){
     term.innerHTML = LINES.map(function(l){return '<span class="ln on '+l[0]+'">'+l[1]+'</span>';}).join('');
     dealFinish();
+    followTail();
   }
   function play(){
     term.innerHTML='';
+    term.scrollTop=0;
     dealReset();
     var i=0;
     var cur=document.createElement('span'); cur.className='cursor';
@@ -996,7 +1010,7 @@ curl -N <span class="k">-H</span> <span class="s">"Accept: text/event-stream"</s
       el.className='ln '+l[0];
       el.innerHTML=l[1];
       term.insertBefore(el,cur);
-      requestAnimationFrame(function(){ requestAnimationFrame(function(){ el.classList.add('on'); }); });
+      requestAnimationFrame(function(){ requestAnimationFrame(function(){ el.classList.add('on'); followTail(); }); });
       if(FX[i]) FX[i]();
       i++;
       var delay = l[0]==='t-dim' ? 1400 : 700;
