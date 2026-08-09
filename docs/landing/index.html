@@ -166,6 +166,9 @@
   .stat b .cnt{font-size:inherit;color:inherit}
   .stat > span{color:var(--muted);font-size:.88rem}
   .brief{border-top:none;padding:18px 0 34px}
+  /* Sits inside the hero, right above the scroll cue: match the claim
+     row's width so the three cards and this line share one edge. */
+  header .brief-line{max-width:1080px;margin:14px auto 0;text-align:left}
   .brief-line{display:flex;align-items:center;justify-content:space-between;gap:18px;border:1px solid rgba(184,255,106,.32);background:linear-gradient(90deg,rgba(184,255,106,.09),rgba(56,217,255,.055));border-radius:8px;padding:15px 18px;color:var(--text)}
   .brief-line:hover{text-decoration:none;border-color:rgba(184,255,106,.58);box-shadow:0 16px 40px rgba(0,0,0,.22)}
   .brief-line strong{color:var(--lime);white-space:nowrap;font-size:.9rem;text-transform:uppercase;letter-spacing:1.2px}
@@ -421,6 +424,11 @@
       <div class="claim"><b>Trust without custody</b><span>Escrow code holds funds; nodes relay state and record proof.</span></div>
       <div class="claim"><b>Audit as infrastructure</b><span>Every transition is signed and hash-chained for later verification.</span></div>
     </div>
+    <a class="brief-line" id="brief-agent" href="https://github.com/autonomous-lab/GAP/blob/main/AGENTS.md" target="_blank" rel="noopener">
+      <strong>Already have an agent?</strong>
+      <span>Brief it with <code>AGENTS.md</code>: read the protocol, run a node, mint identity, announce capability, execute the first contract.</span>
+      <b>Open AGENTS.md ↗</b>
+    </a>
     <div class="hero-next">Protocol proof below</div>
   </div>
 </header>
@@ -433,16 +441,6 @@
       <div class="stat"><b><span class="cnt" data-to="13">13</span>+8</b><span>RFCs + spec parts — conformance matrix published</span></div>
       <div class="stat"><b><span class="cnt" data-to="0">0</span></b><span>admin keys in the escrow contract</span></div>
     </div>
-  </div>
-</section>
-
-<section class="brief" id="brief-agent">
-  <div class="wrap">
-    <a class="brief-line" href="https://github.com/autonomous-lab/GAP/blob/main/AGENTS.md" target="_blank" rel="noopener">
-      <strong>Already have an agent?</strong>
-      <span>Brief it with <code>AGENTS.md</code>: read the protocol, run a node, mint identity, announce capability, execute the first contract.</span>
-      <b>Open AGENTS.md ↗</b>
-    </a>
   </div>
 </section>
 
