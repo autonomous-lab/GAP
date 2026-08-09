@@ -158,6 +158,15 @@ code,.mono{font-size:.86em}
 header.nav{position:sticky;top:0;z-index:40;border-bottom:1px solid var(--line);
 background:rgba(4,6,12,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
 header.nav .wrap{display:flex;align-items:center;gap:6px;height:60px}
+.navmenu{display:flex;align-items:center;flex:1;gap:6px}
+/* A checkbox rather than a script: the menu has to work on a page that
+   is otherwise entirely server-rendered, including with JS disabled. */
+.navtoggle{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.burger{display:none;margin-left:auto;width:42px;height:36px;border:1px solid var(--line-2);
+border-radius:8px;cursor:pointer;flex-direction:column;align-items:center;justify-content:center;gap:4px}
+.burger span{display:block;width:16px;height:2px;background:var(--muted);border-radius:2px;
+transition:transform .2s ease,opacity .2s ease}
+.navtoggle:focus-visible+.burger{outline:2px solid var(--cyan);outline-offset:2px}
 .brand{display:flex;align-items:center;gap:9px;margin-right:20px;font-weight:700;letter-spacing:-.02em;color:var(--text)}
 .brand:hover{text-decoration:none}
 .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green)}
@@ -183,7 +192,7 @@ mask-image:radial-gradient(72% 58% at 50% 34%,#000,transparent 78%)}
 .eyebrow{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--line-2);background:rgba(10,17,32,.7);
 border-radius:99px;padding:6px 14px;font-size:.78rem;color:var(--muted);margin-bottom:22px}
 h1{font-size:clamp(2.1rem,5.2vw,3.5rem);line-height:1.05;letter-spacing:-.035em;font-weight:700;margin-bottom:18px}
-h1 .accent{background:linear-gradient(96deg,var(--cyan),var(--green));-webkit-background-clip:text;background-clip:text;color:transparent}
+h1 .accent{display:block;background:linear-gradient(96deg,var(--cyan),var(--green));-webkit-background-clip:text;background-clip:text;color:transparent}
 .sub{font-size:1.09rem;color:var(--muted);max-width:64ch;margin-bottom:26px}
 .cta{display:flex;gap:11px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
 .btn{display:inline-flex;align-items:center;gap:8px;background:#f0f6ff;color:#060c18;border:0;border-radius:9px;
@@ -344,6 +353,77 @@ font:inherit;font-size:.72rem;cursor:pointer;opacity:.75}
 .codewrap button.cp:hover{opacity:1;color:var(--text);border-color:var(--line-3)}
 .codehead+pre,.codewrap>pre{margin-top:0}
 
+
+/* ------------------------------------------- hero deal panel
+   Ported from the standalone landing, where the two-column hero with a
+   replaying deal beside the headline was the one element that explained
+   the product before anyone read a word. A stat bar alone reads flat. */
+.hero-grid{display:grid;grid-template-columns:minmax(0,.92fr) minmax(0,1.08fr);gap:46px;align-items:center}
+.hero-copy h1{margin-bottom:18px}
+.hero-copy .sub{margin-bottom:26px}
+.proof-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+.proof-chips span{font:600 .72rem/1 ui-monospace,monospace;letter-spacing:.5px;color:var(--muted);
+border:1px solid var(--line-2);border-radius:999px;padding:7px 12px;background:rgba(6,12,22,.62)}
+.proof-chips b{color:var(--lime);font-weight:800}
+.deal{position:relative;border:1px solid var(--line-2);border-radius:10px;background:rgba(6,12,22,.86);
+overflow:hidden;text-align:left;box-shadow:0 40px 110px rgba(0,0,0,.55),0 0 70px rgba(58,214,255,.06)}
+.deal:before{content:"";position:absolute;inset:0;pointer-events:none;z-index:2;
+background:linear-gradient(115deg,transparent 34%,rgba(58,214,255,.07) 47%,rgba(182,255,103,.05) 52%,transparent 64%);
+transform:translateX(-100%);animation:dealsweep 8s ease-in-out infinite}
+@keyframes dealsweep{0%{transform:translateX(-100%)}55%,100%{transform:translateX(100%)}}
+.term-bar{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}
+.term-bar i{width:11px;height:11px;border-radius:50%;background:#2a3a5c;display:inline-block}
+.term-bar i:nth-child(1){background:#ff5f57}.term-bar i:nth-child(2){background:#febc2e}.term-bar i:nth-child(3){background:#28c840}
+.term-bar span{margin-left:10px;color:var(--dim);font-size:.78rem;font-family:ui-monospace,monospace}
+.rail{display:flex;align-items:flex-start;justify-content:space-between;padding:18px 20px 4px;position:relative}
+.rail:before{content:"";position:absolute;left:46px;right:46px;top:30px;height:2px;background:var(--line-2)}
+.rail-fill{position:absolute;left:46px;top:30px;height:2px;width:0;max-width:calc(100% - 92px);
+background:linear-gradient(90deg,var(--cyan),var(--green),var(--lime));transition:width .55s ease;
+box-shadow:0 0 12px rgba(69,230,160,.6);z-index:0}
+.rstep{position:relative;z-index:1;display:grid;justify-items:center;gap:7px;min-width:48px}
+.rstep i{width:25px;height:25px;border-radius:50%;border:2px solid var(--line-3);background:#0a1320;
+display:grid;place-items:center;font:800 .64rem/1 ui-monospace,monospace;font-style:normal;color:var(--muted);transition:all .35s}
+.rstep span{font:700 .58rem/1.2 ui-monospace,monospace;letter-spacing:.9px;text-transform:uppercase;
+color:var(--dim);text-align:center;transition:color .35s}
+.rstep.on i{border-color:var(--green);color:#04110a;background:var(--green);box-shadow:0 0 16px rgba(69,230,160,.75);transform:scale(1.12)}
+.rstep.on span{color:var(--text)}
+.rstep.done i{border-color:rgba(69,230,160,.8);background:rgba(69,230,160,.14);color:var(--green);transform:none;box-shadow:none}
+.rstep.done span{color:var(--muted)}
+.deal-meta{display:flex;gap:12px;align-items:center;padding:12px 20px 14px;font-family:ui-monospace,monospace}
+.deal-meta b{font-size:.68rem;font-weight:700;color:var(--muted);letter-spacing:.6px;white-space:nowrap;text-transform:uppercase}
+.deal-meta b.hot{color:var(--lime)}
+.meter{flex:1;height:8px;border-radius:99px;background:var(--panel-3);overflow:hidden;position:relative}
+.meter i{position:absolute;inset:0;width:0%;background:linear-gradient(90deg,var(--cyan),var(--green));
+border-radius:99px;transition:width .8s ease,background .4s}
+.meter.release i{background:linear-gradient(90deg,var(--green),var(--lime))}
+.stamp{position:absolute;right:14px;top:52px;z-index:3;padding:7px 14px;border:2px solid var(--green);
+border-radius:6px;color:var(--green);font:800 .8rem/1 ui-monospace,monospace;letter-spacing:2.6px;
+text-transform:uppercase;background:rgba(6,18,12,.8);box-shadow:0 0 26px rgba(69,230,160,.35);
+opacity:0;transform:rotate(7deg) scale(1.7);transition:all .4s cubic-bezier(.2,2.2,.4,1);pointer-events:none}
+.stamp.on{opacity:1;transform:rotate(-5deg) scale(1)}
+.term-body{height:280px;overflow-y:auto;overscroll-behavior:contain;border-top:1px solid var(--line);
+font-family:ui-monospace,monospace;font-size:.71rem;line-height:1.85;padding:16px 20px 20px;
+scrollbar-width:thin;scrollbar-color:var(--line-3) transparent}
+.term-body::-webkit-scrollbar{width:6px}
+.term-body::-webkit-scrollbar-thumb{background:var(--line-3);border-radius:99px}
+.term-body .ln{display:block;white-space:pre-wrap;word-break:break-word;opacity:0;transform:translateY(3px);
+transition:opacity .25s,transform .25s;color:var(--muted)}
+.term-body .ln.on{opacity:1;transform:none}
+.t-dim{color:var(--faint)}.t-gr{color:var(--green)}.t-cy{color:var(--cyan)}
+.t-vi{color:var(--violet)}.t-am{color:var(--amber)}
+.hero-claim{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:26px}
+.claim{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:13px 14px}
+.claim b{display:block;color:var(--text);font-size:.88rem}
+.claim span{display:block;color:var(--muted);font-size:.78rem;line-height:1.45;margin-top:2px}
+@media(max-width:900px){
+.hero-grid{grid-template-columns:1fr;gap:30px}
+.hero-claim{grid-template-columns:1fr}
+.term-body{height:220px;font-size:.63rem}
+.rstep span{display:none}
+.rail:before,.rail-fill{left:26px;right:26px}
+}
+@media(prefers-reduced-motion:reduce){.deal:before{animation:none}}
+
 /* ---------------------------------------------------------- footer */
 footer.site{border-top:1px solid var(--line);margin-top:60px;padding:38px 0 46px;background:var(--bg-soft)}
 footer.site .cols{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:26px}
@@ -355,8 +435,20 @@ footer.site .fine{margin-top:30px;padding-top:20px;border-top:1px solid var(--li
 @media(max-width:860px){
 .split,footer.site .cols{grid-template-columns:1fr}
 .hero{padding-top:56px}
-header.nav .wrap{height:auto;padding-top:10px;padding-bottom:10px;flex-wrap:wrap}
-.nav-right{margin-left:0}
+/* The nav used to wrap onto three rows and eat 400px before any content
+   appeared. Below this width it collapses behind the burger. */
+.burger{display:flex}
+.navmenu{display:none;position:absolute;top:100%;left:0;right:0;flex-direction:column;
+align-items:stretch;gap:0;background:var(--bg-soft);border-bottom:1px solid var(--line);
+padding:6px 26px 14px;box-shadow:0 24px 50px rgba(0,0,0,.55)}
+.navtoggle:checked~.navmenu{display:flex}
+.navtoggle:checked+.burger span:nth-child(1){transform:translateY(6px) rotate(45deg)}
+.navtoggle:checked+.burger span:nth-child(2){opacity:0}
+.navtoggle:checked+.burger span:nth-child(3){transform:translateY(-6px) rotate(-45deg)}
+header.nav nav{flex-direction:column;gap:0}
+header.nav nav a{padding:13px 2px;border-radius:0;border-bottom:1px solid var(--line);font-size:.98rem}
+.nav-right{margin-left:0;margin-top:12px}
+.nav-right .ghost{display:block;text-align:center}
 }
 @media(max-width:640px){
 .wrap{padding:0 18px}
@@ -500,9 +592,14 @@ pub(crate) fn page(meta: &Meta, body: &str) -> String {
 <style>{style}</style></head><body>
 <header class="nav"><div class="wrap">
   <a class="brand" href="/"><span class="dot"></span>GAP</a>
-  <nav>{nav}</nav>
-  <div class="nav-right">
-    <a class="ghost" href="https://github.com/autonomous-lab/GAP">GitHub</a>
+  <input type="checkbox" id="navtoggle" class="navtoggle">
+  <label for="navtoggle" class="burger" aria-label="Open menu" role="button" tabindex="0">
+    <span></span><span></span><span></span></label>
+  <div class="navmenu">
+    <nav>{nav}</nav>
+    <div class="nav-right">
+      <a class="ghost" href="https://github.com/autonomous-lab/GAP">GitHub</a>
+    </div>
   </div>
 </div></header>
 <main>{body}</main>
@@ -721,6 +818,23 @@ mod tests {
             "a closing tag inside JSON-LD must not terminate the block"
         );
         assert!(html.contains(r#"type="application/ld+json""#));
+    }
+
+    #[test]
+    fn the_navigation_collapses_behind_a_burger_without_javascript() {
+        // On a phone the nav wrapped onto three rows and pushed the
+        // first content 400px down the page. The toggle is a checkbox,
+        // not a script, because the rest of this UI is server-rendered
+        // and works with JavaScript disabled.
+        let html = page(&Meta::new("T", "D", "/", ""), "");
+        assert!(html.contains(r#"<input type="checkbox" id="navtoggle""#));
+        assert!(html.contains(r#"<label for="navtoggle" class="burger""#));
+        assert!(html.contains(".navtoggle:checked~.navmenu{display:flex}"));
+        // ...and every nav entry still ships in the HTML, so a crawler
+        // that ignores CSS sees the whole navigation.
+        for (href, label) in NAV {
+            assert!(html.contains(label), "{href} missing from the markup");
+        }
     }
 
     #[test]

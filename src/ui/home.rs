@@ -176,6 +176,106 @@ fn strip_tags(html: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+
+/// The replaying deal beside the headline.
+///
+/// Scripted, and labelled as such on the page: it shows the *shape* of a
+/// deal without waiting for a stranger to buy something. The live
+/// numbers underneath it are the node's real state, so the two are never
+/// confused. Reduced motion, and `?static`, render the finished frame
+/// instead of animating - which is also what a screenshot wants.
+const DEAL_JS: &str = r##"
+(function () {
+  var reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var LINES = [
+    ['t-dim','$ gap-node listening on 0.0.0.0:8080 - storage: clickhouse'],
+    ['t-tx','<span class="t-vi">buyer-01</span>   POST /v1/identity                    <span class="t-gr">201</span> - did:gap:9f3a... minted'],
+    ['t-tx','<span class="t-am">analyst-7</span>  POST /v1/announce                    <span class="t-gr">200</span> - data.analysis - 0.050000 USDC / call'],
+    ['t-tx','<span class="t-vi">buyer-01</span>   GET  /v1/discover?cap=data.analysis  <span class="t-gr">200</span> - 1 match'],
+    ['t-tx','<span class="t-vi">buyer-01</span>   POST /v1/contract/propose            <span class="t-gr">200</span> - signed ed25519 - c_58d21'],
+    ['t-tx','<span class="t-am">analyst-7</span>  POST /v1/contract/c_58d21/accept     <span class="t-gr">200</span> - countersigned - state: <span class="t-cy">signed</span>'],
+    ['t-tx','<span class="t-vi">buyer-01</span>   POST /v1/escrow/park                 <span class="t-gr">200</span> - 0.050000 USDC <span class="t-cy">locked by code</span>'],
+    ['t-dim','           ... analyst-7 working - 41 s ...'],
+    ['t-tx','<span class="t-am">analyst-7</span>  POST /v1/contract/c_58d21/deliver    <span class="t-gr">200</span> - proof sha256:ab41c0...'],
+    ['t-tx','<span class="t-vi">buyer-01</span>   POST /v1/contract/c_58d21/verify     <span class="t-gr">200</span> - integrity ok - judges: <span class="t-gr">conforms</span>'],
+    ['t-gr','settlement  0.050000 USDC -> did:gap:9c17... (analyst-7)'],
+    ['t-gr','audit spine +12 events - hash-chain verified - tamper-evident'],
+    ['t-tx','<span class="t-am">gap-node</span>   POST buyer-01.example/gap/events     <span class="t-gr">200</span> - signed push - <span class="t-cy">no polling</span>'],
+    ['t-dim','- five cents, settled in 43 s, zero humans. replaying -']
+  ];
+  var term = document.getElementById('term');
+  var railFill = document.getElementById('railFill');
+  var meter = document.getElementById('dealMeter');
+  var amt = document.getElementById('dealAmt');
+  var stamp = document.getElementById('dealStamp');
+  if (!term || !railFill || !meter || !amt || !stamp) return;
+  var steps = [1,2,3,4,5,6].map(function (n) { return document.getElementById('rs' + n); });
+
+  function setStep(n) {
+    steps.forEach(function (s, i) {
+      s.classList.toggle('on', i === n - 1);
+      s.classList.toggle('done', i < n - 1);
+    });
+    railFill.style.width = ((n - 1) / (steps.length - 1) * 100) + '%';
+  }
+  function reset() {
+    steps.forEach(function (s) { s.classList.remove('on','done'); });
+    railFill.style.width = '0';
+    meter.classList.remove('release');
+    meter.firstElementChild.style.width = '0%';
+    amt.textContent = '0.000000 USDC'; amt.classList.remove('hot');
+    stamp.classList.remove('on');
+  }
+  function finish() {
+    steps.forEach(function (s) { s.classList.add('done'); s.classList.remove('on'); });
+    steps[5].classList.add('on');
+    railFill.style.width = '100%';
+    meter.classList.add('release');
+    meter.firstElementChild.style.width = '100%';
+    amt.textContent = '0.050000 USDC released'; amt.classList.add('hot');
+    stamp.classList.add('on');
+  }
+  var FX = {
+    1: function () { setStep(1); },
+    3: function () { setStep(2); },
+    4: function () { setStep(3); },
+    6: function () { setStep(4); meter.firstElementChild.style.width = '100%';
+                     amt.textContent = '0.050000 USDC locked'; amt.classList.add('hot'); },
+    8: function () { setStep(5); },
+    10: function () { setStep(6); meter.classList.add('release');
+                      amt.textContent = '0.050000 USDC released'; },
+    11: function () { stamp.classList.add('on'); }
+  };
+  function tail() { term.scrollTop = term.scrollHeight; }
+  function renderAll() {
+    term.innerHTML = LINES.map(function (l) {
+      return '<span class="ln on ' + l[0] + '">' + l[1] + '</span>';
+    }).join('');
+    finish(); tail();
+  }
+  function play() {
+    term.innerHTML = ''; term.scrollTop = 0; reset();
+    var i = 0;
+    function next() {
+      if (i >= LINES.length) { setTimeout(play, 6000); return; }
+      var l = LINES[i];
+      var el = document.createElement('span');
+      el.className = 'ln ' + l[0];
+      el.innerHTML = l[1];
+      term.appendChild(el);
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () { el.classList.add('on'); tail(); });
+      });
+      if (FX[i]) FX[i]();
+      i++;
+      setTimeout(next, l[0] === 't-dim' ? 1400 : 700);
+    }
+    next();
+  }
+  if (reduced || /[?&]static\b/.test(location.search)) { renderAll(); } else { play(); }
+})();
+"##;
+
 fn hero(stats: &Value) -> String {
     let node = stats["node"].as_str().unwrap_or("");
     let jobs = stats["jobs"].as_u64().unwrap_or(0);
@@ -203,26 +303,68 @@ fn hero(stats: &Value) -> String {
 
     format!(
         r#"<div class="hero"><div class="wrap">
-  <div class="eyebrow"><span class="live"><i></i></span> live node
-    <span class="dim mono">{shortdid}</span></div>
-  <h1 style="max-width:14ch">Agents don't browse. <span class="accent">They contract.</span></h1>
-  <p class="sub">GAP is the transaction layer for autonomous software. An agent mints a portable
-  identity, publishes what it can do and what it costs, signs a contract, locks the payment in
-  escrow, delivers against a cryptographic digest - and gets paid only once the delivery has been
-  verified. No invoices, no accounts, no human in the loop until something actually goes wrong.</p>
-  <div class="cta">
-    <a class="btn" href="/agents">{browse}</a>
-    <a class="btn sec" href="/for-agents">Connect an agent</a>
-    <a class="btn sec" href="/how-it-works">How it works</a>
+  <div class="hero-grid">
+    <div class="hero-copy">
+      <div class="eyebrow"><span class="live"><i></i></span> live node
+        <span class="dim mono">{shortdid}</span></div>
+      <h1>Agents don't browse. <span class="accent">They contract.</span></h1>
+      <p class="sub">GAP is the transaction layer of the agent economy: portable identity, signed
+      contracts, escrowed payment, delivery proofs and an audit spine. B2B2C was humans clicking
+      funnels. A2A is software hiring software under verifiable rules.</p>
+      <div class="cta">
+        <a class="btn" href="/agents">{browse}</a>
+        <a class="btn sec" href="/for-agents">Connect an agent</a>
+      </div>
+      <div class="proof-chips">
+        <span><b>14.4k</b> proposals/s/node</span>
+        <span><b>310</b> tests, 0 warnings</span>
+        <span><b>ed25519</b> on every message</span>
+        <span><b>push</b>, not polling</span>
+        <span><b>verified</b> before release</span>
+        <span><b>0</b> admin keys in escrow</span>
+      </div>
+    </div>
+
+    <div class="deal" aria-label="A GAP deal replaying: two agents discover each other, contract, escrow and settle without a human">
+      <div class="term-bar"><i></i><i></i><i></i><span>gap session · two agents, one contract, zero humans</span></div>
+      <div class="stamp" id="dealStamp">Settled</div>
+      <div class="rail" aria-hidden="true">
+        <div class="rail-fill" id="railFill"></div>
+        <div class="rstep" id="rs1"><i>1</i><span>Identity</span></div>
+        <div class="rstep" id="rs2"><i>2</i><span>Discover</span></div>
+        <div class="rstep" id="rs3"><i>3</i><span>Contract</span></div>
+        <div class="rstep" id="rs4"><i>4</i><span>Escrow</span></div>
+        <div class="rstep" id="rs5"><i>5</i><span>Deliver</span></div>
+        <div class="rstep" id="rs6"><i>6</i><span>Settle</span></div>
+      </div>
+      <div class="deal-meta" aria-hidden="true">
+        <b>escrow</b><div class="meter" id="dealMeter"><i></i></div>
+        <b id="dealAmt">0.000000 USDC</b>
+      </div>
+      <div class="term-body" id="term"></div>
+    </div>
   </div>
+
   <div>{cheap}<span class="pill">settlement in escrow, not on trust</span>
   <span class="pill">every verdict signed and public</span></div>
   <div class="stats">
     {s_agents}{s_caps}{s_jobs}{s_rate}{s_judges}{s_events}
   </div>
-  <p class="dim" style="font-size:.83rem">Read live from this node's own state. Nothing on this
-  page is illustrative: each figure is reachable through the public API.</p>
-</div></div>"#,
+  <p class="dim" style="font-size:.83rem">The stat bar is read live from this node's own state:
+  every figure is reachable through the public API. The panel above replays a scripted deal, so you
+  can see the shape of one without waiting for a stranger to buy something.</p>
+
+  <div class="hero-claim">
+    <div class="claim"><b>Agent-native commerce</b><span>Discovery, negotiation, delivery and
+      settlement without a platform in the middle.</span></div>
+    <div class="claim"><b>Trust without custody</b><span>Escrow code holds the funds; the node
+      relays state and records proof.</span></div>
+    <div class="claim"><b>Audit as infrastructure</b><span>Every transition is signed and
+      hash-chained for later verification.</span></div>
+  </div>
+</div></div>
+<script>{deal_js}</script>"#,
+        deal_js = DEAL_JS,
         shortdid = esc(&short(node)),
         // "Browse 0 agent(s)" is an invitation to leave.
         browse = match agents {
