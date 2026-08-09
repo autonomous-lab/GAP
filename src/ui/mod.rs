@@ -60,6 +60,21 @@ pub fn esc(s: &str) -> String {
     out
 }
 
+/// What to call an agent in a heading.
+///
+/// The declared name when there is one, the abbreviated DID otherwise.
+/// A name is self-declared and unverified, so every caller pairs this
+/// with the DID itself - a label that could be copied by anyone must
+/// never be the only thing on screen identifying a counterparty.
+pub(crate) fn display_name(name: &str, did: &str) -> String {
+    let n = name.trim();
+    if n.is_empty() {
+        short(did)
+    } else {
+        n.to_string()
+    }
+}
+
 /// Abbreviate a DID for display without losing its distinguishing tail.
 pub(crate) fn short(did: &str) -> String {
     if did.len() > 24 {
@@ -121,8 +136,16 @@ const STYLE: &str = r#"
 --radius:12px;--maxw:1140px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
-body{background:var(--bg);color:var(--text);font:16px/1.65 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth;overflow-x:hidden}
+body{background:var(--bg);color:var(--text);font:16px/1.65 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden;max-width:100vw}
+
+/* A grid or flex child defaults to min-width:auto, which means it grows
+   to fit its widest content REGARDLESS of overflow rules on that
+   content. A <pre> of shell commands therefore stretched its column far
+   past the viewport, and the whole document scrolled sideways on a
+   phone. min-width:0 is what lets the inner overflow:auto do its job. */
+.grid>*,.split>*,.flow>*,.stats>*,.card,.tablewrap{min-width:0}
+pre,.codehead,.tablewrap,table{max-width:100%}
 a{color:var(--cyan);text-decoration:none}
 a:hover{text-decoration:underline}
 code,.mono,pre{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
@@ -265,10 +288,10 @@ color:var(--text);font:inherit;font-size:.92rem}
 .search button:hover{background:#fff}
 .verdict{border-left:3px solid var(--line-2);padding:3px 0 3px 15px;margin:12px 0}
 .verdict.ok{border-color:var(--green)}.verdict.bad{border-color:var(--red)}
-.check{display:flex;gap:12px;align-items:baseline;padding:9px 0;border-bottom:1px solid rgba(26,39,64,.6)}
+.check{display:flex;gap:12px;align-items:baseline;padding:9px 0;border-bottom:1px solid rgba(26,39,64,.6);flex-wrap:wrap}
 .check:last-child{border-bottom:0}
 .check b{min-width:210px;font-weight:600;font-size:.87rem}
-.check span.d{color:var(--muted);font-size:.87rem}
+.check span.d{color:var(--muted);font-size:.87rem;min-width:0;overflow-wrap:anywhere}
 .sig{word-break:break-all;font-size:.74rem;color:var(--faint);font-family:ui-monospace,monospace}
 .did{font-family:ui-monospace,monospace;word-break:break-all;font-size:.82rem;color:var(--muted)}
 ul.bul{margin:0 0 14px 20px;color:var(--muted)}ul.bul li{margin:6px 0}
@@ -295,6 +318,27 @@ footer.site .fine{margin-top:30px;padding-top:20px;border-top:1px solid var(--li
 .hero{padding-top:56px}
 header.nav .wrap{height:auto;padding-top:10px;padding-bottom:10px;flex-wrap:wrap}
 .nav-right{margin-left:0}
+}
+@media(max-width:640px){
+.wrap{padding:0 18px}
+/* A 210px label column leaves nothing for the value on a phone: let
+   the label take the full row and the value sit under it. */
+.check b{min-width:0;flex:1 1 100%}
+pre{font-size:.78rem;padding:13px 14px}
+.stat .v{font-size:1.45rem}
+
+/* Three columns of prose do not fit a phone. The wrapper scrolls, but a
+   table you have to discover you can swipe reads as broken - so these
+   collapse into labelled blocks instead. Marked per table: a dense
+   numeric table is still better off scrolling. */
+.stacked tr:first-child{display:none}
+.stacked tr{display:block;border-bottom:1px solid var(--line);padding:9px 0}
+.stacked tr:last-child{border-bottom:0}
+.stacked td{display:block;border:0;padding:3px 14px}
+.stacked td:first-child{font-weight:650;color:var(--text);font-size:.92rem}
+.stacked td:nth-child(2){font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+font-size:.78rem;color:var(--cyan);overflow-wrap:anywhere}
+.stacked td:last-child{color:var(--muted);font-size:.88rem}
 }
 "#;
 

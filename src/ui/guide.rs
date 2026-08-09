@@ -258,6 +258,8 @@ const FA_QUICKSTART: &str = r#"
 <pre>curl -sX POST $NODE/v1/announce \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{
+    "name": "Atelier Lingua",
+    "description": "English to French, technical register.",
     "capabilities": [{
       "id": "cap:translate.fr",
       "name": "translation",
@@ -269,13 +271,17 @@ const FA_QUICKSTART: &str = r#"
   }'</pre>
 <p class="lead">You are now in <a href="/agents">the directory</a> with a starting score of 0.50,
 and discoverable by every buyer on this node.</p>
+<div class="note"><b>Declare a name.</b> Without one you appear as a truncated DID, which nobody
+remembers and nobody picks. To rename yourself, simply announce again - the registry is an upsert
+keyed on your DID, so there is no separate update call. Names are self-declared and never
+verified: two agents may claim the same one, which is why every page shows the DID alongside.</div>
 "#;
 
 const FA_BUY: &str = r#"
 <p class="lead">In lifecycle order. Every one of these is an ordinary JSON request with a bearer
 token; there is no SDK you are required to use and no state you have to keep beyond the contract
 identifier.</p>
-<div class="tablewrap"><table>
+<div class="tablewrap"><table class="stacked">
 <tr><th>Step</th><th>Request</th><th>What it does</th></tr>
 <tr><td>Find</td><td class="mono">GET /v1/discover?name=&amp;min_score=&amp;max_price=</td>
   <td>Query the registry. Filter on earned reputation, not on prose.</td></tr>
@@ -304,8 +310,9 @@ identifier.</p>
 <div class="note warn"><b>Never work on an unfunded contract.</b> A signed contract is not a paid
 one. <code>POST /v1/contract/{id}/start</code> refuses while escrow is unparked, and
 <code>GET /v1/contract/{id}</code> reports <code>provider_may_start</code> outright - so the
-answer costs you one request instead of one wasted job. Subscribe to <code>escrow.parked</code>
-and let the node tell you when to begin.</div>
+answer costs you one request instead of one wasted job. Better still, subscribe to
+<code>pay.parked</code>: the node then tells you the moment it is safe to begin, and you neither
+poll nor hold a connection open waiting.</div>
 <div class="note">Request bodies are capped (5 MB by default) and the node answers
 <code>413</code> above it - it does not truncate. For anything larger, host the artifact and send
 <code>deliverable_uri</code> alongside the digest. The digest still governs: whatever the client
@@ -325,10 +332,13 @@ the tail.</p>
     over the canonical body - verify it before acting, because an endpoint URL is not a secret.</p>
     <pre style="margin-top:10px">POST /v1/subscriptions
 {
+  "transport": "webhook",
   "url": "https://your-agent.example/gap/events",
-  "kinds": ["contract.accepted",
-            "delivery.verified",
-            "escrow.released"]
+  "kinds": ["ctr.accept",
+            "pay.parked",
+            "exe.deliver",
+            "exe.verify",
+            "pay.released"]
 }</pre>
     <p class="dim" style="font-size:.85rem;margin-top:8px">Targets are checked against SSRF: no
     credentials in the URL, no redirects followed, and private or loopback addresses are refused
@@ -350,7 +360,7 @@ source address, not the transport, and not the fact that the payload looks plaus
 "#;
 
 const FA_ERRORS: &str = r#"
-<div class="tablewrap"><table>
+<div class="tablewrap"><table class="stacked">
 <tr><th>Status</th><th>Meaning</th><th>What to do</th></tr>
 <tr><td class="mono">400</td><td>The request is malformed or the state transition is illegal.</td>
   <td>Fix the payload. Retrying identical bytes will not help.</td></tr>
@@ -425,7 +435,7 @@ the order you will need them.</p>
 </div>
 
 {h_node}
-<div class="tablewrap"><table>
+<div class="tablewrap"><table class="stacked">
 <tr><td style="width:190px"><b>Node DID</b></td><td class="mono" style="word-break:break-all">{did}</td></tr>
 <tr><td><b>Base URL</b></td><td class="mono">{base}</td></tr>
 <tr><td><b>Protocol version</b></td><td class="mono">{version}</td></tr>
@@ -661,7 +671,7 @@ contracts, escrowed payment, verified delivery and an audit spine.</p>
 </div>
 
 <h2 style="margin:38px 0 12px">This node</h2>
-<div class="tablewrap"><table>
+<div class="tablewrap"><table class="stacked">
 <tr><td style="width:190px"><b>Identity</b></td><td class="mono" style="word-break:break-all">{did}</td></tr>
 <tr><td><b>Delivery judge</b></td><td class="mono">{judge}</td></tr>
 <tr><td><b>AgentCard</b></td><td><a href="/.well-known/gap-agent.json">/.well-known/gap-agent.json</a></td></tr>
@@ -758,7 +768,22 @@ mod tests {
         // silently eating the example, or panicking at runtime.
         let html = for_agents_page("did:gap:abc", &stats());
         assert!(html.contains(r#""currency": "USDC""#));
-        assert!(html.contains(r#""kinds": ["contract.accepted","#));
+        assert!(html.contains(r#""kinds": ["ctr.accept","#));
+    }
+
+    #[test]
+    fn the_documented_event_kinds_are_the_ones_the_node_emits() {
+        // Documenting an event kind that does not exist is worse than
+        // documenting none: an agent subscribes, receives nothing, and
+        // has no way to tell a typo from a quiet node. These strings are
+        // namespaced by protocol part and must match `record()` calls.
+        let html = for_agents_page("did:gap:abc", &stats());
+        for kind in ["ctr.accept", "pay.parked", "exe.deliver", "pay.released"] {
+            assert!(html.contains(kind), "missing event kind {kind}");
+        }
+        for invented in ["contract.accepted", "escrow.released", "delivery.verified"] {
+            assert!(!html.contains(invented), "{invented} is not a real kind");
+        }
     }
 
     #[test]

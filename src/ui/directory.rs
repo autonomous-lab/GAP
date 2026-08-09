@@ -58,8 +58,10 @@ pub fn directory(dir: &Value) -> String {
 
         cards.push_str(&format!(
             r#"<div class="card hoverable">
-<h3><a href="/agent/{did}">{shortdid}</a></h3>
-<div style="display:flex;align-items:baseline;gap:9px;font-size:.86rem;margin-top:2px">
+<h3><a href="/agent/{did}">{label}</a></h3>
+{didline}
+{blurb}
+<div style="display:flex;align-items:baseline;gap:9px;font-size:.86rem;margin-top:8px">
   <span class="score">{score:.2}</span>
   <span class="dim">over {n} verified job(s)</span></div>
 <div class="bar"><i style="width:{pct:.0}%"></i></div>
@@ -68,7 +70,26 @@ pub fn directory(dir: &Value) -> String {
 <p style="margin-top:12px"><a href="/agent/{did}" class="dim" style="font-size:.85rem">Track record and job history -&gt;</a></p>
 </div>"#,
             did = esc(did),
-            shortdid = esc(&short(did)),
+            label = esc(&super::display_name(
+                a["name"].as_str().unwrap_or(""),
+                did
+            )),
+            // Only worth a second line when the heading is a name; an
+            // unnamed agent would otherwise show the same DID twice.
+            didline = match a["name"].as_str().map(str::trim).filter(|n| !n.is_empty()) {
+                Some(_) => format!(
+                    r#"<div class="did" style="font-size:.72rem;margin-top:1px">{}</div>"#,
+                    esc(&short(did))
+                ),
+                None => String::new(),
+            },
+            blurb = match a["description"].as_str().map(str::trim).filter(|d| !d.is_empty()) {
+                Some(d) => format!(
+                    r#"<p class="muted" style="font-size:.88rem;margin-top:7px">{}</p>"#,
+                    esc(&clip(d, 160))
+                ),
+                None => String::new(),
+            },
             score = score,
             n = n,
             pct = score * 100.0,
@@ -190,6 +211,42 @@ mod tests {
         assert!(html.contains("0.200000 EUR"));
         assert!(html.contains("0.87"));
         assert!(html.contains(r#"href="/agent/did:gap:0123456789abcdef0123456789abcdef""#));
+    }
+
+    #[test]
+    fn an_agent_is_shown_by_its_declared_name_with_the_did_kept_visible() {
+        let d = dir_with(json!([{
+            "did": "did:gap:0123456789abcdef0123456789abcdef",
+            "name": "Atelier Visuel", "description": "Images on demand.",
+            "score": 0.9, "n": 3, "capabilities": []
+        }]));
+        let html = directory(&d);
+        assert!(html.contains("Atelier Visuel"));
+        assert!(html.contains("Images on demand."));
+        // The DID is what actually identifies the agent, so a
+        // self-declared label must never replace it entirely.
+        assert!(html.contains("did:gap:01234567"));
+    }
+
+    #[test]
+    fn an_agent_without_a_name_still_gets_a_heading() {
+        let d = dir_with(json!([{
+            "did": "did:gap:0123456789abcdef0123456789abcdef",
+            "score": 0.5, "n": 0, "capabilities": []
+        }]));
+        let html = directory(&d);
+        assert!(html.contains("did:gap:0123456789"));
+    }
+
+    #[test]
+    fn a_hostile_name_cannot_inject_markup() {
+        let d = dir_with(json!([{
+            "did": "did:gap:aaa", "name": "<script>alert(1)</script>",
+            "score": 0.5, "n": 0, "capabilities": []
+        }]));
+        let html = directory(&d);
+        assert!(!html.contains("<script>alert(1)"));
+        assert!(html.contains("&lt;script&gt;"));
     }
 
     #[test]

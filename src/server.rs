@@ -501,50 +501,59 @@ impl NodeState {
         &mut self,
         token: &str,
         capabilities: Vec<Capability>,
-        _languages: Vec<String>,
-        _regions: Vec<String>,
+        languages: Vec<String>,
+        regions: Vec<String>,
         ttl_seconds: u64,
     ) -> Result<String> {
-        self.announce_with_reachability(
+        self.announce_request(
             token,
-            capabilities,
-            _languages,
-            _regions,
-            ttl_seconds,
-            vec![],
+            crate::discovery::AnnounceRequest {
+                capabilities,
+                languages,
+                regions,
+                ttl_seconds,
+                ..Default::default()
+            },
         )
     }
 
-    /// Announce with the agent's declared reachability (spec 02 §2.2).
+    /// Announce with the agent's declared reachability (spec 02 §2.2)
+    /// and its self-declared profile.
     ///
     /// The node used to overwrite whatever the agent declared with a
     /// placeholder (`https://agent/<did>/gap`, not a routable host),
-    /// which discarded the very data event delivery needs — spec §2.4.4
+    /// which discarded the very data event delivery needs - spec §2.4.4
     /// requires a registry to support a transport *listed by the agent*
     /// (RFC-0013 §2.2). Declared entries are now stored verbatim; the
     /// node-mediated entry is appended, clearly marked.
-    pub fn announce_with_reachability(
+    ///
+    /// Re-announcing is also how an agent renames itself: the registry
+    /// is an upsert keyed on the DID, so the newest announcement wins
+    /// and there is no separate update call to forget to implement.
+    pub fn announce_request(
         &mut self,
         token: &str,
-        capabilities: Vec<Capability>,
-        _languages: Vec<String>,
-        _regions: Vec<String>,
-        ttl_seconds: u64,
-        declared: Vec<Reachability>,
+        req: crate::discovery::AnnounceRequest,
     ) -> Result<String> {
         let agent = self
             .agents
             .get_mut(token)
             .ok_or_else(|| Error::Unauthorized("invalid bearer token".into()))?;
-        let mut reachability = declared;
+        let mut reachability = req.reachability;
         reachability.push(Reachability {
             transport: "gap-node".into(),
             endpoint: format!("/v1/contract/?agent={}", agent.identity.did()),
         });
-        let mut ann =
-            Announcement::signed(&agent.identity, capabilities, reachability, ttl_seconds);
-        ann.languages = _languages;
-        ann.regions = _regions;
+        let mut ann = Announcement::signed(
+            &agent.identity,
+            req.capabilities,
+            reachability,
+            req.ttl_seconds,
+        );
+        ann.languages = req.languages;
+        ann.regions = req.regions;
+        ann.name = req.profile.name;
+        ann.description = req.profile.description;
         ann.resign(&agent.identity);
         ann.verify()?;
         self.registry.announce(ann.clone())?;
@@ -2087,6 +2096,10 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                         || c.description.to_lowercase().contains(&needle)
                         || c.id.to_lowercase().contains(&needle)
                 }) || a.agent_did.to_string().contains(&needle)
+                    // Searching for an agent by the name it goes by is
+                    // the first thing anyone tries.
+                    || a.name.to_lowercase().contains(&needle)
+                    || a.description.to_lowercase().contains(&needle)
             })
             .filter(|a| {
                 max_price.is_none_or(|max| {
@@ -2106,6 +2119,8 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                 let jobs = self.jobs.get(&did).map(|j| j.len()).unwrap_or(0);
                 json!({
                     "did": did,
+                    "name": a.name,
+                    "description": a.description,
                     "capabilities": a.capabilities,
                     "languages": a.languages,
                     "regions": a.regions,
@@ -2566,9 +2581,26 @@ pub fn route_with_ip(
                 .get("reachability")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
+            // Self-declared identity. Re-announcing with a different
+            // name is how an agent renames itself - there is no separate
+            // update call to forget to implement.
+            let profile = crate::discovery::AgentProfile::new(
+                body.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                body.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+            );
             match (token, caps.is_empty()) {
                 (Some(t), false) => guard
-                    .announce_with_reachability(t, caps, languages, regions, ttl, reachability)
+                    .announce_request(
+                        t,
+                        crate::discovery::AnnounceRequest {
+                            capabilities: caps,
+                            languages,
+                            regions,
+                            ttl_seconds: ttl,
+                            reachability,
+                            profile,
+                        },
+                    )
                     .map(|id| json!({ "announcement_id": id })),
                 (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
                 (_, true) => Err(Error::Other("capabilities required".into())),

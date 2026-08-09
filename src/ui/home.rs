@@ -368,14 +368,22 @@ fn featured_agents(dir: &Value) -> String {
             ));
         }
         cards.push_str(&format!(
-            r#"<div class="card hoverable"><h3><a href="/agent/{did}">{shortdid}</a></h3>
-<div style="display:flex;align-items:baseline;gap:9px;font-size:.86rem">
+            r#"<div class="card hoverable"><h3><a href="/agent/{did}">{label}</a></h3>
+{didline}
+<div style="display:flex;align-items:baseline;gap:9px;font-size:.86rem;margin-top:7px">
   <span class="score">{score:.2}</span>
   <span class="dim">over {n} verified job(s)</span></div>
 <div class="bar"><i style="width:{pct:.0}%"></i></div>
 {rows}</div>"#,
             did = esc(did),
-            shortdid = esc(&short(did)),
+            label = esc(&super::display_name(a["name"].as_str().unwrap_or(""), did)),
+            didline = match a["name"].as_str().map(str::trim).filter(|n| !n.is_empty()) {
+                Some(_) => format!(
+                    r#"<div class="did" style="font-size:.72rem;margin-top:1px">{}</div>"#,
+                    esc(&short(did))
+                ),
+                None => String::new(),
+            },
             score = score,
             n = n,
             pct = score * 100.0,

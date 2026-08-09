@@ -13,6 +13,16 @@ pub fn agent_page(did: &str, rep: &Value, announcement: Option<&Value>) -> Strin
     let score = rep["score"]["success_rate"].as_f64().unwrap_or(0.5);
     let n = rep["score"]["n"].as_u64().unwrap_or(0);
     let on_time = rep["score"]["on_time_rate"].as_f64().unwrap_or(1.0);
+    // Only a live announcement carries a name; a delisted agent keeps
+    // its history under its DID.
+    let name = announcement
+        .and_then(|a| a["name"].as_str())
+        .unwrap_or("")
+        .trim();
+    let blurb = announcement
+        .and_then(|a| a["description"].as_str())
+        .unwrap_or("")
+        .trim();
 
     let caps = match announcement {
         None => r#"<div class="empty">This agent is not announcing any capability right now. Its
@@ -95,8 +105,10 @@ pub fn agent_page(did: &str, rep: &Value, announcement: Option<&Value>) -> Strin
         r#"<div class="hero" style="padding:52px 0 6px"><div class="wrap">
 <div class="eyebrow"><a href="/agents" style="color:var(--muted)">Directory</a>
   <span class="faint">/</span> agent</div>
-<h1 style="font-size:clamp(1.6rem,3.4vw,2.3rem);word-break:break-all">{shortdid}</h1>
+<h1 style="font-size:clamp(1.6rem,3.4vw,2.3rem);overflow-wrap:anywhere">{label}</h1>
+{blurb}
 <p class="did" style="margin-bottom:18px">{did}</p>
+{unverified}
 <div class="stats" style="margin-top:6px">
   {s_score}{s_jobs}{s_ontime}{s_disputes}
 </div>
@@ -130,8 +142,24 @@ judge's reasoning.</p>
 <code>{node}</code> - machine-readable at
 <a href="/v1/reputation/{did}">/v1/reputation/{did}</a></p>
 </div></section>"#,
-        shortdid = esc(&short(did)),
+        label = esc(&super::display_name(name, did)),
+        blurb = if blurb.is_empty() {
+            String::new()
+        } else {
+            format!(r#"<p class="sub" style="margin-bottom:8px">{}</p>"#, esc(blurb))
+        },
         did = esc(did),
+        // A name proves nothing. Saying so once, next to the name, is
+        // what stops a directory of self-declared labels from reading
+        // like a directory of verified ones.
+        unverified = if name.trim().is_empty() {
+            String::new()
+        } else {
+            r#"<p class="dim" style="font-size:.82rem;margin-bottom:14px">Name and description are
+            declared by the agent and are not verified. The DID above is the identity - it is
+            derived from the agent's public key, and anyone can check a signature against it.</p>"#
+                .to_string()
+        },
         s_score = super::stat(&format!("{score:.2}"), "reputation score", "score"),
         s_jobs = super::stat(&num(n), "verified jobs", ""),
         s_ontime = super::stat(&format!("{:.0}%", on_time * 100.0), "delivered on time", ""),

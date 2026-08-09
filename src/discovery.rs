@@ -42,6 +42,22 @@ pub struct Price {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Announcement {
     pub agent_did: Did,
+    /// A human-readable name the agent declares for itself.
+    ///
+    /// **Self-declared and unverified.** It is a label, never an
+    /// identity: two agents may claim the same name, and only the DID
+    /// distinguishes them. Every surface that shows a name must show
+    /// the DID with it.
+    ///
+    /// Skipped when empty so that announcements signed before this
+    /// field existed still serialize to the exact bytes they were
+    /// signed over - adding a field to a signed struct otherwise
+    /// invalidates every signature already in storage.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// One line about what the agent is, for the directory listing.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
     pub capabilities: Vec<Capability>,
     pub reachability: Vec<Reachability>,
     #[serde(default)]
@@ -61,6 +77,70 @@ pub struct Announcement {
     pub signature: Option<String>,
 }
 
+/// Everything an agent publishes when it announces.
+///
+/// One struct rather than eight positional arguments: the list had
+/// grown past the point where a call site could be read, and a caller
+/// that swapped `languages` and `regions` would have compiled happily.
+#[derive(Debug, Clone, Default)]
+pub struct AnnounceRequest {
+    pub capabilities: Vec<Capability>,
+    pub languages: Vec<String>,
+    pub regions: Vec<String>,
+    pub ttl_seconds: u64,
+    pub reachability: Vec<Reachability>,
+    pub profile: AgentProfile,
+}
+
+/// The self-declared, human-readable part of an announcement.
+///
+/// Kept separate from [`Announcement`] so that adding a display field
+/// does not mean adding another positional argument to every call site
+/// that publishes one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentProfile {
+    pub name: String,
+    pub description: String,
+}
+
+impl AgentProfile {
+    /// Longest name a directory row can show without the layout losing
+    /// its shape. Truncation is silent on purpose: refusing an
+    /// announcement over a cosmetic limit would be worse.
+    pub const MAX_NAME: usize = 60;
+    pub const MAX_DESCRIPTION: usize = 240;
+
+    pub fn new(name: &str, description: &str) -> Self {
+        Self {
+            name: sanitize_label(name, Self::MAX_NAME),
+            description: sanitize_label(description, Self::MAX_DESCRIPTION),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.name.is_empty() && self.description.is_empty()
+    }
+}
+
+/// Normalise a self-declared label.
+///
+/// HTML escaping happens at render time, but that does not help against
+/// a name made of newlines, tabs or zero-width characters: those pass
+/// every escape unchanged and still wreck a page, or hide one name
+/// inside another. Control and format characters are dropped, runs of
+/// whitespace collapse to one space, and the result is length-capped in
+/// characters (not bytes, which would split a multi-byte one).
+pub fn sanitize_label(raw: &str, max: usize) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        // Cf = zero-width joiners, bidi overrides, and friends.
+        .filter(|c| !c.is_control() && !matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{feff}'))
+        .collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed.chars().take(max).collect::<String>()
+}
+
 /// How to reach an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reachability {
@@ -78,6 +158,8 @@ impl Announcement {
     ) -> Self {
         let mut ann = Self {
             agent_did: agent.did().clone(),
+            name: String::new(),
+            description: String::new(),
             capabilities,
             reachability,
             autonomy_levels: vec!["propose".into(), "execute-notify".into()],
@@ -379,6 +461,51 @@ pub fn query_digest(q: &Query) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_label_is_stripped_of_characters_that_survive_html_escaping() {
+        // Newlines and zero-width characters pass every HTML escape
+        // unchanged and still wreck a layout - or hide one name inside
+        // another that looks identical on screen.
+        assert_eq!(sanitize_label("Atelier\n\tVisuel", 60), "Atelier Visuel");
+        assert_eq!(sanitize_label("  spaced   out  ", 60), "spaced out");
+        assert_eq!(sanitize_label("ze\u{200b}ro", 60), "zero");
+        assert_eq!(sanitize_label("bidi\u{202e}flip", 60), "bidiflip");
+    }
+
+    #[test]
+    fn a_label_is_capped_in_characters_not_bytes() {
+        // A byte-based cap would split a multi-byte character in half.
+        let accents = "é".repeat(100);
+        assert_eq!(sanitize_label(&accents, 10).chars().count(), 10);
+        assert_eq!(sanitize_label(&"a".repeat(500), 60).len(), 60);
+    }
+
+    #[test]
+    fn an_unnamed_announcement_serializes_exactly_as_it_did_before_names_existed() {
+        // The signature covers the serialized announcement. If an empty
+        // name emitted `"name":""`, every announcement signed before
+        // this field existed would fail verification on reload.
+        let agent = AgentIdentity::generate();
+        let ann = Announcement::signed(&agent, vec![], vec![], 3600);
+        let json = serde_json::to_string(&ann).unwrap();
+        assert!(!json.contains("\"name\""));
+        assert!(!json.contains("\"description\""));
+        ann.verify().expect("an unnamed announcement still verifies");
+    }
+
+    #[test]
+    fn a_named_announcement_still_verifies() {
+        let agent = AgentIdentity::generate();
+        let mut ann = Announcement::signed(&agent, vec![], vec![], 3600);
+        ann.name = "Atelier Visuel".into();
+        ann.description = "Images on demand.".into();
+        ann.resign(&agent);
+        ann.verify().expect("a named announcement verifies");
+        // ...and tampering with the name after signing does not.
+        ann.name = "Someone Else".into();
+        assert!(ann.verify().is_err(), "the name is covered by the signature");
+    }
 
     fn make_agent(name: &str) -> (AgentIdentity, Capability) {
         let agent = AgentIdentity::generate();
