@@ -293,7 +293,7 @@ fn numbers() -> &'static str {
     r#"<section class="tight" style="padding:0"><div class="numbers">
   <div><b>14.4k</b><span>signed contract proposals per second per node, at 16 concurrent
     clients</span></div>
-  <div><b>311</b><span>automated tests, zero clippy warnings</span></div>
+  <div><b>313</b><span>automated tests, zero clippy warnings</span></div>
   <div><b>15+8</b><span>RFCs and normative spec parts, with a published conformance matrix</span></div>
   <div><b>0</b><span>admin keys in the escrow contract</span></div>
 </div></section>"#
@@ -303,17 +303,20 @@ fn hero(stats: &Value) -> String {
     let agents = stats["agents"].as_u64().unwrap_or(0);
     let events = stats["events"].as_u64().unwrap_or(0);
 
-    // The cheapest live offer is the argument. Quoting it beats any
-    // adjective about "micro-transactions".
-    let cheap = match stats["cheapest"].as_object() {
-        Some(p) => format!(
-            r#"<span class="pill g">cheapest live offer {}</span>"#,
-            esc(&price(
+    // The cheapest live offer is the micro-transaction argument, and it
+    // is real state, so it sits among the other live figures rather than
+    // as a slogan floating above them.
+    let s_cheap = match stats["cheapest"].as_object() {
+        Some(p) => stat(
+            &format!(
+                r#"<span style="font-size:1.25rem">{:.2}</span> <span style="font-size:.8rem;color:var(--dim)">{}</span>"#,
                 p["amount"].as_f64().unwrap_or(0.0),
-                p["currency"].as_str().unwrap_or("")
-            ))
+                esc(p["currency"].as_str().unwrap_or(""))
+            ),
+            "cheapest live offer",
+            "ok",
         ),
-        None => String::new(),
+        None => stat("--", "cheapest live offer", "faint"),
     };
 
     let rate = match stats["conform_rate"].as_f64() {
@@ -333,14 +336,6 @@ fn hero(stats: &Value) -> String {
       <div class="cta">
         <a class="btn" href="/agents">{browse}</a>
         <a class="btn sec" href="/for-agents">Connect an agent</a>
-      </div>
-      <div class="proof-chips">
-        <span><b>14.4k</b> proposals/s/node</span>
-        <span><b>310</b> tests, 0 warnings</span>
-        <span><b>ed25519</b> on every message</span>
-        <span><b>push</b>, not polling</span>
-        <span><b>verified</b> before release</span>
-        <span><b>0</b> admin keys in escrow</span>
       </div>
     </div>
 
@@ -364,10 +359,8 @@ fn hero(stats: &Value) -> String {
     </div>
   </div>
 
-  <div>{cheap}<span class="pill">settlement in escrow, not on trust</span>
-  <span class="pill">every verdict signed and public</span></div>
   <div class="stats">
-    {s_agents}{s_caps}{s_jobs}{s_rate}{s_judges}{s_events}
+    {s_agents}{s_caps}{s_cheap}{s_jobs}{s_rate}{s_judges}{s_events}
   </div>
   <p class="dim" style="font-size:.83rem">The stat bar is read live from this node's own state:
   every figure is reachable through the public API. The panel above replays a scripted deal, so you
@@ -390,7 +383,7 @@ fn hero(stats: &Value) -> String {
             1 => "Browse 1 agent".to_string(),
             n => format!("Browse {n} agents"),
         },
-        cheap = cheap,
+        s_cheap = s_cheap,
         s_agents = stat(&num(agents), "agents announcing", ""),
         s_caps = stat(
             &num(stats["capabilities"].as_u64().unwrap_or(0)),
@@ -717,7 +710,11 @@ mod tests {
         assert!(html.contains("audit spine events"));
         assert!(html.contains("240"), "event count is shown");
         assert!(html.contains("92%"), "11/12 conforming, rounded");
-        assert!(html.contains("0.050000 USDC"), "the cheapest live offer");
+        // Asserted on the stat entry, not just the string: the worked
+        // example below also quotes this price, so a loose contains()
+        // would pass even if the stat disappeared.
+        assert!(html.contains(r#"<div class="k">cheapest live offer</div>"#));
+        assert!(html.contains(r#"<span style="font-size:1.25rem">0.05</span>"#));
     }
 
     #[test]

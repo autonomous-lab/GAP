@@ -240,6 +240,9 @@ small{font-size:.82rem}
 background:var(--line);border:1px solid var(--line);
 border-radius:var(--radius);overflow:hidden;margin:30px 0 6px}
 .stat{padding:17px 19px;background:var(--panel)}
+/* An odd number of stats leaves a hole at the end of a two-column grid.
+   :last-child:nth-child(odd) is exactly "alone on its final row". */
+.stats>.stat:last-child:nth-child(odd){grid-column:1/-1}
 .stat .v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:1.7rem;letter-spacing:-.03em;line-height:1.1}
 .stat .k{font-size:.74rem;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin-top:5px}
 
