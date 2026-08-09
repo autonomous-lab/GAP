@@ -1,4 +1,4 @@
-# GAP node + ClickHouse — local stack
+# GAP node + ClickHouse - local stack
 #
 # Usage:
 #   docker compose up --build
@@ -23,7 +23,7 @@ services:
       GAP_STORAGE: "clickhouse"
       GAP_CLICKHOUSE_URL: "http://clickhouse:8123"
       GAP_DB_INIT: "1"
-      # Absolute URLs in sitemap.xml — set this to your public origin.
+      # Absolute URLs in sitemap.xml - set this to your public origin.
       GAP_PUBLIC_URL: "http://172.17.0.1:8080"
     depends_on:
       clickhouse:
@@ -38,7 +38,7 @@ services:
       - "172.17.0.1:8123:8123"   # HTTP interface (used by the node)
       - "172.17.0.1:9000:9000"   # native protocol (admin/analytics)
     volumes:
-      # System logs are disabled/kept tiny — they grow forever otherwise.
+      # System logs are disabled/kept tiny - they grow forever otherwise.
       - ./deploy/clickhouse/system-logs.xml:/etc/clickhouse-server/config.d/system-logs.xml:ro
       - ./data/clickhouse:/var/lib/clickhouse
     ulimits:

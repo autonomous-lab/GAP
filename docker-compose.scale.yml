@@ -1,19 +1,19 @@
-# GAP node — scaled stack: load balancer + 3 nodes + ClickHouse
+# GAP node - scaled stack: load balancer + 3 nodes + ClickHouse
 #
 # Usage:
 #   docker compose -f docker-compose.scale.yml up --build
-#   curl http://172.17.0.1:8080/health      # LB → any node
+#   curl http://172.17.0.1:8080/health      # LB -> any node
 #   curl http://172.17.0.1:8080/v1/identity # through the LB
 #
 # Architecture (see docs/scaling.md):
-#   agents → HAProxy → {gap-node ×3} → ClickHouse (shared state)
+#   agents -> HAProxy -> {gap-node x3} -> ClickHouse (shared state)
 #
 # Ports bind to the Docker bridge address (172.17.0.1) rather than
 # 0.0.0.0: a reverse proxy in front decides what reaches the internet
 # and terminates TLS. State is bind-mounted under ./data.
 #
 # NOTE: for real production scaling, identities must be persisted to
-# ClickHouse (see docs/scaling.md §2). This compose demonstrates the
+# ClickHouse (see docs/scaling.md section 2). This compose demonstrates the
 # topology; the in-memory identity map of the reference node means
 # identities are per-node until that migration lands.
 
@@ -83,7 +83,7 @@ services:
       - "172.17.0.1:8123:8123"   # HTTP interface
       - "172.17.0.1:9000:9000"   # native protocol
     volumes:
-      # System logs disabled — they grow forever otherwise.
+      # System logs disabled - they grow forever otherwise.
       - ./deploy/clickhouse/system-logs.xml:/etc/clickhouse-server/config.d/system-logs.xml:ro
       - ./data/clickhouse:/var/lib/clickhouse
     ulimits:

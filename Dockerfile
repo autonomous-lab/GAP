@@ -1,4 +1,4 @@
-# GAP node — multi-stage build
+# GAP node - multi-stage build
 #
 # Stage 1: compile the Rust binary (musl for static linking).
 FROM rust:1.97-alpine AS builder

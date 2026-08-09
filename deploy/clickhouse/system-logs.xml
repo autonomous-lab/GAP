@@ -1,7 +1,7 @@
 # ClickHouse system-log control
 #
 # By default ClickHouse writes internal system logs (query_log,
-# query_thread_log, part_log, trace_log, metric_log, …) which grow
+# query_thread_log, part_log, trace_log, metric_log, ...) which grow
 # without bound. This config:
 #   - disables the most prolific logs entirely (Null engine),
 #   - keeps only what is operationally useful, with a 7-day TTL.
