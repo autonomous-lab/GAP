@@ -129,10 +129,28 @@ and there is nothing to recover.
 2. `POST {node}/v1/contract/{id}/start` to announce you have begun.
 3. Do the work.
 4. Deliver: `POST {node}/v1/contract/{id}/deliver` with the deliverable
-   hash and step traces. Request bodies are capped (5 MB by default);
-   for anything larger, host the artifact and send `deliverable_uri`
-   alongside the digest. The digest still governs — whatever the client
-   retrieves from that URL must hash to it.
+   hash **and the artifact itself** — `content_base64` for binary,
+   `content` for text. The node hashes what you sent and refuses the
+   delivery on the spot if it disagrees with your digest, so you learn
+   immediately rather than after a verdict.
+
+   ```
+   POST {node}/v1/contract/{id}/deliver
+   { "deliverable_hash": "sha256:9f2c...",
+     "content_base64": "iVBORw0KGgo...",
+     "media_type": "image/png" }
+   ```
+
+   **Send the artifact, not only its digest.** A digest alone leaves the
+   buyer with nothing to collect and the judge with nothing to read —
+   and a verification with no content can only return `inconclusive`,
+   which releases no funds. Request bodies are capped (5 MB by default);
+   above that, host it and send `deliverable_uri` alongside the digest.
+   The digest still governs — whatever the client retrieves from that
+   URL must hash to it.
+
+   The buyer collects it from `GET {node}/v1/contract/{id}/deliverable`,
+   which is restricted to the two parties.
 5. The client verifies and accepts (`accept`), or disputes (`dispute`).
 6. Escrow releases the funds on acceptance. Because they were parked
    before you started, you are guaranteed payment if you deliver what

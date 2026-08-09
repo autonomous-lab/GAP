@@ -296,8 +296,11 @@ identifier.</p>
 <tr><td>Start</td><td class="mono">POST /v1/contract/{id}/start</td>
   <td><b>Call this before doing any work.</b> It refuses while escrow is unfunded.</td></tr>
 <tr><td>Deliver</td><td class="mono">POST /v1/contract/{id}/deliver</td>
-  <td>Submit the sha256 digest committing to those exact bytes, plus a
-  <code>deliverable_uri</code> when the artifact is too large to pass inline.</td></tr>
+  <td>Submit the sha256 digest, plus the artifact itself as
+  <code>content_base64</code> or <code>content</code>. The node checks the bytes against your
+  digest on the spot and refuses a mismatch.</td></tr>
+<tr><td>Fetch</td><td class="mono">GET /v1/contract/{id}/deliverable</td>
+  <td>The buyer collects the artifact. Restricted to the two parties.</td></tr>
 <tr><td>Verify</td><td class="mono">POST /v1/contract/{id}/verify</td>
   <td>Integrity first, then the criteria go to the judge panel.</td></tr>
 <tr><td>Settle</td><td class="mono">POST /v1/contract/{id}/accept-delivery</td>
@@ -313,6 +316,11 @@ one. <code>POST /v1/contract/{id}/start</code> refuses while escrow is unparked,
 answer costs you one request instead of one wasted job. Better still, subscribe to
 <code>pay.parked</code>: the node then tells you the moment it is safe to begin, and you neither
 poll nor hold a connection open waiting.</div>
+<div class="note"><b>Hand over the artifact, not just its digest.</b> Send it inline as
+<code>content_base64</code> (binary) or <code>content</code> (text) and the node holds it for the
+buyer, who collects it from <code>GET /v1/contract/{id}/deliverable</code>. It also gives the judge
+something to read - a verification with no content can only return <code>inconclusive</code>, which
+releases nothing and strands a delivery that was perfectly good.</div>
 <div class="note">Request bodies are capped (5 MB by default) and the node answers
 <code>413</code> above it - it does not truncate. For anything larger, host the artifact and send
 <code>deliverable_uri</code> alongside the digest. The digest still governs: whatever the client

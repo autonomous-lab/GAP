@@ -670,6 +670,7 @@ impl NodeState {
         contract_id: &str,
         deliverable_hash: &str,
         deliverable_uri: Option<&str>,
+        artifact: Option<crate::artifact::Artifact>,
     ) -> Result<()> {
         let provider_did = self.agent_by_token(provider_token)?.identity.did().clone();
         self.check_veto(&provider_did, contract_id)?;
@@ -697,6 +698,12 @@ Call POST /v1/contract/{id}/start before working - it refuses while unfunded"
         // Keep the commitment: verification later checks what the client
         // actually received against this exact digest.
         contract.deliverable_hash = Some(deliverable_hash.to_string());
+        // The artifact itself, when the provider handed it over.
+        // Checked against the commitment HERE rather than at
+        // verification: a digest that does not match the bytes is a
+        // delivery that was never valid, and saying so immediately is
+        // worth far more to the provider than a verdict an hour later.
+        let stored = Self::accept_artifact(artifact, deliverable_hash)?;
         // An optional retrieval location for artifacts too large to pass
         // inline. It is a convenience, never an authority - the digest
         // is what the verifier checks, so pointing at bytes that do not
@@ -713,8 +720,114 @@ Call POST /v1/contract/{id}/start before working - it refuses while unfunded"
         contract.transition(ContractState::Delivered)?;
         let saved = contract.clone();
         self.persist_contract(&saved);
+        self.persist_deliverable(contract_id, deliverable_hash, stored, deliverable_uri);
         self.record("exe.deliver", json!({ "contract_id": contract_id }));
         Ok(())
+    }
+
+    /// Validate an inline artifact against the digest the provider
+    /// committed to. Returns it unchanged when it checks out.
+    fn accept_artifact(
+        artifact: Option<crate::artifact::Artifact>,
+        declared_hash: &str,
+    ) -> Result<Option<crate::artifact::Artifact>> {
+        let art = match artifact.filter(|a| !a.is_empty()) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        if art.byte_len() > crate::artifact::MAX_INLINE_BYTES {
+            return Err(Error::Other(format!(
+                "deliverable is {} bytes, over the {} byte inline limit: host it and send \
+deliverable_uri with the digest instead",
+                art.byte_len(),
+                crate::artifact::MAX_INLINE_BYTES
+            )));
+        }
+        let computed = art.digest()?;
+        if !crate::artifact::digests_match(&computed, declared_hash) {
+            return Err(Error::Other(format!(
+                "deliverable_hash does not match the content supplied: committed to \
+{declared_hash}, the content hashes to {computed}"
+            )));
+        }
+        Ok(Some(art))
+    }
+
+    /// Record what the node now holds for a contract.
+    fn persist_deliverable(
+        &mut self,
+        contract_id: &str,
+        digest: &str,
+        artifact: Option<crate::artifact::Artifact>,
+        uri: Option<&str>,
+    ) {
+        let uri = uri.map(str::trim).unwrap_or("");
+        if artifact.is_none() && uri.is_empty() {
+            return;
+        }
+        let art = artifact.unwrap_or(crate::artifact::Artifact {
+            content: String::new(),
+            encoding: "utf8".into(),
+            media_type: String::new(),
+        });
+        let _ = self
+            .storage
+            .upsert_deliverable(&crate::storage::DeliverableRecord {
+                contract_id: contract_id.to_string(),
+                digest: digest.to_string(),
+                encoding: art.encoding,
+                media_type: art.media_type,
+                content: art.content,
+                uri: uri.to_string(),
+                delivered_at: now_unix(),
+            });
+    }
+
+    /// The artifact the node holds for a contract, if any.
+    pub fn deliverable_of(&self, contract_id: &str) -> Option<crate::storage::DeliverableRecord> {
+        self.storage.get_deliverable(contract_id).ok().flatten()
+    }
+
+    /// `GET /v1/contract/{id}/deliverable` — hand the artifact to a
+    /// party to the contract.
+    ///
+    /// Restricted to the client and the provider. A public directory of
+    /// who trades what is one thing; handing any caller the work
+    /// somebody paid for is another, and no amount of pseudonymity in
+    /// the reputation projection would undo that.
+    pub fn fetch_deliverable(&self, token: &str, contract_id: &str) -> Result<Value> {
+        let caller = self.agent_by_token(token)?.identity.did().clone();
+        let contract = self
+            .contracts
+            .get(contract_id)
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.client != caller && contract.provider != caller {
+            return Err(Error::Unauthorized(
+                "only the contract's parties may fetch the deliverable".into(),
+            ));
+        }
+        match self.deliverable_of(contract_id) {
+            Some(d) => Ok(json!({
+                "contract_id": contract_id,
+                "digest": d.digest,
+                "encoding": d.encoding,
+                "media_type": d.media_type,
+                "content": d.content,
+                "uri": d.uri,
+                "delivered_at": d.delivered_at,
+                // Restating the guarantee where it is consumed: these
+                // bytes hashed to the committed digest at delivery, so
+                // the caller does not have to take the node's word for
+                // it - it can hash them again.
+                "integrity": "content matched the provider's committed digest at delivery",
+            })),
+            None => Err(Error::Other(
+                "no artifact is held for this contract: the provider committed to a digest \
+only. Fetch it from deliverable_uri on the contract, or ask the provider to re-deliver with \
+the content inline"
+                    .into(),
+            )),
+        }
     }
 
     /// Client accepts delivery; escrow releases automatically.
@@ -1335,6 +1448,49 @@ Call POST /v1/contract/{id}/start before working - it refuses while unfunded"
             });
         }
 
+        // What the judge will actually read.
+        //
+        // The client may pass the bytes it received - that is the
+        // strongest evidence, because it proves what *arrived*. When it
+        // does not, fall back to the artifact the node holds. Without
+        // this fallback a delivery whose artifact went through the node
+        // was judged with no content at all, and the only honest answer
+        // to "does this meet the criteria" with nothing to read is
+        // `inconclusive` - which releases no funds and strands a
+        // perfectly good delivery.
+        let held = self.deliverable_of(contract_id);
+        let (content, content_origin): (Option<String>, &str) = match content {
+            Some(c) => (Some(c.to_string()), "client"),
+            None => match held.as_ref().filter(|d| !d.content.is_empty()) {
+                Some(d) => {
+                    // Text goes to the judge as text; binary cannot be
+                    // read by one, so it is described rather than
+                    // pasted - a judge shown a megabyte of base64 will
+                    // hallucinate an opinion about it.
+                    if d.encoding == "base64" {
+                        (
+                            Some(format!(
+                                "[binary artifact held by the node: {} bytes, media type {}, \
+digest {} - integrity verified against the provider's commitment]",
+                                d.content.len(),
+                                if d.media_type.is_empty() {
+                                    "unspecified"
+                                } else {
+                                    &d.media_type
+                                },
+                                d.digest
+                            )),
+                            "node-binary",
+                        )
+                    } else {
+                        (Some(d.content.clone()), "node")
+                    }
+                }
+                None => (None, "none"),
+            },
+        };
+        let content = content.as_deref();
+
         // A contract that negotiated confidentiality, or carries a
         // compliance context, must never have its content leave the
         // node — enforced here, not left to the judge.
@@ -1346,7 +1502,20 @@ Call POST /v1/contract/{id}/start before working - it refuses while unfunded"
             deadline: contract.terms.deadline,
             delivered_at: now_unix(),
             declared_hash: contract.deliverable_hash.clone().unwrap_or_default(),
-            computed_hash: content.map(|c| format!("sha256:{}", crate::sha256_hex(c.as_bytes()))),
+            // Where the digest comes from matters. Bytes supplied by the
+            // client are hashed here, because that is the whole point -
+            // it proves what arrived. Content the node holds was already
+            // hashed and matched at delivery, so its stored digest is
+            // the answer; hashing the human-readable stand-in written
+            // for a binary artifact would compute the digest of a
+            // sentence and fail integrity on a delivery that is sound.
+            computed_hash: match content_origin {
+                "client" => {
+                    content.map(|c| format!("sha256:{}", crate::sha256_hex(c.as_bytes())))
+                }
+                "node" | "node-binary" => held.as_ref().map(|d| d.digest.clone()),
+                _ => None,
+            },
             deliverable_excerpt: if confidential {
                 None
             } else {
@@ -1419,8 +1588,13 @@ Call POST /v1/contract/{id}/start before working - it refuses while unfunded"
         provider_token: &str,
         contract_id: &str,
         deliverable_hash: &str,
+        deliverable_uri: Option<&str>,
+        artifact: Option<crate::artifact::Artifact>,
     ) -> Result<Value> {
         let provider_did = self.agent_by_token(provider_token)?.identity.did().clone();
+        // Same commitment check as a first delivery: a rework that does
+        // not hash to what it claims is not a rework.
+        let stored = Self::accept_artifact(artifact, deliverable_hash)?;
         let verdict_was_bad = self
             .verdicts
             .get(contract_id)
@@ -1449,12 +1623,18 @@ Call POST /v1/contract/{id}/start before working - it refuses while unfunded"
         }
         contract.remedies_used += 1;
         contract.deliverable_hash = Some(deliverable_hash.to_string());
+        if let Some(uri) = deliverable_uri.map(str::trim).filter(|u| !u.is_empty()) {
+            contract.deliverable_uri = Some(uri.to_string());
+        }
         if contract.state == ContractState::Disputed {
             contract.transition(ContractState::Delivered)?;
         }
         let saved = contract.clone();
         let remaining = Self::MAX_REMEDIES - saved.remedies_used;
         self.persist_contract(&saved);
+        // Replace what the node holds: the old artifact is the one that
+        // was just judged non-conforming.
+        self.persist_deliverable(contract_id, deliverable_hash, stored, deliverable_uri);
         // The stale verdict must go: it judged the previous artifact.
         self.verdicts.remove(contract_id);
         self.escalations.remove(contract_id);
@@ -2669,10 +2849,15 @@ pub fn route_with_ip(
                 .get("deliverable_uri")
                 .or_else(|| body.get("uri"))
                 .and_then(|v| v.as_str());
+            let artifact = crate::artifact::Artifact::parse(&body);
             match token {
-                Some(t) => guard
-                    .deliver(t, id, hash, uri)
-                    .map(|_| json!({ "state": "delivered" })),
+                Some(t) => guard.deliver(t, id, hash, uri, artifact).map(|_| {
+                    json!({
+                        "state": "delivered",
+                        "artifact_held": guard.deliverable_of(id).is_some(),
+                        "retrieve": format!("/v1/contract/{id}/deliverable"),
+                    })
+                }),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
@@ -2684,6 +2869,19 @@ pub fn route_with_ip(
                 .trim_end_matches("/accept-delivery");
             match token {
                 Some(t) => guard.accept_delivery(t, id),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        // The artifact itself. Restricted to the two parties: a public
+        // node directory is one thing, handing anyone the work somebody
+        // paid for is another.
+        ("GET", p) if p.starts_with("/v1/contract/") && p.ends_with("/deliverable") => {
+            let id = percent_decode(
+                p.trim_start_matches("/v1/contract/")
+                    .trim_end_matches("/deliverable"),
+            );
+            match token {
+                Some(t) => guard.fetch_deliverable(t, &id),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
@@ -2906,8 +3104,13 @@ pub fn route_with_ip(
                 .get("deliverable_hash")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let uri = body
+                .get("deliverable_uri")
+                .or_else(|| body.get("uri"))
+                .and_then(|v| v.as_str());
+            let artifact = crate::artifact::Artifact::parse(&body);
             match token {
-                Some(t) => guard.remedy(t, id, hash),
+                Some(t) => guard.remedy(t, id, hash, uri, artifact),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
@@ -3146,7 +3349,9 @@ mod tests {
             "terms": {
                 "input": {}, "deliverable": {}, "acceptance_criteria": ["ok"],
                 "deadline": now + 3600,
-                "price": { "amount": 0.2, "currency": "EUR", "model": "fixed", "cap": 1.0 },
+                // Priced in USDC on purpose: the escrow used to
+                // hardcode EUR, and a fixture in EUR could never catch it.
+                "price": { "amount": 0.2, "currency": "USDC", "model": "fixed", "cap": 1.0 },
                 "autonomy": "propose", "confidentiality": null
             },
             "escrow": true
@@ -3284,6 +3489,187 @@ mod tests {
             "the URL a provider supplied must survive to the client"
         );
         assert_eq!(view["contract"]["deliverable_hash"], json!("sha256:abc123"));
+    }
+
+    /// Drive a contract to the point where the provider may deliver.
+    fn funded_contract(arc: &Arc<Mutex<NodeState>>) -> (String, String, String) {
+        let (id, client_tok, provider_tok) = signed_contract(arc);
+        route(
+            arc,
+            "POST",
+            "/v1/escrow/park",
+            json!({ "contract_id": id, "amount": "0.20" })
+                .to_string()
+                .as_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
+        (id, client_tok, provider_tok)
+    }
+
+    #[test]
+    fn the_node_holds_the_artifact_and_hands_it_to_the_buyer() {
+        // The gap this closes: the node kept only a digest, so a buyer
+        // whose provider had no out-of-band channel could not fetch what
+        // it had just paid for. There was no endpoint at all.
+        let arc = state();
+        let (id, client_tok, provider_tok) = funded_contract(&arc);
+        let digest = format!("sha256:{}", crate::sha256_hex(b"hello"));
+
+        let (status, out) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/deliver"),
+            json!({ "deliverable_hash": digest, "content_base64": "aGVsbG8=" })
+                .to_string()
+                .as_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_eq!(status, 200, "deliver failed: {out}");
+        assert_eq!(out["artifact_held"], json!(true));
+
+        let (status, art) = route(
+            &arc,
+            "GET",
+            &format!("/v1/contract/{id}/deliverable"),
+            b"",
+            Some(&format!("Bearer {client_tok}")),
+        );
+        assert_eq!(status, 200, "the buyer must be able to fetch it: {art}");
+        assert_eq!(art["content"], json!("aGVsbG8="));
+        assert_eq!(art["encoding"], json!("base64"));
+        assert_eq!(art["digest"], json!(digest));
+    }
+
+    #[test]
+    fn settlement_reports_the_currency_the_parties_signed() {
+        // The escrow used to hardcode EUR, so a contract priced in USDC
+        // settled with a receipt naming a currency nobody agreed to.
+        // The amount was right and the unit was wrong - the sort of
+        // discrepancy an accounting system inherits without questioning.
+        let arc = state();
+        let (id, client_tok, provider_tok) = funded_contract(&arc);
+        let digest = format!("sha256:{}", crate::sha256_hex(b"done"));
+        route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/deliver"),
+            json!({ "deliverable_hash": digest, "content": "done" })
+                .to_string()
+                .as_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        let (status, out) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/accept-delivery"),
+            b"",
+            Some(&format!("Bearer {client_tok}")),
+        );
+        assert_eq!(status, 200, "settle failed: {out}");
+        assert_eq!(
+            out["settlement"]["currency"],
+            json!("USDC"),
+            "the receipt must name the currency the contract was priced in: {out}"
+        );
+    }
+
+    #[test]
+    fn a_delivery_whose_bytes_do_not_match_its_digest_is_refused_immediately() {
+        // Checked at delivery, not at verification: the provider learns
+        // now, while it can still fix it.
+        let arc = state();
+        let (id, _client_tok, provider_tok) = funded_contract(&arc);
+        let (status, out) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/deliver"),
+            json!({ "deliverable_hash": "sha256:deadbeef", "content_base64": "aGVsbG8=" })
+                .to_string()
+                .as_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_ne!(status, 200);
+        assert!(
+            out.to_string().contains("does not match the content supplied"),
+            "and says exactly what disagreed: {out}"
+        );
+    }
+
+    #[test]
+    fn a_stranger_cannot_fetch_an_artifact() {
+        let arc = state();
+        let (id, _client_tok, provider_tok) = funded_contract(&arc);
+        let digest = format!("sha256:{}", crate::sha256_hex(b"secret work"));
+        route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/deliver"),
+            json!({ "deliverable_hash": digest, "content": "secret work" })
+                .to_string()
+                .as_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
+
+        let (_, stranger_tok) = arc.lock().unwrap().create_identity();
+        let (status, _) = route(
+            &arc,
+            "GET",
+            &format!("/v1/contract/{id}/deliverable"),
+            b"",
+            Some(&format!("Bearer {stranger_tok}")),
+        );
+        assert_eq!(status, 401, "the work belongs to the parties, not the world");
+
+        // ...and the provider, who authored it, still can.
+        let (status, _) = route(
+            &arc,
+            "GET",
+            &format!("/v1/contract/{id}/deliverable"),
+            b"",
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_eq!(status, 200);
+    }
+
+    #[test]
+    fn verification_uses_the_held_artifact_when_the_client_supplies_none() {
+        // The bug behind a spurious `inconclusive`: with no content and
+        // no fallback, the integrity check had nothing to compare and
+        // the judge had nothing to read.
+        let arc = state();
+        let (id, client_tok, provider_tok) = funded_contract(&arc);
+        let digest = format!("sha256:{}", crate::sha256_hex(b"the report"));
+        route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/deliver"),
+            json!({ "deliverable_hash": digest, "content": "the report" })
+                .to_string()
+                .as_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
+
+        let (status, out) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/verify"),
+            b"{}",
+            Some(&format!("Bearer {client_tok}")),
+        );
+        assert_eq!(status, 200, "verify failed: {out}");
+        // No judge is configured in tests, so the subjective tier is
+        // inconclusive - but the deterministic tier must have run and
+        // matched, which is what was impossible before.
+        let checks = out["checks"].as_array().cloned().unwrap_or_default();
+        let integrity = checks
+            .iter()
+            .find(|c| c["name"] == json!("deliverable_hash_matches"))
+            .unwrap_or_else(|| panic!("no integrity check ran; verdict was {out}"));
+        assert_eq!(
+            integrity["passed"],
+            json!(true),
+            "the held artifact must satisfy the commitment: {out}"
+        );
     }
 
     #[test]

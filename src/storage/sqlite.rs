@@ -6,8 +6,8 @@
 //! suite.
 
 use super::{
-    validate_event, AnnouncementRecord, ContractRecord, EscrowRecord, EventRecord, IdentityRecord,
-    Storage,
+    validate_event, AnnouncementRecord, ContractRecord, DeliverableRecord, EscrowRecord,
+    EventRecord, IdentityRecord, Storage,
 };
 use crate::error::{Error, Result};
 use rusqlite::{params, Connection};
@@ -79,6 +79,15 @@ impl SqliteStorage {
                      held TEXT NOT NULL,
                      currency TEXT NOT NULL,
                      updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS deliverables (
+                     contract_id TEXT PRIMARY KEY,
+                     digest TEXT NOT NULL,
+                     encoding TEXT NOT NULL,
+                     media_type TEXT NOT NULL,
+                     content TEXT NOT NULL,
+                     uri TEXT NOT NULL,
+                     delivered_at INTEGER NOT NULL
                  );",
             )
             .map_err(|e| Error::Other(format!("sqlite init failed: {e}")))?;
@@ -456,6 +465,79 @@ impl Storage for SqliteStorage {
         }
         Ok(out)
     }
+
+    fn upsert_deliverable(&mut self, record: &DeliverableRecord) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO deliverables
+                   (contract_id, digest, encoding, media_type, content, uri, delivered_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(contract_id) DO UPDATE SET
+                   digest=excluded.digest, encoding=excluded.encoding,
+                   media_type=excluded.media_type, content=excluded.content,
+                   uri=excluded.uri, delivered_at=excluded.delivered_at",
+                rusqlite::params![
+                    record.contract_id,
+                    record.digest,
+                    record.encoding,
+                    record.media_type,
+                    record.content,
+                    record.uri,
+                    record.delivered_at as i64,
+                ],
+            )
+            .map_err(|e| Error::Other(format!("sqlite insert failed: {e}")))?;
+        Ok(())
+    }
+
+    fn get_deliverable(&self, contract_id: &str) -> Result<Option<DeliverableRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT contract_id, digest, encoding, media_type, content, uri, delivered_at
+                 FROM deliverables WHERE contract_id = ?1",
+            )
+            .map_err(|e| Error::Other(format!("sqlite prepare failed: {e}")))?;
+        let mut rows = stmt
+            .query_map([contract_id], row_to_deliverable)
+            .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;
+        match rows.next() {
+            Some(r) => Ok(Some(
+                r.map_err(|e| Error::Other(format!("sqlite row failed: {e}")))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    fn list_deliverables(&self) -> Result<Vec<DeliverableRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT contract_id, digest, encoding, media_type, content, uri, delivered_at
+                 FROM deliverables ORDER BY delivered_at, contract_id",
+            )
+            .map_err(|e| Error::Other(format!("sqlite prepare failed: {e}")))?;
+        let rows = stmt
+            .query_map([], row_to_deliverable)
+            .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;
+        let mut out = vec![];
+        for row in rows {
+            out.push(row.map_err(|e| Error::Other(format!("sqlite row failed: {e}")))?);
+        }
+        Ok(out)
+    }
+}
+
+fn row_to_deliverable(row: &rusqlite::Row) -> rusqlite::Result<DeliverableRecord> {
+    Ok(DeliverableRecord {
+        contract_id: row.get(0)?,
+        digest: row.get(1)?,
+        encoding: row.get(2)?,
+        media_type: row.get(3)?,
+        content: row.get(4)?,
+        uri: row.get(5)?,
+        delivered_at: row.get::<_, i64>(6)? as u64,
+    })
 }
 
 #[cfg(test)]

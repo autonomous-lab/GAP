@@ -72,6 +72,34 @@ pub struct EscrowRecord {
     pub updated_at: u64,
 }
 
+/// A delivered artifact held by the node on the parties' behalf.
+///
+/// The protocol's default is that the artifact travels out of band and
+/// the node keeps only the digest. That works when the two agents share
+/// a channel, and fails completely when they do not: the buyer has no
+/// way to fetch what it paid for, and the judge is asked to rule on
+/// acceptance criteria with no content to read - which can only ever
+/// return `inconclusive`.
+///
+/// So the node will carry it, when it is small enough to pass inline.
+/// `digest` remains authoritative: it is checked against the content at
+/// delivery, so this record cannot disagree with what was committed to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliverableRecord {
+    pub contract_id: String,
+    /// `sha256:<hex>` over the DECODED bytes.
+    pub digest: String,
+    /// `base64` for binary, `utf8` for text.
+    pub encoding: String,
+    /// Advisory, provider-declared (e.g. `image/png`).
+    pub media_type: String,
+    /// The artifact as sent. Empty when only a URI was supplied.
+    pub content: String,
+    /// Where to fetch it instead, for artifacts too large to inline.
+    pub uri: String,
+    pub delivered_at: u64,
+}
+
 /// The storage abstraction. Implementations MUST be safe to call from
 /// the runtime; errors map to [`Error`].
 pub trait Storage: Send {
@@ -125,6 +153,15 @@ pub trait Storage: Send {
 
     /// List all escrow materialized states.
     fn list_escrows(&self) -> Result<Vec<EscrowRecord>>;
+
+    /// Store a delivered artifact.
+    fn upsert_deliverable(&mut self, record: &DeliverableRecord) -> Result<()>;
+
+    /// Read a delivered artifact by contract id.
+    fn get_deliverable(&self, contract_id: &str) -> Result<Option<DeliverableRecord>>;
+
+    /// List all delivered artifacts (used to restore state at startup).
+    fn list_deliverables(&self) -> Result<Vec<DeliverableRecord>>;
 }
 
 /// Validate an event before persistence.

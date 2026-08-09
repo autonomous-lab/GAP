@@ -26,6 +26,7 @@
 
 pub mod agentcard;
 pub mod amount;
+pub mod artifact;
 pub mod compliance;
 pub mod conformance;
 pub mod contract;

@@ -20,8 +20,8 @@
 //! production uses a real HTTP client (ureq).
 
 use super::{
-    validate_event, AnnouncementRecord, ContractRecord, EscrowRecord, EventRecord, IdentityRecord,
-    Storage,
+    validate_event, AnnouncementRecord, ContractRecord, DeliverableRecord, EscrowRecord,
+    EventRecord, IdentityRecord, Storage,
 };
 use crate::error::{Error, Result};
 use std::collections::HashMap;
@@ -221,6 +221,16 @@ CREATE TABLE IF NOT EXISTS gap_escrows (
     currency String,
     updated_at UInt64
 ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY contract_id;
+
+CREATE TABLE IF NOT EXISTS gap_deliverables (
+    contract_id String,
+    digest String,
+    encoding String,
+    media_type String,
+    content String,
+    uri String,
+    delivered_at UInt64
+) ENGINE = ReplacingMergeTree(delivered_at) ORDER BY contract_id;
 "#;
 
 /// What [`ClickHouseStorage::hydrate`] read back from the cluster.
@@ -231,6 +241,7 @@ pub struct HydrateSummary {
     pub announcements: usize,
     pub identities: usize,
     pub escrows: usize,
+    pub deliverables: usize,
 }
 
 /// ClickHouse-backed storage.
@@ -242,6 +253,7 @@ pub struct ClickHouseStorage<T: HttpTransport + Send> {
     announcements: Mutex<HashMap<String, AnnouncementRecord>>,
     identities: Mutex<HashMap<String, IdentityRecord>>,
     escrows: Mutex<HashMap<String, EscrowRecord>>,
+    deliverables: Mutex<HashMap<String, DeliverableRecord>>,
     events: Mutex<Vec<EventRecord>>,
     /// The atomicity gate for escrow-style operations.
     pub sequencer: Sequencer<()>,
@@ -255,6 +267,7 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             announcements: Mutex::new(HashMap::new()),
             identities: Mutex::new(HashMap::new()),
             escrows: Mutex::new(HashMap::new()),
+            deliverables: Mutex::new(HashMap::new()),
             events: Mutex::new(vec![]),
             sequencer: Sequencer::new(()),
         }
@@ -349,6 +362,17 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
                 .map_err(|_| Error::Other("escrows lock poisoned".into()))?
                 .insert(rec.contract_id.clone(), rec);
             summary.escrows += 1;
+        }
+
+        for rec in self.select::<DeliverableRecord>(
+            "SELECT contract_id, digest, encoding, media_type, content, uri, delivered_at \
+             FROM gap_deliverables FINAL",
+        )? {
+            self.deliverables
+                .lock()
+                .map_err(|_| Error::Other("deliverables lock poisoned".into()))?
+                .insert(rec.contract_id.clone(), rec);
+            summary.deliverables += 1;
         }
 
         Ok(summary)
@@ -612,6 +636,45 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .lock()
             .map_err(|_| Error::Other("escrows lock poisoned".into()))?;
         Ok(escrows.values().cloned().collect())
+    }
+
+    fn upsert_deliverable(&mut self, record: &DeliverableRecord) -> Result<()> {
+        let mut deliverables = self
+            .deliverables
+            .lock()
+            .map_err(|_| Error::Other("deliverables lock poisoned".into()))?;
+        deliverables.insert(record.contract_id.clone(), record.clone());
+        let q = "INSERT INTO gap_deliverables \
+                 (contract_id, digest, encoding, media_type, content, uri, delivered_at) \
+                 VALUES ({contract_id:String}, {digest:String}, {encoding:String}, \
+                 {media_type:String}, {content:String}, {uri:String}, {delivered_at:UInt64})";
+        let params = [
+            QueryParam::new("contract_id", &record.contract_id),
+            QueryParam::new("digest", &record.digest),
+            QueryParam::new("encoding", &record.encoding),
+            QueryParam::new("media_type", &record.media_type),
+            QueryParam::new("content", &record.content),
+            QueryParam::new("uri", &record.uri),
+            QueryParam::new("delivered_at", record.delivered_at.to_string()),
+        ];
+        let _ = self.transport.post_params(q, &params);
+        Ok(())
+    }
+
+    fn get_deliverable(&self, contract_id: &str) -> Result<Option<DeliverableRecord>> {
+        let deliverables = self
+            .deliverables
+            .lock()
+            .map_err(|_| Error::Other("deliverables lock poisoned".into()))?;
+        Ok(deliverables.get(contract_id).cloned())
+    }
+
+    fn list_deliverables(&self) -> Result<Vec<DeliverableRecord>> {
+        let deliverables = self
+            .deliverables
+            .lock()
+            .map_err(|_| Error::Other("deliverables lock poisoned".into()))?;
+        Ok(deliverables.values().cloned().collect())
     }
 }
 

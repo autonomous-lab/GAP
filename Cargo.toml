@@ -24,6 +24,7 @@ x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 hkdf = "0.12.4"
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 rand_core = "0.10.1"
+base64 = "0.22.1"
 
 [dev-dependencies]
 criterion = "0.8.2"

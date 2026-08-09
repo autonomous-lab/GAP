@@ -147,11 +147,17 @@ impl Escrow {
         contract: crate::contract::Contract,
     ) -> Result<Self> {
         contract.verify_signed()?;
+        // The currency is the one the parties signed, not a house
+        // default. Hardcoding EUR here meant a contract priced in USDC
+        // settled with a receipt that said EUR - the amount was right
+        // and the unit was a lie, which is the kind of discrepancy an
+        // accounting system inherits and never questions.
+        let currency = contract.terms.price.currency.clone();
         Ok(Self {
             identity,
             state: EscrowState::Empty,
             held: Amount::ZERO,
-            currency: "EUR".into(),
+            currency,
             contract,
             log: vec![],
             guard: crate::message::ReplayGuard::new(),
