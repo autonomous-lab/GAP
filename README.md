@@ -41,6 +41,7 @@ GAP/
 ├── BUSINESS.md        # The business model: how GAP becomes durable
 ├── COMPETITIVE-ANALYSIS.md  # GAP vs A2A, OAP, OpenAgents, xlang, robpolak
 ├── BENCHMARK.md       # Full benchmark report (protocol + HTTP layers)
+├── docs/landing/      # The public landing page (mirror of the hosted site)
 ├── Dockerfile         # The node server image (multi-stage, musl)
 ├── docker-compose.yml # Node + ClickHouse stack
 ├── docker-compose.scale.yml  # LB + 3 nodes + ClickHouse (scaling)
