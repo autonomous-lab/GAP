@@ -106,6 +106,11 @@ pub struct Contract {
     #[serde(default)]
     pub provider_sig: Option<String>,
     pub created_at: u64,
+    /// The digest the provider committed to at delivery. Recorded so a
+    /// verifier can prove integrity later; it was previously validated
+    /// and then discarded, leaving nothing to check against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable_hash: Option<String>,
     #[serde(skip)]
     pub state: ContractState,
 }
@@ -129,6 +134,7 @@ impl Contract {
             client_sig: None,
             provider_sig: None,
             created_at: crate::message::now_unix(),
+            deliverable_hash: None,
             state: ContractState::Draft,
         };
         let canonical = c.canonical_bytes();

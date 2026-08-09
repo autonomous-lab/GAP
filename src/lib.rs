@@ -51,6 +51,7 @@ pub mod storage;
 pub mod subscription;
 pub mod sybil;
 pub mod vault;
+pub mod verifier;
 pub mod workflow;
 
 pub use contract::{Contract, ContractState, Price, Terms};

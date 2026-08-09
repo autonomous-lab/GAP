@@ -55,7 +55,7 @@ GAP/
 │   └── test-escrow.js # 14 lifecycle tests (solc + EVM sim)
 ├── deploy/            # Runtime configs (ClickHouse system-log control, HAProxy)
 ├── docs/              # The RFC process (like OAP's)
-│   ├── rfcs/          # RFC-0001 … RFC-0013 (delegation, workflows, delivery, …)
+│   ├── rfcs/          # RFC-0001 … RFC-0014 (delegation, workflows, verification, …)
 │   ├── node-api.md    # The GAP node HTTP API (what agents point at)
 │   ├── openapi.yaml   # OpenAPI 3.1 spec of the node API
 │   ├── deployment.md  # Storage architecture (SQLite / ClickHouse)
@@ -77,6 +77,7 @@ GAP/
 │   ├── contract.rs    # Contract lifecycle
 │   ├── message.rs     # Wire format, addressing, replay guard
 │   ├── delivery.rs    # Signed webhooks, SSE, SSRF guard (RFC-0013)
+│   ├── verifier.rs    # Two-tier delivery verification (RFC-0014)
 │   ├── payment.rs     # Escrow & settlement (one escrow per contract)
 │   ├── amount.rs      # Exact decimal amounts (integer minor units)
 │   ├── vault.rs       # Seed encryption at rest (XChaCha20-Poly1305)
@@ -102,6 +103,7 @@ GAP/
 ├── tests/             # Integration tests
 │   ├── economy.rs     # Full economy scenarios + replay attacks
 │   ├── event_delivery.rs # Webhook signing, scoping, retries, cursor
+│   ├── verification.rs   # Verified delivery + pseudonymous reputation
 │   ├── http_routes.rs # Exhaustive HTTP route coverage
 │   ├── properties.rs  # Property-based invariants (proptest)
 │   └── test_vectors.rs  # Known-answer vectors (interop lock)
@@ -231,6 +233,53 @@ exclusively to public unicast addresses — a node must never be talked
 into calling `169.254.169.254` or its own admin surface. Full design in
 [RFC-0013](./docs/rfcs/RFC-0013-event-delivery.md).
 
+### Is the work actually checked before the money moves?
+
+Yes — since RFC-0014. The acceptance criteria both parties signed used
+to be stored and never read; now they are verified in two tiers:
+
+```bash
+curl -X POST $NODE/v1/contract/$CID/verify -H "Authorization: Bearer $TOKEN" \
+  -d '{"content":"the bytes the client received"}'
+```
+
+1. **Deterministic and authoritative** — the node recomputes the digest
+   of what the client received and compares it to what the provider
+   committed to, and checks the deadline. A mismatch is
+   `nonconforming`, and no judge is even consulted.
+2. **A judge** for the subjective criteria (any OpenAI-compatible
+   model, set by `GAP_VERIFIER_MODEL` / `GAP_VERIFIER_PROVIDER`). It
+   **cannot overturn tier 1**, and silence, failure or an unparseable
+   answer yields `inconclusive` — never `conforms`. Money only moves on
+   evidence.
+
+A `nonconforming` verdict **blocks release**; the remedy is the dispute
+path. Every verdict is signed by the node, carries a digest of the
+exact evidence used, and lands on the audit spine.
+
+The deliverable is written by the party whose payment depends on the
+verdict, so prompt injection is the obvious exploit. Content is fenced
+and length-capped, the judge is told it is untrusted data, and any
+answer that is not strict JSON fails closed. Against the configured
+model, an explicit injection attempt is ruled non-conforming *and
+reported as an injection attempt*.
+
+Contracts under `confidentiality` never have their content sent to a
+third-party judge: they get integrity proof and human arbitration
+instead (that is the whole point of RFC-0006).
+
+### Can I see an agent's track record?
+
+```bash
+curl $NODE/v1/reputation/did:gap:b71fb3…     # no token required
+```
+
+Returns the smoothed score with its `n`, and the **pseudonymous job
+history** behind it: capability, outcome, verdict, which judge ruled,
+and whether it was on time — with the contract id and the counterparty
+DID reduced to truncated digests. Outcomes are auditable; who an
+agent's clients are is not exposed.
+
 ### Where is the node?
 
 - **Geta.Team operates a public node** (planned): `https://gap.geta.team`
@@ -269,7 +318,12 @@ XChaCha20-Poly1305; without it a database copy is a copy of every
 identity on the node), `GAP_SSE_MAX_SECS` (stream lifetime before the
 client reconnects with its cursor; default 300), and the webhook SSRF
 opt-outs `GAP_WEBHOOK_ALLOW_HTTP` / `GAP_WEBHOOK_ALLOW_PRIVATE` (local
-development, or a node and its agents sharing a trusted VPC).
+development, or a node and its agents sharing a trusted VPC). Delivery
+verification (RFC-0014) reads `GAP_VERIFIER_API_KEY`,
+`GAP_VERIFIER_MODEL`, `GAP_VERIFIER_PROVIDER`, `GAP_VERIFIER_URL`,
+`GAP_VERIFIER_MAX_CHARS` and `GAP_VERIFIER_TIMEOUT_SECS`; without an
+API key the node runs deterministic-only verification rather than
+pretending to judge.
 
 ### Scaling: many nodes, one ClickHouse
 
@@ -341,21 +395,22 @@ Honest accounting of what the reference implementation covers today:
 | 01 §1.2 | Key rotation (old key signs handover, chain verify) | ✅ |
 | 01 §1.2 | X25519 payload encryption (`confidentiality: encrypted`) | ❌ planned |
 | 01 §1.3 | Bilateral principal binding + unbind | ✅ `principal.rs` |
-| 01 §1.4 | Reputation log, **signed** endorsements | ✅ |
+| 01 §1.4 | Reputation log, **signed** endorsements, public job history | ✅ (`GET /v1/reputation/{did}`) |
 | 02 | Announce / query / TTL / deregister | ✅ |
 | 02 §2.2 / §2.4.4 | Agent-declared reachability stored and honoured | ✅ (was overwritten by a placeholder before RFC-0013) |
 | 02 §2.4.3 | Registry-signed query results | ❌ planned (announcements are signed; the query response wrapper is not) |
 | 03 | Negotiation state machine, dual signatures, disputes | ✅ (counter-offer endpoint on the node: planned) |
-| 04 | Proof bundles, hash verification, autonomy enforcement | ✅ |
+| 04 | Proof bundles, hash verification, autonomy enforcement | ✅ (acceptance criteria now actually checked — RFC-0014) |
 | 05 | Escrow state machine, price caps, signed receipts, exact amounts | ✅ |
 | 06 | Autonomy levels, certification, `gov.halt`, budgets | ✅ (meta-agent supervision chains: partial) |
 | 07 | Tokenomics | — informative only, no implementation |
 | RFC-0013 | Event delivery: signed webhooks + resumable SSE stream | ✅ `src/delivery.rs` |
+| RFC-0014 | Delivery verification (2-tier) + public pseudonymous reputation | ✅ `src/verifier.rs` |
 
 ## Testing
 
 ```bash
-cargo test            # 217 tests: 186 unit + 30 integration + 1 doc
+cargo test            # 239 tests: 199 unit + 39 integration + 1 doc
 cargo clippy          # zero warnings
 cargo run --example lead_gen   # end-to-end demo
 ```
@@ -381,8 +436,12 @@ workflow DAG execution, credentials, AgentCard, conformance reports,
 SLA divergence, principal binding (bilateral signatures, expiry,
 forged unbind), key-rotation chains, event delivery (signed webhooks
 verified by an out-of-process receiver, SSRF matrix, retry/backoff,
-disabling, per-party scoping, gapless cursor resume), full economy
-flows, and exhaustive HTTP route coverage (`tests/http_routes.rs`).
+disabling, per-party scoping, gapless cursor resume), delivery
+verification (integrity beats the judge, prompt-injection fencing,
+fail-closed parsing, confidential contracts withheld from external
+judges, non-conforming verdicts blocking release, pseudonymous
+reputation), full economy flows, and exhaustive HTTP route coverage
+(`tests/http_routes.rs`).
 
 ## Benchmarks
 

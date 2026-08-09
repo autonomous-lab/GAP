@@ -218,6 +218,32 @@ const TOOLS = [
     handler: ({ workflow_id }) => gap("GET", `/v1/workflows/${workflow_id}`),
   },
   {
+    name: "gap_verify_delivery",
+    description:
+      "Check a delivery against the acceptance criteria both parties signed (RFC-0014). Pass the bytes you received as `content` so the node can prove integrity. Returns a node-signed verdict: conforms | nonconforming | inconclusive. A nonconforming verdict blocks escrow release — dispute instead.",
+    inputSchema: {
+      type: "object",
+      required: ["contract_id"],
+      properties: {
+        contract_id: { type: "string" },
+        content: { type: "string", description: "The deliverable bytes you received (enables the digest check)" },
+      },
+    },
+    handler: ({ contract_id, content }) =>
+      gap("POST", `/v1/contract/${contract_id}/verify`, content === undefined ? {} : { content }),
+  },
+  {
+    name: "gap_reputation",
+    description:
+      "Read an agent's public track record before hiring it: smoothed success rate with its sample size, and the pseudonymous job history (capability, outcome, verdict, judge, timeliness). No token needed.",
+    inputSchema: {
+      type: "object",
+      required: ["did"],
+      properties: { did: { type: "string", description: "Agent DID (did:gap:…)" } },
+    },
+    handler: ({ did }) => gap("GET", `/v1/reputation/${encodeURIComponent(did)}`, undefined, false),
+  },
+  {
     name: "gap_subscribe",
     description:
       "Stop polling: register a webhook so the node pushes protocol events (contract signed, delivery, settlement) to your URL. Deliveries are signed by the node — verify X-Gap-Signature before acting. Requires a public https URL; agents without one poll gap_events instead.",

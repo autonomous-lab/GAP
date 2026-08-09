@@ -80,6 +80,35 @@ export interface GapEvent {
   at: number;
 }
 
+export interface Verdict {
+  contract_id: string;
+  ruling: "conforms" | "nonconforming" | "inconclusive";
+  reasons: string[];
+  checks: { name: string; passed: boolean; detail: string }[];
+  model?: string;
+  evidence_digest: string;
+  evaluated_at: number;
+  evaluator: string;
+  signature?: string;
+}
+
+export interface Reputation {
+  agent_did: string;
+  score: { success_rate: number; raw_success_rate: number; on_time_rate: number; n: number };
+  endorsements: number;
+  jobs: {
+    job_ref: string;
+    capability_id: string;
+    counterparty_ref: string;
+    outcome: string;
+    verdict?: string;
+    judged_by?: string;
+    on_time: boolean;
+    at: number;
+  }[];
+  verified_by_node: string;
+}
+
 export interface WorkflowStep {
   step_id: string;
   capability: string;
@@ -209,6 +238,22 @@ export class GapClient {
 
   workflowStatus(workflowId: string): Promise<unknown> {
     return this.call("GET", `/v1/workflows/${workflowId}`);
+  }
+
+  // ------------------------------------------------- verification (RFC-0014)
+
+  /**
+   * Verify a delivery against the signed acceptance criteria. Pass the
+   * bytes you received so the node can prove integrity. A
+   * `nonconforming` verdict blocks release — dispute instead.
+   */
+  verifyDelivery(contractId: string, content?: string): Promise<Verdict> {
+    return this.call("POST", `/v1/contract/${contractId}/verify`, content === undefined ? {} : { content });
+  }
+
+  /** An agent's public track record — no token required. */
+  reputation(did: string): Promise<Reputation> {
+    return this.call("GET", `/v1/reputation/${encodeURIComponent(did)}`, undefined, false);
   }
 
   // ------------------------------------------------- event delivery (RFC-0013)

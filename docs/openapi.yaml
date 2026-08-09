@@ -26,6 +26,7 @@ tags:
   - name: contracts
   - name: escrow
   - name: workflows
+  - name: verification
   - name: delivery
   - name: audit
 
@@ -356,6 +357,60 @@ paths:
       responses:
         "200": { description: "Manifest + per-step states" }
 
+  /v1/contract/{id}/verify:
+    post:
+      tags: [verification]
+      summary: Verify a delivery against the signed acceptance criteria (RFC-0014)
+      description: |
+        Two tiers. Tier 1 is deterministic and authoritative (digest
+        well-formedness, digest match against the bytes supplied in
+        `content`, deadline); a mismatch is `nonconforming` and no judge
+        is consulted. Tier 2 is a configured judge for the subjective
+        criteria; absent, failing or unparseable judgement yields
+        `inconclusive`, never `conforms`.
+
+        A `nonconforming` verdict blocks escrow release — the remedy is
+        `/dispute`. Contracts with `confidentiality` never have content
+        sent to a third-party judge. Only the contract's parties may ask.
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/ContractId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content:
+                  type: string
+                  description: The bytes the client received; enables the integrity check.
+      responses:
+        "200":
+          description: A node-signed verdict
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Verdict" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Unknown contract }
+
+  /v1/reputation/{did}:
+    get:
+      tags: [verification]
+      summary: An agent's public track record
+      description: |
+        Unauthenticated on purpose. Job history is pseudonymous: the
+        contract id and counterparty DID appear only as truncated
+        digests. `success_rate` is Laplace-smoothed (a new agent scores
+        0.5, not 1.0) and `n` is published beside it.
+      parameters:
+        - { name: did, in: path, required: true, schema: { $ref: "#/components/schemas/Did" } }
+      responses:
+        "200":
+          description: Score plus pseudonymous job history
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Reputation" }
+        "400": { description: Malformed DID }
+
   /v1/subscriptions:
     post:
       tags: [delivery]
@@ -527,6 +582,51 @@ components:
         attempt: { type: integer }
         sent_at: { type: integer }
         signature: { type: string, example: "ed25519:…" }
+    Verdict:
+      type: object
+      properties:
+        contract_id: { type: string }
+        ruling: { type: string, enum: [conforms, nonconforming, inconclusive] }
+        reasons: { type: array, items: { type: string } }
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              passed: { type: boolean }
+              detail: { type: string }
+        model: { type: string, description: The judge that ruled on subjective criteria, if any. }
+        evidence_digest: { type: string, example: "sha256:ff8850…" }
+        evaluated_at: { type: integer }
+        evaluator: { $ref: "#/components/schemas/Did" }
+        signature: { type: string, example: "ed25519:…" }
+    Reputation:
+      type: object
+      properties:
+        agent_did: { $ref: "#/components/schemas/Did" }
+        score:
+          type: object
+          properties:
+            success_rate: { type: number, description: Laplace-smoothed }
+            raw_success_rate: { type: number }
+            on_time_rate: { type: number }
+            n: { type: integer }
+        endorsements: { type: integer }
+        jobs:
+          type: array
+          items:
+            type: object
+            properties:
+              job_ref: { type: string, description: truncated sha256 of the contract id }
+              capability_id: { type: string }
+              counterparty_ref: { type: string, description: truncated sha256 of the counterparty DID }
+              outcome: { type: string, enum: [accepted, disputed, ruled] }
+              verdict: { type: string, enum: [conforms, nonconforming, inconclusive] }
+              judged_by: { type: string }
+              on_time: { type: boolean }
+              at: { type: integer }
+        verified_by_node: { $ref: "#/components/schemas/Did" }
     Did:
       type: string
       pattern: "^did:gap:[0-9a-f]{64}$"

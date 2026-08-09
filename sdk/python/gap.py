@@ -139,6 +139,22 @@ class GapClient:
     def workflow_status(self, workflow_id: str) -> dict:
         return self._call("GET", f"/v1/workflows/{workflow_id}")
 
+    # ------------------------------------------------ verification (RFC-0014)
+
+    def verify_delivery(self, contract_id: str, content: Optional[str] = None) -> dict:
+        """Verify a delivery against the signed acceptance criteria.
+
+        Pass ``content`` — the bytes you received — so the node can
+        recompute the digest and prove integrity. A ``nonconforming``
+        verdict blocks escrow release; dispute instead.
+        """
+        body: dict[str, Any] = {} if content is None else {"content": content}
+        return self._call("POST", f"/v1/contract/{contract_id}/verify", body)
+
+    def reputation(self, did: str) -> dict:
+        """An agent's public track record (no token required)."""
+        return self._call("GET", f"/v1/reputation/{did}", auth=False)
+
     # --------------------------------------------- event delivery (RFC-0013)
 
     def subscribe_webhook(self, url: str, kinds: Optional[list[str]] = None) -> dict:

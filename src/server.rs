@@ -34,6 +34,34 @@ pub struct RegisteredAgent {
     pub announcement: Option<Announcement>,
 }
 
+/// One entry of an agent's public track record.
+///
+/// Deliberately pseudonymous: the capability, the outcome and the timing
+/// are public evidence, while the contract and the counterparty appear
+/// only as stable digests. A reader can verify an agent's history and
+/// count repeat business without learning who its clients are
+/// (spec 01 §1.4 rule 2: selective disclosure, no fabrication).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct JobRecord {
+    /// sha256(contract_id), truncated — stable, non-reversible.
+    pub job_ref: String,
+    pub capability_id: String,
+    /// sha256(counterparty DID), truncated.
+    pub counterparty_ref: String,
+    /// accepted | disputed | ruled
+    pub outcome: String,
+    /// The verifier's ruling, when one was produced.
+    pub verdict: Option<String>,
+    /// Which judge ruled, when one did.
+    pub judged_by: Option<String>,
+    pub on_time: bool,
+    pub at: u64,
+}
+
+fn pseudonym(input: &str) -> String {
+    crate::sha256_hex(input.as_bytes())[..16].to_string()
+}
+
 /// The node state — shared behind a mutex, one process, one order.
 pub struct NodeState {
     /// The node's own identity.
@@ -72,6 +100,12 @@ pub struct NodeState {
     /// Seed vault (encryption at rest for custodied identity seeds),
     /// keyed by `GAP_MASTER_KEY` when set.
     vault: Option<crate::vault::Vault>,
+    /// Optional delivery judge (RFC-0014). None = deterministic checks only.
+    verifier: Option<Box<dyn crate::verifier::Verifier>>,
+    /// contract_id -> the signed verdict produced for it.
+    verdicts: HashMap<String, crate::verifier::Verdict>,
+    /// Per-agent job history, the raw material of reputation (RFC-0014 §5).
+    jobs: HashMap<String, Vec<JobRecord>>,
     /// Delivery subscriptions, id -> subscription (RFC-0013).
     subscriptions: HashMap<String, crate::delivery::Subscription>,
     /// Pending webhook deliveries, drained outside the state lock.
@@ -203,6 +237,10 @@ impl NodeState {
             ip_cap,
             admin_token: None,
             vault,
+            verifier: crate::verifier::OpenRouterVerifier::from_env()
+                .map(|v| Box::new(v) as Box<dyn crate::verifier::Verifier>),
+            verdicts: HashMap::new(),
+            jobs: HashMap::new(),
             subscriptions: HashMap::new(),
             outbox: Vec::new(),
         }
@@ -519,6 +557,9 @@ impl NodeState {
         if deliverable_hash.trim().is_empty() {
             return Err(Error::Other("deliverable_hash required".into()));
         }
+        // Keep the commitment: verification later checks what the client
+        // actually received against this exact digest.
+        contract.deliverable_hash = Some(deliverable_hash.to_string());
         contract.transition(ContractState::Executing)?;
         contract.transition(ContractState::Delivered)?;
         let saved = contract.clone();
@@ -543,6 +584,19 @@ impl NodeState {
                 from: contract.state.wire_name().into(),
                 to: "accepted".into(),
             });
+        }
+        // RFC-0014: a recorded non-conforming verdict blocks release.
+        // The client may accept an *inconclusive* delivery (that is its
+        // prerogative — it is its money), but it cannot release funds
+        // against signed evidence that the work does not conform; that
+        // path is the dispute, where an arbitrator splits.
+        if let Some(v) = self.verdicts.get(contract_id) {
+            if v.ruling == crate::verifier::Ruling::Nonconforming {
+                return Err(Error::EscrowViolation(format!(
+                    "delivery was verified non-conforming ({}); dispute it instead of releasing",
+                    v.reasons.first().cloned().unwrap_or_default()
+                )));
+            }
         }
 
         // Build the signed acceptance + release envelopes.
@@ -619,6 +673,14 @@ impl NodeState {
         self.record("exe.accepted", json!({ "contract_id": contract_id }));
         let on_time = crate::message::now_unix() <= saved.terms.deadline;
         self.credit_reputation(&saved.provider, true, on_time);
+        self.record_job(
+            &saved.provider.clone(),
+            &saved.client.clone(),
+            contract_id,
+            &saved.capability_id.clone(),
+            "accepted",
+            on_time,
+        );
         Ok(json!({
             "state": "accepted",
             "settlement": { "amount": amount, "currency": currency }
@@ -854,8 +916,16 @@ impl NodeState {
         );
         // The ruling is the attested outcome: a majority share to the
         // provider counts as a success, otherwise as a failure.
-        if let Some(provider_did) = self.contracts.get(contract_id).map(|c| c.provider.clone()) {
-            self.credit_reputation(&provider_did, provider_share >= 0.5, false);
+        if let Some(c) = self.contracts.get(contract_id).cloned() {
+            self.credit_reputation(&c.provider, provider_share >= 0.5, false);
+            self.record_job(
+                &c.provider,
+                &c.client,
+                contract_id,
+                &c.capability_id,
+                "ruled",
+                false,
+            );
         }
         Ok(json!({
             "state": "ruled",
@@ -1021,6 +1091,149 @@ impl NodeState {
             return other == did;
         }
         true
+    }
+
+    /// Attach a delivery judge explicitly (tests, or a non-hosted judge).
+    pub fn set_verifier(&mut self, verifier: Box<dyn crate::verifier::Verifier>) {
+        self.verifier = Some(verifier);
+    }
+
+    /// Whether a judge is configured (reported by the agent card).
+    pub fn has_verifier(&self) -> bool {
+        self.verifier.is_some()
+    }
+
+    /// Verify a delivery against the contract's acceptance criteria
+    /// (RFC-0014). Either party may ask; the verdict is signed by the
+    /// node and appended to the spine, so neither can quietly discard
+    /// one it dislikes.
+    ///
+    /// `content` is what the client says it received: supplying it lets
+    /// the node recompute the digest and prove integrity, rather than
+    /// taking the provider's committed hash on faith.
+    pub fn verify_delivery(
+        &mut self,
+        token: &str,
+        contract_id: &str,
+        content: Option<&str>,
+    ) -> Result<Value> {
+        let caller = self.agent_by_token(token)?.identity.did().clone();
+        let contract = self
+            .contracts
+            .get(contract_id)
+            .cloned()
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.client != caller && contract.provider != caller {
+            return Err(Error::Unauthorized(
+                "only the contract's parties may request verification".into(),
+            ));
+        }
+        if contract.state != ContractState::Delivered {
+            return Err(Error::InvalidTransition {
+                from: contract.state.wire_name().into(),
+                to: "verified".into(),
+            });
+        }
+
+        // A contract that negotiated confidentiality, or carries a
+        // compliance context, must never have its content leave the
+        // node — enforced here, not left to the judge.
+        let confidential = contract.terms.confidentiality.is_some();
+        let evidence = crate::verifier::Evidence {
+            contract_id: contract_id.to_string(),
+            capability_id: contract.capability_id.clone(),
+            acceptance_criteria: contract.terms.acceptance_criteria.clone(),
+            deadline: contract.terms.deadline,
+            delivered_at: now_unix(),
+            declared_hash: contract.deliverable_hash.clone().unwrap_or_default(),
+            computed_hash: content.map(|c| format!("sha256:{}", crate::sha256_hex(c.as_bytes()))),
+            deliverable_excerpt: if confidential {
+                None
+            } else {
+                content.map(|c| c.to_string())
+            },
+            confidential,
+        };
+
+        let verdict =
+            crate::verifier::verify(&self.node.identity, &evidence, self.verifier.as_deref());
+        self.verdicts
+            .insert(contract_id.to_string(), verdict.clone());
+        self.record(
+            "exe.verified",
+            json!({
+                "contract_id": contract_id,
+                "ruling": verdict.ruling.as_str(),
+                "model": verdict.model,
+                "evidence_digest": verdict.evidence_digest,
+            }),
+        );
+        Ok(serde_json::to_value(&verdict).unwrap_or_default())
+    }
+
+    /// The verdict recorded for a contract, if any.
+    pub fn verdict_of(&self, contract_id: &str) -> Option<&crate::verifier::Verdict> {
+        self.verdicts.get(contract_id)
+    }
+
+    /// Append an entry to an agent's public track record.
+    fn record_job(
+        &mut self,
+        agent: &crate::identity::Did,
+        counterparty: &crate::identity::Did,
+        contract_id: &str,
+        capability_id: &str,
+        outcome: &str,
+        on_time: bool,
+    ) {
+        let verdict = self.verdicts.get(contract_id);
+        let record = JobRecord {
+            job_ref: pseudonym(contract_id),
+            capability_id: capability_id.to_string(),
+            counterparty_ref: pseudonym(&counterparty.to_string()),
+            outcome: outcome.to_string(),
+            verdict: verdict.map(|v| v.ruling.as_str().to_string()),
+            judged_by: verdict.and_then(|v| v.model.clone()),
+            on_time,
+            at: now_unix(),
+        };
+        self.jobs.entry(agent.to_string()).or_default().push(record);
+    }
+
+    /// An agent's public reputation: aggregate score plus the
+    /// pseudonymous job history behind it (RFC-0014 §5). Unauthenticated
+    /// on purpose — a track record you cannot read before hiring is not
+    /// a track record.
+    pub fn reputation_of(&self, did: &str) -> Result<Value> {
+        let did = crate::identity::Did::parse(did)?;
+        let key = did.to_string();
+        let token = self.agents_by_did.get(&key);
+        let (executions, successes, on_time, endorsements) =
+            match token.and_then(|t| self.agents.get(t)) {
+                Some(agent) => {
+                    let r = agent.identity.reputation();
+                    (r.executions, r.successes, r.on_time, r.endorsements.len())
+                }
+                // Unknown to this node: report an empty record rather than
+                // an error, so a client can tell "no history here" apart
+                // from "this DID is invalid".
+                None => (0, 0, 0, 0),
+            };
+        let jobs = self.jobs.get(&key).cloned().unwrap_or_default();
+        let smoothed = (successes as f64 + 1.0) / (executions as f64 + 2.0);
+        Ok(json!({
+            "agent_did": key,
+            "score": {
+                "success_rate": smoothed,
+                "raw_success_rate": if executions == 0 { 1.0 } else { successes as f64 / executions as f64 },
+                "on_time_rate": if executions == 0 { 1.0 } else { on_time as f64 / executions as f64 },
+                "n": executions,
+                "note": "success_rate is Laplace-smoothed: a new agent scores 0.5, not 1.0"
+            },
+            "endorsements": endorsements,
+            "jobs": jobs,
+            "verified_by_node": self.node_did().to_string(),
+        }))
     }
 
     /// Register a delivery subscription for the authenticated agent.
@@ -1525,6 +1738,22 @@ pub fn route_with_ip(
         ("GET", p) if p.starts_with("/v1/workflows/") => {
             let id = p.trim_start_matches("/v1/workflows/");
             guard.workflow_status(id)
+        }
+
+        // ---- verification & reputation (RFC-0014) ----
+        (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/verify") => {
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/verify");
+            let content = body.get("content").and_then(|v| v.as_str());
+            match token {
+                Some(t) => guard.verify_delivery(t, id, content),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("GET", p) if p.starts_with("/v1/reputation/") => {
+            let did = percent_decode(p.trim_start_matches("/v1/reputation/"));
+            guard.reputation_of(&did)
         }
 
         // ---- event delivery (RFC-0013) ----

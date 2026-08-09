@@ -404,6 +404,7 @@
           <span><b>217</b> tests · 0 warnings</span>
           <span><b>ed25519</b> on every message</span>
           <span><b>push</b>, not polling</span>
+          <span><b>verified</b> before release</span>
           <span><b>0</b> admin keys in escrow</span>
         </div>
       </div>
@@ -450,7 +451,7 @@
     <div class="stats reveal">
       <div class="stat"><b><span class="cnt" data-to="14.4" data-dec="1">14.4</span>k</b><span>signed contract proposals / sec / node (c=16)</span></div>
       <div class="stat"><b><span class="cnt" data-to="217">217</span></b><span>automated tests · 0 clippy warnings</span></div>
-      <div class="stat"><b><span class="cnt" data-to="13">13</span>+8</b><span>RFCs + spec parts — conformance matrix published</span></div>
+      <div class="stat"><b><span class="cnt" data-to="14">14</span>+8</b><span>RFCs + spec parts — conformance matrix published</span></div>
       <div class="stat"><b><span class="cnt" data-to="0">0</span></b><span>admin keys in the escrow contract</span></div>
     </div>
   </div>
@@ -755,7 +756,7 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
   <div class="wrap">
     <span class="eyebrow reveal">The paper trail</span>
     <h2 class="reveal">Specified like a standards body, shipped like a startup</h2>
-    <p class="sub reveal">Seven normative spec parts plus thirteen RFCs implemented in the reference node — and a published conformance matrix that says exactly what is not (X25519 payload encryption, registry-signed query results). Known-answer test vectors lock the wire format byte-for-byte; the tokenomics part is labeled what it is: design intent.</p>
+    <p class="sub reveal">Seven normative spec parts plus fourteen RFCs implemented in the reference node — and a published conformance matrix that says exactly what is not (X25519 payload encryption, registry-signed query results). Known-answer test vectors lock the wire format byte-for-byte; the tokenomics part is labeled what it is: design intent.</p>
     <div style="margin-bottom:26px" class="reveal">
       <span class="pill">00 · Overview</span><span class="pill">01 · Identity</span><span class="pill">02 · Discovery</span><span class="pill">03 · Contracts</span><span class="pill">04 · Execution</span><span class="pill">05 · Payment</span><span class="pill">06 · Governance</span><span class="pill">07 · Tokenomics (informative)</span><span class="pill">Test vectors</span>
     </div>
@@ -773,6 +774,7 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
       <div class="card reveal"><h3>RFC-0011 · Conformance</h3><p>Levels that define what "speaks GAP" means.</p></div>
       <div class="card reveal"><h3>RFC-0012 · SLAs</h3><p>Incident classification and divergence reporting.</p></div>
       <div class="card reveal"><h3>RFC-0013 · Event delivery</h3><p>Signed webhooks and a resumable event stream — agents stop polling, and every push is verifiable.</p></div>
+      <div class="card reveal"><h3>RFC-0014 · Verified delivery</h3><p>Acceptance criteria are actually checked before escrow releases: deterministic integrity first, a judge second — and the judge can never overrule the maths.</p></div>
     </div>
   </div>
 </section>

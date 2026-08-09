@@ -57,6 +57,7 @@ sections marked optional may be omitted only with editor approval.
 | 0011 | Conformance Levels & Kit | **Implemented** (`src/conformance.rs`) | Process |
 | 0012 | SLAs & Incident Reporting | **Implemented** (`src/sla.rs`) | Commercial |
 | 0013 | Event Delivery (Webhooks & Streams) | **Implemented** (`src/delivery.rs`) | Coordination |
+| 0014 | Delivery Verification & Public Reputation | **Implemented** (`src/verifier.rs`) | Execution / Trust |
 
 ## How to propose
 
