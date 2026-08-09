@@ -7,7 +7,7 @@
 
 use super::{
     validate_event, AnnouncementRecord, ContractRecord, DeliverableRecord, EscrowRecord,
-    EventRecord, IdentityRecord, Storage,
+    EventRecord, IdentityRecord, StateRecord, Storage,
 };
 use crate::error::{Error, Result};
 use rusqlite::{params, Connection};
@@ -79,6 +79,13 @@ impl SqliteStorage {
                      held TEXT NOT NULL,
                      currency TEXT NOT NULL,
                      updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS node_state (
+                     scope TEXT NOT NULL,
+                     key TEXT NOT NULL,
+                     value TEXT NOT NULL,
+                     updated_at INTEGER NOT NULL,
+                     PRIMARY KEY (scope, key)
                  );
                  CREATE TABLE IF NOT EXISTS deliverables (
                      contract_id TEXT PRIMARY KEY,
@@ -509,6 +516,52 @@ impl Storage for SqliteStorage {
         }
     }
 
+    fn upsert_state(&mut self, record: &StateRecord) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO node_state (scope, key, value, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(scope, key) DO UPDATE SET
+                   value=excluded.value, updated_at=excluded.updated_at",
+                params![
+                    record.scope,
+                    record.key,
+                    record.value,
+                    record.updated_at as i64
+                ],
+            )
+            .map_err(|e| Error::Other(format!("sqlite upsert state failed: {e}")))?;
+        Ok(())
+    }
+
+    fn list_state(&self, scope: &str) -> Result<Vec<StateRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT scope, key, value, updated_at FROM node_state
+                 WHERE scope = ?1 ORDER BY updated_at, key",
+            )
+            .map_err(|e| Error::Other(format!("sqlite prepare failed: {e}")))?;
+        let rows = stmt
+            .query_map([scope], row_to_state)
+            .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;
+        let mut out = vec![];
+        for row in rows {
+            out.push(row.map_err(|e| Error::Other(format!("sqlite row failed: {e}")))?);
+        }
+        Ok(out)
+    }
+
+    fn delete_state(&mut self, scope: &str, key: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM node_state WHERE scope = ?1 AND key = ?2",
+                params![scope, key],
+            )
+            .map_err(|e| Error::Other(format!("sqlite delete state failed: {e}")))?;
+        Ok(())
+    }
+
     fn list_deliverables(&self) -> Result<Vec<DeliverableRecord>> {
         let mut stmt = self
             .conn
@@ -526,6 +579,15 @@ impl Storage for SqliteStorage {
         }
         Ok(out)
     }
+}
+
+fn row_to_state(row: &rusqlite::Row) -> rusqlite::Result<StateRecord> {
+    Ok(StateRecord {
+        scope: row.get(0)?,
+        key: row.get(1)?,
+        value: row.get(2)?,
+        updated_at: row.get::<_, i64>(3)? as u64,
+    })
 }
 
 fn row_to_deliverable(row: &rusqlite::Row) -> rusqlite::Result<DeliverableRecord> {

@@ -21,7 +21,7 @@
 
 use super::{
     validate_event, AnnouncementRecord, ContractRecord, DeliverableRecord, EscrowRecord,
-    EventRecord, IdentityRecord, Storage,
+    EventRecord, IdentityRecord, StateRecord, Storage,
 };
 use crate::error::{Error, Result};
 use std::collections::HashMap;
@@ -222,6 +222,13 @@ CREATE TABLE IF NOT EXISTS gap_escrows (
     updated_at UInt64
 ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY contract_id;
 
+CREATE TABLE IF NOT EXISTS gap_state (
+    scope String,
+    key String,
+    value String,
+    updated_at UInt64
+) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (scope, key);
+
 CREATE TABLE IF NOT EXISTS gap_deliverables (
     contract_id String,
     digest String,
@@ -242,6 +249,7 @@ pub struct HydrateSummary {
     pub identities: usize,
     pub escrows: usize,
     pub deliverables: usize,
+    pub state: usize,
 }
 
 /// ClickHouse-backed storage.
@@ -254,6 +262,8 @@ pub struct ClickHouseStorage<T: HttpTransport + Send> {
     identities: Mutex<HashMap<String, IdentityRecord>>,
     escrows: Mutex<HashMap<String, EscrowRecord>>,
     deliverables: Mutex<HashMap<String, DeliverableRecord>>,
+    /// (scope, key) -> record, the mirror behind `list_state`.
+    node_state: Mutex<HashMap<(String, String), StateRecord>>,
     events: Mutex<Vec<EventRecord>>,
     /// The atomicity gate for escrow-style operations.
     pub sequencer: Sequencer<()>,
@@ -268,6 +278,7 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             identities: Mutex::new(HashMap::new()),
             escrows: Mutex::new(HashMap::new()),
             deliverables: Mutex::new(HashMap::new()),
+            node_state: Mutex::new(HashMap::new()),
             events: Mutex::new(vec![]),
             sequencer: Sequencer::new(()),
         }
@@ -373,6 +384,23 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
                 .map_err(|_| Error::Other("deliverables lock poisoned".into()))?
                 .insert(rec.contract_id.clone(), rec);
             summary.deliverables += 1;
+        }
+
+        for rec in self.select::<StateRecord>(
+            "SELECT scope, key, value, updated_at FROM gap_state FINAL",
+        )? {
+            // A tombstone: deleted entries are written back with an
+            // empty value rather than mutated away, because a
+            // ReplacingMergeTree collapses on the sort key and a delete
+            // mutation is asynchronous.
+            if rec.value.is_empty() {
+                continue;
+            }
+            self.node_state
+                .lock()
+                .map_err(|_| Error::Other("state lock poisoned".into()))?
+                .insert((rec.scope.clone(), rec.key.clone()), rec);
+            summary.state += 1;
         }
 
         Ok(summary)
@@ -667,6 +695,56 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .lock()
             .map_err(|_| Error::Other("deliverables lock poisoned".into()))?;
         Ok(deliverables.get(contract_id).cloned())
+    }
+
+    fn upsert_state(&mut self, record: &StateRecord) -> Result<()> {
+        self.node_state
+            .lock()
+            .map_err(|_| Error::Other("state lock poisoned".into()))?
+            .insert((record.scope.clone(), record.key.clone()), record.clone());
+        let q = "INSERT INTO gap_state (scope, key, value, updated_at) \
+                 VALUES ({scope:String}, {key:String}, {value:String}, {updated_at:UInt64})";
+        let params = [
+            QueryParam::new("scope", &record.scope),
+            QueryParam::new("key", &record.key),
+            QueryParam::new("value", &record.value),
+            QueryParam::new("updated_at", record.updated_at.to_string()),
+        ];
+        let _ = self.transport.post_params(q, &params);
+        Ok(())
+    }
+
+    fn list_state(&self, scope: &str) -> Result<Vec<StateRecord>> {
+        let state = self
+            .node_state
+            .lock()
+            .map_err(|_| Error::Other("state lock poisoned".into()))?;
+        Ok(state
+            .values()
+            .filter(|r| r.scope == scope)
+            .cloned()
+            .collect())
+    }
+
+    fn delete_state(&mut self, scope: &str, key: &str) -> Result<()> {
+        self.node_state
+            .lock()
+            .map_err(|_| Error::Other("state lock poisoned".into()))?
+            .remove(&(scope.to_string(), key.to_string()));
+        // Write a tombstone rather than issuing a mutation:
+        // ReplacingMergeTree collapses on (scope, key) and keeps the
+        // highest updated_at, so an empty value at "now" wins and the
+        // hydrate skips it. ALTER DELETE would work too, but it is
+        // asynchronous and a restart in between would resurrect the row.
+        let q = "INSERT INTO gap_state (scope, key, value, updated_at) \
+                 VALUES ({scope:String}, {key:String}, '', {updated_at:UInt64})";
+        let params = [
+            QueryParam::new("scope", scope),
+            QueryParam::new("key", key),
+            QueryParam::new("updated_at", crate::message::now_unix().to_string()),
+        ];
+        let _ = self.transport.post_params(q, &params);
+        Ok(())
     }
 
     fn list_deliverables(&self) -> Result<Vec<DeliverableRecord>> {

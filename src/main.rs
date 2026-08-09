@@ -227,8 +227,14 @@ fn build_storage() -> Result<Box<dyn Storage>> {
             match storage.hydrate() {
                 Ok(h) => println!(
                     "[gap-node] clickhouse hydrated: {} event(s), {} identity(ies), \
-{} announcement(s), {} contract(s), {} escrow(s)",
-                    h.events, h.identities, h.announcements, h.contracts, h.escrows
+{} announcement(s), {} contract(s), {} escrow(s), {} artifact(s), {} state entr(ies)",
+                    h.events,
+                    h.identities,
+                    h.announcements,
+                    h.contracts,
+                    h.escrows,
+                    h.deliverables,
+                    h.state
                 ),
                 // A node that cannot read its own history should say so
                 // loudly and still start: refusing to boot would turn a

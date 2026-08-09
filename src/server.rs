@@ -42,7 +42,7 @@ pub struct RegisteredAgent {
 /// only as stable digests. A reader can verify an agent's history and
 /// count repeat business without learning who its clients are
 /// (spec 01 §1.4 rule 2: selective disclosure, no fabrication).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct JobRecord {
     /// sha256(contract_id), truncated — stable, non-reversible.
     pub job_ref: String,
@@ -75,7 +75,7 @@ pub struct JobRecord {
 /// signal of abuse is **disputing and being wrong**, so the published
 /// figure is a win rate, and disputes merely received are tracked
 /// separately.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DisputeStats {
     /// Disputes this agent opened.
     pub raised: u64,
@@ -280,6 +280,75 @@ impl NodeState {
             }
         }
 
+
+        // Reload the projections that used to live only in RAM.
+        //
+        // Each is best-effort per entry: a row that no longer
+        // deserializes (an older shape, a truncated write) is skipped
+        // with a warning rather than taking the node down. Losing one
+        // record is bad; refusing to boot because of it is worse.
+        fn load<T: serde::de::DeserializeOwned>(
+            storage: &dyn Storage,
+            scope: &str,
+        ) -> HashMap<String, T> {
+            let mut out = HashMap::new();
+            for rec in storage.list_state(scope).unwrap_or_default() {
+                match serde_json::from_str::<T>(&rec.value) {
+                    Ok(v) => {
+                        out.insert(rec.key, v);
+                    }
+                    Err(e) => eprintln!("gap-node: skipping {scope}/{}: {e}", rec.key),
+                }
+            }
+            out
+        }
+
+        let verdicts: HashMap<String, crate::verifier::Verdict> = load(&*storage, "verdicts");
+        let jobs: HashMap<String, Vec<JobRecord>> = load(&*storage, "jobs");
+        let disputes: HashMap<String, DisputeStats> = load(&*storage, "disputes");
+        let bindings: HashMap<String, crate::principal::PrincipalBinding> =
+            load(&*storage, "bindings");
+        let vetoes: HashMap<String, Vec<crate::principal::Veto>> = load(&*storage, "vetoes");
+        let budgets: HashMap<String, crate::principal::BudgetGrant> = load(&*storage, "budgets");
+        let escalations: HashMap<String, crate::verifier::Escalation> =
+            load(&*storage, "escalations");
+        let subscriptions: HashMap<String, crate::delivery::Subscription> =
+            load(&*storage, "subscriptions");
+
+        // job_ref -> contract is derivable from the job history, so it
+        // is rebuilt rather than stored twice and allowed to disagree.
+        let mut jobs_by_ref = HashMap::new();
+        for records in jobs.values() {
+            for r in records {
+                if let Some(cid) = verdicts
+                    .iter()
+                    .find(|(cid, _)| pseudonym(cid) == r.job_ref)
+                    .map(|(cid, _)| cid.clone())
+                {
+                    jobs_by_ref.insert(r.job_ref.clone(), cid);
+                }
+            }
+        }
+
+        // The daily spend counter: keyed "did|day", and only today's
+        // rows matter. Without it a restart hands out a fresh allowance.
+        let today = now_unix() / 86_400;
+        let mut spend_today = HashMap::new();
+        for rec in storage.list_state("spend").unwrap_or_default() {
+            let (did, day) = match rec.key.rsplit_once('|') {
+                Some((d, day)) => (d.to_string(), day.parse::<u64>().unwrap_or(0)),
+                None => continue,
+            };
+            if day != today {
+                continue;
+            }
+            if let Ok(text) = serde_json::from_str::<String>(&rec.value) {
+                if let Ok(amount) = crate::amount::Amount::parse(&text) {
+                    spend_today.insert((did, day), amount);
+                }
+            }
+        }
+
         Self {
             node: NodeIdentity { identity },
             agents,
@@ -300,16 +369,16 @@ impl NodeState {
                 .map(|v| Box::new(v) as Box<dyn crate::verifier::Verifier>),
             verifier_b: crate::verifier::OpenRouterVerifier::second_from_env()
                 .map(|v| Box::new(v) as Box<dyn crate::verifier::Verifier>),
-            verdicts: HashMap::new(),
-            jobs: HashMap::new(),
-            disputes: HashMap::new(),
-            jobs_by_ref: HashMap::new(),
-            bindings: HashMap::new(),
-            vetoes: HashMap::new(),
-            budgets: HashMap::new(),
-            spend_today: HashMap::new(),
-            escalations: HashMap::new(),
-            subscriptions: HashMap::new(),
+            verdicts,
+            jobs,
+            disputes,
+            jobs_by_ref,
+            bindings,
+            vetoes,
+            budgets,
+            spend_today,
+            escalations,
+            subscriptions,
             outbox: Vec::new(),
         }
     }
@@ -905,6 +974,7 @@ the content inline"
                 confidential: contract.terms.confidentiality.is_some(),
             };
             let verdict = crate::verifier::verify_panel(&self.node.identity, &evidence, &[], None);
+            self.save_state("verdicts", contract_id, &verdict);
             self.verdicts.insert(contract_id.to_string(), verdict);
         }
 
@@ -1194,6 +1264,8 @@ the content inline"
         self.contracts.insert(contract_id.into(), contract.clone());
         self.persist_contract(&contract);
         self.persist_escrow(contract_id, escrow_state, escrow_held, &receipt.currency);
+        self.save_dispute(&contract.client.to_string());
+        self.save_dispute(&contract.provider.to_string());
         self.record(
             "ctr.dispute",
             json!({ "contract_id": contract_id, "reason": reason }),
@@ -1261,8 +1333,11 @@ the content inline"
                     .or_default()
                     .received_lost += 1;
             }
+            self.save_dispute(&c.client.to_string());
+            self.save_dispute(&c.provider.to_string());
             // A human has now ruled: the case is closed.
             self.escalations.remove(contract_id);
+            self.forget_state("escalations", contract_id);
         }
         Ok(json!({
             "state": "ruled",
@@ -1614,9 +1689,11 @@ digest {} - integrity verified against the provider's commitment{}]",
             crate::verifier::verify_panel(&self.node.identity, &evidence, &panel, escalate);
         if let Some(e) = verdict.escalation {
             self.escalations.insert(contract_id.to_string(), e);
+            self.save_state("escalations", contract_id, &e);
         }
         self.verdicts
             .insert(contract_id.to_string(), verdict.clone());
+        self.save_state("verdicts", contract_id, &verdict);
         self.record(
             "exe.verify",
             json!({
@@ -1696,6 +1773,7 @@ digest {} - integrity verified against the provider's commitment{}]",
         self.persist_deliverable(contract_id, deliverable_hash, stored, deliverable_uri);
         // The stale verdict must go: it judged the previous artifact.
         self.verdicts.remove(contract_id);
+        self.forget_state("verdicts", contract_id);
         self.escalations.remove(contract_id);
         self.record(
             "ctr.remedy",
@@ -1744,6 +1822,10 @@ digest {} - integrity verified against the provider's commitment{}]",
         };
         let job_ref = record.job_ref.clone();
         self.jobs.entry(agent.to_string()).or_default().push(record);
+        let agent_key = agent.to_string();
+        if let Some(list) = self.jobs.get(&agent_key).cloned() {
+            self.save_state("jobs", &agent_key, &list);
+        }
         // job_ref -> contract, so a pseudonymous reference can be
         // resolved to its verdict without ever publishing the id.
         self.jobs_by_ref.insert(job_ref, contract_id.to_string());
@@ -1913,6 +1995,49 @@ digest {} - integrity verified against the provider's commitment{}]",
         Ok(json!({ "contract_id": contract_id, "state": "cancelled", "escrow_refunded": refunded }))
     }
 
+
+    // ---- durable projections -------------------------------------
+    //
+    // Contracts, escrows, identities and announcements each had a typed
+    // table; everything else lived only in RAM and vanished on restart.
+    // These write through to one generic state table so that a redeploy
+    // stops being a quiet amnesia event.
+
+    /// Persist one entry of a projection. Failures are logged, never
+    /// fatal: losing durability is bad, refusing to serve is worse.
+    fn save_state<T: serde::Serialize>(&mut self, scope: &str, key: &str, value: &T) {
+        let json = match serde_json::to_string(value) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("gap-node: cannot serialize {scope}/{key}: {e}");
+                return;
+            }
+        };
+        if let Err(e) = self.storage.upsert_state(&crate::storage::StateRecord {
+            scope: scope.to_string(),
+            key: key.to_string(),
+            value: json,
+            updated_at: now_unix(),
+        }) {
+            eprintln!("gap-node: cannot persist {scope}/{key}: {e}");
+        }
+    }
+
+    /// Persist one agent's dispute counters after they change.
+    fn save_dispute(&mut self, agent: &str) {
+        if let Some(d) = self.disputes.get(agent).cloned() {
+            self.save_state("disputes", agent, &d);
+        }
+    }
+
+    /// Forget one entry, so state that outlived its purpose does not
+    /// come back at the next restart.
+    fn forget_state(&mut self, scope: &str, key: &str) {
+        if let Err(e) = self.storage.delete_state(scope, key) {
+            eprintln!("gap-node: cannot delete {scope}/{key}: {e}");
+        }
+    }
+
     /// Is this contract's payment actually secured?
     ///
     /// One predicate, used by both `exe.start` and `exe.deliver`, so the
@@ -2014,7 +2139,8 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             serde_json::from_value(body.clone()).map_err(|e| Error::Json(e.to_string()))?;
         binding.verify()?;
         let agent = binding.agent_did.to_string();
-        self.bindings.insert(agent.clone(), binding);
+        self.bindings.insert(agent.clone(), binding.clone());
+        self.save_state("bindings", &agent, &binding);
         self.record("principal.bind", json!({ "agent_did": agent }));
         Ok(json!({ "bound": agent }))
     }
@@ -2033,6 +2159,8 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         }
         self.bindings.remove(&agent);
         self.vetoes.remove(&agent);
+        self.forget_state("vetoes", &agent);
+        self.forget_state("bindings", &agent);
         self.budgets.remove(&agent);
         self.record("principal.unbind", json!({ "agent_did": agent }));
         Ok(json!({ "unbound": agent }))
@@ -2051,6 +2179,9 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         veto.verify_for(binding)?;
         let scope = veto.scope.clone();
         self.vetoes.entry(agent.clone()).or_default().push(veto);
+        if let Some(list) = self.vetoes.get(&agent).cloned() {
+            self.save_state("vetoes", &agent, &list);
+        }
         self.record(
             "gov.halt",
             json!({ "agent_did": agent, "scope": scope, "source": "principal" }),
@@ -2070,7 +2201,8 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         grant.verify_for(binding)?;
         grant.cap()?;
         let per_day = grant.per_day.clone();
-        self.budgets.insert(agent.clone(), grant);
+        self.budgets.insert(agent.clone(), grant.clone());
+        self.save_state("budgets", &agent, &grant);
         self.record(
             "gov.certify",
             json!({ "agent_did": agent, "per_day": per_day, "kind": "budget" }),
@@ -2116,7 +2248,9 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                 "principal budget exceeded: {after} would pass the {cap} daily cap"
             )));
         }
-        self.spend_today.insert((key, day), after);
+        self.spend_today.insert((key.clone(), day), after);
+        // Without this a restart hands out a fresh daily allowance.
+        self.save_state("spend", &format!("{key}|{day}"), &after.to_string_decimal());
         Ok(())
     }
 
@@ -2194,7 +2328,8 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         let sub = crate::delivery::Subscription::new(agent_did, transport, url, kinds);
         let view = sub.to_json();
         let id = sub.subscription_id.clone();
-        self.subscriptions.insert(id.clone(), sub);
+        self.subscriptions.insert(id.clone(), sub.clone());
+        self.save_state("subscriptions", &id, &sub);
         self.record("node.sub.register", json!({ "subscription_id": id }));
         Ok(view)
     }
@@ -2217,6 +2352,7 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         match self.subscriptions.get(id) {
             Some(s) if s.agent_did.to_string() == did => {
                 self.subscriptions.remove(id);
+                self.forget_state("subscriptions", id);
                 self.record("node.sub.delete", json!({ "subscription_id": id }));
                 Ok(json!({ "deleted": id }))
             }

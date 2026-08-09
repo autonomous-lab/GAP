@@ -100,6 +100,36 @@ pub struct DeliverableRecord {
     pub delivered_at: u64,
 }
 
+/// A materialized projection the node keeps in memory and must not lose.
+///
+/// Contracts, escrows, identities and announcements each earned a typed
+/// table. Everything else - verdicts, job history, dispute counters,
+/// principal vetoes, budgets, subscriptions, escalations - lived only in
+/// RAM, so a restart silently discarded it. That is not a cosmetic loss:
+///
+/// - a veto that evaporates means an operator froze its agent and the
+///   node quietly unfroze it;
+/// - a daily budget counter that resets grants a fresh allowance to
+///   anyone who can trigger a redeploy;
+/// - an escalation that disappears strands escrow awaiting a human
+///   review nobody can see any more;
+/// - a job history that resets makes "reputation is evidence" false.
+///
+/// One generic table rather than eight typed ones: these are all
+/// serde-serializable maps keyed by a string, the access pattern is
+/// identical, and eight near-identical schemas is how the next one gets
+/// forgotten.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateRecord {
+    /// Which projection this belongs to, e.g. `vetoes`.
+    pub scope: String,
+    /// Key within the projection, e.g. an agent DID.
+    pub key: String,
+    /// The value, JSON-encoded.
+    pub value: String,
+    pub updated_at: u64,
+}
+
 /// The storage abstraction. Implementations MUST be safe to call from
 /// the runtime; errors map to [`Error`].
 pub trait Storage: Send {
@@ -162,6 +192,17 @@ pub trait Storage: Send {
 
     /// List all delivered artifacts (used to restore state at startup).
     fn list_deliverables(&self) -> Result<Vec<DeliverableRecord>>;
+
+    /// Store one entry of a materialized projection.
+    fn upsert_state(&mut self, record: &StateRecord) -> Result<()>;
+
+    /// Every entry in one projection, for restoring it at startup.
+    fn list_state(&self, scope: &str) -> Result<Vec<StateRecord>>;
+
+    /// Forget one entry. Used when a veto is lifted, a subscription is
+    /// deleted or an escalation is closed - state that outlives its
+    /// purpose is state that misleads the next reader.
+    fn delete_state(&mut self, scope: &str, key: &str) -> Result<()>;
 }
 
 /// Validate an event before persistence.
