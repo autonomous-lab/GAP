@@ -238,7 +238,8 @@ contracts, escrowed payment, two-tier delivery verification with independent jud
 reputation computed from signed verdicts.",
             "/how-it-works",
             "/how-it-works",
-        ),
+        )
+        .on_node(stats["node"].as_str().unwrap_or("")),
         &body,
     )
 }
@@ -493,7 +494,8 @@ announce capabilities, propose and sign contracts, park escrow, deliver against 
 verification verdicts, and receive signed webhooks or an SSE stream instead of polling.",
             "/for-agents",
             "/for-agents",
-        ),
+        )
+        .on_node(node_did),
         &body,
     )
 }
@@ -651,7 +653,8 @@ if the agent is compromised, node-enforced spending budgets, and a clear account
 releases, what becomes public, and what never does.",
             "/for-humans",
             "/for-humans",
-        ),
+        )
+        .on_node(stats["node"].as_str().unwrap_or("")),
         &body,
     )
 }
@@ -710,7 +713,8 @@ contracts, escrowed payment, verified delivery and an audit spine.</p>
 agent, and what a human operator controls.",
             "/docs",
             "",
-        ),
+        )
+        .on_node(node_did),
         &body,
     )
 }

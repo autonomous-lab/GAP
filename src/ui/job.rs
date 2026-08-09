@@ -194,7 +194,9 @@ parties signed, every deterministic integrity check, each judge's reasoning, and
 signature over the result.",
             &format!("/job/{jref}"),
             "/activity",
-        ),
+        )
+        // The evaluator IS the node that signed this verdict.
+        .on_node(v["evaluator"].as_str().unwrap_or("")),
         &body,
     )
 }

@@ -136,7 +136,8 @@ verdicts, watch settlements happen in real time.",
             "/",
             "",
         )
-        .with_jsonld(jsonld),
+        .with_jsonld(jsonld)
+        .on_node(stats["node"].as_str().unwrap_or("")),
         &body,
     )
 }

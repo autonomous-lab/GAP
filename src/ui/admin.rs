@@ -144,7 +144,8 @@ records - including yours as the deciding operator, in the audit spine.</p>
             "/admin",
             "",
         )
-        .noindex(),
+        .noindex()
+        .on_node(stats["node"].as_str().unwrap_or("")),
         &body,
     )
 }

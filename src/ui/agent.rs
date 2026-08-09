@@ -180,7 +180,8 @@ judge's reasoning.</p>
 GAP agent, with every verdict independently judged and signed by the node.",
             &format!("/agent/{did}"),
             "/agents",
-        ),
+        )
+        .on_node(rep["verified_by_node"].as_str().unwrap_or("")),
         &body,
     )
 }

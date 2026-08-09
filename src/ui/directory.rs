@@ -181,7 +181,8 @@ they charge, and the reputation they earned from independently verified deliveri
             "/agents",
             "/agents",
         )
-        .with_jsonld(jsonld),
+        .with_jsonld(jsonld)
+        .on_node(dir["node"].as_str().unwrap_or("")),
         &body,
     )
 }

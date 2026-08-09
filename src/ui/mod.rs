@@ -167,7 +167,11 @@ border-radius:8px;cursor:pointer;flex-direction:column;align-items:center;justif
 .burger span{display:block;width:16px;height:2px;background:var(--muted);border-radius:2px;
 transition:transform .2s ease,opacity .2s ease}
 .navtoggle:focus-visible+.burger{outline:2px solid var(--cyan);outline-offset:2px}
-.brand{display:flex;align-items:center;gap:9px;margin-right:20px;font-weight:700;letter-spacing:-.02em;color:var(--text)}
+.brand{display:flex;align-items:baseline;gap:9px;margin-right:20px;font-weight:700;letter-spacing:-.02em;color:var(--text);min-width:0}
+.brand .dot{align-self:center}
+.brand b{white-space:nowrap}
+.nodeid{font:600 .74rem/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim);
+border-left:1px solid var(--line-2);padding-left:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .brand:hover{text-decoration:none}
 .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green)}
 header.nav nav{display:flex;gap:2px;flex-wrap:wrap}
@@ -179,7 +183,7 @@ header.nav nav a.on{color:var(--text);background:var(--panel-3)}
 .ghost:hover{color:var(--text);border-color:var(--line-3);text-decoration:none}
 
 /* ---------------------------------------------------------- hero */
-.hero{position:relative;padding:86px 0 26px;overflow:hidden}
+.hero{position:relative;padding:58px 0 26px;overflow:hidden}
 .hero:before{content:"";position:absolute;inset:-260px 0 auto;height:640px;pointer-events:none;
 background:radial-gradient(60% 60% at 50% 42%,rgba(58,214,255,.14),transparent 70%),
 radial-gradient(46% 46% at 78% 20%,rgba(69,230,160,.10),transparent 70%)}
@@ -190,7 +194,7 @@ background-size:58px 58px;
 mask-image:radial-gradient(72% 58% at 50% 34%,#000,transparent 78%)}
 .hero>*{position:relative}
 .eyebrow{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--line-2);background:rgba(10,17,32,.7);
-border-radius:99px;padding:6px 14px;font-size:.78rem;color:var(--muted);margin-bottom:22px}
+border-radius:99px;padding:6px 14px;font-size:.78rem;color:var(--muted);margin-bottom:14px}
 h1{font-size:clamp(2.1rem,5.2vw,3.5rem);line-height:1.05;letter-spacing:-.035em;font-weight:700;margin-bottom:18px}
 h1 .accent{display:block;background:linear-gradient(96deg,var(--cyan),var(--green));-webkit-background-clip:text;background-clip:text;color:transparent}
 .sub{font-size:1.09rem;color:var(--muted);max-width:64ch;margin-bottom:26px}
@@ -425,7 +429,7 @@ transition:opacity .25s,transform .25s;color:var(--muted)}
 .hero-copy .sub{order:4}
 .hero-copy .cta{order:5}
 .hero-copy .proof-chips{order:6}
-.hero-grid{display:flex;flex-direction:column;align-items:stretch}
+.hero-grid{display:flex;flex-direction:column;align-items:stretch;gap:18px}
 .hero-copy .eyebrow{align-self:flex-start}
 .proof-chips{gap:6px}
 .proof-chips span{font-size:.66rem;padding:6px 10px}
@@ -486,7 +490,7 @@ footer.site .fine{margin-top:30px;padding-top:20px;border-top:1px solid var(--li
 
 @media(max-width:860px){
 .split,footer.site .cols{grid-template-columns:1fr}
-.hero{padding-top:56px}
+.hero{padding-top:26px}
 /* The nav used to wrap onto three rows and eat 400px before any content
    appeared. Below this width it collapses behind the burger. */
 .burger{display:flex}
@@ -504,6 +508,10 @@ header.nav nav a{padding:13px 2px;border-radius:0;border-bottom:1px solid var(--
 }
 @media(max-width:640px){
 .wrap{padding:0 18px}
+/* On a narrow masthead the node identifier matters more than the word
+   "Protocol": one says which escrow you are looking at. */
+.brand b{font-size:.98rem}
+.nodeid{font-size:.68rem}
 .bar-row{grid-template-columns:1fr;gap:5px}
 .bar-row b{text-align:left}
 /* A 210px label column leaves nothing for the value on a phone: let
@@ -544,6 +552,12 @@ pub(crate) struct Meta<'a> {
     /// shared link is indexed without ever being crawled from here -
     /// only the meta tag stops that.
     pub noindex: bool,
+    /// This node's DID, shown in the masthead.
+    ///
+    /// A visitor landing on any GAP node sees the same brand, so the
+    /// brand alone does not say *which* node holds the escrow they are
+    /// about to trust. The identifier belongs next to it.
+    pub node: String,
 }
 
 impl<'a> Meta<'a> {
@@ -555,7 +569,14 @@ impl<'a> Meta<'a> {
             active,
             jsonld: None,
             noindex: false,
+            node: String::new(),
         }
+    }
+
+    /// Name the node in the masthead.
+    pub fn on_node(mut self, did: &str) -> Self {
+        self.node = did.to_string();
+        self
     }
     pub fn with_jsonld(mut self, j: String) -> Self {
         self.jsonld = Some(j);
@@ -601,6 +622,21 @@ const COPY_JS: &str = r#"<script>
 </script>
 "#;
 
+
+/// "Node 815a191c" from a `did:gap:` identifier, or `None` when there is
+/// nothing meaningful to show.
+///
+/// Eight hex characters is enough to tell two nodes apart at a glance
+/// while staying readable; the full DID is on `/for-agents` and in the
+/// AgentCard for anyone who needs to verify a signature against it.
+pub(crate) fn node_label(did: &str) -> Option<String> {
+    let key = did.trim().strip_prefix("did:gap:").unwrap_or(did.trim());
+    if key.len() < 8 {
+        return None;
+    }
+    Some(format!("Node {}", &key[..8]))
+}
+
 pub(crate) fn page(meta: &Meta, body: &str) -> String {
     let mut nav = String::new();
     for (href, label) in NAV {
@@ -643,7 +679,7 @@ pub(crate) fn page(meta: &Meta, body: &str) -> String {
 {jsonld}
 <style>{style}</style></head><body>
 <header class="nav"><div class="wrap">
-  <a class="brand" href="/"><span class="dot"></span>GAP</a>
+  <a class="brand" href="/"><span class="dot"></span><b>GAP Protocol</b>{nodeid}</a>
   <input type="checkbox" id="navtoggle" class="navtoggle">
   <label for="navtoggle" class="burger" aria-label="Open menu" role="button" tabindex="0">
     <span></span><span></span><span></span></label>
@@ -692,6 +728,10 @@ pub(crate) fn page(meta: &Meta, body: &str) -> String {
         jsonld = jsonld,
         style = STYLE,
         copyjs = COPY_JS,
+        nodeid = match node_label(&meta.node) {
+            Some(l) => format!(r#"<span class="nodeid">{}</span>"#, esc(&l)),
+            None => String::new(),
+        },
         nav = nav,
         body = body,
         v = crate::VERSION,
@@ -887,6 +927,34 @@ mod tests {
         for (href, label) in NAV {
             assert!(html.contains(label), "{href} missing from the markup");
         }
+    }
+
+    #[test]
+    fn the_masthead_names_which_node_you_are_looking_at() {
+        // Every GAP node serves the same brand, so the brand alone does
+        // not say which node holds the escrow a visitor is about to
+        // trust. The identifier belongs beside it.
+        let did = "did:gap:815a191c53276f6e8ed7c03afa64fc9cca54fd97bf96927b4f76afd4aa38d0d1";
+        let html = page(&Meta::new("T", "D", "/", "").on_node(did), "");
+        assert!(html.contains("GAP Protocol"));
+        assert!(html.contains(r#"<span class="nodeid">Node 815a191c</span>"#));
+
+        // A page with no node to name shows the brand alone rather than
+        // an empty separator.
+        let bare = page(&Meta::new("T", "D", "/", ""), "");
+        assert!(bare.contains("GAP Protocol"));
+        // (asserting on the markup, not the word: the stylesheet always
+        // carries a .nodeid rule)
+        assert!(!bare.contains(r#"<span class="nodeid">"#));
+    }
+
+    #[test]
+    fn a_node_label_needs_a_real_identifier() {
+        assert_eq!(node_label("did:gap:abcdef0123"), Some("Node abcdef01".into()));
+        assert_eq!(node_label("abcdef0123"), Some("Node abcdef01".into()));
+        assert_eq!(node_label("did:gap:"), None);
+        assert_eq!(node_label(""), None);
+        assert_eq!(node_label("short"), None);
     }
 
     #[test]

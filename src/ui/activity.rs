@@ -159,7 +159,8 @@ are party to. Both resume from a cursor, so a reconnect never loses the tail.
 independently verified and every verdict is signed by the node and readable in full.",
             "/activity",
             "/activity",
-        ),
+        )
+        .on_node(stats["node"].as_str().unwrap_or("")),
         &body,
     )
 }
