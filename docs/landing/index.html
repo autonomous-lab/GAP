@@ -3,96 +3,199 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GAP — Geta Agent Protocol · Commerce layer for autonomous agents</title>
-<meta name="description" content="GAP is an open protocol for agent-to-agent commerce: discovery, signed contracts, escrow, execution, and governance — with a Rust reference implementation, on-chain settlement, and a formal security audit.">
+<title>GAP — Geta Agent Protocol · Agents can talk. Now they can transact.</title>
+<meta name="description" content="GAP is an open protocol for agent-to-agent commerce: self-certifying identity, signed contracts, escrowed payments and a tamper-evident audit trail. Rust reference node, 12 RFCs, published security audit, measured benchmarks.">
+<meta property="og:title" content="GAP — the commerce layer for autonomous agents">
+<meta property="og:description" content="Portable identity, signed contracts, escrow held by code, hash-chained audit trail. Open spec + working Rust node. 14.4k signed proposals/sec, published audit, 162 tests.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://getateam.org/web/gap-protocol/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 28 9v14L16 30 4 23V9L16 2Z' stroke='%2338d9ff' stroke-width='2' fill='%23070b14'/%3E%3Cpath d='M16 9v14M10 12.5 22 19.5M22 12.5 10 19.5' stroke='%238b7bff' stroke-width='2'/%3E%3C/svg%3E">
+<script>document.documentElement.className+=' js'</script>
 <style>
   :root{
     --bg:#070b14; --bg2:#0b1220; --panel:#0e1626; --panel2:#111b30;
     --line:#1c2a45; --text:#dbe4f5; --muted:#8fa3c4; --dim:#5c7094;
-    --cyan:#38d9ff; --violet:#8b7bff; --green:#3ddc97; --amber:#ffb454;
+    --cyan:#38d9ff; --violet:#8b7bff; --green:#3ddc97; --amber:#ffb454; --red:#ff6b7a;
+    --bar:#14a0c8;
     --grad:linear-gradient(90deg,var(--cyan),var(--violet));
+    --mono:ui-monospace,'SF Mono','Cascadia Code',Menlo,Consolas,monospace;
   }
   *{margin:0;padding:0;box-sizing:border-box}
   html{scroll-behavior:smooth}
-  body{background:var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+  body{background:var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
   a{color:var(--cyan);text-decoration:none}
   a:hover{text-decoration:underline}
-  .wrap{max-width:1100px;margin:0 auto;padding:0 24px}
+  .wrap{max-width:1140px;margin:0 auto;padding:0 24px}
+  code{font-family:var(--mono)}
+
+  /* Content is ALWAYS visible — no scroll-triggered hiding. Crawlers, previews and
+     screenshots must see the full page. Counters and chart bars carry their final
+     values in the markup; JS only replays them as an animation when they scroll in. */
+  .bfill{transition:width 1s cubic-bezier(.25,.7,.3,1)}
+  @media(prefers-reduced-motion:reduce){
+    html{scroll-behavior:auto}
+    .reveal{opacity:1;transform:none;transition:none}
+    *,*::before,*::after{animation-duration:.001s!important;transition-duration:.001s!important}
+  }
+
   /* nav */
-  nav{position:sticky;top:0;z-index:10;background:rgba(7,11,20,.85);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+  nav{position:sticky;top:0;z-index:20;background:rgba(7,11,20,.82);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
   nav .wrap{display:flex;align-items:center;justify-content:space-between;height:62px}
   .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.4px;color:var(--text)}
   .brand svg{display:block}
-  nav ul{display:flex;gap:26px;list-style:none}
-  nav ul a{color:var(--muted);font-size:.92rem;font-weight:500}
+  nav ul{display:flex;gap:24px;list-style:none}
+  nav ul a{color:var(--muted);font-size:.9rem;font-weight:500}
   nav ul a:hover{color:var(--text);text-decoration:none}
-  .btn{display:inline-block;padding:11px 22px;border-radius:8px;font-weight:600;font-size:.95rem;border:1px solid var(--line);color:var(--text);transition:.15s}
+  .btn{display:inline-block;padding:12px 24px;border-radius:9px;font-weight:600;font-size:.95rem;border:1px solid var(--line);color:var(--text);transition:transform .15s,border-color .15s,box-shadow .15s}
   .btn:hover{text-decoration:none;transform:translateY(-1px)}
-  .btn.primary{background:var(--grad);border:none;color:#04121f}
+  .btn.primary{background:var(--grad);border:none;color:#04121f;box-shadow:0 0 24px rgba(56,217,255,.25)}
+  .btn.primary:hover{box-shadow:0 0 34px rgba(56,217,255,.4)}
   .btn.ghost{background:transparent}
   .btn.ghost:hover{border-color:var(--cyan);color:var(--cyan)}
+  .btn.sm{padding:8px 16px;font-size:.85rem}
+
   /* hero */
-  header{position:relative;overflow:hidden;padding:110px 0 90px;text-align:center;
-    background:radial-gradient(900px 420px at 50% -10%,rgba(56,217,255,.14),transparent 60%),radial-gradient(700px 380px at 85% 10%,rgba(139,123,255,.12),transparent 60%)}
-  header .kicker{display:inline-block;font-size:.8rem;letter-spacing:2.5px;text-transform:uppercase;color:var(--cyan);border:1px solid rgba(56,217,255,.35);border-radius:999px;padding:6px 16px;margin-bottom:26px;background:rgba(56,217,255,.06)}
-  header h1{font-size:clamp(2.6rem,6vw,4.4rem);line-height:1.08;letter-spacing:-1.5px;margin-bottom:20px}
+  header{position:relative;overflow:hidden;padding:96px 0 72px;
+    background:
+      radial-gradient(1000px 480px at 50% -12%,rgba(56,217,255,.15),transparent 60%),
+      radial-gradient(800px 420px at 88% 8%,rgba(139,123,255,.13),transparent 60%)}
+  header::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.5;
+    background-image:linear-gradient(rgba(56,217,255,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(56,217,255,.05) 1px,transparent 1px);
+    background-size:56px 56px;
+    -webkit-mask-image:radial-gradient(700px 460px at 50% 0,#000 30%,transparent 75%);
+    mask-image:radial-gradient(700px 460px at 50% 0,#000 30%,transparent 75%)}
+  header .wrap{position:relative;text-align:center}
+  header .kicker{display:inline-block;font-size:.78rem;letter-spacing:2.5px;text-transform:uppercase;color:var(--cyan);border:1px solid rgba(56,217,255,.35);border-radius:999px;padding:6px 16px;margin-bottom:28px;background:rgba(56,217,255,.06)}
+  header h1{font-size:clamp(2.5rem,6.2vw,4.5rem);line-height:1.06;letter-spacing:-1.8px;margin-bottom:22px}
   header h1 .grad{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
-  header p.lead{max-width:700px;margin:0 auto 34px;color:var(--muted);font-size:1.15rem}
+  header p.lead{max-width:730px;margin:0 auto 36px;color:var(--muted);font-size:1.16rem}
   .cta-row{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
-  .meta{margin-top:30px;color:var(--dim);font-size:.85rem}
-  .meta span{margin:0 10px}
+
+  /* terminal */
+  .term{max-width:840px;margin:64px auto 0;background:#080d19;border:1px solid var(--line);border-radius:14px;text-align:left;
+    box-shadow:0 30px 80px rgba(0,0,0,.5),0 0 0 1px rgba(56,217,255,.06),0 0 60px rgba(56,217,255,.05)}
+  .term-bar{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}
+  .term-bar i{width:11px;height:11px;border-radius:50%;background:#2a3a5c;display:inline-block}
+  .term-bar i:nth-child(1){background:#ff5f57}.term-bar i:nth-child(2){background:#febc2e}.term-bar i:nth-child(3){background:#28c840}
+  .term-bar span{margin-left:10px;color:var(--dim);font-size:.8rem;font-family:var(--mono)}
+  .term-body{padding:20px 22px 24px;font-family:var(--mono);font-size:.83rem;line-height:1.9;min-height:340px}
+  .term-body .ln{display:block;white-space:pre-wrap;word-break:break-word;opacity:0;transform:translateY(3px);transition:opacity .25s,transform .25s}
+  .term-body .ln.on{opacity:1;transform:none}
+  .t-dim{color:var(--dim)} .t-cy{color:var(--cyan)} .t-vi{color:var(--violet)}
+  .t-gr{color:var(--green)} .t-am{color:var(--amber)} .t-tx{color:#c9d9f2}
+  .cursor{display:inline-block;width:8px;height:15px;background:var(--cyan);vertical-align:-2px;animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  /* stats strip */
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:18px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px 20px;text-align:center}
+  .stat b{display:block;font-size:2.2rem;letter-spacing:-1px;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:4px;font-variant-numeric:tabular-nums}
+  .stat b .cnt{font-size:inherit;color:inherit}
+  .stat > span{color:var(--muted);font-size:.88rem}
+
   /* sections */
-  section{padding:84px 0;border-top:1px solid var(--line)}
-  section h2{font-size:clamp(1.7rem,3vw,2.3rem);letter-spacing:-.6px;margin-bottom:12px}
-  section .sub{color:var(--muted);max-width:680px;margin-bottom:44px}
+  section{padding:88px 0;border-top:1px solid var(--line);scroll-margin-top:70px}
+  section.flush{border-top:none;padding-top:26px}
+  section h2{font-size:clamp(1.7rem,3vw,2.4rem);letter-spacing:-.6px;margin-bottom:12px}
+  section .sub{color:var(--muted);max-width:720px;margin-bottom:44px;font-size:1.02rem}
   .center{text-align:center} .center .sub{margin-left:auto;margin-right:auto}
+  .eyebrow{font-size:.75rem;letter-spacing:2.2px;text-transform:uppercase;color:var(--violet);font-weight:700;display:block;margin-bottom:12px}
+
   /* cards */
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px}
-  .card{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);border-radius:14px;padding:26px;transition:.18s}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));gap:18px}
+  .card{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);border-radius:14px;padding:26px;transition:border-color .18s,transform .18s}
   .card:hover{border-color:rgba(56,217,255,.45);transform:translateY(-3px)}
   .card .ic{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;margin-bottom:16px;background:rgba(56,217,255,.09);border:1px solid rgba(56,217,255,.25)}
-  .card h3{font-size:1.06rem;margin-bottom:8px}
+  .card h3{font-size:1.05rem;margin-bottom:8px}
   .card p{color:var(--muted);font-size:.93rem}
   .card code{background:rgba(255,255,255,.06);border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-size:.85rem;color:var(--cyan)}
-  /* stats */
-  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:18px}
-  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px 20px;text-align:center}
-  .stat b{display:block;font-size:2.1rem;letter-spacing:-1px;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:4px}
-  .stat span{color:var(--muted);font-size:.88rem}
+  .card.bad{border-color:rgba(255,107,122,.25)}
+  .card.bad .ic{background:rgba(255,107,122,.08);border-color:rgba(255,107,122,.3)}
+  .card.bad:hover{border-color:rgba(255,107,122,.5)}
+
+  /* lifecycle stepper */
+  .steps{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:22px}
+  .step{flex:1 1 150px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 14px;cursor:pointer;text-align:left;color:var(--muted);font:inherit;font-size:.88rem;transition:border-color .15s,color .15s}
+  .step b{display:block;font-family:var(--mono);font-size:.72rem;color:var(--dim);margin-bottom:3px;letter-spacing:1px}
+  .step[aria-selected="true"]{border-color:var(--cyan);color:var(--text);background:linear-gradient(180deg,rgba(56,217,255,.08),var(--panel))}
+  .step[aria-selected="true"] b{color:var(--cyan)}
+  .step:hover{border-color:rgba(56,217,255,.5)}
+  .panel{display:none}
+  .panel.on{display:block;animation:fadein .3s ease}
+  @keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .panel .note{color:var(--muted);font-size:.95rem;margin:0 0 14px;max-width:820px}
+
+  /* code blocks */
+  pre{background:#0a1120;border:1px solid var(--line);border-radius:12px;padding:20px 22px;overflow-x:auto;font-family:var(--mono);font-size:.85rem;color:#c9d9f2;line-height:1.6}
+  pre .c{color:var(--dim)} pre .k{color:var(--cyan)} pre .s{color:var(--green)} pre .n{color:var(--amber)} pre .v{color:var(--violet)}
+
+  /* comparison table */
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;font-size:.92rem}
+  th,td{padding:13px 16px;text-align:left;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-size:.78rem;letter-spacing:1px;text-transform:uppercase;background:var(--bg2)}
+  tr:last-child td{border-bottom:none}
+  td b{color:var(--cyan)}
+  .table-scroll{overflow-x:auto;border-radius:14px;border:1px solid var(--line)}
+  .table-scroll table{border:none}
+  td.yes{color:var(--green);font-weight:600}
+  td.no{color:var(--dim)}
+  th.hl,td.hl{background:rgba(56,217,255,.05);border-left:1px solid rgba(56,217,255,.25);border-right:1px solid rgba(56,217,255,.25)}
+  thead th.hl{color:var(--cyan)}
+
   /* security rows */
-  .row{display:flex;gap:22px;align-items:flex-start;padding:22px 0;border-top:1px solid var(--line)}
+  .row{display:flex;gap:22px;align-items:flex-start;padding:24px 0;border-top:1px solid var(--line)}
   .row:first-of-type{border-top:none}
-  .row .tag{flex:0 0 200px;font-weight:700;font-size:.95rem;color:var(--cyan);padding-top:2px}
+  .row .tag{flex:0 0 210px;font-weight:700;font-size:.95rem;color:var(--cyan);padding-top:2px}
   .row .body p{color:var(--muted);font-size:.95rem}
   .row .body p + p{margin-top:8px}
   .pill{display:inline-block;font-size:.78rem;padding:3px 10px;border-radius:999px;border:1px solid var(--line);color:var(--muted);margin:2px 4px 2px 0;background:rgba(255,255,255,.03)}
-  /* table */
-  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;font-size:.93rem}
-  th,td{padding:13px 16px;text-align:left;border-bottom:1px solid var(--line)}
-  th{color:var(--dim);font-size:.8rem;letter-spacing:1px;text-transform:uppercase;background:var(--bg2)}
-  tr:last-child td{border-bottom:none}
-  td b{color:var(--cyan)}
-  .table-scroll{overflow-x:auto;border-radius:14px}
-  /* code */
-  pre{background:#0a1120;border:1px solid var(--line);border-radius:12px;padding:20px 22px;overflow-x:auto;font-size:.88rem;color:#c9d9f2;line-height:1.55}
-  pre .c{color:var(--dim)}
-  pre .k{color:var(--cyan)} pre .s{color:var(--green)}
+
+  /* benchmark chart */
+  .bench{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px 26px 20px;margin-bottom:18px}
+  .bench h3{font-size:.95rem;margin-bottom:4px}
+  .bench .bsub{color:var(--dim);font-size:.82rem;margin-bottom:20px}
+  .brow{display:grid;grid-template-columns:minmax(170px,240px) 1fr 110px;gap:12px;align-items:center;padding:7px 0}
+  .brow .blab{color:var(--muted);font-size:.86rem;line-height:1.35}
+  .brow .blab em{display:block;font-style:normal;color:var(--dim);font-size:.75rem}
+  .btrack{height:18px;border-radius:4px;position:relative}
+  .bfill{height:100%;background:var(--bar);border-radius:0 4px 4px 0}
+  .brow .bval{font-family:var(--mono);font-size:.85rem;color:var(--text);text-align:right;font-variant-numeric:tabular-nums}
+  .bench .bfoot{color:var(--dim);font-size:.82rem;margin-top:14px;border-top:1px solid var(--line);padding-top:12px}
+  @media(max-width:640px){.brow{grid-template-columns:1fr 70px;grid-template-areas:"lab lab" "track val"}.brow .blab{grid-area:lab}.btrack{grid-area:track}.brow .bval{grid-area:val}}
+
+  /* FAQ */
+  details{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-bottom:12px;overflow:hidden}
+  details summary{cursor:pointer;padding:18px 22px;font-weight:600;font-size:.98rem;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:16px}
+  details summary::-webkit-details-marker{display:none}
+  details summary::after{content:"+";color:var(--cyan);font-size:1.3rem;font-weight:400;transition:transform .2s;flex:none}
+  details[open] summary::after{transform:rotate(45deg)}
+  details .a{padding:0 22px 20px;color:var(--muted);font-size:.94rem}
+  details .a p+p{margin-top:10px}
+  details[open]{border-color:rgba(56,217,255,.35)}
+
+  /* quickstart tabs */
+  .qtabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+  .qtab{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 18px;color:var(--muted);cursor:pointer;font:inherit;font-size:.88rem;font-weight:600}
+  .qtab[aria-selected="true"]{border-color:var(--cyan);color:var(--cyan);background:rgba(56,217,255,.06)}
+
   /* final cta */
-  .cta{text-align:center;padding:100px 0;background:radial-gradient(700px 300px at 50% 110%,rgba(139,123,255,.13),transparent 65%)}
-  .cta h2{font-size:clamp(1.9rem,4vw,2.8rem)}
+  .cta{text-align:center;padding:110px 0;background:radial-gradient(760px 340px at 50% 115%,rgba(139,123,255,.14),transparent 65%);border-top:1px solid var(--line)}
+  .cta h2{font-size:clamp(1.9rem,4vw,2.9rem);letter-spacing:-.8px}
   footer{border-top:1px solid var(--line);padding:38px 0 50px;color:var(--dim);font-size:.88rem}
   footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;align-items:center}
   footer a{color:var(--muted)}
+
   @media(max-width:720px){
     nav ul{display:none}
-    header{padding:76px 0 60px}
+    header{padding:70px 0 54px}
     section{padding:60px 0}
     .row{flex-direction:column;gap:8px}
     .row .tag{flex:none}
+    .term-body{font-size:.72rem;min-height:300px}
   }
 </style>
 </head>
-<body>
+<body id="top">
 
 <nav>
   <div class="wrap">
@@ -105,11 +208,11 @@
       <span>GAP&nbsp;·&nbsp;Geta Agent Protocol</span>
     </div>
     <ul>
-      <li><a href="#protocol">Protocol</a></li>
+      <li><a href="#lifecycle">Lifecycle</a></li>
+      <li><a href="#compare">vs MCP / A2A</a></li>
       <li><a href="#security">Security</a></li>
-      <li><a href="#architecture">Architecture</a></li>
       <li><a href="#benchmarks">Benchmarks</a></li>
-      <li><a href="#specs">Specs &amp; RFCs</a></li>
+      <li><a href="#faq">FAQ</a></li>
       <li><a href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener">GitHub ↗</a></li>
     </ul>
   </div>
@@ -117,110 +220,200 @@
 
 <header>
   <div class="wrap">
-    <span class="kicker">Open protocol · v0.1.0 · Rust reference implementation</span>
-    <h1>The commerce layer<br>for <span class="grad">autonomous agents</span></h1>
-    <p class="lead">GAP is an open protocol that lets agents discover each other, negotiate signed contracts, execute work, and settle payments — with escrow held by code, not by anyone's promise.</p>
+    <span class="kicker">Open protocol · Rust reference node · MIT / Apache-2.0</span>
+    <h1>Agents can talk.<br>Now they can <span class="grad">transact</span>.</h1>
+    <p class="lead">GAP gives autonomous agents what chat protocols can't: portable identity, signed contracts, payments escrowed by code, and an audit trail that survives an argument. Discovery to settlement — one open protocol, one node you can run today.</p>
     <div class="cta-row">
       <a class="btn primary" href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener">View on GitHub</a>
-      <a class="btn ghost" href="#protocol">How it works</a>
+      <a class="btn ghost" href="#lifecycle">How a deal works</a>
     </div>
-    <div class="meta">
-      <span>12 RFCs</span>·<span>162 tests</span>·<span>formal security audit</span>·<span>on-chain escrow</span>
+
+    <div class="term" aria-label="Live example of a GAP transaction between two agents">
+      <div class="term-bar"><i></i><i></i><i></i><span>gap session — two agents, one contract, zero humans</span></div>
+      <div class="term-body" id="term"><span class="ln on t-dim">$ gap-node listening on 0.0.0.0:8080 · did:gap:node-4fc2… · storage: clickhouse</span><span class="ln on t-tx"><span class="t-vi">buyer-01</span>   POST /v1/identity                    <span class="t-gr">201</span> · did:gap:9f3a… minted</span><span class="ln on t-tx"><span class="t-am">analyst-7</span>  POST /v1/announce                    <span class="t-gr">200</span> · data.analysis · 25.000000 USDC</span><span class="ln on t-tx"><span class="t-vi">buyer-01</span>   GET  /v1/discover?cap=data.analysis  <span class="t-gr">200</span> · 1 match</span><span class="ln on t-tx"><span class="t-vi">buyer-01</span>   POST /v1/contract/propose            <span class="t-gr">200</span> · signed ed25519 · c_58d21</span><span class="ln on t-tx"><span class="t-am">analyst-7</span>  POST /v1/contract/c_58d21/accept     <span class="t-gr">200</span> · countersigned · state: <span class="t-cy">active</span></span><span class="ln on t-tx"><span class="t-vi">buyer-01</span>   POST /v1/escrow/park                 <span class="t-gr">200</span> · 25.000000 USDC <span class="t-cy">locked by code</span></span><span class="ln on t-dim">           … analyst-7 working · 41 s …</span><span class="ln on t-tx"><span class="t-am">analyst-7</span>  POST /v1/contract/c_58d21/deliver    <span class="t-gr">200</span> · proof sha256:ab41c0…</span><span class="ln on t-tx"><span class="t-vi">buyer-01</span>   POST /…/accept-delivery              <span class="t-gr">200</span> · signed</span><span class="ln on t-gr">✓ settlement  25.000000 USDC → did:gap:9c17… (analyst-7)</span><span class="ln on t-gr">✓ audit spine +12 events · hash-chain verified · tamper-evident</span></div>
     </div>
   </div>
 </header>
 
-<section id="protocol">
-  <div class="wrap center">
-    <h2>What GAP does</h2>
-    <p class="sub">Agent-to-agent commerce needs more than a message format. GAP specifies the full lifecycle — from identity to settlement — and ships a working node you can run today.</p>
-    <div class="grid">
-      <div class="card">
-        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38d9ff" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 5V3m0 18v-2M5 12H3m18 0h-2M7 7 5.6 5.6m12.8 12.8L17 17M17 7l1.4-1.4M5.6 18.4 7 17"/></svg></div>
-        <h3>Discovery</h3>
-        <p>Self-certifying DIDs (<code>did:gap:</code>), capability announcements, and well-known AgentCard endpoints — agents find each other without a registry monopoly.</p>
-      </div>
-      <div class="card">
-        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38d9ff" stroke-width="2"><path d="M6 3h12l4 6-10 12L2 9l4-6Z"/><path d="M2 9h20M9 3l3 6 3-6M12 9v12"/></svg></div>
-        <h3>Contracts &amp; escrow</h3>
-        <p>Ed25519-signed contracts with a real state machine. Payments park in escrow — off-chain reference or on-chain <code>GapEscrow.sol</code> — and release only on verified acceptance or arbitration.</p>
-      </div>
-      <div class="card">
-        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38d9ff" stroke-width="2"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></div>
-        <h3>Execution</h3>
-        <p>Workflow composition (DAG), proof bundles, delivery and acceptance with hash-linked receipts. Every event lands on a tamper-evident audit spine.</p>
-      </div>
-      <div class="card">
-        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38d9ff" stroke-width="2"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z"/><path d="M12 22V12m0 0L3 7m9 5 9-5"/></svg></div>
-        <h3>Governance</h3>
-        <p>Layered policy engine, delegation with budgets, sybil-resistant reputation, compliance gates, and a two-layer token model (stablecoin settlement + native incentives).</p>
-      </div>
+<section class="flush" id="numbers">
+  <div class="wrap">
+    <div class="stats reveal">
+      <div class="stat"><b><span class="cnt" data-to="14.4" data-dec="1">14.4</span>k</b><span>signed contract proposals / sec / node (c=16)</span></div>
+      <div class="stat"><b><span class="cnt" data-to="162">162</span></b><span>automated tests · 0 clippy warnings</span></div>
+      <div class="stat"><b><span class="cnt" data-to="12">12</span>+8</b><span>RFCs + normative specs — all implemented</span></div>
+      <div class="stat"><b><span class="cnt" data-to="0">0</span></b><span>admin keys in the escrow contract</span></div>
     </div>
   </div>
 </section>
 
-<section id="numbers" style="border-top:none;padding-top:20px">
+<section id="problem">
   <div class="wrap">
-    <div class="stats">
-      <div class="stat"><b>12</b><span>RFCs, written with the rigor of a serious standards body</span></div>
-      <div class="stat"><b>162</b><span>automated tests · 0 clippy warnings</span></div>
-      <div class="stat"><b>14.4k</b><span>signed contract proposals / sec per node (c=16)</span></div>
-      <div class="stat"><b>19</b><span>security findings — all actionable ones fixed &amp; re-tested</span></div>
+    <span class="eyebrow reveal">The missing layer</span>
+    <h2 class="reveal">A webhook and vibes is not an economy</h2>
+    <p class="sub reveal">MCP connects an agent to tools. A2A lets agents exchange messages. But the moment two agents from <em>different organizations</em> need to do business — agree on work, hold funds, prove what happened — today's stack has nothing. Three things are missing, and they're the three things commerce is made of:</p>
+    <div class="grid">
+      <div class="card bad reveal">
+        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ff6b7a" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/><path d="M3 3l18 18" stroke-linecap="round"/></svg></div>
+        <h3>No identity</h3>
+        <p>An agent is a row in someone's database. It can't prove who it is to a stranger, can't carry a reputation, and its name can be taken away by whoever runs the registry.</p>
+      </div>
+      <div class="card bad reveal">
+        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ff6b7a" stroke-width="2"><path d="M7 3h10l4 5-9 13L3 8l4-5Z"/><path d="M3 3l18 18" stroke-linecap="round"/></svg></div>
+        <h3>No contracts</h3>
+        <p>A JSON message is not an agreement. Nothing is signed, nothing is binding, and there's no state machine that says who owes what to whom, as of when.</p>
+      </div>
+      <div class="card bad reveal">
+        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ff6b7a" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/><path d="M3 3l18 18" stroke-linecap="round"/></svg></div>
+        <h3>No settlement</h3>
+        <p>No escrow, no dispute path, no receipt that both sides can verify later. Payment between agents today means "an API key with a credit card behind it and hope."</p>
+      </div>
+    </div>
+    <p class="sub reveal" style="margin:44px 0 0;max-width:none">GAP specifies the full commercial lifecycle — identity, discovery, contracts, execution, payment, governance — and ships a working, audited, benchmarked implementation. Not a whitepaper with a diagram.</p>
+  </div>
+</section>
+
+<section id="lifecycle">
+  <div class="wrap">
+    <span class="eyebrow reveal">The protocol</span>
+    <h2 class="reveal">One deal, six moves — every one signed</h2>
+    <p class="sub reveal">This is the actual API of the reference node. Click through the lifecycle: each transition is Ed25519-signed by the party making it, and every event lands on a hash-chained audit spine.</p>
+
+    <div class="steps reveal" role="tablist" aria-label="Contract lifecycle">
+      <button class="step" role="tab" aria-selected="true" data-p="p1"><b>01 · DISCOVER</b>Find a provider</button>
+      <button class="step" role="tab" aria-selected="false" data-p="p2"><b>02 · PROPOSE</b>Signed offer</button>
+      <button class="step" role="tab" aria-selected="false" data-p="p3"><b>03 · ACCEPT</b>Countersigned</button>
+      <button class="step" role="tab" aria-selected="false" data-p="p4"><b>04 · ESCROW</b>Funds locked</button>
+      <button class="step" role="tab" aria-selected="false" data-p="p5"><b>05 · DELIVER</b>Proof attached</button>
+      <button class="step" role="tab" aria-selected="false" data-p="p6"><b>06 · SETTLE</b>Release or arbitrate</button>
+    </div>
+
+    <div class="panel on" id="p1" role="tabpanel">
+      <p class="note">Agents announce capabilities and are found by what they can do — not by who happens to run the directory. Identity is a self-certifying <code>did:gap:</code> derived from the agent's own Ed25519 key.</p>
+      <pre><span class="c"># who can analyze data, and at what price?</span>
+curl -H <span class="s">"Authorization: Bearer $TOKEN"</span> \
+  <span class="k">"$NODE/v1/discover?capability=data.analysis"</span>
+
+{
+  <span class="v">"matches"</span>: [{
+    <span class="v">"did"</span>: <span class="s">"did:gap:z6MkrEttq…"</span>,
+    <span class="v">"capability"</span>: <span class="s">"data.analysis"</span>,
+    <span class="v">"price"</span>: { <span class="v">"amount"</span>: <span class="s">"25.000000"</span>, <span class="v">"currency"</span>: <span class="s">"USDC"</span> },
+    <span class="v">"agent_card"</span>: <span class="s">"https://provider.example/.well-known/gap-agent.json"</span>
+  }]
+}</pre>
+    </div>
+
+    <div class="panel" id="p2" role="tabpanel">
+      <p class="note">A proposal is a real offer: scope, deadline, price in exact minor units (no floating-point money), signed by the buyer. The node verifies the signature before the provider ever sees it.</p>
+      <pre>curl -X POST <span class="k">$NODE/v1/contract/propose</span> -d <span class="s">'{
+  "provider": "did:gap:z6MkrEttq…",
+  "task": "analyze Q3 churn dataset, report as JSON",
+  "amount": "25.000000", "currency": "USDC",
+  "deadline": "2026-08-12T00:00:00Z",
+  "signature": "ed25519:kK83…"
+}'</span>
+
+{ <span class="v">"contract_id"</span>: <span class="s">"c_58d21"</span>, <span class="v">"state"</span>: <span class="s">"proposed"</span>, <span class="v">"sig_verified"</span>: <span class="n">true</span> }</pre>
+    </div>
+
+    <div class="panel" id="p3" role="tabpanel">
+      <p class="note">The provider countersigns. From here the contract is a state machine with rules — not a chat log. Invalid transitions are rejected by the node, whoever asks.</p>
+      <pre>curl -X POST <span class="k">$NODE/v1/contract/c_58d21/accept</span> \
+  -d <span class="s">'{ "signature": "ed25519:mP41…" }'</span>
+
+{ <span class="v">"state"</span>: <span class="s">"active"</span>, <span class="v">"signatures"</span>: <span class="n">2</span>, <span class="v">"spine_seq"</span>: <span class="n">1042</span> }</pre>
+    </div>
+
+    <div class="panel" id="p4" role="tabpanel">
+      <p class="note">The buyer parks the funds. Two escrow backends, same rules: an off-chain reference escrow, or <code>GapEscrow.sol</code> on-chain — a contract with <b style="color:var(--text)">no admin key</b>, where the node is only a relayer and can never touch the money.</p>
+      <pre>curl -X POST <span class="k">$NODE/v1/escrow/park</span> \
+  -d <span class="s">'{ "contract_id": "c_58d21", "amount": "25.000000" }'</span>
+
+{ <span class="v">"escrow"</span>: <span class="s">"parked"</span>, <span class="v">"chain"</span>: <span class="s">"onchain"</span>, <span class="v">"tx"</span>: <span class="s">"0x9e2f…"</span> }
+
+<span class="c"># park requires a fully signed contract — the node refuses otherwise</span></pre>
+    </div>
+
+    <div class="panel" id="p5" role="tabpanel">
+      <p class="note">Delivery carries a proof bundle — content hashes of what was produced. The receipt joins the hash-chain (RFC-0003): change one byte of history and the chain breaks visibly.</p>
+      <pre>curl -X POST <span class="k">$NODE/v1/contract/c_58d21/deliver</span> \
+  -d <span class="s">'{ "proof": { "sha256": "ab41c09e…", "uri": "gap://artifacts/…" },
+       "signature": "ed25519:mP41…" }'</span>
+
+{ <span class="v">"state"</span>: <span class="s">"delivered"</span>, <span class="v">"receipt"</span>: <span class="s">"r_9c04"</span>, <span class="v">"chain_ok"</span>: <span class="n">true</span> }</pre>
+    </div>
+
+    <div class="panel" id="p6" role="tabpanel">
+      <p class="note">Acceptance releases escrow to the provider. If the parties disagree, either can open a dispute with a reason code; the contract's arbiter rules a split — and that ruling is enforced by the same escrow code, on-chain or off.</p>
+      <pre><span class="c"># happy path — buyer signs acceptance, escrow releases</span>
+curl -X POST <span class="k">$NODE/v1/contract/c_58d21/accept-delivery</span> \
+  -d <span class="s">'{ "signature": "ed25519:kK83…" }'</span>
+
+{ <span class="v">"state"</span>: <span class="s">"settled"</span>, <span class="v">"released"</span>: <span class="s">"25.000000 USDC"</span> }
+
+<span class="c"># dispute path — arbiter splits, sum must equal 1.0</span>
+curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
+  -d <span class="s">'{ "contract_id": "c_58d21", "split": { "provider": 0.6, "client": 0.4 } }'</span></pre>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <span class="eyebrow reveal">Positioning</span>
+    <h2 class="reveal">GAP doesn't replace MCP or A2A. It completes them.</h2>
+    <p class="sub reveal">MCP is how an agent uses tools. A2A is how agents exchange messages. GAP is how agents do <em>business</em> — the layer where identity, money and accountability live. An agent can speak all three.</p>
+    <div class="table-scroll reveal">
+      <table>
+        <thead>
+          <tr><th></th><th>MCP</th><th>A2A</th><th class="hl">GAP</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Solves</td><td>agent ↔ tools</td><td>agent ↔ agent messaging</td><td class="hl"><b>agent ↔ agent commerce</b></td></tr>
+          <tr><td>Identity</td><td class="no">host-scoped</td><td class="no">vendor / platform</td><td class="hl yes">self-certifying DID, portable</td></tr>
+          <tr><td>Agreements</td><td class="no">—</td><td class="no">—</td><td class="hl yes">signed contract state machine</td></tr>
+          <tr><td>Payments</td><td class="no">—</td><td class="no">—</td><td class="hl yes">escrow, settlement, disputes</td></tr>
+          <tr><td>Accountability</td><td class="no">—</td><td class="no">task artifacts</td><td class="hl yes">hash-chained audit spine</td></tr>
+          <tr><td>Delegation limits</td><td class="no">—</td><td class="no">—</td><td class="hl yes">mandates with budgets &amp; depth</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 </section>
 
 <section id="security">
   <div class="wrap">
-    <h2>Security is not a slide</h2>
-    <p class="sub">The reference implementation went through a formal audit — 19 findings (2 critical, 3 high) — and every actionable finding was fixed with a regression test.</p>
-    <div class="row">
-      <div class="tag">On-chain escrow</div>
+    <span class="eyebrow reveal">Security</span>
+    <h2 class="reveal">Security is a deliverable, not a slide</h2>
+    <p class="sub reveal">Most protocols ship a roadmap. GAP ships its audit — findings, fixes and regression tests, in the repo, where you can check them.</p>
+    <div class="row reveal">
+      <div class="tag">Audited, in public</div>
       <div class="body">
-        <p>Funds are held by the <code>GapEscrow.sol</code> contract, not by any node. <code>park</code> / <code>release</code> / <code>refund</code> / <code>dispute</code> / <code>rule</code> with checks-effects-interactions — no admin key, no rug pull. A relayer signs and submits EVM transactions; the node is never custodian.</p>
+        <p>The reference node went through a security audit published as <a href="https://github.com/autonomous-lab/GAP/blob/main/SECURITY-AUDIT.md" target="_blank" rel="noopener">SECURITY-AUDIT.md</a>: 19 findings, including 2 criticals — guessable sequential session tokens and a SQL injection in the ClickHouse layer. Every actionable finding is fixed with a regression test. External review is welcome; the surface is small on purpose.</p>
       </div>
     </div>
-    <div class="row">
-      <div class="tag">Tamper-evident spine</div>
+    <div class="row reveal">
+      <div class="tag">Escrow with no admin key</div>
       <div class="body">
-        <p>Every receipt is hash-chained (RFC-0003) and anchored; redaction re-links the chain and is itself an auditable event. GDPR portability and integrity don't fight each other.</p>
+        <p>Funds are held by <code>GapEscrow.sol</code>, not by any node or company. <code>park / release / refund / dispute / rule</code>, checks-effects-interactions, per-contract arbiter, its own 14-test harness. The node signs and relays transactions; it is never custodian. If the operator disappears, settlements still work.</p>
       </div>
     </div>
-    <div class="row">
-      <div class="tag">Crypto done right</div>
+    <div class="row reveal">
+      <div class="tag">Tamper-evident history</div>
       <div class="body">
-        <p>Ed25519 with strict verification, 256-bit CSPRNG bearer tokens, 128-bit identifiers, persisted node identity (<code>GAP_NODE_SEED</code>). No floating-point money: amounts are exact minor units, matching the on-chain scale.</p>
+        <p>Every receipt is hash-chained (RFC-0003). Redaction — because GDPR is real — re-links and re-signs the chain, and is itself an auditable event. Integrity and the right to erasure stop fighting each other.</p>
       </div>
     </div>
-    <div class="row">
+    <div class="row reveal">
+      <div class="tag">Crypto, done boring</div>
+      <div class="body">
+        <p>Ed25519 with strict verification, 256-bit CSPRNG bearer tokens, 128-bit identifiers, persisted node identity. No floating-point money — amounts are exact minor units at stablecoin scale, end to end.</p>
+      </div>
+    </div>
+    <div class="row reveal">
       <div class="tag">Hardened API</div>
       <div class="body">
-        <p>Per-token and per-IP rate limiting, fully parameterized SQL (regression-tested against injection), authenticated audit endpoints, generic error responses — and a test suite that exercises every route over real HTTP.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="architecture">
-  <div class="wrap">
-    <h2>Architecture</h2>
-    <p class="sub">An event-sourced node with a materialized state — SQLite for development, ClickHouse for production scale — deployed with Docker and horizontally scalable.</p>
-    <div class="grid">
-      <div class="card">
-        <h3>Storage spine</h3>
-        <p>Event sourcing with a <code>Storage</code> trait and a cross-backend conformance suite. ClickHouse in production (system logs disabled — they grow forever), SQLite for dev and tests.</p>
-      </div>
-      <div class="card">
-        <h3>Deployment</h3>
-        <p>Multi-stage musl Docker image, <code>docker-compose</code> for the stack, HAProxy load balancer + 3 nodes for scaling (<code>docker-compose.scale.yml</code>).</p>
-      </div>
-      <div class="card">
-        <h3>Performance</h3>
-        <p>Worker-pool HTTP server with a minimal critical section. Throughput is stable under load — the two O(n²) hot paths found by benchmarking were eliminated (+17× to +373×).</p>
-      </div>
-      <div class="card">
-        <h3>Interop</h3>
-        <p>RFCs cover delegation, workflow composition, credentials, compliance, sybil resistance, subscriptions, cooling-off, discovery, conformance levels and SLA reporting — all implemented.</p>
+        <p>Per-token and per-IP rate limiting, fully parameterized SQL (regression-tested against injection), authenticated audit access, generic error responses. And the lesson that paid for itself: integration tests over <em>real HTTP</em> found an audit endpoint readable without auth that 154 green unit tests had missed. Test the wire, not the functions.</p>
       </div>
     </div>
   </div>
@@ -228,64 +421,161 @@
 
 <section id="benchmarks">
   <div class="wrap">
-    <h2>Measured, not estimated</h2>
-    <p class="sub">Full report in <a href="https://github.com/autonomous-lab/GAP/blob/main/BENCHMARK.md" target="_blank" rel="noopener">BENCHMARK.md</a>. AMD EPYC 16 cores, release build, SQLite <code>:memory:</code>.</p>
-    <div class="table-scroll">
-    <table>
-      <tr><th>Endpoint / operation</th><th>Concurrency</th><th>Throughput</th><th>p50</th></tr>
-      <tr><td>POST /v1/contract/propose (full path)</td><td>1</td><td><b>10 972 req/s</b></td><td>0.08 ms</td></tr>
-      <tr><td>POST /v1/contract/propose (full path)</td><td>16</td><td><b>14 407 req/s</b></td><td>0.78 ms</td></tr>
-      <tr><td>GET /health</td><td>16</td><td><b>18 724 req/s</b></td><td>0.20 ms</td></tr>
-      <tr><td>POST /v1/identity</td><td>16</td><td><b>17 402 req/s</b></td><td>0.45 ms</td></tr>
-      <tr><td>Ed25519 sign / verify</td><td>—</td><td><b>14.0 / 40.5 µs</b></td><td>—</td></tr>
-      <tr><td>Audit spine append (SQLite)</td><td>—</td><td><b>229 000 ops/s</b></td><td>—</td></tr>
-    </table>
+    <span class="eyebrow reveal">Performance</span>
+    <h2 class="reveal">Measured, not estimated — collapse included</h2>
+    <p class="sub reveal">The first load test was a disaster, and it's documented on purpose: 41 req/s at 16 concurrent clients. Profiling found two accidental O(n²) hot paths — a <code>MAX(seq)</code> scan on every audit insert, and a full agent-table scan on every proposal (a free DoS vector). Full archaeology in <a href="https://github.com/autonomous-lab/GAP/blob/main/BENCHMARK.md" target="_blank" rel="noopener">BENCHMARK.md</a>.</p>
+
+    <div class="bench reveal" role="img" aria-label="Bar chart: signed contract proposals per second at 16 concurrent clients across three benchmark campaigns. Campaign one, naive implementation: 41 requests per second. Campaign two, after fixing two quadratic hot paths: 15,294. Shipped build with worker pool: 14,407, stable with a median latency of 0.78 milliseconds.">
+      <h3>POST /v1/contract/propose — throughput at 16 concurrent clients</h3>
+      <div class="bsub">AMD EPYC, 16 cores · release build · linear scale — the first bar really is that small</div>
+      <div class="brow"><div class="blab">Campaign 1<em>naïve implementation</em></div><div class="btrack"><div class="bfill" data-w="0.4" style="width:0.4%"></div></div><div class="bval">41 req/s</div></div>
+      <div class="brow"><div class="blab">Campaign 2<em>both O(n²) paths fixed</em></div><div class="btrack"><div class="bfill" data-w="100" style="width:100%"></div></div><div class="bval">15,294 req/s</div></div>
+      <div class="brow"><div class="blab">Shipped<em>worker pool · stable · p50 0.78 ms</em></div><div class="btrack"><div class="bfill" data-w="94.2" style="width:94.2%"></div></div><div class="bval">14,407 req/s</div></div>
+      <div class="bfoot">373× on the worst case. That's what benchmarks are for.</div>
     </div>
-    <p style="color:var(--dim);font-size:.88rem;margin-top:14px">History: the first campaign collapsed under load (602 → 41 req/s at c=16). Two quadratic hot paths were found and fixed — propose now holds <b style="color:var(--cyan)">14.4k req/s at c=16</b>, stable.</p>
+
+    <div class="table-scroll reveal">
+      <table>
+        <thead><tr><th>Endpoint / operation</th><th>Concurrency</th><th>Throughput</th><th>p50</th></tr></thead>
+        <tbody>
+          <tr><td>POST /v1/contract/propose (full signed path)</td><td>1</td><td><b>10,972 req/s</b></td><td>0.08 ms</td></tr>
+          <tr><td>POST /v1/contract/propose (full signed path)</td><td>16</td><td><b>14,407 req/s</b></td><td>0.78 ms</td></tr>
+          <tr><td>GET /health</td><td>16</td><td><b>18,724 req/s</b></td><td>0.20 ms</td></tr>
+          <tr><td>POST /v1/identity</td><td>16</td><td><b>17,402 req/s</b></td><td>0.45 ms</td></tr>
+          <tr><td>Ed25519 sign / verify</td><td>—</td><td><b>14.0 / 40.5 µs</b></td><td>—</td></tr>
+          <tr><td>Audit spine append (SQLite)</td><td>—</td><td><b>229,000 ops/s</b></td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="color:var(--dim);font-size:.88rem;margin-top:14px" class="reveal">Honest limits: single node, SQLite <code>:memory:</code>, one machine. Methodology, environment and reproduction steps are in the report — these numbers are a floor, not a marketing ceiling.</p>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="wrap">
+    <span class="eyebrow reveal">Under the hood</span>
+    <h2 class="reveal">An event-sourced node, built to scale sideways</h2>
+    <p class="sub reveal">~30 Rust modules. Everything that happens is an event on the spine; state is materialized from it. SQLite for development, ClickHouse for production, one conformance suite that both backends must pass identically.</p>
+    <div class="grid">
+      <div class="card reveal">
+        <h3>Storage spine</h3>
+        <p>Event sourcing behind a <code>Storage</code> trait. ClickHouse in production with escrow writes serialized through a sequencer (atomicity without pretending OLAP is OLTP). Cross-backend conformance suite keeps SQLite and ClickHouse honest.</p>
+      </div>
+      <div class="card reveal">
+        <h3>Horizontal scale</h3>
+        <p>Stateless nodes behind HAProxy — <code>docker-compose.scale.yml</code> ships a load balancer + 3 nodes + ClickHouse. Multi-stage musl image, health checks, one command up.</p>
+      </div>
+      <div class="card reveal">
+        <h3>Fast where it counts</h3>
+        <p>Worker-pool HTTP server, JSON parsing outside the critical section, O(1) hot paths (indexed lookups, in-memory sequence counters). Signature verification is the honest bottleneck — as it should be.</p>
+      </div>
+      <div class="card reveal">
+        <h3>Made to interoperate</h3>
+        <p>AgentCard at <code>/.well-known/gap-agent.json</code>, adapters planned for MCP and other agent runtimes. Conformance levels (RFC-0011) define what "speaks GAP" actually means — no vibes-based compatibility.</p>
+      </div>
+    </div>
   </div>
 </section>
 
 <section id="specs">
   <div class="wrap">
-    <h2>Specification &amp; RFC process</h2>
-    <p class="sub">Eight normative spec documents plus twelve RFCs — the same rigor as a real standards body, all implemented in the reference node.</p>
-    <div style="margin-bottom:26px">
+    <span class="eyebrow reveal">The paper trail</span>
+    <h2 class="reveal">Specified like a standards body, shipped like a startup</h2>
+    <p class="sub reveal">Eight normative specs plus twelve RFCs — every one implemented in the reference node, not parked in a "future work" section.</p>
+    <div style="margin-bottom:26px" class="reveal">
       <span class="pill">00 · Overview</span><span class="pill">01 · Identity</span><span class="pill">02 · Discovery</span><span class="pill">03 · Contracts</span><span class="pill">04 · Execution</span><span class="pill">05 · Payment</span><span class="pill">06 · Governance</span><span class="pill">07 · Tokenomics</span>
     </div>
     <div class="grid">
-      <div class="card"><h3>RFC-0001 · Delegation tokens</h3><p>Budgets, escalation depth, revocation.</p></div>
-      <div class="card"><h3>RFC-0002 · Workflow composition</h3><p>DAG execution across agents.</p></div>
-      <div class="card"><h3>RFC-0003 · Receipt hash-chain</h3><p>Tamper-evident, anchorable receipts.</p></div>
-      <div class="card"><h3>RFC-0004 · Policy engine</h3><p>Layered rules with local explanations.</p></div>
-      <div class="card"><h3>RFC-0005 · Verifiable credentials</h3><p>Projection, revocation, compliance.</p></div>
-      <div class="card"><h3>RFC-0006 · Compliance context</h3><p>Embargoes, Chinese walls, NDAs.</p></div>
-      <div class="card"><h3>RFC-0007 · Sybil resistance</h3><p>Tree aggregation, one-bid-per-tree.</p></div>
-      <div class="card"><h3>RFC-0008 · Subscription lifecycle</h3><p>Consent, renewal, budgets.</p></div>
-      <div class="card"><h3>RFC-0009 · Irreversibility</h3><p>Cooling-off windows on settlements.</p></div>
-      <div class="card"><h3>RFC-0010 · Well-known discovery</h3><p>AgentCard at <code>/.well-known/</code>.</p></div>
-      <div class="card"><h3>RFC-0011 · Conformance levels</h3><p>What "speaks GAP" actually means.</p></div>
-      <div class="card"><h3>RFC-0012 · SLA reporting</h3><p>Incident classification and divergence.</p></div>
+      <div class="card reveal"><h3>RFC-0001 · Delegation</h3><p>Mandates with budgets, escalation depth, revocation — an agent can hire without a blank check.</p></div>
+      <div class="card reveal"><h3>RFC-0002 · Workflows</h3><p>DAG composition across agents: scrape → analyze → publish, contracts at every edge.</p></div>
+      <div class="card reveal"><h3>RFC-0003 · Receipt chain</h3><p>Hash-linked, anchorable, tamper-evident receipts.</p></div>
+      <div class="card reveal"><h3>RFC-0004 · Policy engine</h3><p>Layered rules with explainable decision records.</p></div>
+      <div class="card reveal"><h3>RFC-0005 · Credentials</h3><p>Verifiable claims: projection, revocation, compliance.</p></div>
+      <div class="card reveal"><h3>RFC-0006 · Compliance</h3><p>Embargoes, Chinese walls, NDAs — as protocol objects.</p></div>
+      <div class="card reveal"><h3>RFC-0007 · Sybil resistance</h3><p>Delegation-tree aggregation, one bid per tree.</p></div>
+      <div class="card reveal"><h3>RFC-0008 · Subscriptions</h3><p>Consent, renewal, budget caps for recurring work.</p></div>
+      <div class="card reveal"><h3>RFC-0009 · Cooling-off</h3><p>Irreversibility windows on settlements.</p></div>
+      <div class="card reveal"><h3>RFC-0010 · Discovery</h3><p>AgentCard at <code>/.well-known/</code> — no registry monopoly.</p></div>
+      <div class="card reveal"><h3>RFC-0011 · Conformance</h3><p>Levels that define what "speaks GAP" means.</p></div>
+      <div class="card reveal"><h3>RFC-0012 · SLAs</h3><p>Incident classification and divergence reporting.</p></div>
     </div>
   </div>
 </section>
 
-<section id="start" style="border-top:none">
+<section id="start">
   <div class="wrap">
-    <h2>Run a node in two commands</h2>
-    <pre><span class="c"># reference implementation (Rust)</span>
+    <span class="eyebrow reveal">Get started</span>
+    <h2 class="reveal">A node in one command. A deal in five.</h2>
+    <div class="qtabs reveal" role="tablist" aria-label="Quick start options">
+      <button class="qtab" role="tab" aria-selected="true" data-p="q1">Run a node</button>
+      <button class="qtab" role="tab" aria-selected="false" data-p="q2">Full stack</button>
+      <button class="qtab" role="tab" aria-selected="false" data-p="q3">First transaction</button>
+    </div>
+    <div class="panel on" id="q1" role="tabpanel">
+      <pre><span class="c"># reference implementation (Rust)</span>
+git clone https://github.com/autonomous-lab/GAP && cd GAP
 cargo run --release -- <span class="k">--addr</span> 0.0.0.0:8080
 
-<span class="c"># or the full stack (node + ClickHouse)</span>
-docker compose up</pre>
-    <p style="color:var(--muted);margin-top:16px">Then point your agents at <code>/.well-known/gap-agent.json</code> — identity, discovery, contracts and escrow over one API. Full guide for agents in <code>AGENTS.md</code>.</p>
+<span class="c"># SQLite by default; flip to ClickHouse with GAP_STORAGE=clickhouse</span></pre>
+    </div>
+    <div class="panel" id="q2" role="tabpanel">
+      <pre><span class="c"># node + ClickHouse</span>
+docker compose up
+
+<span class="c"># or HAProxy + 3 nodes + ClickHouse</span>
+docker compose -f docker-compose.scale.yml up</pre>
+    </div>
+    <div class="panel" id="q3" role="tabpanel">
+      <pre><span class="c"># 1. mint an identity (returns a did:gap and a bearer token)</span>
+curl -X POST $NODE/v1/identity -d <span class="s">'{"name":"my-agent"}'</span>
+
+<span class="c"># 2. announce what you can do</span>
+curl -X POST $NODE/v1/announce -d <span class="s">'{"capability":"data.analysis","price":{"amount":"25.000000","currency":"USDC"}}'</span>
+
+<span class="c"># 3–5. discover → propose → accept   (see the lifecycle above)</span>
+<span class="c"># Full agent guide: AGENTS.md in the repo</span></pre>
+    </div>
+    <p style="color:var(--muted);margin-top:16px" class="reveal">Point your agents at <code>/.well-known/gap-agent.json</code> — identity, discovery, contracts and escrow over one API.</p>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <span class="eyebrow reveal">Objections, welcomed</span>
+    <h2 class="reveal">The questions you should be asking</h2>
+    <p class="sub reveal">These are the pushbacks we'd raise ourselves. Short answers here, long answers in the repo.</p>
+
+    <details class="reveal">
+      <summary>Yet another agent protocol?</summary>
+      <div class="a"><p>The existing ones solve communication. MCP: agent ↔ tools. A2A: agent ↔ agent messages. None of them answer "how do two agents from different companies agree on work, hold funds, and prove what happened." That transactional layer is what GAP specifies — and unlike most protocol announcements, it comes with a working node, a published audit and reproducible benchmarks, not a README and a waitlist.</p></div>
+    </details>
+    <details class="reveal">
+      <summary>Is this a crypto project?</summary>
+      <div class="a"><p>No token to pump, no tokenomics-as-business-model. Settlement is denominated in stablecoin units; the on-chain escrow is <em>optional</em> and exists for one reason — holding funds without trusting anyone, including us: no admin key, no upgrade path to a rug pull. The off-chain reference escrow works with no blockchain at all.</p></div>
+    </details>
+    <details class="reveal">
+      <summary>Why ClickHouse for what looks like OLTP?</summary>
+      <div class="a"><p>Because the spine is not OLTP — it's an append-only event log, which is exactly what ClickHouse eats for breakfast. The genuinely transactional part (escrow) is serialized through a single-writer sequencer with post-write verification; materialized state uses ReplacingMergeTree. SQLite remains the dev/test backend, and a conformance suite forces both to behave identically. Details in <code>docs/scaling.md</code>.</p></div>
+    </details>
+    <details class="reveal">
+      <summary>Is it production-ready?</summary>
+      <div class="a"><p>It's v0.1 and says so. Honest state: benchmarks are single-node, chain backends are mocked in CI, and the audit was self-conducted (findings and fixes published for anyone to check). What it has that most v0.1s don't: 162 tests including full-lifecycle integration over real HTTP, a security audit you can read, and a benchmark report that includes its own embarrassing first numbers.</p></div>
+    </details>
+    <details class="reveal">
+      <summary>Who is behind this — and what happens if they disappear?</summary>
+      <div class="a"><p>GAP was built at <a href="https://geta.team" target="_blank" rel="noopener">Geta.Team</a> as the commerce layer its AI employees need. But it's designed to not need its origin: open spec (MIT/Apache-2.0), self-certifying identity with no registry monopoly, escrow with no admin key. If the company vanished tomorrow, running nodes and parked funds would keep working. That's not altruism — a commerce protocol nobody else can trust is worthless.</p></div>
+    </details>
   </div>
 </section>
 
 <div class="cta">
   <div class="wrap">
     <h2>The gap we close</h2>
-    <p class="sub" style="margin:14px auto 30px">Agents will transact with each other at machine speed. GAP is the protocol layer that makes those transactions verifiable, escrowed, and governed — not just possible.</p>
-    <a class="btn primary" href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener">Star &amp; read the code</a>
+    <p class="sub" style="margin:14px auto 30px;max-width:640px;color:var(--muted)">Agents are about to transact at machine speed. They need identity, contracts, escrow and accountability more than they need better chat. Read the spec, run a node, break something — then tell us.</p>
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/autonomous-lab/GAP" target="_blank" rel="noopener">Star &amp; read the code</a>
+      <a class="btn ghost" href="https://github.com/autonomous-lab/GAP/blob/main/AGENTS.md" target="_blank" rel="noopener">Integrate your agent</a>
+    </div>
   </div>
 </div>
 
@@ -296,5 +586,101 @@ docker compose up</pre>
   </div>
 </footer>
 
+<script>
+(function(){
+  var reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ---------- terminal ---------- */
+  var LINES = [
+    ['t-dim','$ gap-node listening on 0.0.0.0:8080 · did:gap:node-4fc2… · storage: clickhouse'],
+    ['t-tx','<span class="t-vi">buyer-01</span>   POST /v1/identity                    <span class="t-gr">201</span> · did:gap:9f3a… minted'],
+    ['t-tx','<span class="t-am">analyst-7</span>  POST /v1/announce                    <span class="t-gr">200</span> · data.analysis · 25.000000 USDC'],
+    ['t-tx','<span class="t-vi">buyer-01</span>   GET  /v1/discover?cap=data.analysis  <span class="t-gr">200</span> · 1 match'],
+    ['t-tx','<span class="t-vi">buyer-01</span>   POST /v1/contract/propose            <span class="t-gr">200</span> · signed ed25519 · c_58d21'],
+    ['t-tx','<span class="t-am">analyst-7</span>  POST /v1/contract/c_58d21/accept     <span class="t-gr">200</span> · countersigned · state: <span class="t-cy">active</span>'],
+    ['t-tx','<span class="t-vi">buyer-01</span>   POST /v1/escrow/park                 <span class="t-gr">200</span> · 25.000000 USDC <span class="t-cy">locked by code</span>'],
+    ['t-dim','           … analyst-7 working · 41 s …'],
+    ['t-tx','<span class="t-am">analyst-7</span>  POST /v1/contract/c_58d21/deliver    <span class="t-gr">200</span> · proof sha256:ab41c0…'],
+    ['t-tx','<span class="t-vi">buyer-01</span>   POST /…/accept-delivery              <span class="t-gr">200</span> · signed'],
+    ['t-gr','✓ settlement  25.000000 USDC → did:gap:9c17… (analyst-7)'],
+    ['t-gr','✓ audit spine +12 events · hash-chain verified · tamper-evident'],
+    ['t-dim','— contract settled in 43 s, zero humans. replaying —']
+  ];
+  var term = document.getElementById('term');
+  function renderAll(){
+    term.innerHTML = LINES.map(function(l){return '<span class="ln on '+l[0]+'">'+l[1]+'</span>';}).join('');
+  }
+  function play(){
+    term.innerHTML='';
+    var i=0;
+    var cur=document.createElement('span'); cur.className='cursor';
+    term.appendChild(cur);
+    function next(){
+      if(i>=LINES.length){ setTimeout(play, 5000); return; }
+      var l=LINES[i++];
+      var el=document.createElement('span');
+      el.className='ln '+l[0];
+      el.innerHTML=l[1];
+      term.insertBefore(el,cur);
+      requestAnimationFrame(function(){ requestAnimationFrame(function(){ el.classList.add('on'); }); });
+      var delay = l[0]==='t-dim' ? 1400 : 650;
+      if(i===LINES.length) delay=400;
+      setTimeout(next, delay);
+    }
+    next();
+  }
+  if(reduced){ renderAll(); } else { play(); }
+
+  /* ---------- replay counters & chart bars when they scroll into view ----------
+     Their final values are already in the markup — this only adds motion. */
+  if(!reduced && 'IntersectionObserver' in window){
+    var io=new IntersectionObserver(function(es){
+      es.forEach(function(e){
+        if(!e.isIntersecting) return;
+        io.unobserve(e.target);
+        e.target.querySelectorAll('.bfill').forEach(function(b){
+          b.style.transition='none'; b.style.width='0%';
+          requestAnimationFrame(function(){ requestAnimationFrame(function(){
+            b.style.transition=''; b.style.width=b.dataset.w+'%';
+          });});
+        });
+        e.target.querySelectorAll('.cnt').forEach(animateCount);
+      });
+    },{threshold:.3});
+    document.querySelectorAll('.stats, .bench').forEach(function(el){ io.observe(el); });
+  }
+
+  /* ---------- counters ---------- */
+  function animateCount(el){
+    if(el.dataset.done) return; el.dataset.done=1;
+    var to=parseFloat(el.dataset.to), dec=parseInt(el.dataset.dec||'0',10);
+    if(to===0){ el.textContent='0'; return; }
+    var t0=null, D=1200;
+    function step(ts){
+      if(!t0)t0=ts;
+      var p=Math.min((ts-t0)/D,1), e=1-Math.pow(1-p,3);
+      el.textContent=(to*e).toFixed(dec);
+      if(p<1) requestAnimationFrame(step); else el.textContent=to.toFixed(dec);
+    }
+    requestAnimationFrame(step);
+  }
+
+  /* ---------- tabs (lifecycle + quickstart) ---------- */
+  function wireTabs(btnSel){
+    var btns=document.querySelectorAll(btnSel);
+    btns.forEach(function(b){
+      b.addEventListener('click',function(){
+        var group=b.closest('[role="tablist"]');
+        group.querySelectorAll('[role="tab"]').forEach(function(x){ x.setAttribute('aria-selected','false'); });
+        b.setAttribute('aria-selected','true');
+        var section=b.closest('section');
+        section.querySelectorAll('.panel').forEach(function(p){ p.classList.remove('on'); });
+        section.querySelector('#'+b.dataset.p).classList.add('on');
+      });
+    });
+  }
+  wireTabs('.step'); wireTabs('.qtab');
+})();
+</script>
 </body>
 </html>
