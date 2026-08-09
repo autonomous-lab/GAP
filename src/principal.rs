@@ -186,6 +186,135 @@ fn check_sig(did: &Did, body: &[u8], sig_hex: Option<&str>) -> Result<()> {
     verify_signature(did, body, &Signature(sig_bytes))
 }
 
+/// A principal's veto (spec 06 §6.5).
+///
+/// The spec calls the principal's rights **inalienable**: "no contract
+/// or certificate may waive them". Until now the node implemented none
+/// of them — an organization had no way to stop its own agent. A veto
+/// is a signed artifact: the signature IS the authority, so it needs no
+/// bearer token and works even if the agent's own credentials are
+/// compromised.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Veto {
+    pub agent_did: Did,
+    pub principal_did: Did,
+    /// `all` to freeze the agent, or a specific `urn:gap:ctr:…`.
+    pub scope: String,
+    pub reason: String,
+    pub at: u64,
+    #[serde(default)]
+    pub sig: Option<String>,
+}
+
+impl Veto {
+    pub const SCOPE_ALL: &'static str = "all";
+
+    /// Issue a veto, signed by the principal.
+    pub fn signed(
+        principal: &AgentIdentity,
+        agent_did: Did,
+        scope: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        let mut v = Self {
+            agent_did,
+            principal_did: principal.did().clone(),
+            scope: scope.into(),
+            reason: reason.into(),
+            at: crate::message::now_unix(),
+            sig: None,
+        };
+        v.sig = Some(principal.sign(&v.canonical_bytes()).to_hex());
+        v
+    }
+
+    /// Verify the veto is signed by the principal it names, and that
+    /// the binding it relies on actually binds that pair.
+    pub fn verify_for(&self, binding: &PrincipalBinding) -> Result<()> {
+        if binding.agent_did != self.agent_did || binding.principal_did != self.principal_did {
+            return Err(Error::Unauthorized(
+                "veto does not match the agent's principal binding".into(),
+            ));
+        }
+        check_sig(
+            &self.principal_did,
+            &self.canonical_bytes(),
+            self.sig.as_deref(),
+        )
+    }
+
+    /// Whether this veto covers the given contract.
+    pub fn covers(&self, contract_id: &str) -> bool {
+        self.scope == Self::SCOPE_ALL || self.scope == contract_id
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        let mut clone = self.clone();
+        clone.sig = None;
+        let v = serde_json::to_value(&clone).expect("veto serializes");
+        serde_json::to_vec(&v).expect("veto serializes")
+    }
+}
+
+/// A principal's hard spending cap for one agent (spec 06 §6.5,
+/// "budget authority"), enforced by the runtime rather than trusted to
+/// the agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetGrant {
+    pub agent_did: Did,
+    pub principal_did: Did,
+    /// Exact decimal string, per rolling day.
+    pub per_day: String,
+    pub currency: String,
+    pub at: u64,
+    #[serde(default)]
+    pub sig: Option<String>,
+}
+
+impl BudgetGrant {
+    pub fn signed(
+        principal: &AgentIdentity,
+        agent_did: Did,
+        per_day: impl Into<String>,
+        currency: impl Into<String>,
+    ) -> Self {
+        let mut g = Self {
+            agent_did,
+            principal_did: principal.did().clone(),
+            per_day: per_day.into(),
+            currency: currency.into(),
+            at: crate::message::now_unix(),
+            sig: None,
+        };
+        g.sig = Some(principal.sign(&g.canonical_bytes()).to_hex());
+        g
+    }
+
+    pub fn verify_for(&self, binding: &PrincipalBinding) -> Result<()> {
+        if binding.agent_did != self.agent_did || binding.principal_did != self.principal_did {
+            return Err(Error::Unauthorized(
+                "budget grant does not match the agent's principal binding".into(),
+            ));
+        }
+        check_sig(
+            &self.principal_did,
+            &self.canonical_bytes(),
+            self.sig.as_deref(),
+        )
+    }
+
+    pub fn cap(&self) -> Result<crate::amount::Amount> {
+        crate::amount::Amount::parse(&self.per_day)
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        let mut clone = self.clone();
+        clone.sig = None;
+        let v = serde_json::to_value(&clone).expect("grant serializes");
+        serde_json::to_vec(&v).expect("grant serializes")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +414,69 @@ mod tests {
         // Forged: stranger claims to be the agent.
         let mut forged = Unbind::signed(&b, &AgentIdentity::generate());
         assert!(forged.is_err() || forged.as_mut().unwrap().verify().is_err());
+    }
+
+    #[test]
+    fn a_principal_can_veto_its_agent() {
+        let (agent, principal, binding) = bound();
+        let v = Veto::signed(
+            &principal,
+            agent.did().clone(),
+            Veto::SCOPE_ALL,
+            "budget review",
+        );
+        assert!(v.verify_for(&binding).is_ok());
+        assert!(v.covers("urn:gap:ctr:anything"));
+    }
+
+    #[test]
+    fn nobody_else_can_veto_an_agent() {
+        let (agent, _principal, binding) = bound();
+        // A stranger signs a veto naming itself as principal.
+        let stranger = AgentIdentity::generate();
+        let forged = Veto::signed(&stranger, agent.did().clone(), Veto::SCOPE_ALL, "malice");
+        assert!(
+            forged.verify_for(&binding).is_err(),
+            "only the bound principal may veto"
+        );
+        // And the agent cannot lift a veto by editing it.
+        let (_, principal2, binding2) = bound();
+        let mut real = Veto::signed(
+            &principal2,
+            binding2.agent_did.clone(),
+            Veto::SCOPE_ALL,
+            "stop",
+        );
+        real.scope = "urn:gap:ctr:only-this-one".into();
+        assert!(real.verify_for(&binding2).is_err());
+    }
+
+    #[test]
+    fn a_veto_can_be_scoped_to_one_contract() {
+        let (agent, principal, binding) = bound();
+        let v = Veto::signed(
+            &principal,
+            agent.did().clone(),
+            "urn:gap:ctr:abc",
+            "this deal only",
+        );
+        assert!(v.verify_for(&binding).is_ok());
+        assert!(v.covers("urn:gap:ctr:abc"));
+        assert!(!v.covers("urn:gap:ctr:other"));
+    }
+
+    #[test]
+    fn budget_grants_are_signed_and_parse_exactly() {
+        let (agent, principal, binding) = bound();
+        let g = BudgetGrant::signed(&principal, agent.did().clone(), "100.00", "EUR");
+        assert!(g.verify_for(&binding).is_ok());
+        assert_eq!(
+            g.cap().unwrap(),
+            crate::amount::Amount::parse("100.00").unwrap()
+        );
+        // Raising your own allowance breaks the signature.
+        let mut tampered = g;
+        tampered.per_day = "1000000.00".into();
+        assert!(tampered.verify_for(&binding).is_err());
     }
 }

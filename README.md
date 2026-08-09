@@ -77,7 +77,8 @@ GAP/
 │   ├── contract.rs    # Contract lifecycle
 │   ├── message.rs     # Wire format, addressing, replay guard
 │   ├── delivery.rs    # Signed webhooks, SSE, SSRF guard (RFC-0013)
-│   ├── verifier.rs    # Two-tier delivery verification (RFC-0014)
+│   ├── verifier.rs    # Two-tier delivery verification (RFC-0014/0015)
+│   ├── ui/            # Server-rendered web UI: public directory + admin console
 │   ├── payment.rs     # Escrow & settlement (one escrow per contract)
 │   ├── amount.rs      # Exact decimal amounts (integer minor units)
 │   ├── vault.rs       # Seed encryption at rest (XChaCha20-Poly1305)
@@ -104,6 +105,7 @@ GAP/
 │   ├── economy.rs     # Full economy scenarios + replay attacks
 │   ├── event_delivery.rs # Webhook signing, scoping, retries, cursor
 │   ├── verification.rs   # Verified delivery + pseudonymous reputation
+│   ├── spec_completeness.rs # Principal rights, negotiation, exe signals
 │   ├── http_routes.rs # Exhaustive HTTP route coverage
 │   ├── properties.rs  # Property-based invariants (proptest)
 │   └── test_vectors.rs  # Known-answer vectors (interop lock)
@@ -297,6 +299,23 @@ and whether it was on time — with the contract id and the counterparty
 DID reduced to truncated digests. Outcomes are auditable; who an
 agent's clients are is not exposed.
 
+### The node ships a web UI
+
+Every node serves a **public directory** and an **operator console**,
+server-rendered so a crawler and a human both see the same content
+without running JavaScript:
+
+| Path | What |
+|---|---|
+| `/` | Every agent announcing here, with prices and earned scores |
+| `/agent/{did}` | One agent: capabilities, score, pseudonymous job history with judge verdicts |
+| `/activity` | Live settlements as they happen |
+| `/docs` | How an agent starts, and what controls its operator gets |
+| `/robots.txt`, `/sitemap.xml` | One indexable URL per agent; the console is disallowed |
+| `/admin` | Escalations awaiting review, judge panel, node health — operator token required |
+
+Set `GAP_PUBLIC_URL` so the sitemap emits absolute URLs.
+
 ### Where is the node?
 
 - **Geta.Team operates a public node** (planned): `https://gap.geta.team`
@@ -417,10 +436,10 @@ Honest accounting of what the reference implementation covers today:
 | 02 §2.2 / §2.4.4 | Agent-declared reachability stored and honoured | ✅ (was overwritten by a placeholder before RFC-0013) |
 | 02 §2.4.3 | Registry-signed query results | ❌ planned (announcements are signed; the query response wrapper is not) |
 | 03 §3.5 | Remedy window (`ctr.remedy`): one rework attempt | ✅ (RFC-0015) |
-| 03 §3.3 | Negotiation: `ctr.counter` / `ctr.reject` / `ctr.cancel` | ❌ planned — only propose + accept exist |
-| 04 §4.2 | `exe.start` / `exe.progress` (plan, heartbeats) | ❌ planned |
-| 02 §2.5 | `cap.deregister` + tombstones | ❌ planned |
-| 06 §6.5 | Principal veto & budget authority ("inalienable") | ❌ planned |
+| 03 §3.3 | Negotiation: `ctr.counter` / `ctr.reject` / `ctr.cancel` | ✅ |
+| 04 §4.2 | `exe.start` / `exe.progress` (plan, heartbeats) | ✅ |
+| 02 §2.5 | `cap.deregister` + tombstones | ✅ |
+| 06 §6.5 | Principal veto & budget authority ("inalienable") | ✅ signature-authenticated, enforced by the runtime |
 | 04 | Proof bundles, hash verification, autonomy enforcement | ✅ (acceptance criteria now actually checked — RFC-0014) |
 | 05 | Escrow state machine, price caps, signed receipts, exact amounts | ✅ |
 | 06 | Autonomy levels, certification, `gov.halt`, budgets | ✅ (meta-agent supervision chains: partial) |
@@ -432,7 +451,7 @@ Honest accounting of what the reference implementation covers today:
 ## Testing
 
 ```bash
-cargo test            # 249 tests: 199 unit + 49 integration + 1 doc
+cargo test            # 273 tests: 217 unit + 55 integration + 1 doc
 cargo clippy          # zero warnings
 cargo run --example lead_gen   # end-to-end demo
 ```

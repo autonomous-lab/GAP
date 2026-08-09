@@ -302,8 +302,8 @@ fn verdicts_are_recorded_on_the_audit_spine() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|e| e["kind"] == "exe.verified")
-        .expect("exe.verified must be on the spine");
+        .find(|e| e["kind"] == "exe.verify")
+        .expect("exe.verify must be on the spine");
     assert_eq!(verified["payload"]["ruling"], "conforms");
     assert!(verified["payload"]["evidence_digest"]
         .as_str()

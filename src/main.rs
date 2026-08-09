@@ -303,6 +303,19 @@ fn main() -> Result<()> {
                 continue;
             }
 
+            // Web UI (public directory + operator console) before the
+            // JSON API: browsers ask for HTML, agents ask for JSON.
+            if let Some((status, ctype, body)) =
+                gap::server::route_html(&state, &method, &path, auth.as_deref())
+            {
+                let mut response = Response::from_string(body).with_status_code(status);
+                response.add_header(
+                    Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap(),
+                );
+                let _ = request.respond(response);
+                continue;
+            }
+
             let client_ip = request.remote_addr().map(|addr| addr.ip().to_string());
             let (status, json_body) = route_with_ip(
                 &state,

@@ -21,6 +21,8 @@ pub enum ContractState {
     Disputed,
     Ruled,
     Cancelled,
+    /// Either party declined the current terms (spec 03 §3.3).
+    Rejected,
 }
 
 impl ContractState {
@@ -35,6 +37,7 @@ impl ContractState {
             ContractState::Disputed => "disputed",
             ContractState::Ruled => "ruled",
             ContractState::Cancelled => "cancelled",
+            ContractState::Rejected => "rejected",
         }
     }
 
@@ -48,6 +51,7 @@ impl ContractState {
             "disputed" => ContractState::Disputed,
             "ruled" => ContractState::Ruled,
             "cancelled" => ContractState::Cancelled,
+            "rejected" => ContractState::Rejected,
             _ => return Err(Error::Other(format!("unknown contract state: {s}"))),
         })
     }
@@ -201,10 +205,26 @@ impl Contract {
     }
 
     /// Transition the contract state (execution/payment layers call this).
+    /// Re-sign a redrafted contract as whichever party this identity
+    /// is (spec 03 §3.3: a counter is a fresh signature, not an edit).
+    pub fn resign_as(&mut self, signer: &AgentIdentity) -> Result<()> {
+        let sig = signer.sign(&self.canonical_bytes()).to_hex();
+        if signer.did() == &self.client {
+            self.client_sig = Some(sig);
+        } else if signer.did() == &self.provider {
+            self.provider_sig = Some(sig);
+        } else {
+            return Err(Error::Unauthorized("signer is not a party".into()));
+        }
+        Ok(())
+    }
+
     pub fn transition(&mut self, to: ContractState) -> Result<()> {
         let ok = match (self.state, to) {
             (ContractState::Draft, ContractState::Signed) => true,
             (ContractState::Draft, ContractState::Cancelled) => true,
+            // Spec 03 §3.3: either party may decline the current terms.
+            (ContractState::Draft, ContractState::Rejected) => true,
             (ContractState::Signed, ContractState::Executing) => true,
             (ContractState::Signed, ContractState::Cancelled) => true,
             (ContractState::Executing, ContractState::Delivered) => true,

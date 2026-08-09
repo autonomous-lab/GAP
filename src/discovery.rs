@@ -157,6 +157,9 @@ pub struct Registry {
     announcements: HashMap<Did, (Announcement, u64)>,
     /// Optional reputation snapshot per agent (fed by attestations).
     reputations: HashMap<Did, f64>,
+    /// Deregistered agents and when (spec 02 §2.5): a query can then
+    /// distinguish "gone" from "never existed".
+    tombstones: HashMap<Did, u64>,
     /// Optional test clock override; when set, replaces `now_unix()`.
     #[cfg(test)]
     now_override: Option<u64>,
@@ -197,6 +200,20 @@ impl Registry {
 
     /// Record a reputation snapshot for an agent (e.g. from attestations
     /// published after executions).
+    /// `cap.deregister` — withdraw an announcement and leave a
+    /// tombstone (spec 02 §2.5), so a query can tell "gone" from
+    /// "never existed". Re-announcing clears it.
+    pub fn deregister(&mut self, agent: &Did) -> bool {
+        let existed = self.announcements.remove(agent).is_some();
+        self.tombstones.insert(agent.clone(), self.now());
+        existed
+    }
+
+    /// When this agent deregistered, if it did.
+    pub fn tombstone(&self, agent: &Did) -> Option<u64> {
+        self.tombstones.get(agent).copied()
+    }
+
     pub fn set_reputation(&mut self, agent: Did, score: f64) {
         self.reputations.insert(agent, score);
     }

@@ -244,11 +244,11 @@ fn all_routes_full_lifecycle() {
     let events = v["events"].as_array().expect("audit events");
     let kinds: Vec<&str> = events.iter().filter_map(|e| e["kind"].as_str()).collect();
     for expected in [
-        "ctr.proposed",
-        "ctr.signed",
+        "ctr.propose",
+        "ctr.accept",
         "pay.parked",
-        "exe.delivered",
-        "exe.accepted",
+        "exe.deliver",
+        "exe.accept",
     ] {
         assert!(
             kinds.contains(&expected),
@@ -274,7 +274,7 @@ fn all_routes_full_lifecycle() {
         json!({ "contract_id": c2 }),
     );
     assert_eq!(s, 200, "refund: {v}");
-    assert_eq!(v["receipt"]["event"], "pay.refunded");
+    assert_eq!(v["receipt"]["event"], "pay.refund");
 
     // 15. Third contract: dispute + arbitration ruling.
     let (s, v) = c.post("/v1/contract/propose", Some(&client_tok), propose);

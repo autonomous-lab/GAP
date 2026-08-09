@@ -133,7 +133,7 @@ fn webhook_is_delivered_signed_and_verifiable_by_the_receiver() {
     // The contract lifecycle actually reached the subscriber.
     let kinds: Vec<String> = bodies.iter().map(|b| b.event.kind.clone()).collect();
     assert!(
-        kinds.iter().any(|k| k == "ctr.signed"),
+        kinds.iter().any(|k| k == "ctr.accept"),
         "expected ctr.signed among {kinds:?}"
     );
     let _ = cid;
@@ -209,7 +209,7 @@ fn kind_filter_limits_what_is_delivered() {
     let (_client_did, client_tok) = register(&state);
     let (provider_did, provider_tok) = register(&state);
 
-    let sub_id = subscribe(&state, &client_tok, json!(["ctr.signed"]));
+    let sub_id = subscribe(&state, &client_tok, json!(["ctr.accept"]));
     signed_contract(&state, &client_tok, &provider_tok, &provider_did);
 
     let sender = MockSender::new();
@@ -221,7 +221,7 @@ fn kind_filter_limits_what_is_delivered() {
         .collect();
     assert!(!mine.is_empty());
     assert!(
-        mine.iter().all(|b| b.event.kind == "ctr.signed"),
+        mine.iter().all(|b| b.event.kind == "ctr.accept"),
         "filter must be exact"
     );
 }
@@ -231,7 +231,7 @@ fn failed_delivery_retries_with_backoff_then_gives_up() {
     let state = node();
     let (_client_did, client_tok) = register(&state);
     let (provider_did, provider_tok) = register(&state);
-    subscribe(&state, &client_tok, json!(["ctr.signed"]));
+    subscribe(&state, &client_tok, json!(["ctr.accept"]));
     signed_contract(&state, &client_tok, &provider_tok, &provider_did);
 
     let sender = MockSender::new();
@@ -312,8 +312,8 @@ fn subscription_is_disabled_after_repeated_failures_and_recorded() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|e| e["kind"] == "sub.disabled");
-    assert!(disabled, "sub.disabled must be recorded on the spine");
+        .any(|e| e["kind"] == "node.sub.disable");
+    assert!(disabled, "node.sub.disable must be recorded on the spine");
 }
 
 #[test]
@@ -321,7 +321,7 @@ fn successful_delivery_resets_the_failure_counter() {
     let state = node();
     let (_client_did, client_tok) = register(&state);
     let (provider_did, provider_tok) = register(&state);
-    let sub_id = subscribe(&state, &client_tok, json!(["ctr.signed"]));
+    let sub_id = subscribe(&state, &client_tok, json!(["ctr.accept"]));
     signed_contract(&state, &client_tok, &provider_tok, &provider_did);
 
     let sender = MockSender::new();
@@ -349,7 +349,7 @@ fn successful_delivery_resets_the_failure_counter() {
             &sub_id,
             gap::delivery::DeliveredEvent {
                 seq: 99,
-                kind: "ctr.signed".into(),
+                kind: "ctr.accept".into(),
                 payload: json!({}),
                 at: 0,
             },

@@ -145,6 +145,14 @@ pub struct NodeState {
     jobs: HashMap<String, Vec<JobRecord>>,
     /// Per-agent dispute record (RFC-0015).
     disputes: HashMap<String, DisputeStats>,
+    /// agent DID -> its principal binding (spec 01 §1.3).
+    bindings: HashMap<String, crate::principal::PrincipalBinding>,
+    /// agent DID -> active vetoes (spec 06 §6.5).
+    vetoes: HashMap<String, Vec<crate::principal::Veto>>,
+    /// agent DID -> signed daily budget cap.
+    budgets: HashMap<String, crate::principal::BudgetGrant>,
+    /// (agent DID, unix day) -> already parked that day.
+    spend_today: HashMap<(String, u64), crate::amount::Amount>,
     /// Second, independent judge (RFC-0015): a different model on a
     /// different host, so the two do not share a failure mode.
     verifier_b: Option<Box<dyn crate::verifier::Verifier>>,
@@ -288,6 +296,10 @@ impl NodeState {
             verdicts: HashMap::new(),
             jobs: HashMap::new(),
             disputes: HashMap::new(),
+            bindings: HashMap::new(),
+            vetoes: HashMap::new(),
+            budgets: HashMap::new(),
+            spend_today: HashMap::new(),
             escalations: HashMap::new(),
             subscriptions: HashMap::new(),
             outbox: Vec::new(),
@@ -412,7 +424,7 @@ impl NodeState {
                 let score = agent.identity.reputation().success_rate();
                 self.registry.set_reputation(agent_did.clone(), score);
                 self.record(
-                    "reputation.updated",
+                    "node.reputation.update",
                     json!({ "agent_did": did_str, "score": score, "accepted": accepted, "on_time": on_time }),
                 );
             }
@@ -458,6 +470,15 @@ impl NodeState {
             created_at: now_unix(),
         });
         (did, token)
+    }
+
+    /// The custodied identity behind a DID, when this node holds it.
+    /// Used where the node must sign on the agent's behalf.
+    pub fn agent_identity_for(&self, did: &str) -> Option<AgentIdentity> {
+        self.agents_by_did
+            .get(did)
+            .and_then(|t| self.agents.get(t))
+            .map(|a| a.identity.clone())
     }
 
     /// Look up an agent by bearer token.
@@ -528,7 +549,7 @@ impl NodeState {
                 expires_at: now_unix().saturating_add(saved.ttl_seconds),
             });
         }
-        self.record("cap.announced", json!({ "agent_did": self.agent_by_token(token).map(|a| a.identity.did().to_string()).unwrap_or_default() }));
+        self.record("cap.announce", json!({ "agent_did": self.agent_by_token(token).map(|a| a.identity.did().to_string()).unwrap_or_default() }));
         Ok(id)
     }
 
@@ -547,6 +568,9 @@ impl NodeState {
         use_escrow: bool,
     ) -> Result<String> {
         let client = self.agent_by_token(client_token)?;
+        let client_did = client.identity.did().clone();
+        self.check_veto(&client_did, "")?;
+        let client = self.agent_by_token(client_token)?;
         let provider = crate::identity::Did::parse(provider_did)?;
         // O(1) provider lookup via the DID index (previously a scan of
         // every registered agent — quadratic once the node serves
@@ -561,24 +585,49 @@ impl NodeState {
         let id = contract.contract_id.clone();
         self.persist_contract(&contract);
         self.contracts.insert(id.clone(), contract);
-        self.record("ctr.proposed", json!({ "contract_id": id }));
+        self.record("ctr.propose", json!({ "contract_id": id }));
         Ok(id)
     }
 
     /// The provider accepts a proposed contract.
     pub fn accept_contract(&mut self, provider_token: &str, contract_id: &str) -> Result<()> {
         let provider = self.agent_by_token(provider_token)?;
+        let identity = provider.identity.clone();
         let contract = self
             .contracts
             .get(contract_id)
             .cloned()
             .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        // A rejected or cancelled negotiation is over (spec 03 §3.3).
+        if contract.state != ContractState::Draft {
+            return Err(Error::InvalidTransition {
+                from: contract.state.wire_name().into(),
+                to: "signed".into(),
+            });
+        }
+        // After a counter it is the *other* party's turn to accept, so
+        // acceptance is not provider-only: whoever did not sign last
+        // closes the deal.
+        if contract.client == *identity.did() {
+            let mut c = contract.clone();
+            c.resign_as(&identity)?;
+            if c.provider_sig.is_some() && c.client_sig.is_some() {
+                c.verify_signed()?;
+                c.transition(ContractState::Signed)?;
+            }
+            self.contracts.insert(contract_id.into(), c);
+            if let Some(saved) = self.contracts.get(contract_id).cloned() {
+                self.persist_contract(&saved);
+            }
+            self.record("ctr.accept", json!({ "contract_id": contract_id }));
+            return Ok(());
+        }
         let signed = contract.accept_by_provider(&provider.identity)?;
         self.contracts.insert(contract_id.into(), signed);
         if let Some(saved) = self.contracts.get(contract_id).cloned() {
             self.persist_contract(&saved);
         }
-        self.record("ctr.signed", json!({ "contract_id": contract_id }));
+        self.record("ctr.accept", json!({ "contract_id": contract_id }));
         Ok(())
     }
 
@@ -590,6 +639,7 @@ impl NodeState {
         deliverable_hash: &str,
     ) -> Result<()> {
         let provider_did = self.agent_by_token(provider_token)?.identity.did().clone();
+        self.check_veto(&provider_did, contract_id)?;
         let contract = self
             .contracts
             .get_mut(contract_id)
@@ -608,11 +658,16 @@ impl NodeState {
         // Keep the commitment: verification later checks what the client
         // actually received against this exact digest.
         contract.deliverable_hash = Some(deliverable_hash.to_string());
-        contract.transition(ContractState::Executing)?;
+        // `exe.start` is optional (spec 04 §4.2): a provider that
+        // announced its plan is already Executing, one that went
+        // straight to delivery still needs the intermediate step.
+        if contract.state == ContractState::Signed {
+            contract.transition(ContractState::Executing)?;
+        }
         contract.transition(ContractState::Delivered)?;
         let saved = contract.clone();
         self.persist_contract(&saved);
-        self.record("exe.delivered", json!({ "contract_id": contract_id }));
+        self.record("exe.deliver", json!({ "contract_id": contract_id }));
         Ok(())
     }
 
@@ -695,7 +750,7 @@ impl NodeState {
                 crate::amount::Amount::ZERO,
                 "USDC",
             );
-            self.record("exe.accepted", json!({ "contract_id": contract_id }));
+            self.record("exe.accept", json!({ "contract_id": contract_id }));
             let on_time = crate::message::now_unix() <= saved.terms.deadline;
             self.credit_reputation(&saved.provider, true, on_time);
             return Ok(json!({
@@ -727,7 +782,7 @@ impl NodeState {
             &currency,
         );
 
-        self.record("exe.accepted", json!({ "contract_id": contract_id }));
+        self.record("exe.accept", json!({ "contract_id": contract_id }));
         let on_time = crate::message::now_unix() <= saved.terms.deadline;
         self.credit_reputation(&saved.provider, true, on_time);
         self.record_job(
@@ -751,6 +806,11 @@ impl NodeState {
         contract_id: &str,
         amount: &crate::amount::Amount,
     ) -> Result<()> {
+        let client_did = self.agent_by_token(client_token)?.identity.did().clone();
+        // Two inalienable principal rights, checked before any money
+        // moves: the veto, and the daily budget cap (spec 06 §6.5).
+        self.check_veto(&client_did, contract_id)?;
+        self.check_budget(&client_did, *amount)?;
         let client = self.agent_by_token(client_token)?;
         let contract = self
             .contracts
@@ -831,10 +891,7 @@ impl NodeState {
             ));
         }
         let _ = client;
-        self.record(
-            "pay.released.confirmed",
-            json!({ "contract_id": contract_id }),
-        );
+        self.record("pay.released", json!({ "contract_id": contract_id }));
         Ok(json!({ "state": "released", "contract_id": contract_id }))
     }
 
@@ -879,10 +936,10 @@ impl NodeState {
             &receipt.currency,
         );
         self.record(
-            "pay.refunded",
+            "pay.refund",
             json!({ "contract_id": contract_id, "amount": receipt.amount }),
         );
-        Ok(json!({ "receipt": { "event": "pay.refunded", "amount": receipt.amount } }))
+        Ok(json!({ "receipt": { "event": "pay.refund", "amount": receipt.amount } }))
     }
 
     /// Client disputes a contract; funds move to `disputed`.
@@ -940,7 +997,7 @@ impl NodeState {
         self.persist_contract(&contract);
         self.persist_escrow(contract_id, escrow_state, escrow_held, &receipt.currency);
         self.record(
-            "ctr.disputed",
+            "ctr.dispute",
             json!({ "contract_id": contract_id, "reason": reason }),
         );
         Ok(json!({ "state": "disputed", "amount": receipt.amount }))
@@ -1056,7 +1113,7 @@ impl NodeState {
         let id = workflow.workflow_id.clone();
         self.workflows
             .insert(id.clone(), (workflow, WorkflowEngine::new()));
-        self.record("wf.created", json!({ "workflow_id": id }));
+        self.record("node.workflow.create", json!({ "workflow_id": id }));
         Ok(json!({ "workflow_id": id, "state": "pending" }))
     }
 
@@ -1095,7 +1152,7 @@ impl NodeState {
             .cloned()
             .collect();
         let events = self.storage.events_after(0, 1000).unwrap_or_default();
-        self.record("id.exported", json!({ "did": did }));
+        self.record("node.identity.export", json!({ "did": did }));
         Ok(json!({
             "did": did,
             "contracts": contracts,
@@ -1183,6 +1240,16 @@ impl NodeState {
     /// Attach the second, independent judge (RFC-0015).
     pub fn set_second_verifier(&mut self, verifier: Box<dyn crate::verifier::Verifier>) {
         self.verifier_b = Some(verifier);
+    }
+
+    /// The configured judge's name, for the docs page.
+    pub fn verifier_name(&self) -> Option<String> {
+        self.verifier.as_ref().map(|v| v.name())
+    }
+
+    /// The admin token, for UI gating.
+    pub fn admin_token_ref(&self) -> Option<&str> {
+        self.admin_token.as_deref()
     }
 
     /// Whether a judge is configured (reported by the agent card).
@@ -1277,7 +1344,7 @@ impl NodeState {
         self.verdicts
             .insert(contract_id.to_string(), verdict.clone());
         self.record(
-            "exe.verified",
+            "exe.verify",
             json!({
                 "contract_id": contract_id,
                 "ruling": verdict.ruling.as_str(),
@@ -1346,7 +1413,7 @@ impl NodeState {
         self.verdicts.remove(contract_id);
         self.escalations.remove(contract_id);
         self.record(
-            "ctr.remedied",
+            "ctr.remedy",
             json!({ "contract_id": contract_id, "attempts_left": remaining }),
         );
         Ok(json!({
@@ -1437,6 +1504,326 @@ impl NodeState {
         }))
     }
 
+    /// `ctr.counter` — revise the terms of a draft (spec 03 §3.3).
+    ///
+    /// Counter-offers were specified from v0.1 and never implemented:
+    /// the node could only propose and accept, so a provider who wanted
+    /// a different price had to refuse and start over. A counter
+    /// replaces the terms and re-signs, keeping the contract id and the
+    /// negotiation history on the spine.
+    pub fn counter_contract(
+        &mut self,
+        token: &str,
+        contract_id: &str,
+        terms: Terms,
+    ) -> Result<Value> {
+        let did = self.agent_by_token(token)?.identity.did().clone();
+        self.check_veto(&did, contract_id)?;
+        let identity = self.agent_by_token(token)?.identity.clone();
+        let contract = self
+            .contracts
+            .get_mut(contract_id)
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.client != did && contract.provider != did {
+            return Err(Error::Unauthorized("not a party to this contract".into()));
+        }
+        if contract.state != ContractState::Draft {
+            return Err(Error::InvalidTransition {
+                from: contract.state.wire_name().into(),
+                to: "countered".into(),
+            });
+        }
+        // New terms invalidate both signatures — nobody edits a live
+        // document (spec 03 §3.3 rule 2). The counter-party signs the
+        // revision, and the other side must accept it afresh.
+        contract.terms = terms;
+        contract.client_sig = None;
+        contract.provider_sig = None;
+        contract.resign_as(&identity)?;
+        let saved = contract.clone();
+        self.persist_contract(&saved);
+        self.record(
+            "ctr.counter",
+            json!({ "contract_id": contract_id, "by": did.to_string() }),
+        );
+        Ok(json!({ "contract_id": contract_id, "state": "draft", "countered_by": did.to_string() }))
+    }
+
+    /// `ctr.reject` — decline the current terms (spec 03 §3.3).
+    pub fn reject_contract(
+        &mut self,
+        token: &str,
+        contract_id: &str,
+        reason: &str,
+    ) -> Result<Value> {
+        let did = self.agent_by_token(token)?.identity.did().clone();
+        let contract = self
+            .contracts
+            .get_mut(contract_id)
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.client != did && contract.provider != did {
+            return Err(Error::Unauthorized("not a party to this contract".into()));
+        }
+        contract.transition(ContractState::Rejected)?;
+        let saved = contract.clone();
+        self.persist_contract(&saved);
+        self.record(
+            "ctr.reject",
+            json!({ "contract_id": contract_id, "by": did.to_string(), "reason": reason }),
+        );
+        Ok(json!({ "contract_id": contract_id, "state": "rejected" }))
+    }
+
+    /// `ctr.cancel` — call the deal off before execution (spec 03 §3.3
+    /// rule 3: valid only while nothing has been executed).
+    pub fn cancel_contract(
+        &mut self,
+        token: &str,
+        contract_id: &str,
+        reason: &str,
+    ) -> Result<Value> {
+        let did = self.agent_by_token(token)?.identity.did().clone();
+        let contract = self
+            .contracts
+            .get_mut(contract_id)
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.client != did && contract.provider != did {
+            return Err(Error::Unauthorized("not a party to this contract".into()));
+        }
+        contract.transition(ContractState::Cancelled)?;
+        let saved = contract.clone();
+        self.persist_contract(&saved);
+        // Parked funds go home: a cancelled deal must not strand money.
+        let refunded = {
+            let node_did = self.node_did();
+            let client_identity = self
+                .agents_by_did
+                .get(&saved.client.to_string())
+                .and_then(|t| self.agents.get(t))
+                .map(|a| a.identity.clone());
+            match (client_identity, self.escrows.get_mut(contract_id)) {
+                (Some(identity), Some(escrow)) => {
+                    let instruction = Envelope::new(
+                        identity.did().clone(),
+                        node_did,
+                        Kind::PayRefund,
+                        json!({ "reason": "contract cancelled" }),
+                    )
+                    .for_contract(contract_id)
+                    .sign(&identity);
+                    escrow.refund(&instruction).is_ok()
+                }
+                _ => false,
+            }
+        };
+        self.record(
+            "ctr.cancel",
+            json!({ "contract_id": contract_id, "by": did.to_string(), "reason": reason, "refunded": refunded }),
+        );
+        Ok(json!({ "contract_id": contract_id, "state": "cancelled", "escrow_refunded": refunded }))
+    }
+
+    /// `exe.start` — the provider announces it has begun, with a plan
+    /// and an ETA (spec 04 §4.2). Until now a contract jumped straight
+    /// from signed to delivered and the client was blind in between.
+    pub fn start_execution(
+        &mut self,
+        provider_token: &str,
+        contract_id: &str,
+        plan: &Value,
+    ) -> Result<Value> {
+        let did = self.agent_by_token(provider_token)?.identity.did().clone();
+        self.check_veto(&did, contract_id)?;
+        let contract = self
+            .contracts
+            .get_mut(contract_id)
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.provider != did {
+            return Err(Error::Unauthorized("only the provider may start".into()));
+        }
+        contract.transition(ContractState::Executing)?;
+        let saved = contract.clone();
+        self.persist_contract(&saved);
+        self.record(
+            "exe.start",
+            json!({ "contract_id": contract_id, "plan": plan }),
+        );
+        Ok(json!({ "state": "executing" }))
+    }
+
+    /// `exe.progress` — a heartbeat while the work runs (spec 04 §4.2).
+    pub fn report_progress(
+        &mut self,
+        provider_token: &str,
+        contract_id: &str,
+        step: u64,
+        note: &str,
+    ) -> Result<Value> {
+        let did = self.agent_by_token(provider_token)?.identity.did().clone();
+        let contract = self
+            .contracts
+            .get(contract_id)
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.provider != did {
+            return Err(Error::Unauthorized("only the provider may report".into()));
+        }
+        if contract.state != ContractState::Executing {
+            return Err(Error::InvalidTransition {
+                from: contract.state.wire_name().into(),
+                to: "progress".into(),
+            });
+        }
+        self.record(
+            "exe.progress",
+            json!({ "contract_id": contract_id, "step": step, "note": note }),
+        );
+        Ok(json!({ "state": "executing", "step": step }))
+    }
+
+    /// `cap.deregister` — withdraw from the registry (spec 02 §2.5).
+    pub fn deregister(&mut self, token: &str) -> Result<Value> {
+        let did = self.agent_by_token(token)?.identity.did().clone();
+        self.registry.deregister(&did);
+        if let Some(agent) = self.agents.get_mut(token) {
+            agent.announcement = None;
+        }
+        self.record("cap.deregister", json!({ "agent_did": did.to_string() }));
+        Ok(json!({ "deregistered": did.to_string() }))
+    }
+
+    /// Register a bilateral principal binding (spec 01 §1.3). The two
+    /// signatures are the authority; no bearer token is involved.
+    pub fn bind_principal(&mut self, body: &Value) -> Result<Value> {
+        let binding: crate::principal::PrincipalBinding =
+            serde_json::from_value(body.clone()).map_err(|e| Error::Json(e.to_string()))?;
+        binding.verify()?;
+        let agent = binding.agent_did.to_string();
+        self.bindings.insert(agent.clone(), binding);
+        self.record("principal.bind", json!({ "agent_did": agent }));
+        Ok(json!({ "bound": agent }))
+    }
+
+    /// Release an agent from its binding, and with it any veto or
+    /// budget that depended on it.
+    pub fn unbind_principal(&mut self, body: &Value) -> Result<Value> {
+        let unbind: crate::principal::Unbind =
+            serde_json::from_value(body.clone()).map_err(|e| Error::Json(e.to_string()))?;
+        unbind.verify()?;
+        let agent = unbind.agent_did.to_string();
+        match self.bindings.get(&agent) {
+            Some(b) if b.principal_did == unbind.principal_did => {}
+            Some(_) => return Err(Error::Unauthorized("not this agent's principal".into())),
+            None => return Err(Error::Other("no binding for this agent".into())),
+        }
+        self.bindings.remove(&agent);
+        self.vetoes.remove(&agent);
+        self.budgets.remove(&agent);
+        self.record("principal.unbind", json!({ "agent_did": agent }));
+        Ok(json!({ "unbound": agent }))
+    }
+
+    /// A principal vetoes its agent (spec 06 §6.5). Inalienable: it
+    /// needs no cooperation from the agent, and no contract can waive it.
+    pub fn principal_veto(&mut self, body: &Value) -> Result<Value> {
+        let veto: crate::principal::Veto =
+            serde_json::from_value(body.clone()).map_err(|e| Error::Json(e.to_string()))?;
+        let agent = veto.agent_did.to_string();
+        let binding = self
+            .bindings
+            .get(&agent)
+            .ok_or_else(|| Error::Unauthorized("agent has no principal binding".into()))?;
+        veto.verify_for(binding)?;
+        let scope = veto.scope.clone();
+        self.vetoes.entry(agent.clone()).or_default().push(veto);
+        self.record(
+            "gov.halt",
+            json!({ "agent_did": agent, "scope": scope, "source": "principal" }),
+        );
+        Ok(json!({ "vetoed": agent, "scope": scope }))
+    }
+
+    /// A principal sets its agent's hard daily spending cap.
+    pub fn principal_budget(&mut self, body: &Value) -> Result<Value> {
+        let grant: crate::principal::BudgetGrant =
+            serde_json::from_value(body.clone()).map_err(|e| Error::Json(e.to_string()))?;
+        let agent = grant.agent_did.to_string();
+        let binding = self
+            .bindings
+            .get(&agent)
+            .ok_or_else(|| Error::Unauthorized("agent has no principal binding".into()))?;
+        grant.verify_for(binding)?;
+        grant.cap()?;
+        let per_day = grant.per_day.clone();
+        self.budgets.insert(agent.clone(), grant);
+        self.record(
+            "gov.certify",
+            json!({ "agent_did": agent, "per_day": per_day, "kind": "budget" }),
+        );
+        Ok(json!({ "agent_did": agent, "per_day": per_day }))
+    }
+
+    /// Refuse anything a vetoed agent tries to do. Called on every
+    /// state-changing action, because a veto that only covered some
+    /// routes would not be a veto.
+    fn check_veto(&self, agent: &crate::identity::Did, contract_id: &str) -> Result<()> {
+        if let Some(vetoes) = self.vetoes.get(&agent.to_string()) {
+            if let Some(v) = vetoes.iter().find(|v| v.covers(contract_id)) {
+                return Err(Error::AutonomyViolation(format!(
+                    "principal veto in force ({}): {}",
+                    v.scope, v.reason
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Enforce the principal's daily budget before funds are committed.
+    fn check_budget(
+        &mut self,
+        agent: &crate::identity::Did,
+        amount: crate::amount::Amount,
+    ) -> Result<()> {
+        let key = agent.to_string();
+        let Some(grant) = self.budgets.get(&key) else {
+            return Ok(());
+        };
+        let cap = grant.cap()?;
+        let day = now_unix() / 86_400;
+        let spent = self
+            .spend_today
+            .get(&(key.clone(), day))
+            .copied()
+            .unwrap_or(crate::amount::Amount::ZERO);
+        let after = spent.checked_add(amount)?;
+        if after > cap {
+            return Err(Error::AutonomyViolation(format!(
+                "principal budget exceeded: {after} would pass the {cap} daily cap"
+            )));
+        }
+        self.spend_today.insert((key, day), after);
+        Ok(())
+    }
+
+    /// The principal-rights view of an agent (spec 06 §6.5).
+    pub fn principal_status(&self, did: &str) -> Result<Value> {
+        let did = crate::identity::Did::parse(did)?.to_string();
+        Ok(json!({
+            "agent_did": did,
+            "bound": self.bindings.get(&did).map(|b| json!({
+                "principal": b.principal.name,
+                "principal_did": b.principal_did.to_string(),
+                "autonomy_grant": format!("{:?}", b.autonomy_grant),
+                "expires_at": b.expires_at,
+            })),
+            "vetoes": self.vetoes.get(&did).map(|v| v.iter()
+                .map(|x| json!({ "scope": x.scope, "reason": x.reason, "at": x.at }))
+                .collect::<Vec<_>>()).unwrap_or_default(),
+            "budget": self.budgets.get(&did).map(|g| json!({
+                "per_day": g.per_day, "currency": g.currency
+            })),
+        }))
+    }
+
     /// Cases waiting on a human (RFC-0015). Admin-only: this is the
     /// operator's work queue, not public data.
     pub fn escalations(&self) -> Value {
@@ -1492,7 +1879,7 @@ impl NodeState {
         let view = sub.to_json();
         let id = sub.subscription_id.clone();
         self.subscriptions.insert(id.clone(), sub);
-        self.record("sub.registered", json!({ "subscription_id": id }));
+        self.record("node.sub.register", json!({ "subscription_id": id }));
         Ok(view)
     }
 
@@ -1514,7 +1901,7 @@ impl NodeState {
         match self.subscriptions.get(id) {
             Some(s) if s.agent_did.to_string() == did => {
                 self.subscriptions.remove(id);
-                self.record("sub.deleted", json!({ "subscription_id": id }));
+                self.record("node.sub.delete", json!({ "subscription_id": id }));
                 Ok(json!({ "deleted": id }))
             }
             Some(_) => Err(Error::Unauthorized(
@@ -1589,7 +1976,7 @@ impl NodeState {
         }
         if disable {
             self.record(
-                "sub.disabled",
+                "node.sub.disable",
                 json!({ "subscription_id": id, "reason": "consecutive delivery failures" }),
             );
         }
@@ -1603,6 +1990,68 @@ impl NodeState {
     /// Read a subscription (tests and operators).
     pub fn subscription(&self, id: &str) -> Option<&crate::delivery::Subscription> {
         self.subscriptions.get(id)
+    }
+
+    /// Public directory data for the web UI: every live announcement
+    /// with its agent's score, plus recent settled jobs.
+    pub fn public_directory(&self) -> Value {
+        let anns = self.registry.query(&Query::default());
+        let agents: Vec<Value> = anns
+            .iter()
+            .map(|a| {
+                let did = a.agent_did.to_string();
+                let rep = self
+                    .agents_by_did
+                    .get(&did)
+                    .and_then(|t| self.agents.get(t))
+                    .map(|ag| ag.identity.reputation().clone())
+                    .unwrap_or_default();
+                let jobs = self.jobs.get(&did).map(|j| j.len()).unwrap_or(0);
+                json!({
+                    "did": did,
+                    "capabilities": a.capabilities,
+                    "languages": a.languages,
+                    "regions": a.regions,
+                    "reachability": a.reachability,
+                    "score": rep.success_rate(),
+                    "n": rep.executions,
+                    "jobs": jobs,
+                })
+            })
+            .collect();
+        json!({
+            "node": self.node_did().to_string(),
+            "agents": agents,
+            "count": agents.len(),
+            "verifier": self.verifier.as_ref().map(|v| v.name()),
+            "second_verifier": self.verifier_b.as_ref().map(|v| v.name()),
+        })
+    }
+
+    /// Recent public activity: settled jobs across all agents, already
+    /// pseudonymous (RFC-0014 §5), newest first.
+    pub fn public_activity(&self, limit: usize) -> Value {
+        let mut all: Vec<Value> = self
+            .jobs
+            .iter()
+            .flat_map(|(agent, records)| {
+                records.iter().map(move |r| {
+                    json!({
+                        "agent_ref": pseudonym(agent),
+                        "capability_id": r.capability_id,
+                        "outcome": r.outcome,
+                        "verdict": r.verdict,
+                        "judged_by": r.judged_by,
+                        "remedied": r.remedied,
+                        "on_time": r.on_time,
+                        "at": r.at,
+                    })
+                })
+            })
+            .collect();
+        all.sort_by_key(|v| std::cmp::Reverse(v["at"].as_u64().unwrap_or(0)));
+        all.truncate(limit);
+        json!({ "jobs": all, "count": all.len() })
     }
 
     /// The node's AgentCard (RFC-0010 well-known discovery).
@@ -1637,6 +2086,81 @@ pub fn route(
     auth: Option<&str>,
 ) -> (u16, Value) {
     route_with_ip(state, method, path, body, auth, None)
+}
+
+/// Serve the web UI (`src/ui`). Returns `None` for non-UI paths.
+///
+/// HTML lives outside `route()` because that function is the JSON API
+/// contract; mixing content types into it would force every caller to
+/// sniff. Returns `(status, content_type, body)`.
+pub fn route_html(
+    state: &Arc<Mutex<NodeState>>,
+    method: &str,
+    path: &str,
+    auth: Option<&str>,
+) -> Option<(u16, &'static str, String)> {
+    if method != "GET" {
+        return None;
+    }
+    let clean = path.split('?').next().unwrap_or(path);
+    let guard = state.lock().ok()?;
+    let base =
+        std::env::var("GAP_PUBLIC_URL").unwrap_or_else(|_| String::from("http://localhost:8080"));
+
+    let html = |b: String| Some((200u16, "text/html; charset=utf-8", b));
+    match clean {
+        "/" => {
+            let dir = guard.public_directory();
+            html(crate::ui::directory(&dir))
+        }
+        "/activity" => {
+            let recent = guard.public_activity(50);
+            html(crate::ui::activity_page(&recent))
+        }
+        "/docs" => {
+            let did = guard.node_did().to_string();
+            let v = guard.verifier_name();
+            html(crate::ui::docs_page(&did, v.as_deref()))
+        }
+        "/robots.txt" => Some((200, "text/plain; charset=utf-8", crate::ui::robots(&base))),
+        "/sitemap.xml" => {
+            let dir = guard.public_directory();
+            Some((
+                200,
+                "application/xml; charset=utf-8",
+                crate::ui::sitemap(&base, &dir),
+            ))
+        }
+        "/admin" => {
+            // The console is operator-only; a public escalation queue
+            // would leak which deals are in trouble.
+            let token = auth.and_then(|a| a.strip_prefix("Bearer "));
+            let ok = matches!((guard.admin_token_ref(), token), (Some(a), Some(t)) if a == t);
+            if !ok {
+                return Some((
+                    401,
+                    "text/html; charset=utf-8",
+                    "<!DOCTYPE html><meta charset=utf-8><title>401</title><body style=\"font-family:system-ui;background:#05070c;color:#edf4ff;padding:40px\"><h1>401</h1><p>Operator token required: <code>Authorization: Bearer $GAP_ADMIN_TOKEN</code>.</p>".into(),
+                ));
+            }
+            let e = guard.escalations();
+            let d = guard.public_directory();
+            let a = guard.public_activity(1000);
+            html(crate::ui::admin_page(&e, &d, &a))
+        }
+        p if p.starts_with("/agent/") => {
+            let did = percent_decode(p.trim_start_matches("/agent/"));
+            let rep = guard.reputation_of(&did).ok()?;
+            let ann = guard
+                .registry
+                .query(&Query::default())
+                .into_iter()
+                .find(|a| a.agent_did.to_string() == did)
+                .and_then(|a| serde_json::to_value(a).ok());
+            html(crate::ui::agent_page(&did, &rep, ann.as_ref()))
+        }
+        _ => None,
+    }
 }
 
 /// Send every due webhook delivery (RFC-0013).
@@ -1732,6 +2256,17 @@ pub fn route_with_ip(
     let response = match (method, path) {
         // ---- health & card ----
         ("GET", "/health") => Ok(json!({ "status": "ok", "node": guard.node_did() })),
+        // ---- public directory data (consumed by the web UI) ----
+        ("GET", "/v1/directory") => Ok(guard.public_directory()),
+        ("GET", "/v1/activity") => {
+            let params = parse_url_params(raw_path);
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(50)
+                .min(500);
+            Ok(guard.public_activity(limit))
+        }
         ("GET", "/.well-known/gap-agent.json") => Ok(guard.agent_card()),
 
         // ---- identity ----
@@ -1961,7 +2496,82 @@ pub fn route_with_ip(
             guard.workflow_status(id)
         }
 
+        // ---- principal rights (spec 01 §1.3, 06 §6.5) ----
+        // Signature-authenticated, not token-authenticated: a principal
+        // must be able to stop its agent even if the agent's own
+        // credentials are compromised.
+        ("POST", "/v1/principal/bind") => guard.bind_principal(&body),
+        ("POST", "/v1/principal/unbind") => guard.unbind_principal(&body),
+        ("POST", "/v1/principal/veto") => guard.principal_veto(&body),
+        ("POST", "/v1/principal/budget") => guard.principal_budget(&body),
+        ("GET", p) if p.starts_with("/v1/principal/") => {
+            let did = percent_decode(p.trim_start_matches("/v1/principal/"));
+            guard.principal_status(&did)
+        }
+
         // ---- verification & reputation (RFC-0014 / RFC-0015) ----
+        (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/counter") => {
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/counter");
+            let terms = body.get("terms").and_then(terms_from_json);
+            match (token, terms) {
+                (Some(t), Some(terms)) => guard.counter_contract(t, id, terms),
+                (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
+                (_, None) => Err(Error::Other("terms required".into())),
+            }
+        }
+        (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/reject") => {
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/reject");
+            let reason = body
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unspecified");
+            match token {
+                Some(t) => guard.reject_contract(t, id, reason),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/cancel") => {
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/cancel");
+            let reason = body
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unspecified");
+            match token {
+                Some(t) => guard.cancel_contract(t, id, reason),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/start") => {
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/start");
+            let plan = body.get("plan").cloned().unwrap_or(json!({}));
+            match token {
+                Some(t) => guard.start_execution(t, id, &plan),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/progress") => {
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/progress");
+            let step = body.get("step").and_then(|v| v.as_u64()).unwrap_or(0);
+            let note = body.get("note").and_then(|v| v.as_str()).unwrap_or("");
+            match token {
+                Some(t) => guard.report_progress(t, id, step, note),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("POST", "/v1/deregister") => match token {
+            Some(t) => guard.deregister(t),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
         (m, p) if m == "POST" && p.starts_with("/v1/contract/") && p.ends_with("/remedy") => {
             let id = p
                 .trim_start_matches("/v1/contract/")
