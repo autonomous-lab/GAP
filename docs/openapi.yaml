@@ -26,6 +26,7 @@ tags:
   - name: contracts
   - name: escrow
   - name: workflows
+  - name: delivery
   - name: audit
 
 paths:
@@ -355,6 +356,105 @@ paths:
       responses:
         "200": { description: "Manifest + per-step states" }
 
+  /v1/subscriptions:
+    post:
+      tags: [delivery]
+      summary: Register an event-delivery subscription (RFC-0013)
+      description: |
+        Register a signed-webhook target (or declare intent to consume
+        the SSE stream). Webhook URLs are validated against SSRF: https
+        only unless `GAP_WEBHOOK_ALLOW_HTTP=1`, no embedded credentials,
+        and the host must resolve exclusively to public unicast
+        addresses. Deliveries are at-least-once; deduplicate on
+        `delivery_id` / event `seq`.
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transport]
+              properties:
+                transport: { type: string, enum: [webhook, stream] }
+                url:
+                  type: string
+                  format: uri
+                  description: Required for `webhook`.
+                kinds:
+                  type: array
+                  items: { type: string }
+                  description: Exact event-kind filter; empty means everything in scope.
+      responses:
+        "200":
+          description: Subscription registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Subscription" }
+        "400": { description: "Invalid transport, missing url, or URL refused by the SSRF guard" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    get:
+      tags: [delivery]
+      summary: List your subscriptions
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Your subscriptions (never another agent's)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subscriptions:
+                    type: array
+                    items: { $ref: "#/components/schemas/Subscription" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/subscriptions/{id}:
+    delete:
+      tags: [delivery]
+      summary: Delete a subscription (owner only)
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Deleted }
+        "400": { description: Unknown subscription }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/events:
+    get:
+      tags: [delivery]
+      summary: Event stream (SSE) or cursor (JSON)
+      description: |
+        With `Accept: text/event-stream`, a resumable Server-Sent Events
+        stream: frames carry `id:` (the event seq), `event:` (the kind)
+        and `data:` (the event JSON), with `: keepalive` comments.
+        Reconnect with `after=<last seq>` or `Last-Event-ID` and no event
+        is missed. Without that header the same route returns JSON.
+
+        Sequences are 1-based, so `after=0` means "from the beginning".
+        Events are scoped: you only ever see events for contracts you are
+        a party to.
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: after, in: query, schema: { type: integer, default: 0 }, description: Exclusive cursor }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+      responses:
+        "200":
+          description: Events (JSON) or an open SSE stream
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/Event" }
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /v1/audit:
     get:
       tags: [audit]
@@ -393,6 +493,40 @@ components:
             properties:
               error: { type: string }
   schemas:
+    Subscription:
+      type: object
+      properties:
+        subscription_id: { type: string, example: "urn:gap:sub:7c1d…" }
+        agent_did: { $ref: "#/components/schemas/Did" }
+        transport: { type: string, enum: [webhook, stream] }
+        url: { type: string }
+        kinds: { type: array, items: { type: string } }
+        active: { type: boolean, description: False once disabled after repeated delivery failures }
+        failures: { type: integer }
+        created_at: { type: integer }
+    Event:
+      type: object
+      properties:
+        seq: { type: integer, description: 1-based, strictly monotonic per node }
+        kind: { type: string, example: exe.delivered }
+        payload: { type: object }
+        at: { type: integer }
+    DeliveryBody:
+      type: object
+      description: |
+        What the node POSTs to a webhook. Signed with the node key over
+        the canonical JSON of this object **with the `signature` key
+        removed** (UTF-8, keys sorted at every level, no whitespace).
+        Sent with headers X-Gap-Node, X-Gap-Signature, X-Gap-Delivery,
+        X-Gap-Event-Seq.
+      properties:
+        delivery_id: { type: string }
+        subscription_id: { type: string }
+        node: { $ref: "#/components/schemas/Did" }
+        event: { $ref: "#/components/schemas/Event" }
+        attempt: { type: integer }
+        sent_at: { type: integer }
+        signature: { type: string, example: "ed25519:…" }
     Did:
       type: string
       pattern: "^did:gap:[0-9a-f]{64}$"

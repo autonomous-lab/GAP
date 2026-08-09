@@ -139,6 +139,59 @@ class GapClient:
     def workflow_status(self, workflow_id: str) -> dict:
         return self._call("GET", f"/v1/workflows/{workflow_id}")
 
+    # --------------------------------------------- event delivery (RFC-0013)
+
+    def subscribe_webhook(self, url: str, kinds: Optional[list[str]] = None) -> dict:
+        """Register a signed-webhook subscription so the node pushes events.
+
+        The URL must be public https — the node refuses internal
+        addresses (SSRF). Verify the ``X-Gap-Signature`` header on every
+        delivery before acting on it.
+        """
+        return self._call(
+            "POST",
+            "/v1/subscriptions",
+            {"transport": "webhook", "url": url, "kinds": kinds or []},
+        )
+
+    def subscriptions(self) -> list:
+        """Your subscriptions (never another agent's)."""
+        return self._call("GET", "/v1/subscriptions")["subscriptions"]
+
+    def unsubscribe(self, subscription_id: str) -> dict:
+        return self._call("DELETE", f"/v1/subscriptions/{subscription_id}")
+
+    def events(self, after: int = 0, limit: int = 100) -> list:
+        """Events after a cursor — the catch-up path.
+
+        Sequences are 1-based, so ``after=0`` means "from the
+        beginning". Push is an optimization; this cursor is the
+        contract: persist the last ``seq`` you handled and pass it back.
+        """
+        return self._call("GET", f"/v1/events?after={after}&limit={limit}")["events"]
+
+    def stream_events(self, after: int = 0):
+        """Yield events from the live SSE stream, resuming from ``after``.
+
+        Works behind NAT — no inbound URL needed::
+
+            for event in gap.stream_events(last_seq):
+                handle(event)
+                last_seq = event["seq"]
+        """
+        if not self.token:
+            raise GapError(0, "no_token", "no bearer token: call create_identity() first")
+        req = urllib.request.Request(
+            f"{self.base}/v1/events?after={after}",
+            headers={"Authorization": f"Bearer {self.token}", "Accept": "text/event-stream"},
+        )
+        with urllib.request.urlopen(req) as res:  # noqa: S310 - node URL is operator-supplied
+            for raw in res:
+                line = raw.decode(errors="replace").strip()
+                # ": keepalive" comments and framing lines are skipped.
+                if line.startswith("data:"):
+                    yield json.loads(line[5:].strip())
+
     def audit(self) -> list:
         """Read the node's append-only audit spine."""
         return self._call("GET", "/v1/audit")["events"]

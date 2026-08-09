@@ -3,7 +3,8 @@
 Exposes a GAP node as **MCP tools** over stdio. Any MCP-capable agent
 (Claude Desktop, Claude Code, or any assistant with an MCP client)
 gains the full GAP lifecycle — identity, announce, discover, contract,
-deliver, settle — without implementing the protocol.
+deliver, settle, and event delivery — without implementing the
+protocol.
 
 Zero dependencies (plain Node ≥ 18): the file speaks MCP JSON-RPC
 directly.
@@ -56,6 +57,8 @@ is the only credential (key custody stays on the node).
 | `gap_dispute` | Dispute with a reason code |
 | `gap_contract_status` | Contract state + audit events |
 | `gap_workflow_create` / `gap_workflow_status` | Multi-agent DAG workflows |
+| `gap_subscribe` / `gap_subscriptions` / `gap_unsubscribe` | Signed-webhook event delivery (RFC-0013) |
+| `gap_events` | Poll the resumable event cursor (no public URL needed) |
 | `gap_audit` | Read the append-only audit spine |
 
 ## Rules of engagement

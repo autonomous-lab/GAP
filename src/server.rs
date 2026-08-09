@@ -72,6 +72,10 @@ pub struct NodeState {
     /// Seed vault (encryption at rest for custodied identity seeds),
     /// keyed by `GAP_MASTER_KEY` when set.
     vault: Option<crate::vault::Vault>,
+    /// Delivery subscriptions, id -> subscription (RFC-0013).
+    subscriptions: HashMap<String, crate::delivery::Subscription>,
+    /// Pending webhook deliveries, drained outside the state lock.
+    outbox: Vec<crate::delivery::PendingDelivery>,
 }
 
 impl NodeState {
@@ -199,6 +203,8 @@ impl NodeState {
             ip_cap,
             admin_token: None,
             vault,
+            subscriptions: HashMap::new(),
+            outbox: Vec::new(),
         }
     }
 
@@ -384,19 +390,44 @@ impl NodeState {
         _regions: Vec<String>,
         ttl_seconds: u64,
     ) -> Result<String> {
+        self.announce_with_reachability(
+            token,
+            capabilities,
+            _languages,
+            _regions,
+            ttl_seconds,
+            vec![],
+        )
+    }
+
+    /// Announce with the agent's declared reachability (spec 02 §2.2).
+    ///
+    /// The node used to overwrite whatever the agent declared with a
+    /// placeholder (`https://agent/<did>/gap`, not a routable host),
+    /// which discarded the very data event delivery needs — spec §2.4.4
+    /// requires a registry to support a transport *listed by the agent*
+    /// (RFC-0013 §2.2). Declared entries are now stored verbatim; the
+    /// node-mediated entry is appended, clearly marked.
+    pub fn announce_with_reachability(
+        &mut self,
+        token: &str,
+        capabilities: Vec<Capability>,
+        _languages: Vec<String>,
+        _regions: Vec<String>,
+        ttl_seconds: u64,
+        declared: Vec<Reachability>,
+    ) -> Result<String> {
         let agent = self
             .agents
             .get_mut(token)
             .ok_or_else(|| Error::Unauthorized("invalid bearer token".into()))?;
-        let mut ann = Announcement::signed(
-            &agent.identity,
-            capabilities,
-            vec![Reachability {
-                transport: "https".into(),
-                endpoint: format!("https://agent/{}/gap", agent.identity.did()),
-            }],
-            ttl_seconds,
-        );
+        let mut reachability = declared;
+        reachability.push(Reachability {
+            transport: "gap-node".into(),
+            endpoint: format!("/v1/contract/?agent={}", agent.identity.did()),
+        });
+        let mut ann =
+            Announcement::signed(&agent.identity, capabilities, reachability, ttl_seconds);
         ann.languages = _languages;
         ann.regions = _regions;
         ann.resign(&agent.identity);
@@ -923,7 +954,221 @@ impl NodeState {
 
     /// Record an event on the audit spine.
     pub fn record(&mut self, kind: &str, payload: Value) {
-        let _ = self.storage.append_event(kind, payload);
+        // Fan the event out to subscribers (RFC-0013). This only
+        // enqueues — network I/O happens in `drain_outbox`, outside the
+        // state lock, so delivery can never stall the protocol.
+        if let Ok(seq) = self.storage.append_event(kind, payload.clone()) {
+            self.enqueue_event(seq, kind, payload);
+        }
+    }
+
+    /// Queue one event for every subscription that is active, wants the
+    /// kind, and is **in scope** for its owner (RFC-0013 §3.2 rule 2:
+    /// an agent never receives events for contracts it is not a party
+    /// to — this is an access-control boundary, not a filter).
+    fn enqueue_event(&mut self, seq: u64, kind: &str, payload: Value) {
+        if self.subscriptions.is_empty() {
+            return;
+        }
+        let event = crate::delivery::DeliveredEvent {
+            seq,
+            kind: kind.to_string(),
+            payload: payload.clone(),
+            at: now_unix(),
+        };
+        let node_identity = self.node.identity.clone();
+        let mut queued = Vec::new();
+        for sub in self.subscriptions.values() {
+            if !sub.active || !sub.wants(kind) {
+                continue;
+            }
+            if !self.event_in_scope(&sub.agent_did, &payload) {
+                continue;
+            }
+            if sub.transport != crate::delivery::Transport::Webhook {
+                continue; // stream subscribers pull via /v1/events
+            }
+            let mut body = crate::delivery::DeliveryBody::new(
+                &node_identity,
+                &sub.subscription_id,
+                event.clone(),
+            );
+            body.sign(&node_identity);
+            queued.push(crate::delivery::PendingDelivery {
+                subscription_id: sub.subscription_id.clone(),
+                url: sub.url.clone(),
+                body,
+                not_before: 0,
+            });
+        }
+        self.outbox.extend(queued);
+    }
+
+    /// Whether `agent` may see an event with this payload: it must
+    /// reference a contract the agent is a party to, or name the agent
+    /// directly. Events with neither are node-lifecycle events and are
+    /// visible to all authenticated subscribers.
+    fn event_in_scope(&self, agent: &crate::identity::Did, payload: &Value) -> bool {
+        let did = agent.to_string();
+        if let Some(cid) = payload.get("contract_id").and_then(|v| v.as_str()) {
+            return match self.contracts.get(cid) {
+                Some(c) => c.client.to_string() == did || c.provider.to_string() == did,
+                // Unknown contract: fail closed rather than leak.
+                None => false,
+            };
+        }
+        if let Some(other) = payload.get("agent_did").and_then(|v| v.as_str()) {
+            return other == did;
+        }
+        true
+    }
+
+    /// Register a delivery subscription for the authenticated agent.
+    pub fn subscribe(&mut self, token: &str, body: &Value) -> Result<Value> {
+        let agent_did = self.agent_by_token(token)?.identity.did().clone();
+        let transport = crate::delivery::Transport::parse(
+            body.get("transport")
+                .and_then(|v| v.as_str())
+                .unwrap_or("webhook"),
+        )?;
+        let url = body
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if transport == crate::delivery::Transport::Webhook {
+            if url.is_empty() {
+                return Err(Error::Other("webhook subscription requires a url".into()));
+            }
+            // SSRF boundary: refuse before storing, so a hostile URL
+            // never reaches the outbox (RFC-0013 §4).
+            crate::delivery::validate_webhook_url(&url)?;
+        }
+        let kinds: Vec<String> = body
+            .get("kinds")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|k| k.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let sub = crate::delivery::Subscription::new(agent_did, transport, url, kinds);
+        let view = sub.to_json();
+        let id = sub.subscription_id.clone();
+        self.subscriptions.insert(id.clone(), sub);
+        self.record("sub.registered", json!({ "subscription_id": id }));
+        Ok(view)
+    }
+
+    /// List the caller's subscriptions.
+    pub fn list_subscriptions(&self, token: &str) -> Result<Value> {
+        let did = self.agent_by_token(token)?.identity.did().to_string();
+        let subs: Vec<Value> = self
+            .subscriptions
+            .values()
+            .filter(|s| s.agent_did.to_string() == did)
+            .map(|s| s.to_json())
+            .collect();
+        Ok(json!({ "subscriptions": subs }))
+    }
+
+    /// Delete a subscription. Only its owner may delete it.
+    pub fn unsubscribe(&mut self, token: &str, id: &str) -> Result<Value> {
+        let did = self.agent_by_token(token)?.identity.did().to_string();
+        match self.subscriptions.get(id) {
+            Some(s) if s.agent_did.to_string() == did => {
+                self.subscriptions.remove(id);
+                self.record("sub.deleted", json!({ "subscription_id": id }));
+                Ok(json!({ "deleted": id }))
+            }
+            Some(_) => Err(Error::Unauthorized(
+                "subscription belongs to another agent".into(),
+            )),
+            None => Err(Error::Other("unknown subscription".into())),
+        }
+    }
+
+    /// Events visible to the caller after `after`, for the SSE stream
+    /// and for cursor catch-up.
+    pub fn events_for(&self, token: &str, after: u64, limit: u64) -> Result<Vec<Value>> {
+        let did = self.agent_by_token(token)?.identity.did().clone();
+        let events = self.storage.events_after(after, limit).unwrap_or_default();
+        Ok(events
+            .into_iter()
+            .filter(|e| self.event_in_scope(&did, &e.payload))
+            .map(|e| json!({ "seq": e.seq, "kind": e.kind, "payload": e.payload, "at": e.at }))
+            .collect())
+    }
+
+    /// Take the deliveries that are due now, leaving the rest queued.
+    /// Called by `drain_outbox` while holding the lock — deliberately
+    /// cheap, so the network round-trips happen unlocked.
+    pub fn take_due_deliveries(&mut self, now: u64) -> Vec<crate::delivery::PendingDelivery> {
+        let mut due = Vec::new();
+        let mut kept = Vec::new();
+        for d in self.outbox.drain(..) {
+            if d.not_before <= now {
+                due.push(d);
+            } else {
+                kept.push(d);
+            }
+        }
+        self.outbox = kept;
+        due
+    }
+
+    /// Apply a delivery outcome: reset or increment the failure count,
+    /// re-queue with backoff, and disable a subscription that keeps
+    /// failing (RFC-0013 §3.4).
+    pub fn settle_delivery(
+        &mut self,
+        mut pending: crate::delivery::PendingDelivery,
+        success: bool,
+    ) {
+        let id = pending.subscription_id.clone();
+        if success {
+            if let Some(sub) = self.subscriptions.get_mut(&id) {
+                sub.failures = 0;
+            }
+            return;
+        }
+        if pending.body.attempt < crate::delivery::MAX_ATTEMPTS {
+            let attempt = pending.body.attempt + 1;
+            pending.body.attempt = attempt;
+            // The signature covers `attempt`, so it must be renewed.
+            pending.body.sign(&self.node.identity);
+            pending.not_before = now_unix() + crate::delivery::backoff_secs(attempt);
+            self.outbox.push(pending);
+            return;
+        }
+        // Attempts exhausted for this event: count it against the
+        // subscription and disable it if it keeps failing.
+        let mut disable = false;
+        if let Some(sub) = self.subscriptions.get_mut(&id) {
+            sub.failures += 1;
+            if sub.failures >= crate::delivery::MAX_CONSECUTIVE_FAILURES {
+                sub.active = false;
+                disable = true;
+            }
+        }
+        if disable {
+            self.record(
+                "sub.disabled",
+                json!({ "subscription_id": id, "reason": "consecutive delivery failures" }),
+            );
+        }
+    }
+
+    /// Number of queued deliveries (tests and operators).
+    pub fn outbox_len(&self) -> usize {
+        self.outbox.len()
+    }
+
+    /// Read a subscription (tests and operators).
+    pub fn subscription(&self, id: &str) -> Option<&crate::delivery::Subscription> {
+        self.subscriptions.get(id)
     }
 
     /// The node's AgentCard (RFC-0010 well-known discovery).
@@ -958,6 +1203,49 @@ pub fn route(
     auth: Option<&str>,
 ) -> (u16, Value) {
     route_with_ip(state, method, path, body, auth, None)
+}
+
+/// Send every due webhook delivery (RFC-0013).
+///
+/// The lock is taken twice — once to take the due batch, once to record
+/// outcomes — and **released across the network round-trips**. A slow or
+/// hostile subscriber therefore cannot stall contract processing, which
+/// is the whole reason delivery is queued rather than inline.
+///
+/// Returns the number of deliveries attempted.
+pub fn drain_outbox(
+    state: &Arc<Mutex<NodeState>>,
+    sender: &dyn crate::delivery::WebhookSender,
+) -> usize {
+    let now = crate::message::now_unix();
+    let (due, node_did) = {
+        let mut guard = match state.lock() {
+            Ok(g) => g,
+            Err(_) => return 0,
+        };
+        let did = guard.node_did().to_string();
+        (guard.take_due_deliveries(now), did)
+    };
+    let attempted = due.len();
+    for pending in due {
+        let bytes = serde_json::to_vec(&pending.body).unwrap_or_default();
+        let headers = [
+            ("Content-Type", "application/json".to_string()),
+            ("X-Gap-Node", node_did.clone()),
+            (
+                "X-Gap-Signature",
+                pending.body.signature.clone().unwrap_or_default(),
+            ),
+            ("X-Gap-Delivery", pending.body.delivery_id.clone()),
+            ("X-Gap-Event-Seq", pending.body.event.seq.to_string()),
+        ];
+        let outcome = sender.post(&pending.url, &headers, &bytes);
+        let success = matches!(outcome, Ok(status) if (200..300).contains(&status));
+        if let Ok(mut guard) = state.lock() {
+            guard.settle_delivery(pending, success);
+        }
+    }
+    attempted
 }
 
 /// Route with client IP for rate limiting (audit H-03).
@@ -1036,9 +1324,14 @@ pub fn route_with_ip(
                 .get("ttl_seconds")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(86400);
+            // Spec 02 §2.2: the agent declares how it can be reached.
+            let reachability: Vec<Reachability> = body
+                .get("reachability")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
             match (token, caps.is_empty()) {
                 (Some(t), false) => guard
-                    .announce(t, caps, languages, regions, ttl)
+                    .announce_with_reachability(t, caps, languages, regions, ttl, reachability)
                     .map(|id| json!({ "announcement_id": id })),
                 (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
                 (_, true) => Err(Error::Other("capabilities required".into())),
@@ -1234,6 +1527,44 @@ pub fn route_with_ip(
             guard.workflow_status(id)
         }
 
+        // ---- event delivery (RFC-0013) ----
+        ("POST", "/v1/subscriptions") => match token {
+            Some(t) => guard.subscribe(t, &body),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
+        ("GET", "/v1/subscriptions") => match token {
+            Some(t) => guard.list_subscriptions(t),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
+        (m, p) if m == "DELETE" && p.starts_with("/v1/subscriptions/") => {
+            let id = p.trim_start_matches("/v1/subscriptions/");
+            match token {
+                Some(t) => guard.unsubscribe(t, id),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        // Cursor form of the event stream. The streaming SSE responder
+        // lives in main.rs (it must own the connection); this JSON form
+        // is the same data for clients that prefer to poll the cursor.
+        ("GET", p) if p.starts_with("/v1/events") => {
+            let params = parse_url_params(raw_path);
+            let after = params
+                .get("after")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(100)
+                .min(1000);
+            match token {
+                Some(t) => guard
+                    .events_for(t, after, limit)
+                    .map(|events| json!({ "events": events })),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+
         // ---- portability ----
         ("POST", "/v1/identity/export") => match token {
             Some(t) => guard.identity_export(t),
@@ -1255,8 +1586,16 @@ pub fn route_with_ip(
                 Error::EscrowViolation(_) => "escrow_violation",
                 _ => "invalid_request",
             };
+            // Status classes, not a blanket 400: clients (and the
+            // OpenAPI contract) distinguish "you are not allowed" from
+            // "your request was malformed" from "it does not exist".
+            let status = match e {
+                Error::Unauthorized(_) => 401,
+                Error::UnknownContract(_) => 404,
+                _ => 400,
+            };
             (
-                400,
+                status,
                 json!({ "error": { "code": code, "message": e.to_string() } }),
             )
         }
@@ -1576,7 +1915,10 @@ mod tests {
     fn announce_requires_auth_and_caps() {
         let arc = state();
         let (s, _) = route(&arc, "POST", "/v1/announce", b"{}".as_ref(), None);
-        assert_eq!(s, 400);
+        assert_eq!(
+            s, 401,
+            "missing token is an auth failure, not a bad request"
+        );
         let token = register(&arc);
         let (s2, v2) = route(
             &arc,
@@ -1908,11 +2250,11 @@ mod tests {
     fn unauthorized_operations_rejected() {
         let arc = state();
         let (s, v) = route(&arc, "POST", "/v1/contract/propose", b"{}".as_ref(), None);
-        assert_eq!(s, 400);
+        assert_eq!(s, 401);
         assert_eq!(v["error"]["code"], "unauthorized");
 
         let (s2, _) = route(&arc, "GET", "/v1/contract/urn:gap:ctr:nope", &[], None);
-        assert_eq!(s2, 400);
+        assert_eq!(s2, 404, "unknown contract is not-found, not bad-request");
     }
 
     #[test]

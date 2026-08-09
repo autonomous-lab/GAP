@@ -344,12 +344,12 @@ fn all_routes_negative_cases() {
         None,
         json!({ "provider": provider_did, "capability_id": "cap:x", "terms": terms_json(), "escrow": false }),
     );
-    assert_eq!(s, 400, "unauth propose: {v}");
+    assert_eq!(s, 401, "unauth propose: {v}");
     assert_eq!(v["error"]["code"], "unauthorized");
 
     // Invalid bearer token.
     let (s, v) = c.get("/v1/audit", Some("Bearer gat_doesnotexist"));
-    assert_eq!(s, 400, "bad token: {v}");
+    assert_eq!(s, 401, "bad token: {v}");
     assert_eq!(v["error"]["code"], "unauthorized");
 
     // Unknown provider in propose.
@@ -358,7 +358,7 @@ fn all_routes_negative_cases() {
         Some(&client_tok),
         json!({ "provider": "did:gap:1111111111111111111111111111111111111111111111111111111111111111", "capability_id": "cap:x", "terms": terms_json(), "escrow": false }),
     );
-    assert_eq!(s, 400, "unknown provider: {v}");
+    assert_eq!(s, 404, "unknown provider: {v}");
     assert_eq!(v["error"]["code"], "contract_not_found");
 
     // Invalid escrow amount (7 decimals) — exact-money validation.
@@ -435,7 +435,7 @@ fn all_routes_negative_cases() {
         None,
         json!({ "contract_id": cid2.clone(), "split": { "client": 0.4, "provider": 0.6 } }),
     );
-    assert_eq!(s, 400, "unauthenticated ruling must fail: {v}");
+    assert_eq!(s, 401, "unauthenticated ruling must fail: {v}");
     assert_eq!(v["error"]["code"], "unauthorized");
     let (s, v) = c.post(
         "/v1/escrow/rule",

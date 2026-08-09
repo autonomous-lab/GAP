@@ -2,7 +2,9 @@
 
 Thin, dependency-free clients for the GAP node HTTP API. Both cover the
 full lifecycle: identity → announce → discover → contract → escrow →
-deliver → settle → audit.
+deliver → settle → audit, plus **event delivery** (RFC-0013): register
+a signed webhook, or consume the resumable SSE stream / cursor when you
+have no public URL.
 
 | SDK | File | Runtime | Dependencies |
 |-----|------|---------|--------------|

@@ -218,6 +218,56 @@ const TOOLS = [
     handler: ({ workflow_id }) => gap("GET", `/v1/workflows/${workflow_id}`),
   },
   {
+    name: "gap_subscribe",
+    description:
+      "Stop polling: register a webhook so the node pushes protocol events (contract signed, delivery, settlement) to your URL. Deliveries are signed by the node — verify X-Gap-Signature before acting. Requires a public https URL; agents without one poll gap_events instead.",
+    inputSchema: {
+      type: "object",
+      required: ["url"],
+      properties: {
+        url: { type: "string", description: "Public https endpoint that will receive POSTed events" },
+        kinds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Exact event kinds to receive, e.g. ['ctr.signed','exe.delivered']. Omit for everything in scope.",
+        },
+      },
+    },
+    handler: ({ url, kinds }) =>
+      gap("POST", "/v1/subscriptions", { transport: "webhook", url, kinds: kinds || [] }),
+  },
+  {
+    name: "gap_subscriptions",
+    description: "List your event-delivery subscriptions (and whether any were disabled after repeated delivery failures).",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: () => gap("GET", "/v1/subscriptions"),
+  },
+  {
+    name: "gap_unsubscribe",
+    description: "Delete one of your event-delivery subscriptions.",
+    inputSchema: {
+      type: "object",
+      required: ["subscription_id"],
+      properties: { subscription_id: { type: "string" } },
+    },
+    handler: ({ subscription_id }) =>
+      gap("DELETE", `/v1/subscriptions/${encodeURIComponent(subscription_id)}`),
+  },
+  {
+    name: "gap_events",
+    description:
+      "Poll the event cursor: everything that happened to your contracts after `after` (a 1-based sequence; 0 means from the beginning). This is the catch-up path — store the last seq you handled and pass it back. Works for agents with no public URL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        after: { type: "number", description: "Last sequence already handled (0 = from the start)" },
+        limit: { type: "number" },
+      },
+    },
+    handler: ({ after, limit }) =>
+      gap("GET", `/v1/events?after=${after || 0}&limit=${limit || 100}`),
+  },
+  {
     name: "gap_audit",
     description: "Read the node's append-only audit spine (authenticated).",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },

@@ -55,7 +55,7 @@ GAP/
 │   └── test-escrow.js # 14 lifecycle tests (solc + EVM sim)
 ├── deploy/            # Runtime configs (ClickHouse system-log control, HAProxy)
 ├── docs/              # The RFC process (like OAP's)
-│   ├── rfcs/          # RFC-0001 … RFC-0012 (delegation, workflows, …)
+│   ├── rfcs/          # RFC-0001 … RFC-0013 (delegation, workflows, delivery, …)
 │   ├── node-api.md    # The GAP node HTTP API (what agents point at)
 │   ├── openapi.yaml   # OpenAPI 3.1 spec of the node API
 │   ├── deployment.md  # Storage architecture (SQLite / ClickHouse)
@@ -76,6 +76,7 @@ GAP/
 │   ├── agentcard.rs   # Well-known discovery (RFC-0010)
 │   ├── contract.rs    # Contract lifecycle
 │   ├── message.rs     # Wire format, addressing, replay guard
+│   ├── delivery.rs    # Signed webhooks, SSE, SSRF guard (RFC-0013)
 │   ├── payment.rs     # Escrow & settlement (one escrow per contract)
 │   ├── amount.rs      # Exact decimal amounts (integer minor units)
 │   ├── vault.rs       # Seed encryption at rest (XChaCha20-Poly1305)
@@ -100,6 +101,7 @@ GAP/
 │   └── error.rs       # Error taxonomy
 ├── tests/             # Integration tests
 │   ├── economy.rs     # Full economy scenarios + replay attacks
+│   ├── event_delivery.rs # Webhook signing, scoping, retries, cursor
 │   ├── http_routes.rs # Exhaustive HTTP route coverage
 │   ├── properties.rs  # Property-based invariants (proptest)
 │   └── test_vectors.rs  # Known-answer vectors (interop lock)
@@ -168,8 +170,8 @@ curl "$NODE/v1/discover?name=analysis&min_reputation=0.9"
 
 The external agent uses the **GAP MCP adapter**
 ([`adapters/mcp/`](./adapters/mcp/)) — a zero-dependency MCP server
-that exposes the node as 13 tools (identity, announce, discover,
-contract, deliver, settle). The agent never learns GAP; it sees "a
+that exposes the node as 17 tools (identity, announce, discover,
+contract, deliver, settle, event delivery). The agent never learns GAP; it sees "a
 task with terms and a payment promise":
 
 ```bash
@@ -191,6 +193,43 @@ curl -X POST $NODE/v1/workflows -H "Authorization: Bearer $TOKEN" \
        "capability":"cap:data:scrape"},{"step_id":"analyze",
        "capability":"cap:analysis:summarize","needs":["scrape"]}]}'
 ```
+
+### How does an agent know the job is done?
+
+It does not poll. The node **pushes** protocol events — contract
+signed, delivery submitted, escrow released — as **signed webhooks**:
+
+```bash
+curl -X POST $NODE/v1/subscriptions -H "Authorization: Bearer $TOKEN" \
+  -d '{"transport":"webhook","url":"https://my-agent.example/gap/events",
+       "kinds":["ctr.signed","exe.delivered","pay.released"]}'
+```
+
+Every delivery is signed by the node's key and carries `X-Gap-Node`,
+`X-Gap-Signature`, `X-Gap-Delivery` and `X-Gap-Event-Seq`. **Verify
+before you act**: the signature covers the canonical JSON of the body
+with the `signature` key removed.
+
+Agents without a public URL (an MCP assistant, a laptop agent behind
+NAT) consume the same events over a resumable stream instead:
+
+```bash
+curl -N -H "Authorization: Bearer $TOKEN" -H "Accept: text/event-stream" \
+  "$NODE/v1/events?after=41"
+```
+
+Delivery is **at-least-once with exact resume**. Every event carries the
+audit spine's monotonic sequence, so an agent that missed every webhook
+reconstructs its state from the cursor alone (`/v1/events?after=` or
+`/v1/audit?after=`) — push is an optimization, the cursor is the
+contract. Failures retry with exponential backoff, and a subscription
+that keeps failing is disabled, auditably.
+
+Webhook URLs are validated against SSRF before anything is stored:
+https only, no embedded credentials, and the host must resolve
+exclusively to public unicast addresses — a node must never be talked
+into calling `169.254.169.254` or its own admin surface. Full design in
+[RFC-0013](./docs/rfcs/RFC-0013-event-delivery.md).
 
 ### Where is the node?
 
@@ -227,7 +266,10 @@ default min(cpus, 8)), `GAP_NODE_SEED` / `GAP_NODE_SEED_FILE` (persist
 the node DID across restarts), and `GAP_MASTER_KEY` (64 hex chars —
 enables **encryption at rest** for custodied identity seeds,
 XChaCha20-Poly1305; without it a database copy is a copy of every
-identity on the node).
+identity on the node), `GAP_SSE_MAX_SECS` (stream lifetime before the
+client reconnects with its cursor; default 300), and the webhook SSRF
+opt-outs `GAP_WEBHOOK_ALLOW_HTTP` / `GAP_WEBHOOK_ALLOW_PRIVATE` (local
+development, or a node and its agents sharing a trusted VPC).
 
 ### Scaling: many nodes, one ClickHouse
 
@@ -301,17 +343,19 @@ Honest accounting of what the reference implementation covers today:
 | 01 §1.3 | Bilateral principal binding + unbind | ✅ `principal.rs` |
 | 01 §1.4 | Reputation log, **signed** endorsements | ✅ |
 | 02 | Announce / query / TTL / deregister | ✅ |
+| 02 §2.2 / §2.4.4 | Agent-declared reachability stored and honoured | ✅ (was overwritten by a placeholder before RFC-0013) |
 | 02 §2.4.3 | Registry-signed query results | ❌ planned (announcements are signed; the query response wrapper is not) |
 | 03 | Negotiation state machine, dual signatures, disputes | ✅ (counter-offer endpoint on the node: planned) |
 | 04 | Proof bundles, hash verification, autonomy enforcement | ✅ |
 | 05 | Escrow state machine, price caps, signed receipts, exact amounts | ✅ |
 | 06 | Autonomy levels, certification, `gov.halt`, budgets | ✅ (meta-agent supervision chains: partial) |
 | 07 | Tokenomics | — informative only, no implementation |
+| RFC-0013 | Event delivery: signed webhooks + resumable SSE stream | ✅ `src/delivery.rs` |
 
 ## Testing
 
 ```bash
-cargo test            # 192 tests: 173 unit + 18 integration + 1 doc
+cargo test            # 217 tests: 186 unit + 30 integration + 1 doc
 cargo clippy          # zero warnings
 cargo run --example lead_gen   # end-to-end demo
 ```
@@ -335,8 +379,10 @@ chinese walls, NDA), sybil resistance (tree aggregation,
 one-bid-per-tree), subscription lifecycle, cooling-off windows,
 workflow DAG execution, credentials, AgentCard, conformance reports,
 SLA divergence, principal binding (bilateral signatures, expiry,
-forged unbind), key-rotation chains, full economy flows, and
-exhaustive HTTP route coverage (`tests/http_routes.rs`).
+forged unbind), key-rotation chains, event delivery (signed webhooks
+verified by an out-of-process receiver, SSRF matrix, retry/backoff,
+disabling, per-party scoping, gapless cursor resume), full economy
+flows, and exhaustive HTTP route coverage (`tests/http_routes.rs`).
 
 ## Benchmarks
 

@@ -154,16 +154,17 @@ pub(crate) mod test_helpers {
             .append_event("pay.released", serde_json::json!({ "amount": 5.0 }))
             .unwrap();
         assert_eq!(storage.event_count().unwrap(), 2);
-        assert_eq!(seq1, 0);
-        assert_eq!(seq2, 1);
+        assert_eq!(seq1, 1, "sequences are 1-based so after=0 means everything");
+        assert_eq!(seq2, 2);
 
-        // events_after returns strictly-after: after seq 0 -> only seq 1.
-        let after = storage.events_after(0, 10).unwrap();
+        // events_after is strictly-after; with 1-based seqs, after=0
+        // yields the whole stream.
+        let after = storage.events_after(1, 10).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].kind, "pay.released");
-        assert_eq!(after[0].seq, 1);
+        assert_eq!(after[0].seq, 2);
         // After seq 1 -> nothing.
-        assert!(storage.events_after(1, 10).unwrap().is_empty());
+        assert!(storage.events_after(2, 10).unwrap().is_empty());
 
         // 2. Rejection of invalid events.
         assert!(storage.append_event("", serde_json::json!({})).is_err());

@@ -56,6 +56,7 @@ sections marked optional may be omitted only with editor approval.
 | 0010 | Well-Known Discovery (AgentCard) | **Implemented** (`src/agentcard.rs`) | Discovery |
 | 0011 | Conformance Levels & Kit | **Implemented** (`src/conformance.rs`) | Process |
 | 0012 | SLAs & Incident Reporting | **Implemented** (`src/sla.rs`) | Commercial |
+| 0013 | Event Delivery (Webhooks & Streams) | **Implemented** (`src/delivery.rs`) | Coordination |
 
 ## How to propose
 

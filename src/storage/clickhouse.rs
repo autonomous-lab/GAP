@@ -226,7 +226,9 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .events
             .lock()
             .map_err(|_| Error::Other("events lock poisoned".into()))?;
-        let seq = events.len() as u64;
+        // 1-based: seq 0 is reserved so that a cursor of `after=0`
+        // means "everything" (RFC-0013 §3.2 rule 14).
+        let seq = events.len() as u64 + 1;
         let at = crate::message::now_unix();
         events.push(EventRecord {
             seq,

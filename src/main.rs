@@ -18,9 +18,120 @@ use gap::storage::clickhouse::{ClickHouseStorage, UreqTransport};
 use gap::storage::sqlite::SqliteStorage;
 use gap::storage::Storage;
 use std::env;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Response, Server};
+
+/// Stream events as Server-Sent Events (RFC-0013 §3.3).
+///
+/// Resumable: the client passes `?after=<seq>` (or `Last-Event-ID`) and
+/// receives every later in-scope event with `id:` set to the sequence,
+/// so a reconnect leaves no gap. Keepalive comments stop proxies from
+/// reaping the connection.
+///
+/// This holds a worker thread for the life of the connection —
+/// deliberate, and bounded by `GAP_SSE_MAX_SECS` (default 300 s), after
+/// which the client reconnects with its cursor. Webhooks are the
+/// zero-connection path for agents that can receive inbound HTTP.
+fn stream_events(
+    state: &Arc<Mutex<NodeState>>,
+    request: tiny_http::Request,
+    path: &str,
+    auth: Option<&str>,
+) {
+    let token = auth.and_then(|a| a.strip_prefix("Bearer ").map(|t| t.to_string()));
+    let token = match token {
+        Some(t) => t,
+        None => {
+            let _ = request.respond(
+                Response::from_string(r#"{"error":"unauthorized"}"#).with_status_code(401),
+            );
+            return;
+        }
+    };
+    // Cursor: ?after=<seq>, or the Last-Event-ID header on reconnect.
+    let mut cursor: u64 = path
+        .split_once('?')
+        .map(|(_, q)| q)
+        .and_then(|q| {
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix("after=").and_then(|v| v.parse().ok()))
+        })
+        .or_else(|| {
+            request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Last-Event-ID"))
+                .and_then(|h| h.value.as_str().parse().ok())
+        })
+        .unwrap_or(0);
+
+    // Authenticate before opening the stream.
+    if state
+        .lock()
+        .ok()
+        .map(|g| g.events_for(&token, cursor, 1).is_err())
+        .unwrap_or(true)
+    {
+        let _ = request
+            .respond(Response::from_string(r#"{"error":"unauthorized"}"#).with_status_code(401));
+        return;
+    }
+
+    let max_secs: u64 = env::var("GAP_SSE_MAX_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    let started = std::time::Instant::now();
+
+    let mut writer = request.into_writer();
+    let preamble = "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/event-stream\r\n\
+         Cache-Control: no-cache\r\n\
+         Connection: keep-alive\r\n\
+         X-Accel-Buffering: no\r\n\r\n";
+    if writer.write_all(preamble.as_bytes()).is_err() {
+        return;
+    }
+    let _ = writer.flush();
+
+    loop {
+        let batch = match state.lock() {
+            Ok(guard) => guard.events_for(&token, cursor, 200).unwrap_or_default(),
+            Err(_) => break,
+        };
+        let mut wrote = false;
+        for event in &batch {
+            let seq = event.get("seq").and_then(|v| v.as_u64()).unwrap_or(cursor);
+            let kind = event
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("event");
+            let frame = format!("id: {seq}\nevent: {kind}\ndata: {event}\n\n");
+            if writer.write_all(frame.as_bytes()).is_err() {
+                return; // client hung up
+            }
+            cursor = seq;
+            wrote = true;
+        }
+        if wrote && writer.flush().is_err() {
+            return;
+        }
+        if started.elapsed().as_secs() >= max_secs {
+            // Ask the client to come back with its cursor.
+            let _ = writer.write_all(b": reconnect\n\n");
+            let _ = writer.flush();
+            return;
+        }
+        if batch.is_empty() {
+            // Keepalive comment: proxies reap silent connections.
+            if writer.write_all(b": keepalive\n\n").is_err() || writer.flush().is_err() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        }
+    }
+}
 
 fn build_storage() -> Result<Box<dyn Storage>> {
     let kind = env::var("GAP_STORAGE").unwrap_or_else(|_| "sqlite".into());
@@ -134,6 +245,26 @@ fn main() -> Result<()> {
         );
     }
 
+    // Event delivery (RFC-0013): one background thread drains the
+    // outbox. Network I/O happens with the state lock released, so a
+    // slow subscriber cannot stall contract processing.
+    {
+        let state = state.clone();
+        std::thread::spawn(move || {
+            let sender = gap::delivery::UreqSender::default();
+            loop {
+                let sent = gap::server::drain_outbox(&state, &sender);
+                // Idle: back off; busy: keep draining.
+                std::thread::sleep(std::time::Duration::from_millis(if sent == 0 {
+                    500
+                } else {
+                    50
+                }));
+            }
+        });
+        println!("[gap-node] event delivery: webhooks enabled (RFC-0013)");
+    }
+
     let mut handles = Vec::new();
     for _ in 0..workers {
         let server = server.clone();
@@ -158,6 +289,19 @@ fn main() -> Result<()> {
                 .iter()
                 .find(|h| h.field.equiv("Authorization"))
                 .map(|h| h.value.as_str().to_string());
+
+            // SSE stream (RFC-0013 §3.3): this endpoint owns the
+            // connection, so it cannot go through `route()` (which
+            // returns a single JSON body). Accept-header negotiated:
+            // clients that just want the cursor get the JSON form.
+            let wants_sse = path.starts_with("/v1/events")
+                && request.headers().iter().any(|h| {
+                    h.field.equiv("Accept") && h.value.as_str().contains("text/event-stream")
+                });
+            if wants_sse {
+                stream_events(&state, request, &path, auth.as_deref());
+                continue;
+            }
 
             let client_ip = request.remote_addr().map(|addr| addr.ip().to_string());
             let (status, json_body) = route_with_ip(

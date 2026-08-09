@@ -61,6 +61,25 @@ export interface DiscoverFilters {
   max_results?: number;
 }
 
+export interface Subscription {
+  subscription_id: string;
+  agent_did: string;
+  transport: "webhook" | "stream";
+  url: string;
+  kinds: string[];
+  active: boolean;
+  failures: number;
+  created_at: number;
+}
+
+export interface GapEvent {
+  /** 1-based, strictly monotonic per node. `after=0` means "from the start". */
+  seq: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  at: number;
+}
+
 export interface WorkflowStep {
   step_id: string;
   capability: string;
@@ -190,6 +209,84 @@ export class GapClient {
 
   workflowStatus(workflowId: string): Promise<unknown> {
     return this.call("GET", `/v1/workflows/${workflowId}`);
+  }
+
+  // ------------------------------------------------- event delivery (RFC-0013)
+
+  /**
+   * Register a signed-webhook subscription so the node pushes events
+   * instead of you polling. The URL must be public https (the node
+   * refuses internal addresses: SSRF). Verify `X-Gap-Signature` on
+   * every delivery before acting on it.
+   */
+  subscribeWebhook(url: string, kinds: string[] = []): Promise<Subscription> {
+    return this.call("POST", "/v1/subscriptions", { transport: "webhook", url, kinds });
+  }
+
+  async subscriptions(): Promise<Subscription[]> {
+    const out = await this.call<{ subscriptions: Subscription[] }>("GET", "/v1/subscriptions");
+    return out.subscriptions;
+  }
+
+  unsubscribe(subscriptionId: string): Promise<unknown> {
+    return this.call("DELETE", `/v1/subscriptions/${encodeURIComponent(subscriptionId)}`);
+  }
+
+  /**
+   * Read events after a cursor. This is the catch-up path: push is an
+   * optimization, the cursor is the contract. Persist the last `seq`
+   * you handled and pass it back.
+   */
+  async events(after = 0, limit = 100): Promise<GapEvent[]> {
+    const out = await this.call<{ events: GapEvent[] }>(
+      "GET",
+      `/v1/events?after=${after}&limit=${limit}`,
+    );
+    return out.events;
+  }
+
+  /**
+   * Consume the live SSE stream, resuming from `after`. Yields each
+   * event as it arrives; reconnect with the last seq you saw and no
+   * event is missed. Works behind NAT — no inbound URL needed.
+   *
+   * ```ts
+   * for await (const e of gap.streamEvents(lastSeq)) {
+   *   if (e.kind === "exe.delivered") await handle(e);
+   *   lastSeq = e.seq;
+   * }
+   * ```
+   */
+  async *streamEvents(after = 0): AsyncGenerator<GapEvent> {
+    if (!this.token) {
+      throw new GapError(0, "no_token", "no bearer token: call createIdentity() or setToken()");
+    }
+    const res = await fetch(`${this.base}/v1/events?after=${after}`, {
+      headers: { authorization: `Bearer ${this.token}`, accept: "text/event-stream" },
+    });
+    if (!res.ok || !res.body) {
+      throw new GapError(res.status, "stream_failed", `GAP node ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true });
+      let split;
+      // SSE frames are separated by a blank line.
+      while ((split = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        const data = frame
+          .split("\n")
+          .find((l) => l.startsWith("data:"))
+          ?.slice(5)
+          .trim();
+        if (data) yield JSON.parse(data) as GapEvent;
+      }
+    }
   }
 
   /** Read the node's append-only audit spine. */

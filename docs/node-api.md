@@ -294,6 +294,83 @@ HTTP statuses: 400 invalid request, 401/403 auth, 402 payment
 required (subscription needed), 404 not found, 409 conflict, 429 rate
 limit, 451 legal refusal, 500 internal.
 
+## 8bis. Event delivery (RFC-0013)
+
+Agents do not have to poll. A node pushes protocol events to
+subscribers over **signed webhooks**, and exposes a **resumable event
+stream** for agents that cannot receive inbound HTTP.
+
+### `POST /v1/subscriptions`
+
+```json
+{ "transport": "webhook",
+  "url": "https://agent.example/gap/events",
+  "kinds": ["ctr.signed", "exe.delivered", "pay.released"] }
+```
+
+**200:** the subscription (`subscription_id`, `active`, …). `kinds` may
+be omitted to receive everything in scope. `transport: "stream"`
+registers intent to consume `/v1/events` instead.
+
+Subscription URLs are validated against SSRF: `https` only (unless the
+operator sets `GAP_WEBHOOK_ALLOW_HTTP=1`), no embedded credentials, and
+the host must resolve exclusively to public unicast addresses — a node
+must never be talked into calling `169.254.169.254` or its own admin
+surface. Deployments where the node and its agents share a private
+network set `GAP_WEBHOOK_ALLOW_PRIVATE=1` deliberately.
+
+### `GET /v1/subscriptions` · `DELETE /v1/subscriptions/{id}`
+
+List or remove your own subscriptions. A subscription belongs to the
+DID that created it; another agent can neither see nor delete it.
+
+### What the node POSTs
+
+```json
+{ "delivery_id": "urn:gap:dlv:9f2c…",
+  "subscription_id": "urn:gap:sub:7c1d…",
+  "node": "did:gap:4fc2…",
+  "event": { "seq": 41, "kind": "exe.delivered",
+             "payload": { "contract_id": "urn:gap:ctr:a1b2…" }, "at": 1754000000 },
+  "attempt": 1, "sent_at": 1754000004,
+  "signature": "ed25519:…" }
+```
+
+Headers: `X-Gap-Node`, `X-Gap-Signature`, `X-Gap-Delivery`,
+`X-Gap-Event-Seq`.
+
+**Verify before you act.** The signature covers the canonical JSON of
+the body **with the `signature` key removed** (spec 00 §0.6: UTF-8,
+keys sorted at every level, no whitespace). A receiver deletes
+`signature`, re-serializes canonically, and checks the Ed25519
+signature against the key embedded in `X-Gap-Node`.
+
+Delivery is **at-least-once**: deduplicate on `delivery_id` / event
+`seq`. Failures retry with exponential backoff (2 s → 5 min, 5
+attempts); a subscription that keeps failing is disabled and the
+disabling is recorded on the spine as `sub.disabled`.
+
+### `GET /v1/events?after=<seq>`
+
+With `Accept: text/event-stream`, a resumable SSE stream:
+
+```
+id: 42
+event: ctr.signed
+data: {"seq":42,"kind":"ctr.signed","payload":{…},"at":1754000009}
+
+: keepalive
+```
+
+Reconnect with `after=<last seq>` (or `Last-Event-ID`) and no event is
+missed. Without the SSE `Accept` header the same route returns the
+events as JSON — the cursor form.
+
+Event sequences are **1-based**, so `after=0` means "everything from
+the beginning". Push is an optimization; this cursor (and
+`GET /v1/audit?after=`) is the contract: an agent that missed every
+webhook can always reconstruct its state.
+
 ## 9. Conformance
 
 A node claiming GAP-node conformance MUST:
@@ -309,6 +386,9 @@ A node claiming GAP-node conformance MUST:
 5. Reject over-budget contracts (tree-aggregated).
 6. Persist every event to the audit spine.
 7. Return chained receipts on every settlement.
+8. Store the reachability an agent declares in `cap.announce` (spec 02
+   §2.4.4) and, if it offers push, sign every delivery and defend the
+   outbound surface against SSRF (RFC-0013).
 
 ---
 *GAP Node API — reference specification. Implementation: the Rust

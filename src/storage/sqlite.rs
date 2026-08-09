@@ -28,16 +28,16 @@ impl SqliteStorage {
     pub fn open(path: &str) -> Result<Self> {
         let conn =
             Connection::open(path).map_err(|e| Error::Other(format!("sqlite open failed: {e}")))?;
-        let mut s = Self { conn, next_seq: 0 };
+        let mut s = Self { conn, next_seq: 1 };
         s.init()?;
         // One-time O(n) scan to seed the counter (startup only).
         let max: i64 = s
             .conn
-            .query_row("SELECT COALESCE(MAX(seq), -1) + 1 FROM events", [], |r| {
+            .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM events", [], |r| {
                 r.get(0)
             })
             .map_err(|e| Error::Other(format!("sqlite seq init failed: {e}")))?;
-        s.next_seq = max.max(0) as u64;
+        s.next_seq = max.max(1) as u64;
         Ok(s)
     }
 
@@ -481,11 +481,11 @@ mod tests {
         {
             let s = SqliteStorage::open(&path).unwrap();
             assert_eq!(s.event_count().unwrap(), 2);
-            // Strictly-after seq 0 -> the second event survived.
-            let events = s.events_after(0, 10).unwrap();
+            // Sequences are 1-based, so after=1 -> the second event.
+            let events = s.events_after(1, 10).unwrap();
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].kind, "b");
-            assert_eq!(events[0].seq, 1);
+            assert_eq!(events[0].seq, 2);
         }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{path}-wal"));
@@ -504,9 +504,9 @@ mod tests {
         {
             let mut s = SqliteStorage::open(&path).unwrap();
             let seq = s.append_event("b", serde_json::json!({})).unwrap();
-            assert_eq!(seq, 1, "counter must resume after reopen");
+            assert_eq!(seq, 2, "counter must resume after reopen");
             let seq = s.append_event("c", serde_json::json!({})).unwrap();
-            assert_eq!(seq, 2);
+            assert_eq!(seq, 3);
         }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{path}-wal"));
