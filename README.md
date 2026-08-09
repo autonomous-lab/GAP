@@ -340,25 +340,24 @@ exhaustive HTTP route coverage (`tests/http_routes.rs`).
 
 ## Benchmarks
 
-Chiffres clés (EPYC 16 cœurs, release, SQLite `:memory:`) — rapport
-complet et méthodologie dans [`BENCHMARK.md`](./BENCHMARK.md) :
+Key figures (16-core EPYC, release build, SQLite `:memory:`) — full
+report and methodology in [`BENCHMARK.md`](./BENCHMARK.md):
 
-| Métrique | Valeur |
+| Metric | Value |
 |---|---|
-| Propose (chemin complet), c=1 | 10 972 req/s (p50 0.08 ms) |
-| Propose, c=16 | 14 407 req/s (p50 0.78 ms) |
-| `/health`, `/v1/identity`, c=16 | 17 402 – 18 724 req/s |
-| Signature / vérification Ed25519 | 14.0 µs / 40.5 µs |
-| Append spine SQLite | 4.36 µs (229 k ops/s) |
+| Propose (full path), c=1 | 10,972 req/s (p50 0.08 ms) |
+| Propose, c=16 | 14,407 req/s (p50 0.78 ms) |
+| `/health`, `/v1/identity`, c=16 | 17,402 – 18,724 req/s |
+| Ed25519 sign / verify | 14.0 µs / 40.5 µs |
+| SQLite spine append | 4.36 µs (229k ops/s) |
 
-Le propose est passé de **602 → 10 972 req/s à c=1** et de
-**41 → 14 407 req/s à c=16** depuis la première campagne (fixes
-quadratiques + worker pool). Le throughput est stable sous charge ;
-le plafond restant est le Mutex global de l'état (design « one
-process, one order »).
+Propose throughput went from **602 → 10,972 req/s at c=1** and from
+**41 → 14,407 req/s at c=16** since the first campaign (quadratic-path
+fixes + worker pool). Throughput is stable under load; the remaining
+ceiling is the global state Mutex ("one process, one order" design).
 
-Reproduction : `cargo bench --bench protocol` (couche protocole),
-`cargo run --release --example http_bench 5` (couche HTTP).
+To reproduce: `cargo bench --bench protocol` (protocol layer),
+`cargo run --release --example http_bench 5` (HTTP layer).
 
 ## License
 

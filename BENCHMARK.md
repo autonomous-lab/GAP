@@ -1,349 +1,342 @@
-# GAP — Rapport de benchmarks
+# GAP — Benchmark Report
 
-Mesures de référence de l'implémentation Rust (couche protocole et
-couche HTTP du node), avec la méthodologie complète, l'historique des
-trois campagnes, les bugs trouvés par le benchmark et les goulots
-restants. Les chiffres sont **factuels** : ils décrivent la capacité de
-l'implémentation actuelle, pas une spécification.
+Reference measurements of the Rust implementation (protocol layer and
+node HTTP layer), with the full methodology, the history of the three
+campaigns, the bugs the benchmark uncovered, and the remaining
+bottlenecks. The numbers are **factual**: they describe the capacity of
+the current implementation, not a specification.
 
 ---
 
-## 1. Vue d'ensemble
+## 1. Overview
 
-| Métrique | Valeur mesurée |
+| Metric | Measured value |
 |---|---|
-| Propose (chemin complet : signature + spine), c=1 | **10 972 req/s** (p50 0.08 ms) |
-| Propose, c=16 (charge maximale testée) | **14 407 req/s** (p50 0.78 ms, p99 6.19 ms) |
-| Endpoints légers (`/health`, `/v1/identity`), c=16 | 17 402 – 18 724 req/s |
-| `/v1/audit` (spine, 100 événements), c=1 | 12 945 req/s |
-| Signature Ed25519 | 14.0 µs (71 400 ops/s) |
-| Vérification Ed25519 | 40.5 µs (24 700 ops/s) |
-| Append spine SQLite | 4.36 µs (229 000 ops/s) |
-| Append chaîne de reçus | 475 ns (2.1 M ops/s) |
+| Propose (full path: signature + spine), c=1 | **10,972 req/s** (p50 0.08 ms) |
+| Propose, c=16 (highest concurrency tested) | **14,407 req/s** (p50 0.78 ms, p99 6.19 ms) |
+| Light endpoints (`/health`, `/v1/identity`), c=16 | 17,402 – 18,724 req/s |
+| `/v1/audit` (spine, 100 events), c=1 | 12,945 req/s |
+| Ed25519 signing | 14.0 µs (71,400 ops/s) |
+| Ed25519 verification | 40.5 µs (24,700 ops/s) |
+| SQLite spine append | 4.36 µs (229,000 ops/s) |
+| Receipt-chain append | 475 ns (2.1M ops/s) |
 
-Le node est **stable sous charge** : le throughput ne s'effondre plus à
-forte concurrence (les deux bugs quadratiques qui causaient
-l'effondrement sont corrigés, §8). Le plafond actuel est le Mutex
-global de l'état (section critique ~27 µs), conséquence du design
-« one process, one order » de l'event sourcing.
+The node is **stable under load**: throughput no longer collapses at
+high concurrency (the two quadratic bugs that caused the collapse are
+fixed, §8). The current ceiling is the global state Mutex (~27 µs
+critical section), a consequence of the event-sourcing "one process,
+one order" design.
 
 ---
 
-## 2. Environnement et matériel
+## 2. Environment and hardware
 
-| Paramètre | Valeur |
+| Parameter | Value |
 |---|---|
-| CPU | AMD EPYC 9645 (96 cœurs logiques), 16 alloués au conteneur |
-| RAM | 64 Go (36 Go disponibles au moment des mesures) |
-| OS | Linux (conteneur), kernel hôte |
-| Rust | 1.97.1, profile `release` (opt-level 3) |
-| Criterion | 0.8.2 (benchmarks de la couche protocole) |
-| Client HTTP | ureq 3.3 (keep-alive, un agent par worker) |
-| Serveur HTTP | tiny_http 0.12 (pool de threads interne + pool applicatif `GAP_WORKERS`) |
-| Base de données | SQLite `:memory:` (backend de production ClickHouse non mesuré — pas de démon disponible dans l'environnement) |
+| CPU | AMD EPYC 9645 (96 logical cores), 16 allocated to the container |
+| RAM | 64 GB (36 GB available at measurement time) |
+| OS | Linux (container), host kernel |
+| Rust | 1.97.1, `release` profile (opt-level 3) |
+| Criterion | 0.8.2 (protocol-layer benchmarks) |
+| HTTP client | ureq 3.3 (keep-alive, one agent per worker) |
+| HTTP server | tiny_http 0.12 (internal thread pool + application pool `GAP_WORKERS`) |
+| Database | SQLite `:memory:` (the ClickHouse production backend was not measured — no daemon available in the environment) |
 
-**Notes de validité**
+**Validity notes**
 
-- L'environnement est un conteneur partagé : les valeurs absolues
-  dépendent de l'hôte ; les **ratios** et les **classements de goulots**
-  sont robustes.
-- Les latences p99 incluent le bruit du scheduler du conteneur.
-- Les benchmarks HTTP relèvent les caps de rate limiting
-  (`GAP_RATE_*_CAP`) : ils mesurent la **capacité brute**, pas la
-  politique de sécurité (défauts en production : 120 req/min par
-  token, 600 req/min par IP).
+- The environment is a shared container: absolute values depend on the
+  host; the **ratios** and the **bottleneck rankings** are robust.
+- p99 latencies include container scheduler noise.
+- The HTTP benchmarks lift the rate-limiting caps (`GAP_RATE_*_CAP`):
+  they measure **raw capacity**, not the security policy (production
+  defaults: 120 req/min per token, 600 req/min per IP).
 
 ---
 
-## 3. Méthodologie
+## 3. Methodology
 
-### 3.1 Couche protocole (criterion)
+### 3.1 Protocol layer (criterion)
 
-`benches/protocol.rs` mesure les chemins chauds qui bornent le
-throughput du node : génération/signature/vérification Ed25519,
-création de contrat (propose), acceptation provider, instructions
-d'escrow, append et vérification de chaîne de reçus, append et lecture
-du spine SQLite. Criterion : 100 échantillons, 3 s de warm-up, ~5 s de
-mesure par benchmark, valeurs rapportées = médianes.
+`benches/protocol.rs` measures the hot paths that bound node
+throughput: Ed25519 key generation/signing/verification, contract
+creation (propose), provider acceptance, escrow instructions,
+receipt-chain append and verification, SQLite spine append and read.
+Criterion: 100 samples, 3 s warm-up, ~5 s of measurement per benchmark,
+reported values = medians.
 
-### 3.2 Couche HTTP (`examples/http_bench.rs`)
+### 3.2 HTTP layer (`examples/http_bench.rs`)
 
-Le benchmark démarre le node **in-process** sur un port éphémère avec
-la même boucle serveur que `main.rs` (pool de workers,
-`GAP_BENCH_WORKERS`, défaut 8) et les caps de rate limiting relevés.
+The benchmark starts the node **in-process** on an ephemeral port with
+the same server loop as `main.rs` (worker pool, `GAP_BENCH_WORKERS`,
+default 8) and the rate-limiting caps lifted.
 
-Pour chaque niveau de concurrence c ∈ {1, 4, 8, 16}, un nombre fixe de
-workers client (1 agent ureq chacun, keep-alive) martèle chaque
-endpoint pendant une durée fixe (défaut 5 s) :
+For each concurrency level c ∈ {1, 4, 8, 16}, a fixed number of client
+workers (1 ureq agent each, keep-alive) hammers each endpoint for a
+fixed duration (default 5 s):
 
-- `GET /health` — sans authentification (chemin le plus léger)
-- `GET /v1/audit` — authentifié, lecture spine (100 événements)
-- `POST /v1/identity` — authentifié, génération de clé Ed25519
-- `POST /v1/contract/propose` — authentifié, signature + écriture
-  spine (le chemin complet représentatif)
+- `GET /health` — unauthenticated (the lightest path)
+- `GET /v1/audit` — authenticated, spine read (100 events)
+- `POST /v1/identity` — authenticated, Ed25519 key generation
+- `POST /v1/contract/propose` — authenticated, signature + spine
+  write (the representative full path)
 
-Chaque phase rapporte : req/s, p50, p99, nombre d'erreurs. Les workers
-sont joints entre les phases ; un warm-up (identités + annonce de
-capacité) précède les mesures.
+Each phase reports: req/s, p50, p99, error count. Workers are joined
+between phases; a warm-up (identities + capability announcement)
+precedes the measurements.
 
-### 3.3 Reproductibilité
+### 3.3 Reproducing
 
 ```bash
-# Couche protocole (criterion)
+# Protocol layer (criterion)
 cargo bench --bench protocol
 
-# Couche HTTP — serveur in-process, pool de 8 workers, 5 s par phase
+# HTTP layer — in-process server, 8-worker pool, 5 s per phase
 cargo run --release --example http_bench 5
 
-# Couche HTTP — serveur externe (le binaire gap), caps relevés
+# HTTP layer — external server (the gap binary), caps lifted
 GAP_RATE_TOKEN_CAP=10000000 GAP_RATE_IP_CAP=10000000 ./target/release/gap
 GAP_BENCH_TARGET=http://127.0.0.1:8080 ./target/release/examples/http_bench 5
 
-# Taille du pool
+# Pool size
 GAP_BENCH_WORKERS=16 ./target/release/examples/http_bench 5
 ```
 
 ---
 
-## 4. Microbenchmarks — couche protocole
+## 4. Microbenchmarks — protocol layer
 
-Médianes criterion (voir §3.1).
+Criterion medians (see §3.1).
 
-| Opération | Temps | Throughput |
+| Operation | Time | Throughput |
 |---|---|---|
-| Identity : génération clé Ed25519 | 13.77 µs | 72 600 ops/s |
-| Signature Ed25519 (32 octets) | 14.00 µs | 71 400 ops/s |
-| Vérification Ed25519 (32 octets) | 40.50 µs | 24 700 ops/s |
-| Contrat : propose (création + signature client) | 19.03 µs | 52 500 ops/s |
-| Contrat : accept provider (vérif + signature) | 81.87 µs | 12 200 ops/s |
-| Contrat : sérialisation JSON | 553.7 ns | 1.81 M ops/s |
-| Escrow : instruction park signée | 16.91 µs | 59 100 ops/s |
-| Escrow : register + vérif + application park | 149.9 µs | 6 700 ops/s |
-| Chaîne de reçus : append (hash + lien) | 475.4 ns | 2.10 M ops/s |
-| Chaîne de reçus : vérif chaîne de 1000 entrées | 1.57 ms | 638 chaînes/s |
-| SQLite : append événement spine | 4.36 µs | 229 000 ops/s |
-| SQLite : lecture 100 événements | 38.6 µs | 25 900 lectures/s |
+| Identity: Ed25519 key generation | 13.77 µs | 72,600 ops/s |
+| Ed25519 signing (32 bytes) | 14.00 µs | 71,400 ops/s |
+| Ed25519 verification (32 bytes) | 40.50 µs | 24,700 ops/s |
+| Contract: propose (creation + client signature) | 19.03 µs | 52,500 ops/s |
+| Contract: provider accept (verify + sign) | 81.87 µs | 12,200 ops/s |
+| Contract: JSON serialization | 553.7 ns | 1.81M ops/s |
+| Escrow: signed park instruction | 16.91 µs | 59,100 ops/s |
+| Escrow: register + verify + apply park | 149.9 µs | 6,700 ops/s |
+| Receipt chain: append (hash + link) | 475.4 ns | 2.10M ops/s |
+| Receipt chain: verify a 1,000-entry chain | 1.57 ms | 638 chains/s |
+| SQLite: spine event append | 4.36 µs | 229,000 ops/s |
+| SQLite: read 100 events | 38.6 µs | 25,900 reads/s |
 
-**Lecture**
+**Reading the numbers**
 
-- La crypto Ed25519 domine les chemins signés : ~14 µs par signature,
-  ~40 µs par vérification. Un contrat signé + accepté coûte ~82 µs de
+- Ed25519 crypto dominates the signed paths: ~14 µs per signature,
+  ~40 µs per verification. A signed + accepted contract costs ~82 µs of
   crypto.
-- La chaîne de reçus est quasi gratuite : 475 ns par append. La
-  vérification d'une chaîne de 1000 entrées est linéaire par conception
-  (RFC-0003) ; les ancrages Merkle (`root_commitment`) sont le chemin
-  de vérification rapide pour les intégrations externes.
-- Le spine SQLite tient 229 k événements/s en append (compteur de
-  séquence O(1), voir §8).
+- The receipt chain is nearly free: 475 ns per append. Verifying a
+  1,000-entry chain is linear by design (RFC-0003); Merkle anchors
+  (`root_commitment`) are the fast verification path for external
+  integrations.
+- The SQLite spine sustains 229k events/s on append (O(1) sequence
+  counter, see §8).
 
 ---
 
-## 5. Benchmark HTTP — configuration actuelle
+## 5. HTTP benchmark — current configuration
 
-Serveur : pool de 8 workers (`GAP_WORKERS`/`GAP_BENCH_WORKERS`),
-parsing JSON hors du Mutex global. Durée : 5 s par cellule, 0 erreur.
+Server: 8-worker pool (`GAP_WORKERS`/`GAP_BENCH_WORKERS`), JSON parsing
+outside the global Mutex. Duration: 5 s per cell, 0 errors.
 
-| Concurrence | Endpoint | req/s | p50 | p99 |
+| Concurrency | Endpoint | req/s | p50 | p99 |
 |---|---|---|---|---|
-| 1 | GET /health | 14 871 | 0.04 ms | 1.34 ms |
-| 1 | GET /v1/audit | 12 945 | 0.06 ms | 0.15 ms |
-| 1 | POST /v1/identity | 12 827 | 0.07 ms | 0.13 ms |
-| 1 | POST /v1/contract/propose | 10 972 | 0.08 ms | 0.17 ms |
-| 4 | GET /health | 17 492 | 0.07 ms | 3.67 ms |
-| 4 | GET /v1/audit | 8 115 | 0.40 ms | 2.75 ms |
-| 4 | POST /v1/identity | 16 155 | 0.11 ms | 3.55 ms |
-| 4 | POST /v1/contract/propose | 14 206 | 0.16 ms | 3.39 ms |
-| 8 | GET /health | 17 539 | 0.10 ms | 4.26 ms |
-| 8 | GET /v1/audit | 7 154 | 0.95 ms | 4.12 ms |
-| 8 | POST /v1/identity | 16 788 | 0.22 ms | 4.21 ms |
-| 8 | POST /v1/contract/propose | 14 328 | 0.37 ms | 4.20 ms |
-| 16 | GET /health | 18 724 | 0.20 ms | 6.61 ms |
-| 16 | GET /v1/audit | 6 420 | 2.15 ms | 8.80 ms |
-| 16 | POST /v1/identity | 17 402 | 0.45 ms | 6.83 ms |
-| 16 | POST /v1/contract/propose | 14 407 | 0.78 ms | 6.19 ms |
+| 1 | GET /health | 14,871 | 0.04 ms | 1.34 ms |
+| 1 | GET /v1/audit | 12,945 | 0.06 ms | 0.15 ms |
+| 1 | POST /v1/identity | 12,827 | 0.07 ms | 0.13 ms |
+| 1 | POST /v1/contract/propose | 10,972 | 0.08 ms | 0.17 ms |
+| 4 | GET /health | 17,492 | 0.07 ms | 3.67 ms |
+| 4 | GET /v1/audit | 8,115 | 0.40 ms | 2.75 ms |
+| 4 | POST /v1/identity | 16,155 | 0.11 ms | 3.55 ms |
+| 4 | POST /v1/contract/propose | 14,206 | 0.16 ms | 3.39 ms |
+| 8 | GET /health | 17,539 | 0.10 ms | 4.26 ms |
+| 8 | GET /v1/audit | 7,154 | 0.95 ms | 4.12 ms |
+| 8 | POST /v1/identity | 16,788 | 0.22 ms | 4.21 ms |
+| 8 | POST /v1/contract/propose | 14,328 | 0.37 ms | 4.20 ms |
+| 16 | GET /health | 18,724 | 0.20 ms | 6.61 ms |
+| 16 | GET /v1/audit | 6,420 | 2.15 ms | 8.80 ms |
+| 16 | POST /v1/identity | 17,402 | 0.45 ms | 6.83 ms |
+| 16 | POST /v1/contract/propose | 14,407 | 0.78 ms | 6.19 ms |
 
-**Lecture**
+**Reading the numbers**
 
-- Le propose (le chemin le plus coûteux : authentification + vérif
-  provider O(1) + signature Ed25519 + écriture spine + réponse) tient
-  ~14.4 k req/s à forte concurrence avec des p50 sous la milliseconde.
-- Les endpoints légers plafonnent à ~17-19 k req/s (saturation du
-  thread de traitement ; voir §9 pour le goulot).
-- `/v1/audit` décroît légèrement avec la taille du spine (lecture
-  `ORDER BY seq LIMIT` + sérialisation de 100 événements dans la
-  section critique) : 12.9 k → 6.4 k req/s entre c=1 et c=16.
+- Propose (the most expensive path: authentication + O(1) provider
+  lookup + Ed25519 signature + spine write + response) sustains
+  ~14.4k req/s at high concurrency with sub-millisecond p50s.
+- Light endpoints plateau at ~17–19k req/s (processing-thread
+  saturation; see §9 for the bottleneck).
+- `/v1/audit` degrades slightly with spine size (`ORDER BY seq LIMIT`
+  read + serialization of 100 events inside the critical section):
+  12.9k → 6.4k req/s between c=1 and c=16.
 
 ---
 
-## 6. Historique des trois campagnes
+## 6. History of the three campaigns
 
-Le propose (chemin complet) selon la configuration du serveur, pour
-chaque niveau de concurrence :
+Propose (full path) by server configuration, for each concurrency
+level:
 
 | Configuration | c=1 | c=4 | c=8 | c=16 |
 |---|---|---|---|---|
-| Boucle séquentielle, avant audit de perf (v1) | 602 | 467 | 211 | **41** |
-| + fixes quadratiques (compteur SQLite O(1), index DID O(1)) | 10 357 | 14 377 | 15 096 | 15 294 |
-| + worker pool + parsing hors lock (actuel) | 10 972 | 14 206 | 14 328 | 14 407 |
+| Sequential loop, before the perf audit (v1) | 602 | 467 | 211 | **41** |
+| + quadratic fixes (O(1) SQLite counter, O(1) DID index) | 10,357 | 14,377 | 15,096 | 15,294 |
+| + worker pool + out-of-lock parsing (current) | 10,972 | 14,206 | 14,328 | 14,407 |
 
-**Étapes**
+**Stages**
 
-1. **v1 — effondrement sous charge.** La première campagne a révélé un
-   collapse dramatique : 602 → 41 req/s de c=1 à c=16, latences p50 de
-   393 ms. L'instrumentation (§7) a isolé deux comportements O(n) dans
-   des chemins chauds (§8.1, §8.2).
-2. **Fixes quadratiques.** +17× à c=1, +373× à c=16, throughput stable.
-3. **Worker pool.** Le parsing des requêtes et la sérialisation des
-   réponses passent en parallèle ; le Mutex global ne sérialise plus
-   que le cœur du protocole. Gain modeste sur le throughput (le
-   goulot est le Mutex, §9) mais latences p99 meilleures à forte
-   concurrence (6.19 ms vs 6.86 ms à c=16).
+1. **v1 — collapse under load.** The first campaign revealed a dramatic
+   collapse: 602 → 41 req/s from c=1 to c=16, p50 latencies of 393 ms.
+   Instrumentation (§7) isolated two O(n) behaviors in hot paths
+   (§8.1, §8.2).
+2. **Quadratic fixes.** +17× at c=1, +373× at c=16, stable throughput.
+3. **Worker pool.** Request parsing and response serialization now run
+   in parallel; the global Mutex only serializes the protocol core.
+   Modest throughput gain (the bottleneck is the Mutex, §9) but better
+   p99 latencies at high concurrency (6.19 ms vs 6.86 ms at c=16).
 
 ---
 
-## 7. Instrumentation — comment le diagnostic a été fait
+## 7. Instrumentation — how the diagnosis was made
 
-Chiffres de débogage, conservés ici pour la postérité et la
-reproductibilité de l'analyse :
+Debugging numbers, kept here for posterity and for reproducibility of
+the analysis:
 
-| Mesure | Valeur | Enseignement |
+| Measurement | Value | Lesson |
 |---|---|---|
-| `route()` appelé directement (release, 20 k itérations) | 27.1 µs/req | la logique protocole est ~27 µs ; le reste est de la plomberie |
-| Serveur instrumenté (`read_body` / `route` / `respond`) | 7 / 53 / 71 µs (132 µs total) | le serveur traite un propose en ~130 µs |
-| Mini-bench in-process, 1 worker, table vide | 10 804 req/s | le serveur seul est rapide |
-| Mini-bench + 65 k identités créées | 583 req/s | le scan O(n) des agents était le tueur |
-| curl vs ureq, même serveur | 15 ms vs 1.37 ms (propose, fichier SQLite) | le fsync fichier + `MAX(seq)` dominaient ; keep-alive client ≠ facteur |
-| Serveur main (SQLite fichier) vs `:memory:` | 1.37 ms vs 0.2 ms par propose | le backend fichier ajoute le coût du commit/fsync |
+| `route()` called directly (release, 20k iterations) | 27.1 µs/req | protocol logic is ~27 µs; the rest is plumbing |
+| Instrumented server (`read_body` / `route` / `respond`) | 7 / 53 / 71 µs (132 µs total) | the server handles a propose in ~130 µs |
+| In-process mini-bench, 1 worker, empty table | 10,804 req/s | the server alone is fast |
+| Mini-bench + 65k created identities | 583 req/s | the O(n) agent scan was the killer |
+| curl vs ureq, same server | 15 ms vs 1.37 ms (propose, SQLite file) | file fsync + `MAX(seq)` dominated; client keep-alive was not the factor |
+| Main server (SQLite file) vs `:memory:` | 1.37 ms vs 0.2 ms per propose | the file backend adds commit/fsync cost |
 
-**Fausses pistes éliminées** : le client ureq (POST propre, vérifié par
-capture de socket — pas d'`Expect: 100-continue`, pas de chunked), le
-pool interne de tiny_http (file de capacité 8, pool adaptatif), le
-rate limiter (O(1)), le compteur `MAX(seq)` seul (corrigé mais
-insuffisant — le scan des agents était l'autre moitié).
+**Dead ends eliminated**: the ureq client (clean POST, verified by
+socket capture — no `Expect: 100-continue`, no chunked encoding),
+tiny_http's internal pool (capacity-8 queue, adaptive pool), the rate
+limiter (O(1)), the `MAX(seq)` counter alone (fixed but insufficient —
+the agent scan was the other half).
 
-**Piège méthodologique documenté** : un premier probe de `route()`
-mesurait 0.3 µs — faux résultat : le rate limit par défaut
-(120 req/min par token) renvoyait des erreurs instantanées après 120
-appels. Les probes de performances doivent relever les caps ou
-compter les statuts.
+**Documented methodology trap**: an early probe of `route()` measured
+0.3 µs — a false result: the default rate limit (120 req/min per
+token) returned instant errors after 120 calls. Performance probes
+must lift the caps or count response statuses.
 
 ---
 
-## 8. Bugs trouvés et corrigés grâce au benchmark
+## 8. Bugs found and fixed thanks to the benchmark
 
-### 8.1 SQLite : `MAX(seq)` par insert (O(n) par écriture)
+### 8.1 SQLite: `MAX(seq)` per insert (O(n) per write)
 
-`append_event` calculait la séquence par
-`SELECT COALESCE(MAX(seq), -1) + 1 FROM events` à **chaque** insert —
-un scan complet de la table d'événements à chaque écriture. Plus le
-spine grossissait, plus chaque écriture devenait lente (O(n) en taille
-de spine). **Corrigé** par un compteur mémoire O(1), initialisé une
-fois à l'ouverture depuis `MAX(seq)` (single-writer par process,
-conforme à l'architecture). Test de régression :
-`sqlite_sequence_continues_after_reopen`.
+`append_event` computed the sequence with
+`SELECT COALESCE(MAX(seq), -1) + 1 FROM events` on **every** insert —
+a full scan of the events table per write. The bigger the spine, the
+slower every write (O(n) in spine size). **Fixed** with an O(1)
+in-memory counter, initialized once at open from `MAX(seq)`
+(single-writer per process, consistent with the architecture).
+Regression test: `sqlite_sequence_continues_after_reopen`.
 
-### 8.2 Serveur : scan de tous les agents par propose (O(n), vecteur de DoS)
+### 8.2 Server: full agent scan per propose (O(n), DoS vector)
 
-`propose_contract` vérifiait le provider par
+`propose_contract` verified the provider with
 `agents.values().any(|a| a.identity.did().to_string() == provider)` —
-O(n) **avec allocation par entrée**. Comme `POST /v1/identity` est non
-authentifié, un flux d'identités suffisait à faire dégringoler le node.
-**Corrigé** par un index `did → token` (O(1)), maintenu à la création
-d'identité. Test de régression :
-`propose_lookup_is_constant_time_with_many_agents` (5 000 agents,
-200 proposes, borne < 5 ms/req).
+O(n) **with an allocation per entry**. Since `POST /v1/identity` is
+unauthenticated, a stream of identity creations was enough to bring
+the node down. **Fixed** with a `did → token` index (O(1)), maintained
+at identity creation. Regression test:
+`propose_lookup_is_constant_time_with_many_agents` (5,000 agents,
+200 proposes, bound < 5 ms/req).
 
-### 8.3 Sécurité : `/v1/audit` lisible sans authentification
+### 8.3 Security: `/v1/audit` readable without authentication
 
-Trouvé par les tests exhaustifs de routes (`tests/http_routes.rs`) :
-le spine tamper-evident était lisible anonymement — c'est de la
-preuve, pas des données publiques. **Corrigé** : authentification
-requise (400 sans token valide).
+Found by the exhaustive route tests (`tests/http_routes.rs`): the
+tamper-evident spine was readable anonymously — it is evidence, not
+public data. **Fixed**: authentication required (400 without a valid
+token).
 
-### 8.4 Cohérence API et routes manquantes
+### 8.4 API consistency and missing routes
 
-Toujours via les tests de routes : `GET /v1/contract/{id}` renvoyait
-le state au format Debug (`"Draft"`) alors que toutes les autres
-routes utilisent le format wire minuscule (`"draft"`) ; et quatre
-routes documentées n'étaient pas implémentées (`/v1/escrow/release`,
-`/v1/escrow/refund`, `/v1/escrow/rule`, `/v1/contract/{id}/dispute`).
-Le tout est corrigé, avec l'exigence que le contrat soit signé avant
-le park (erreur `escrow_violation` explicite).
-
----
-
-## 9. Analyse des goulots actuels
-
-1. **Le Mutex global de l'état est le plafond.** Chaque requête tient
-   le lock pendant le cœur du traitement (rate limit + lookup + crypto
-   + écriture spine + construction de la réponse), ~27 µs pour le
-   propose. Le plafond théorique d'un node est donc ~37 k req/s pour
-   le chemin complet ; les ~14.4 k req/s mesurés reflètent la
-   contention réelle du Mutex std à forte concurrence.
-2. **`/v1/audit`** : la lecture `ORDER BY seq LIMIT` est O(log n +
-   limite), mais la sérialisation des 100 événements dans la section
-   critique et la taille de la réponse (plusieurs dizaines de Ko)
-   bornent le throughput à ~6-13 k req/s selon la charge.
-3. **La vérification de chaîne (1.57 ms / 1000 entrées)** est linéaire
-   par conception (chaîne, RFC-0003) ; `root_commitment` (Merkle) est
-   le chemin rapide pour les vérificateurs externes.
-4. **La crypto n'est pas un goulot HTTP** : signer un contrat coûte
-   19 µs ; le serveur passe l'essentiel de son temps dans le lock et
-   la plomberie.
-
-### Prochaines optimisations (par ordre d'impact)
-
-- Remplacer le `Mutex` global par un `RwLock` : les lectures
-  (`/health`, `/v1/discover`, `/v1/audit`, `GET /contract/{id}`)
-  deviennent parallèles ; les écritures restent sérialisées par
-  l'event sourcing.
-- Sharder l'état par agent (les écritures de contrats différents ne
-  se bloquent plus mutuellement).
-- Batch des événements du spine (group commit) pour amortir le coût
-  de commit SQLite sur le backend fichier.
+Also via the route tests: `GET /v1/contract/{id}` returned the state
+in Debug format (`"Draft"`) while every other route uses the lowercase
+wire format (`"draft"`); and four documented routes were not
+implemented (`/v1/escrow/release`, `/v1/escrow/refund`,
+`/v1/escrow/rule`, `/v1/contract/{id}/dispute`). All fixed, along with
+the requirement that the contract be signed before park (explicit
+`escrow_violation` error).
 
 ---
 
-## 10. Implications pour le scaling
+## 9. Analysis of the current bottlenecks
 
-- **Par node** : ~14 k req/s sur le chemin complet, ~17-19 k req/s sur
-  les endpoints légers. Le scaling horizontal prévu
-  (`docker-compose.scale.yml` + HAProxy, `docs/scaling.md`) est le bon
-  outil : chaque node ajoute ~14 k req/s de capacité de traitement.
-- Le node est conçu pour être **stateless côté protocole** (le spine
-  est la source de vérité, les états sont matérialisés) : le scaling
-  horizontal ne nécessite pas de coordination entre nodes pour les
-  contrats (chaque node sert son parc d'agents).
-- Le backend ClickHouse (production) est prévu pour les patterns de
-  lecture/analytique qui dégradent SQLite (`/v1/audit` à grande
-  échelle) ; le spine y est indexé par `(kind, seq)`.
+1. **The global state Mutex is the ceiling.** Every request holds the
+   lock through the processing core (rate limit + lookup + crypto +
+   spine write + response construction), ~27 µs for a propose. The
+   theoretical single-node ceiling is therefore ~37k req/s on the full
+   path; the measured ~14.4k req/s reflects real std Mutex contention
+   at high concurrency.
+2. **`/v1/audit`**: the `ORDER BY seq LIMIT` read is O(log n + limit),
+   but serializing the 100 events inside the critical section and the
+   response size (tens of KB) bound throughput to ~6–13k req/s
+   depending on load.
+3. **Chain verification (1.57 ms / 1,000 entries)** is linear by
+   design (a chain, RFC-0003); `root_commitment` (Merkle) is the fast
+   path for external verifiers.
+4. **Crypto is not an HTTP bottleneck**: signing a contract costs
+   19 µs; the server spends most of its time in the lock and in
+   plumbing.
 
----
+### Next optimizations (by impact)
 
-## 11. Limites de ces mesures
-
-- **Backend ClickHouse non mesuré** (pas de démon dans
-  l'environnement de test) ; il est testé via transport simulé
-  uniquement. Les chiffres SQLite sont une borne basse pour les
-  écritures et une borne haute (défavorable) pour les lectures
-  volumineuses.
-- **Relayer on-chain non mesuré** (pas de nœud EVM disponible) ; les
-  opérations escrow mesurées sont le chemin de référence off-chain.
-- L'environnement est un conteneur partagé (16 cœurs alloués d'un
-  EPYC 96 cœurs) : les valeurs absolues dépendent de l'hôte.
-- Le benchmark HTTP mesure la capacité brute (caps de rate limiting
-  relevés) ; en production, les caps par défaut (120/600 par minute)
-  réduisent volontairement le débit observable par client.
+- Replace the global `Mutex` with an `RwLock`: reads (`/health`,
+  `/v1/discover`, `/v1/audit`, `GET /contract/{id}`) become parallel;
+  writes stay serialized by event sourcing.
+- Shard state by agent (writes to different contracts stop blocking
+  each other).
+- Batch spine events (group commit) to amortize SQLite commit cost on
+  the file backend.
 
 ---
 
-## 12. Références
+## 10. Scaling implications
 
-- Outils : `benches/protocol.rs` (criterion), `examples/http_bench.rs`
-  (HTTP), `tests/http_routes.rs` (couverture des routes).
-- Architecture de déploiement : `docs/deployment.md`, `docs/scaling.md`.
-- Document de référence de l'API mesurée : `docs/node-api.md`.
-- Sécurité : `SECURITY-AUDIT.md` (les fixes §8 y sont référencés).
+- **Per node**: ~14k req/s on the full path, ~17–19k req/s on light
+  endpoints. The planned horizontal scaling
+  (`docker-compose.scale.yml` + HAProxy, `docs/scaling.md`) is the
+  right tool: each node adds ~14k req/s of processing capacity.
+- The node is designed to be **protocol-stateless** (the spine is the
+  source of truth, states are materialized): horizontal scaling needs
+  no inter-node coordination for contracts (each node serves its own
+  fleet of agents).
+- The ClickHouse backend (production) targets the read/analytics
+  patterns that degrade SQLite (`/v1/audit` at scale); the spine is
+  indexed there by `(kind, seq)`.
+
+---
+
+## 11. Limits of these measurements
+
+- **ClickHouse backend not measured** (no daemon in the test
+  environment); it is tested via a simulated transport only. The
+  SQLite numbers are a lower bound for writes and an (unfavorable)
+  upper bound for bulk reads.
+- **On-chain relayer not measured** (no EVM node available); the
+  measured escrow operations are the off-chain reference path.
+- The environment is a shared container (16 cores allocated from a
+  96-core EPYC): absolute values depend on the host.
+- The HTTP benchmark measures raw capacity (rate-limiting caps
+  lifted); in production, the default caps (120/600 per minute)
+  deliberately reduce the throughput observable per client.
+
+---
+
+## 12. References
+
+- Tools: `benches/protocol.rs` (criterion), `examples/http_bench.rs`
+  (HTTP), `tests/http_routes.rs` (route coverage).
+- Deployment architecture: `docs/deployment.md`, `docs/scaling.md`.
+- Reference document for the measured API: `docs/node-api.md`.
+- Security: `SECURITY-AUDIT.md` (the §8 fixes are referenced there).
 
 ---
 *Celene Jimari — GAP benchmark report, observation window 2026.*

@@ -1,30 +1,30 @@
 # Benchmarks
 
-Le rapport complet, avec la méthodologie, l'historique des trois
-campagnes, l'instrumentation et l'analyse des goulots, est dans
-**[`BENCHMARK.md`](../BENCHMARK.md)** (racine du dépôt).
+The full report — methodology, the history of the three campaigns, the
+instrumentation, and the bottleneck analysis — is in
+**[`BENCHMARK.md`](../BENCHMARK.md)** (repository root).
 
-## Résumé
+## Summary
 
-| Métrique | Valeur |
+| Metric | Value |
 |---|---|
-| Propose (chemin complet), c=1 | 10 972 req/s |
-| Propose, c=16 | 14 407 req/s (p50 0.78 ms) |
-| Endpoints légers (`/health`, `/v1/identity`), c=16 | 17 402 – 18 724 req/s |
-| Signature / vérification Ed25519 | 14.0 µs / 40.5 µs |
-| Append spine SQLite | 4.36 µs |
+| Propose (full path), c=1 | 10,972 req/s |
+| Propose, c=16 | 14,407 req/s (p50 0.78 ms) |
+| Light endpoints (`/health`, `/v1/identity`), c=16 | 17,402 – 18,724 req/s |
+| Ed25519 sign / verify | 14.0 µs / 40.5 µs |
+| SQLite spine append | 4.36 µs |
 
-Historique du propose (req/s) :
+Propose history (req/s):
 
 | Configuration | c=1 | c=16 |
 |---|---|---|
-| Séquentiel, avant audit de perf | 602 | 41 |
-| + fixes quadratiques | 10 357 | 15 294 |
-| + worker pool (actuel) | 10 972 | 14 407 |
+| Sequential, before the perf audit | 602 | 41 |
+| + quadratic fixes | 10,357 | 15,294 |
+| + worker pool (current) | 10,972 | 14,407 |
 
-Reproduction :
+To reproduce:
 
 ```bash
-cargo bench --bench protocol                 # couche protocole (criterion)
-cargo run --release --example http_bench 5   # couche HTTP (serveur in-process)
+cargo bench --bench protocol                 # protocol layer (criterion)
+cargo run --release --example http_bench 5   # HTTP layer (in-process server)
 ```
