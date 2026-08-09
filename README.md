@@ -43,7 +43,6 @@ GAP/
 ├── BENCHMARK.md       # Full benchmark report (protocol + HTTP layers)
 ├── SECURITY-AUDIT.md  # Adversarial audit + applied fixes
 ├── LICENSE-MIT / LICENSE-APACHE  # Dual license
-├── ci/                # GitHub Actions workflow (see ci/README.md)
 ├── adapters/mcp/      # ★ MCP adapter: the node as tools for any MCP agent
 ├── sdk/               # Client SDKs (TypeScript + Python, dependency-free)
 ├── docs/landing/      # The public landing page (mirror of the hosted site)
@@ -106,7 +105,8 @@ GAP/
 │   └── test_vectors.rs  # Known-answer vectors (interop lock)
 └── examples/          # Runnable examples
     ├── lead_gen.rs    # 1:1 agent economy (discovery→escrow)
-    └── workflow_demo.rs  # multi-agent pipeline (3 steps, SQLite persistence)```
+    └── workflow_demo.rs  # multi-agent pipeline (3 steps, SQLite persistence)
+```
 
 ## Design principles
 
@@ -337,10 +337,6 @@ workflow DAG execution, credentials, AgentCard, conformance reports,
 SLA divergence, principal binding (bilateral signatures, expiry,
 forged unbind), key-rotation chains, full economy flows, and
 exhaustive HTTP route coverage (`tests/http_routes.rs`).
-
-CI (fmt, clippy `-D warnings`, tests, cargo-audit) is defined in
-[`ci/github-ci.yml`](./ci/github-ci.yml) — see `ci/README.md` for the
-one-step activation.
 
 ## Benchmarks
 
