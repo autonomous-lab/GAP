@@ -371,6 +371,48 @@ impl NodeState {
                 .entry(pseudonym(cid))
                 .or_insert_with(|| cid.clone());
         }
+        // Reputation is earned, and it was being forgotten.
+        //
+        // `Reputation` lives on the in-memory agent identity, and the
+        // identity table stores only a seed - so every restart rebuilt
+        // each agent from its seed with a fresh, empty counter. Score
+        // returned to the 0.50 prior and `n` to zero, no matter how many
+        // contracts the agent had actually settled. The public page said
+        // "0.50 over 0 verified job(s)" beside a job history that listed
+        // the jobs, because the history is persisted and the counter
+        // was not.
+        //
+        // Replayed from that history rather than stored beside it. The
+        // job records are the evidence the score claims to summarise, so
+        // deriving one from the other is the only version that cannot
+        // drift; a second persisted counter would eventually disagree
+        // with the list underneath it, and there would be no way to say
+        // which was right.
+        for (did_str, records) in jobs.iter() {
+            let Some(agent) = agents_by_did
+                .get(did_str)
+                .and_then(|t: &String| agents.get_mut(t))
+            else {
+                continue;
+            };
+            for r in records {
+                // Same predicate the live path uses: what counts is
+                // whether the work was accepted, not how it got there.
+                agent
+                    .identity
+                    .reputation_mut()
+                    .record(r.outcome == "accepted", r.on_time);
+            }
+            // The discovery registry keeps its own copy so that
+            // `min_reputation` can filter without touching identities.
+            // Left unset, a restart silently reopened every
+            // reputation-filtered query to agents that had not earned
+            // the score.
+            if let Ok(did) = crate::identity::Did::parse(did_str) {
+                registry.set_reputation(did, agent.identity.reputation().success_rate());
+            }
+        }
+
         let mut jobs_by_ref = HashMap::new();
         for records in jobs.values() {
             for r in records {

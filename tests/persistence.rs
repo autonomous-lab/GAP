@@ -633,3 +633,82 @@ fn a_missing_record_is_a_404_page_not_an_unknown_route() {
     }
     let _ = std::fs::remove_file(path);
 }
+
+/// A score is earned, and a restart must not take it back.
+///
+/// `Reputation` lives on the in-memory agent identity and the identity
+/// table stores only a seed, so every restart rebuilt each agent with
+/// an empty counter: score back to the 0.50 prior, `n` back to zero,
+/// however many contracts it had settled. The public card said "0.50
+/// over 0 verified job(s)" next to a job history that listed the jobs,
+/// because the history is persisted and the counter was not.
+#[test]
+fn a_reputation_survives_a_restart() {
+    let path = std::env::temp_dir().join(format!("gap-rep-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+
+    let provider_did = {
+        let n = node(path);
+        let (id, client, _p) = delivered(&n);
+        post(
+            &n,
+            &format!("/v1/contract/{id}/accept-delivery"),
+            json!({}),
+            &client,
+        );
+        let (_, act) = route(&n, "GET", "/v1/activity", b"", None);
+        assert_eq!(act["count"], json!(1), "a job settled: {act}");
+
+        let (_, c) = route(&n, "GET", &format!("/v1/contract/{id}"), b"", None);
+        c["contract"]["provider"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the contract must name its provider: {c}"))
+            .to_string()
+    };
+
+    let before = {
+        let n = node(path);
+        let (_, rep) = route(
+            &n,
+            "GET",
+            &format!("/v1/reputation/{provider_did}"),
+            b"",
+            None,
+        );
+        rep
+    };
+
+    assert_eq!(
+        before["score"]["n"],
+        json!(1),
+        "the counter must be rebuilt from the job history: {before}"
+    );
+    assert_eq!(before["jobs"].as_array().map(|j| j.len()), Some(1));
+    // One accepted job out of one: Laplace-smoothed that is 2/3, not
+    // the 0.50 prior an agent with no history gets.
+    let score = before["score"]["success_rate"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("reputation must carry a score: {before}"));
+    assert!(
+        score > 0.66 && score < 0.67,
+        "a settled job must move the score off the prior, got {score}"
+    );
+
+    // The directory card reads the same counter, so if this provider
+    // is listed at all it must agree with the reputation page. It only
+    // appears once it has announced, which this fixture does not do -
+    // hence the conditional rather than a required lookup.
+    let n = node(path);
+    let (_, dir) = route(&n, "GET", "/v1/discover", b"", None);
+    if let Some(me) = dir["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| a["did"] == json!(provider_did))
+    {
+        assert_eq!(me["n"], json!(1), "the card must not say 0 verified: {me}");
+    }
+
+    let _ = std::fs::remove_file(path);
+}

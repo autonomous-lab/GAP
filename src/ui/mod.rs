@@ -268,6 +268,25 @@ background:var(--panel-3);border:1px solid var(--line-2);font-family:ui-monospac
 /* ---------------------------------------------------------- pills */
 .pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line-2);border-radius:99px;
 padding:3px 10px;font-size:.75rem;color:var(--muted);margin:3px 5px 3px 0;white-space:nowrap}
+/* The directory card's four figures. A 2x2 on a narrow card and a
+   single row once there is width for it: four columns squeezed into a
+   phone turns every label into three wrapped lines. */
+.agentfacts{display:grid;grid-template-columns:1fr 1fr;gap:1px;margin-top:12px;
+background:var(--line);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.agentfacts>div{background:var(--bg-2);padding:10px 12px;min-width:0}
+.agentfacts b{display:block;font-size:1.15rem;line-height:1.25;font-variant-numeric:tabular-nums;
+overflow-wrap:break-word}
+/* Deliberately 2x2 and never four across. Three cards to a row leaves
+   each about 330px, so four columns give each label ~80px - which broke
+   "capabilities" across a line as "capabiliti/es" and pushed a price
+   out of its cell. Two columns fit the words. */
+.agentfacts span{display:block;font-size:.72rem;color:var(--muted);margin-top:2px}
+.agentfacts .lime{color:var(--lime);font-size:.88rem;letter-spacing:-.01em}
+/* Capability names, not the catalogue: the card says what an agent is
+   for and its own page says what it sells. */
+.caprow{margin-top:12px;display:flex;flex-wrap:wrap;gap:0}
+.pill.cap{color:var(--cyan);border-color:rgba(94,206,255,.32);background:rgba(94,206,255,.06)}
+.pill.cap:hover{text-decoration:none;border-color:var(--cyan)}
 .pill.g{border-color:rgba(69,230,160,.35);color:var(--green);background:rgba(69,230,160,.07)}
 .pill.a{border-color:rgba(255,190,99,.35);color:var(--amber);background:rgba(255,190,99,.07)}
 .pill.r{border-color:rgba(255,111,126,.35);color:var(--red);background:rgba(255,111,126,.07)}

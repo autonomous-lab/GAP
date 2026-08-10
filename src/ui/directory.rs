@@ -2,8 +2,14 @@
 //!
 //! This is the page a search engine is meant to land on, and the page a
 //! buying agent's operator reads before pointing money at a stranger.
-//! It shows the whole offer: every capability, its price, and the
-//! evidence behind the score - not a curated top six.
+//!
+//! Each agent gets a summary card, not its full catalogue. Printing
+//! every capability with its description made one card as tall as the
+//! screen and the next one three lines, so the grid could not be
+//! scanned and comparing two agents meant scrolling past the offers of
+//! the first. The card now answers the questions asked of a stranger -
+//! how much has it done, how did that go, what does it cover, what does
+//! it cost - and the agent page holds the catalogue.
 
 use super::{clip, esc, num, price, short, Meta};
 use serde_json::Value;
@@ -21,24 +27,70 @@ pub fn directory(dir: &Value) -> String {
         let score = a["score"].as_f64().unwrap_or(0.5);
         let n = a["n"].as_u64().unwrap_or(0);
 
-        let mut caps = String::new();
-        for c in a["capabilities"].as_array().unwrap_or(&vec![]) {
-            caps.push_str(&format!(
-                r#"<div style="padding:11px 0;border-top:1px solid var(--line)">
-<div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline">
-  <b style="font-size:.93rem"><a href="/capability/{id}">{name}</a></b>
-  <span class="mono" style="color:var(--lime);white-space:nowrap">{p}</span></div>
-<p class="muted" style="font-size:.86rem;margin-top:4px">{desc}</p>
-<code class="dim" style="font-size:.74rem">{id}</code></div>"#,
-                name = esc(c["name"].as_str().unwrap_or("capability")),
-                p = esc(&price(
-                    c["price"]["amount"].as_f64().unwrap_or(0.0),
-                    c["price"]["currency"].as_str().unwrap_or("")
-                )),
-                desc = esc(&clip(c["description"].as_str().unwrap_or(""), 190)),
-                id = esc(c["id"].as_str().unwrap_or(""))
+        let cap_list = a["capabilities"].as_array().cloned().unwrap_or_default();
+        let settled = a["jobs"].as_u64().unwrap_or(0);
+
+        // The cheapest advertised price. A buyer scanning a grid wants
+        // an order of magnitude, and "from X" is the honest way to give
+        // one without implying every capability costs it.
+        let cheapest = cap_list
+            .iter()
+            .filter_map(|c| {
+                let amount = c["price"]["amount"].as_f64()?;
+                let currency = c["price"]["currency"].as_str().unwrap_or("");
+                Some((amount, currency.to_string()))
+            })
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Names only, and only a few: enough to tell what this agent is
+        // for, not enough to bury the next card.
+        let mut cap_names = String::new();
+        for c in cap_list.iter().take(4) {
+            let id = esc(c["id"].as_str().unwrap_or(""));
+            cap_names.push_str(&format!(
+                r#"<a class="pill cap" href="/capability/{id}">{name}</a>"#,
+                id = id,
+                name = esc(c["name"].as_str().unwrap_or("capability"))
             ));
         }
+        if cap_list.len() > 4 {
+            cap_names.push_str(&format!(
+                r#"<a class="pill" href="/agent/{did}">+{more} more</a>"#,
+                did = esc(did),
+                more = cap_list.len() - 4
+            ));
+        }
+        if cap_list.is_empty() {
+            cap_names =
+                r#"<span class="dim" style="font-size:.84rem">No capability announced</span>"#
+                    .to_string();
+        }
+
+        // Three figures, in the order a buyer weighs them: what it has
+        // done, how well, and what it covers. `n` is printed beside the
+        // score rather than under it because a 0.50 over nothing and a
+        // 0.50 over forty jobs are not the same claim.
+        let facts = format!(
+            r#"<div class="agentfacts">
+  <div><b>{settled}</b><span>settled</span></div>
+  <div><b class="score">{score:.2}</b><span>score over {n}</span></div>
+  <div><b>{ncaps}</b><span>on offer</span></div>
+  <div><b class="mono lime">{from}</b><span>{fromlabel}</span></div>
+</div>"#,
+            settled = num(settled),
+            score = score,
+            n = num(n),
+            ncaps = num(cap_list.len() as u64),
+            from = match &cheapest {
+                Some((amount, currency)) => esc(&price(*amount, currency)),
+                None => "--".into(),
+            },
+            fromlabel = if cheapest.is_some() {
+                "cheapest"
+            } else {
+                "no price"
+            },
+        );
 
         // Languages and regions are part of the announcement and matter
         // for matching: an agent that only works in one region is not a
@@ -61,12 +113,10 @@ pub fn directory(dir: &Value) -> String {
 <h3><a href="/agent/{did}">{label}</a></h3>
 {didline}
 {blurb}
-<div style="display:flex;align-items:baseline;gap:9px;font-size:.86rem;margin-top:8px">
-  <span class="score">{score:.2}</span>
-  <span class="dim">over {n} verified job(s)</span></div>
+{facts}
 <div class="bar"><i style="width:{pct:.0}%"></i></div>
+<div class="caprow">{caps}</div>
 <div style="margin-top:9px">{tags}</div>
-{caps}
 <p style="margin-top:12px"><a href="/agent/{did}" class="dim" style="font-size:.85rem">Track record and job history -&gt;</a></p>
 </div>"#,
             did = esc(did),
@@ -90,11 +140,10 @@ pub fn directory(dir: &Value) -> String {
                 ),
                 None => String::new(),
             },
-            score = score,
-            n = n,
+            facts = facts,
             pct = score * 100.0,
             tags = tags,
-            caps = caps
+            caps = cap_names
         ));
     }
 
@@ -297,5 +346,92 @@ mod tests {
         let html = directory(&d);
         assert!(html.contains(r#""@type":"ItemList""#));
         assert!(html.contains(r#""url":"/agent/did:gap:aaa""#));
+    }
+
+    fn many_caps(n: usize) -> Value {
+        let caps: Vec<Value> = (0..n)
+            .map(|i| {
+                json!({
+                    "id": format!("cap:{i}"),
+                    "name": format!("capability-{i}"),
+                    "description": "A long description that used to be printed in full on the \
+directory card, which is what made one card taller than the screen while its neighbour was three \
+lines high.",
+                    "price": { "amount": 0.1 + i as f64, "currency": "USDC" }
+                })
+            })
+            .collect();
+        dir_with(json!([{
+            "did": "did:gap:0123456789abcdef0123456789abcdef",
+            "name": "Polymath", "score": 0.8, "n": 12, "jobs": 30,
+            "capabilities": caps
+        }]))
+    }
+
+    #[test]
+    fn a_card_summarises_an_agent_instead_of_printing_its_catalogue() {
+        // The reported problem: every capability was rendered with its
+        // full description, so cards had wildly different heights and
+        // comparing two agents meant scrolling past the offers of the
+        // first.
+        let html = directory(&many_caps(9));
+        assert!(html.contains(">settled<"));
+        assert!(
+            html.contains(">30<"),
+            "the settled count is a headline figure"
+        );
+        assert!(html.contains("0.80"));
+        assert!(html.contains("score over 12"));
+        assert!(
+            html.contains(">9<"),
+            "the capability count is a headline figure"
+        );
+        // Names survive, descriptions do not.
+        assert!(html.contains("capability-0"));
+        assert!(!html.contains("taller than the screen"));
+        // And the overflow is admitted rather than silently dropped.
+        assert!(html.contains("+5 more"));
+    }
+
+    #[test]
+    fn the_cheapest_offer_is_labelled_as_the_cheapest() {
+        // "from X" is the honest summary of a price list. Printing one
+        // capability's price unlabelled would read as the agent's price.
+        let html = directory(&many_caps(3));
+        assert!(html.contains(">cheapest<"));
+        assert!(html.contains("0.100000 USDC"));
+        assert!(!html.contains("2.100000 USDC"), "not the dearest");
+    }
+
+    #[test]
+    fn an_agent_with_no_capability_says_so_and_claims_no_price() {
+        // A blank where a price goes reads as free.
+        let d = dir_with(json!([{
+            "did": "did:gap:aaa", "score": 0.5, "n": 0, "jobs": 0, "capabilities": []
+        }]));
+        let html = directory(&d);
+        assert!(html.contains("No capability announced"));
+        assert!(html.contains(">no price<"));
+        assert!(!html.contains(">cheapest<"));
+    }
+
+    #[test]
+    fn a_capability_name_on_a_card_links_to_its_page() {
+        let html = directory(&many_caps(2));
+        assert!(html.contains(r#"class="pill cap" href="/capability/cap:0""#));
+    }
+
+    #[test]
+    fn a_hostile_capability_name_cannot_inject_markup_from_a_card() {
+        let d = dir_with(json!([{
+            "did": "did:gap:aaa", "score": 0.5, "n": 0, "jobs": 0,
+            "capabilities": [{
+                "id": "x", "name": "<script>alert(1)</script>",
+                "price": { "amount": 1.0, "currency": "USD" }
+            }]
+        }]));
+        let html = directory(&d);
+        assert!(!html.contains("<script>alert(1)"));
+        assert!(html.contains("&lt;script&gt;"));
     }
 }
