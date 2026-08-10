@@ -20,9 +20,10 @@ pub fn home_page(stats: &Value, dir: &Value, activity: &Value) -> String {
     // page that explains how settlement works should show the
     // settlements before it moves on to benchmarks.
     let body = format!(
-        "{hero}{numbers}{shift}{problem}{flow}{example}{agents}{feed}{trust}{custody}{compare}\
+        "{hero}{ticker}{numbers}{shift}{problem}{flow}{example}{agents}{feed}{trust}{custody}{compare}\
 {security}{benchmarks}{architecture}{specs}{faq}{cta}",
         hero = hero(stats),
+        ticker = ticker(activity),
         numbers = numbers(),
         shift = section_aside(
             "the economic inversion",
@@ -388,6 +389,95 @@ fn custody_card(stats: &Value) -> String {
         title,
         body,
         &format!(r#"<div class="card">{rows}</div>{warning}{proof}"#),
+    )
+}
+
+/// A scrolling band of settled jobs.
+///
+/// Real settlements first, newest last-settled first. When the node has
+/// not settled enough to fill a band, the remainder is padded with
+/// **labelled examples** rather than plausible-looking fakes.
+///
+/// That distinction is the whole design. This page's credibility rests
+/// on one sentence - nothing here is illustrative - and a visitor who
+/// found invented jobs mixed in with real ones would be right to stop
+/// believing the figures that are true. So examples carry a tag, are
+/// dimmed, and link nowhere: they show the shape of the feed, they do
+/// not pretend to be it.
+fn ticker(activity: &Value) -> String {
+    let jobs = activity["jobs"].as_array().cloned().unwrap_or_default();
+
+    let mut items = String::new();
+    let mut count = 0usize;
+    for j in jobs.iter().take(24) {
+        let verdict = j["verdict"].as_str().unwrap_or("settled");
+        let cls = match verdict {
+            "conforms" => "g",
+            "nonconforming" => "r",
+            _ => "",
+        };
+        let jref = esc(j["job_ref"].as_str().unwrap_or(""));
+        items.push_str(&format!(
+            r#"<a class="tick" href="/job/{jref}"><b>{cap}</b>
+<span class="pill {cls}">{verdict}</span>
+<span class="dim">{judge}</span></a>"#,
+            jref = jref,
+            cap = esc(j["capability_id"].as_str().unwrap_or("")),
+            cls = cls,
+            verdict = esc(verdict),
+            judge = esc(j["judged_by"].as_str().unwrap_or("deterministic")),
+        ));
+        count += 1;
+    }
+
+    // Shape-of-the-feed examples, clearly marked as such.
+    const EXAMPLES: &[(&str, &str)] = &[
+        ("image-generation", "0.020000 EUR"),
+        ("lead-generation", "0.050000 USDC"),
+        ("translation.fr", "0.050000 USDC"),
+        ("data.analysis", "0.150000 USDC"),
+        ("transcription", "0.010000 USDC"),
+        ("code-review", "0.250000 USDC"),
+        ("web-scrape", "0.005000 USDC"),
+        ("summarisation", "0.008000 USDC"),
+        ("sentiment.batch", "0.030000 USDC"),
+        ("ocr.invoice", "0.012000 USDC"),
+        ("embedding.index", "0.002000 USDC"),
+        ("price-monitoring", "0.007000 USDC"),
+        ("contract-review", "0.400000 USDC"),
+        ("image.upscale", "0.018000 EUR"),
+        ("speech.synthesis", "0.009000 USDC"),
+        ("dataset.label", "0.004000 USDC"),
+        ("seo.audit", "0.120000 USDC"),
+        ("geo.enrich", "0.006000 USDC"),
+        ("pdf.extract", "0.011000 USDC"),
+        ("anomaly.detect", "0.060000 USDC"),
+    ];
+    if count < 12 {
+        for (cap, price) in EXAMPLES.iter().take(20 - count.min(20)) {
+            items.push_str(&format!(
+                r#"<span class="tick ex"><b>{cap}</b>
+<span class="mono">{price}</span>
+<span class="extag">example</span></span>"#,
+                cap = esc(cap),
+                price = esc(price)
+            ));
+        }
+    }
+
+    let note = if count == 0 {
+        "No settlement yet on this node. The band shows the shape of the feed; every entry is tagged as an example until real ones replace them."
+    } else if count < 12 {
+        "Real settlements first, then tagged examples where this node has not settled enough to fill the band. Nothing untagged is invented."
+    } else {
+        "Every entry is a real settlement on this node. Click one to read its signed verdict."
+    };
+
+    format!(
+        r#"<div class="tickerwrap" aria-label="Recently settled jobs">
+  <div class="ticker">{items}{items}</div>
+</div>
+<div class="wrap"><p class="dim" style="font-size:.8rem;margin-top:8px">{note}</p></div>"#
     )
 }
 fn hero(stats: &Value) -> String {
@@ -908,6 +998,44 @@ mod tests {
         }
         assert!(html.contains(r#""@type":"FAQPage""#));
         assert!(html.contains(r#""@type":"SoftwareApplication""#));
+    }
+
+    #[test]
+    fn the_ticker_never_passes_an_example_off_as_a_settlement() {
+        // This page's credibility rests on one sentence: nothing here
+        // is illustrative. A visitor who found invented jobs mixed in
+        // with real ones would be right to stop believing the figures
+        // that are true.
+        let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": [] }));
+        assert!(html.contains(r#"class="tick ex""#), "examples are marked");
+        assert!(html.contains("example</span>"), "and carry a visible tag");
+        assert!(html.contains("tagged as an example"), "and the caption says so");
+        // An example must not look clickable, or it implies a verdict
+        // page that does not exist.
+        assert!(!html.contains(r#"<a class="tick ex""#));
+    }
+
+    #[test]
+    fn real_settlements_come_first_and_link_to_their_verdict() {
+        let act = json!({ "jobs": [
+            { "job_ref": "j-1", "capability_id": "image-generation",
+              "verdict": "conforms", "judged_by": "luna" }
+        ]});
+        let html = home_page(&stats(), &json!({ "agents": [] }), &act);
+        let real = html.find(r#"<a class="tick" href="/job/j-1""#).expect("a real entry");
+        let example = html.find(r#"class="tick ex""#).expect("padding follows");
+        assert!(real < example, "real settlements lead the band");
+    }
+
+    #[test]
+    fn a_busy_node_needs_no_examples_at_all() {
+        let jobs: Vec<Value> = (0..14)
+            .map(|i| json!({ "job_ref": format!("j{i}"), "capability_id": "c",
+                             "verdict": "conforms", "judged_by": "m" }))
+            .collect();
+        let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": jobs }));
+        assert!(!html.contains(r#"class="tick ex""#));
+        assert!(html.contains("Every entry is a real settlement"));
     }
 
     #[test]

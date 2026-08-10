@@ -99,11 +99,25 @@ impl AbiEncoder {
 }
 
 /// The chain interface the relayer speaks.
-pub trait Chain: Send {
+pub trait Chain: Send + Sync {
     /// Submit a signed transaction; returns tx hash.
     fn submit(&self, to: &str, calldata: &[u8]) -> Result<String>;
     /// eth_call a read function; returns the raw 32-byte word result.
     fn call(&self, to: &str, calldata: &[u8]) -> Result<[u8; 32]>;
+
+    /// A transaction receipt, as returned by `eth_getTransactionReceipt`.
+    ///
+    /// Needed to verify that a deposit actually arrived: the node reads
+    /// the chain rather than believing the depositor, who is the party
+    /// that benefits from overstating the amount.
+    fn transaction_receipt(&self, _tx: &str) -> Result<serde_json::Value> {
+        Err(Error::Other("this chain cannot read receipts".into()))
+    }
+
+    /// The current head, for computing confirmation depth.
+    fn block_number(&self) -> Result<u64> {
+        Err(Error::Other("this chain cannot report a head".into()))
+    }
 }
 
 /// A real JSON-RPC chain (Ethereum-compatible, e.g. Sepolia).
@@ -157,6 +171,19 @@ impl Chain for JsonRpcChain {
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| Error::Other("tx hash not returned".into()))
+    }
+
+    fn transaction_receipt(&self, tx: &str) -> Result<serde_json::Value> {
+        self.rpc("eth_getTransactionReceipt", serde_json::json!([tx]))
+    }
+
+    fn block_number(&self) -> Result<u64> {
+        let head = self.rpc("eth_blockNumber", serde_json::json!([]))?;
+        let s = head
+            .as_str()
+            .ok_or_else(|| Error::Other("block number not a string".into()))?;
+        u64::from_str_radix(s.trim_start_matches("0x"), 16)
+            .map_err(|_| Error::Other("block number not hex".into()))
     }
 
     fn call(&self, to: &str, calldata: &[u8]) -> Result<[u8; 32]> {

@@ -236,13 +236,13 @@ small{font-size:.82rem}
 /* 1px grid gap over a line-coloured background draws the dividers, so
    they stay correct however many items wrap onto the last row - a
    border-right would leave a dangling edge there. */
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;
+.stats{display:flex;flex-wrap:wrap;gap:1px;
 background:var(--line);border:1px solid var(--line);
 border-radius:var(--radius);overflow:hidden;margin:30px 0 6px}
-.stat{padding:17px 19px;background:var(--panel)}
-/* An odd number of stats leaves a hole at the end of a two-column grid.
-   :last-child:nth-child(odd) is exactly "alone on its final row". */
-.stats>.stat:last-child:nth-child(odd){grid-column:1/-1}
+/* Flex, not grid: an auto-fit grid leaves an empty cell and a stranded
+   orphan whenever the count does not divide the column count, which it
+   never reliably does since the stats vary with what the node knows. */
+.stat{flex:1 1 150px;padding:17px 19px;background:var(--panel)}
 .stat .v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:1.7rem;letter-spacing:-.03em;line-height:1.1}
 .stat .k{font-size:.74rem;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin-top:5px}
 
@@ -480,6 +480,27 @@ background:var(--line);border-top:1px solid var(--line);border-bottom:1px solid 
 .numbers b{display:block;font-family:ui-monospace,monospace;font-size:2.1rem;letter-spacing:-.03em;
 line-height:1;color:var(--text)}
 .numbers span{display:block;color:var(--dim);font-size:.83rem;margin-top:8px;line-height:1.45}
+
+/* ------------------------------------------- settled-jobs ticker */
+.tickerwrap{position:relative;overflow:hidden;border-top:1px solid var(--line);
+border-bottom:1px solid var(--line);background:var(--bg-soft);padding:11px 0;margin-top:8px;
+-webkit-mask-image:linear-gradient(90deg,transparent,#000 6%,#000 94%,transparent);
+mask-image:linear-gradient(90deg,transparent,#000 6%,#000 94%,transparent)}
+.ticker{display:flex;gap:10px;width:max-content;animation:tick 90s linear infinite}
+.tickerwrap:hover .ticker{animation-play-state:paused}
+.tick{display:inline-flex;align-items:center;gap:9px;white-space:nowrap;flex:none;
+border:1px solid var(--line);background:var(--panel);border-radius:99px;padding:7px 14px;
+font-size:.8rem;color:var(--muted)}
+.tick b{color:var(--text);font-weight:600}
+a.tick:hover{border-color:var(--line-3);text-decoration:none}
+/* Examples are dimmed, tagged and link nowhere: they show the shape of
+   the feed, they do not pretend to be it. */
+.tick.ex{opacity:.55;border-style:dashed}
+.extag{font:700 .62rem/1 ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;
+color:var(--faint);border:1px solid var(--line-2);border-radius:4px;padding:2px 5px}
+@keyframes tick{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+@media(prefers-reduced-motion:reduce){.ticker{animation:none;flex-wrap:wrap;width:auto}
+.tickerwrap{-webkit-mask-image:none;mask-image:none}}
 
 /* ---------------------------------------------------------- footer */
 footer.site{border-top:1px solid var(--line);margin-top:60px;padding:38px 0 46px;background:var(--bg-soft)}

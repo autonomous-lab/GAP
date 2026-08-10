@@ -176,6 +176,11 @@ pub struct NodeState {
     /// chain costs about what the contract is worth, so below the
     /// declared threshold settlement is a ledger entry instead.
     balances: HashMap<String, crate::custody::Balance>,
+    /// Transaction hashes already credited. Replaying one transfer is
+    /// the cheapest attack available; the only defence is to remember.
+    credited_deposits: std::collections::HashSet<String>,
+    /// Read-only chain access used to verify deposits.
+    deposit_chain: Option<Box<dyn crate::relayer::Chain>>,
     /// contract id -> amount held on the ledger rail. Recorded rather
     /// than inferred: "has no Escrow object" also describes the
     /// on-chain path, and re-deriving it from the policy would break if
@@ -330,6 +335,12 @@ impl NodeState {
         // would be the most expensive amnesia of all.
         let balances: HashMap<String, crate::custody::Balance> = load(&*storage, "balances");
         let balance_holds: HashMap<String, Amount> = load(&*storage, "holds");
+        let credited_deposits: std::collections::HashSet<String> = storage
+            .list_state("credited")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.key)
+            .collect();
 
         // job_ref -> contract is derivable from the job history, so it
         // is rebuilt rather than stored twice and allowed to disagree.
@@ -399,6 +410,8 @@ impl NodeState {
             custody: crate::custody::CustodyPolicy::from_env(),
             balances,
             balance_holds,
+            credited_deposits,
+            deposit_chain: None,
         }
     }
 
@@ -2198,7 +2211,18 @@ digest {} - integrity verified against the provider's commitment{}]",
     /// there is one. It is recorded on the spine so a disputed credit
     /// can be traced back to something outside this node's word
     /// (RFC-0016 §8).
-    pub fn deposit(&mut self, token: &str, amount: &Amount, reference: &str) -> Result<Value> {
+    /// Credit a verified deposit.
+    ///
+    /// The amount is **never** taken from the caller. The depositor is
+    /// the party that benefits from overstating it, so the node reads
+    /// the chain and decides for itself: the transaction must have
+    /// succeeded, moved the settlement token, landed on this node's
+    /// deposit address, and be deep enough to survive a reorg.
+    ///
+    /// Crediting is idempotent on the transaction hash. Replaying one
+    /// transfer is the cheapest attack available and the only defence
+    /// is to remember.
+    pub fn deposit_from_chain(&mut self, token: &str, tx: &str) -> Result<Value> {
         if !self.custody.mode.holds_funds() {
             return Err(Error::EscrowViolation(
                 "this node is non-custodial and does not hold balances; \
@@ -2206,27 +2230,115 @@ settle on chain instead"
                     .into(),
             ));
         }
+        let policy = crate::deposit::DepositPolicy::from_env();
+        if !policy.is_configured() {
+            return Err(Error::EscrowViolation(
+                "this node cannot verify deposits: no settlement token or deposit address is \
+configured, and crediting one on the depositor's word is not an option"
+                    .into(),
+            ));
+        }
+        let tx = tx.trim();
+        if tx.is_empty() {
+            return Err(Error::Other("tx required".into()));
+        }
+        // Remember first: a hash already credited must never be
+        // credited again, whatever the chain says now.
+        if self.credited_deposits.contains(tx) {
+            return Err(Error::EscrowViolation(format!(
+                "transaction {tx} has already been credited"
+            )));
+        }
+        let chain = self
+            .deposit_chain
+            .as_ref()
+            .ok_or_else(|| Error::EscrowViolation("no chain connection configured".into()))?;
+        let receipt = chain.transaction_receipt(tx)?;
+        let head = chain.block_number()?;
+        let observed = crate::deposit::transfer_from_receipt(&receipt, head).ok_or_else(|| {
+            Error::EscrowViolation(
+                "that transaction carries no token transfer this node can credit".into(),
+            )
+        })?;
+        let raw = policy.accept(&observed)?;
+        let amount = crate::deposit::units_to_amount(raw.minor_units(), policy.decimals);
+
         let did = self.agent_by_token(token)?.identity.did().to_string();
         let currency = self.custody.currency.clone();
         let entry = self.balances.entry(did.clone()).or_default();
         if entry.currency.is_empty() {
             entry.currency = currency;
         }
-        entry.credit(*amount);
+        entry.credit(amount);
         let balance = entry.clone();
         self.save_balance(&did);
+        self.credited_deposits.insert(tx.to_string());
+        self.save_state("credited", tx, &did);
         self.record(
             "pay.deposit",
             json!({
                 "agent_did": did,
                 "amount": amount.to_string_decimal(),
                 "currency": balance.currency,
+                "tx": tx,
+                "from": observed.from,
+                "confirmations": observed.confirmations,
+            }),
+        );
+        Ok(json!({
+            "credited": amount.to_string_decimal(),
+            "available": balance.available.to_string_decimal(),
+            "held": balance.held.to_string_decimal(),
+            "currency": balance.currency,
+            "tx": tx,
+        }))
+    }
+
+    /// Credit a balance on the operator's authority, for rails the node
+    /// cannot read itself (a bank transfer, a card payment).
+    ///
+    /// Admin-gated, and recorded with its external reference: an
+    /// operator crediting a balance out of nothing is exactly what
+    /// proof of reserves is meant to expose, so it had better be
+    /// traceable to something outside this node.
+    pub fn credit_off_chain(
+        &mut self,
+        admin: &str,
+        agent_did: &str,
+        amount: &Amount,
+        reference: &str,
+    ) -> Result<Value> {
+        match self.admin_token.as_deref() {
+            Some(t) if t == admin => {}
+            _ => return Err(Error::Unauthorized("operator token required".into())),
+        }
+        if reference.trim().is_empty() {
+            return Err(Error::Other(
+                "reference required: an off-chain credit must point at something outside this node"
+                    .into(),
+            ));
+        }
+        let currency = self.custody.currency.clone();
+        let entry = self.balances.entry(agent_did.to_string()).or_default();
+        if entry.currency.is_empty() {
+            entry.currency = currency;
+        }
+        entry.credit(*amount);
+        let balance = entry.clone();
+        self.save_balance(agent_did);
+        self.record(
+            "pay.deposit",
+            json!({
+                "agent_did": agent_did,
+                "amount": amount.to_string_decimal(),
+                "currency": balance.currency,
+                "rail": "operator",
                 "reference": reference,
             }),
         );
         Ok(json!({
+            "credited": amount.to_string_decimal(),
             "available": balance.available.to_string_decimal(),
-            "held": balance.held.to_string_decimal(),
             "currency": balance.currency,
         }))
     }
@@ -3432,16 +3544,28 @@ pub fn route_with_ip(
             }),
             None => Err(Error::Unauthorized("missing bearer token".into())),
         },
+        // The amount is deliberately NOT read from the body: the
+        // depositor is the party that benefits from overstating it.
         ("POST", "/v1/balance/deposit") => {
-            let amount = amount_from(&body);
-            let reference = body
-                .get("reference")
-                .or_else(|| body.get("tx"))
+            let tx = body
+                .get("tx")
+                .or_else(|| body.get("transaction"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            match token {
+                Some(t) => guard.deposit_from_chain(t, tx),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        // Rails the node cannot read itself (bank, card). Operator
+        // authority, and it must point at an external reference.
+        ("POST", "/v1/balance/credit") => {
+            let amount = amount_from(&body);
+            let agent = body.get("agent_did").and_then(|v| v.as_str()).unwrap_or("");
+            let reference = body.get("reference").and_then(|v| v.as_str()).unwrap_or("");
             match (token, amount) {
-                (Some(t), Ok(a)) => guard.deposit(t, &a, reference),
-                (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
+                (Some(t), Ok(a)) => guard.credit_off_chain(t, agent, &a, reference),
+                (None, _) => Err(Error::Unauthorized("operator token required".into())),
                 (_, Err(e)) => Err(e),
             }
         }

@@ -29,12 +29,29 @@ fn node(path: &str) -> Arc<Mutex<NodeState>> {
 }
 
 /// Put a node in custodial mode without touching process-global state.
+///
+/// Also sets an operator token: with no chain to read, the only
+/// legitimate way to fund a balance is the operator credit rail, and
+/// the self-service one no longer exists precisely because a depositor
+/// must not state its own amount.
 fn custodial(n: &Arc<Mutex<NodeState>>) {
-    n.lock().unwrap().set_custody(gap::custody::CustodyPolicy {
+    let mut g = n.lock().unwrap();
+    g.set_custody(gap::custody::CustodyPolicy {
         mode: gap::custody::CustodyMode::Custodial,
         currency: "USDC".into(),
         ..Default::default()
     });
+    g.set_admin_token(String::from("operator-token"));
+}
+
+/// Fund a balance the way an operator would for a bank transfer.
+fn credit(n: &Arc<Mutex<NodeState>>, did: &str, amount: &str) -> (u16, Value) {
+    post(
+        n,
+        "/v1/balance/credit",
+        json!({ "agent_did": did, "amount": amount, "reference": "bank-ref-1" }),
+        "operator-token",
+    )
 }
 
 fn post(n: &Arc<Mutex<NodeState>>, path: &str, body: Value, tok: &str) -> (u16, Value) {
@@ -205,13 +222,8 @@ fn a_contract_settles_from_a_balance_and_the_ledger_balances() {
     let (provider_did, provider) = n.lock().unwrap().create_identity();
 
     // One deposit funds many contracts: that is the entire point.
-    let (status, out) = post(
-        &n,
-        "/v1/balance/deposit",
-        json!({ "amount": "5.00", "reference": "0xdeadbeef" }),
-        &client,
-    );
-    assert_eq!(status, 200, "deposit rejected: {out}");
+    let (status, out) = credit(&n, &client_did, "5.00");
+    assert_eq!(status, 200, "credit rejected: {out}");
     assert_eq!(out["available"], json!("5.000000"));
 
     let now = gap::message::now_unix();
@@ -310,7 +322,6 @@ fn a_contract_settles_from_a_balance_and_the_ledger_balances() {
         json!("0.050000"),
         "a balance must outlive the process holding it: {after}"
     );
-    let _ = client_did;
     let _ = std::fs::remove_file(path);
 }
 
@@ -323,14 +334,9 @@ fn parking_more_than_the_balance_is_refused_not_overdrawn() {
     let n = node(path);
     custodial(&n);
 
-    let (_, client) = n.lock().unwrap().create_identity();
+    let (client_did, client) = n.lock().unwrap().create_identity();
     let (provider_did, provider) = n.lock().unwrap().create_identity();
-    post(
-        &n,
-        "/v1/balance/deposit",
-        json!({ "amount": "0.01" }),
-        &client,
-    );
+    credit(&n, &client_did, "0.01");
 
     let now = gap::message::now_unix();
     let (_, proposed) = post(
@@ -371,5 +377,76 @@ fn parking_more_than_the_balance_is_refused_not_overdrawn() {
     );
     assert_eq!(bal["available"], json!("0.010000"));
     assert_eq!(bal["held"], json!("0.000000"));
+    let _ = std::fs::remove_file(path);
+}
+
+/// An agent must not be able to state its own deposit.
+#[test]
+fn an_agent_cannot_credit_itself() {
+    // The first cut of this endpoint took an `amount` from the caller
+    // and credited it. With real money that is a faucet: the depositor
+    // is precisely the party that benefits from overstating the figure.
+    let dir = std::env::temp_dir().join(format!("gap-selfcredit-{}.db", std::process::id()));
+    let path = dir.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+    custodial(&n);
+
+    let (did, agent) = n.lock().unwrap().create_identity();
+
+    // The self-service rail no longer accepts an amount at all, and
+    // without a chain to read it can credit nothing.
+    let (status, out) = post(
+        &n,
+        "/v1/balance/deposit",
+        json!({ "amount": "1000000.00" }),
+        &agent,
+    );
+    assert_ne!(status, 200, "an unverified deposit must be refused: {out}");
+    assert!(
+        out.to_string().contains("cannot verify deposits"),
+        "and must say why: {out}"
+    );
+
+    // The operator rail is not open to the agent either.
+    let (status, _) = post(
+        &n,
+        "/v1/balance/credit",
+        json!({ "agent_did": did, "amount": "1000000.00", "reference": "nice try" }),
+        &agent,
+    );
+    assert_eq!(status, 401, "operator authority is not an agent's to claim");
+
+    let (_, bal) = route(
+        &n,
+        "GET",
+        "/v1/balance",
+        b"",
+        Some(&format!("Bearer {agent}")),
+    );
+    assert_eq!(bal["available"], json!("0.000000"));
+    let _ = std::fs::remove_file(path);
+}
+
+/// An operator credit has to point at something outside this node.
+#[test]
+fn an_operator_credit_requires_an_external_reference() {
+    let dir = std::env::temp_dir().join(format!("gap-ref-{}.db", std::process::id()));
+    let path = dir.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+    custodial(&n);
+    let (did, _agent) = n.lock().unwrap().create_identity();
+
+    // Money appearing from nowhere is exactly what proof of reserves
+    // exists to expose, so it must at least be traceable.
+    let (status, out) = post(
+        &n,
+        "/v1/balance/credit",
+        json!({ "agent_did": did, "amount": "10.00" }),
+        "operator-token",
+    );
+    assert_ne!(status, 200);
+    assert!(out.to_string().contains("reference required"), "{out}");
     let _ = std::fs::remove_file(path);
 }

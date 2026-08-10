@@ -33,6 +33,7 @@ pub mod contract;
 pub mod credential;
 pub mod custody;
 pub mod delegation;
+pub mod deposit;
 pub mod delivery;
 pub mod discovery;
 pub mod error;

@@ -156,7 +156,57 @@ A balance is therefore not an assertion. It is a fold over a signed,
 append-only log, and a node that misreports one is contradicted by its
 own history.
 
-### 5.3 Insufficient funds
+### 5.3 How funds arrive, and how receipt is checked
+
+A deposit is never **asserted**. It is **observed**.
+
+The first cut of this endpoint accepted an `amount` from the caller and
+credited it. That is a faucet: the depositor is precisely the party that
+benefits from overstating the figure. The amount MUST come from the
+rail, never from the request.
+
+**On-chain rail.** The agent transfers the settlement token to the
+node's deposit address and hands the node a transaction hash. The node
+then reads the chain and decides for itself:
+
+| Check | Why it is load-bearing |
+|---|---|
+| the transaction succeeded | a reverted transfer moved nothing |
+| the log is a `Transfer` of the configured token | any contract can emit an event that looks like one |
+| the recipient is this node's deposit address | otherwise an agent credits itself by pointing at somebody else's payment |
+| the confirmation depth is sufficient | a reorg can unmake a transfer |
+| the hash has not been credited before | replaying one transfer is the cheapest attack of the lot |
+
+The crediting event records the transaction hash, the sender and the
+depth, so a disputed credit is traceable to something outside the node's
+own word.
+
+Sub-unit dust MUST truncate down, never round up. Crediting value that
+was not sent puts the ledger above its reserves, which is exactly what
+§6 exists to catch.
+
+**Attribution.** Nothing on chain says which agent a transfer belongs
+to. A node MUST resolve this deliberately: a deposit address derived per
+agent, a deposit contract carrying the agent identifier in its calldata,
+or a sender address the agent has proved it controls. Crediting on an
+unproven claim of a sender address lets one agent capture another's
+payment.
+
+**Operator rail.** For rails the node cannot read (bank transfer, card),
+the operator credits the balance under its own authority. This MUST be
+admin-gated and MUST carry an external reference. An operator crediting
+a balance out of nothing is precisely what proof of reserves exposes, so
+it had better point at something outside this node.
+
+A custodial node that can verify neither rail MUST refuse deposits
+rather than credit them on trust.
+
+**Chargebacks.** A card payment reversed after the balance has been
+spent is an unrecoverable loss for the operator, not for the protocol.
+Operators using reversible rails SHOULD hold a settlement delay at least
+as long as the chargeback window.
+
+### 5.4 Insufficient funds
 
 A park that exceeds the available balance MUST be refused before the
 contract advances, with the shortfall stated. It MUST NOT be allowed to
