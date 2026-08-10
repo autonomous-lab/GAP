@@ -31,6 +31,7 @@ pub mod compliance;
 pub mod conformance;
 pub mod contract;
 pub mod credential;
+pub mod custody;
 pub mod delegation;
 pub mod delivery;
 pub mod discovery;

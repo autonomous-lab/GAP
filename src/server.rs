@@ -7,6 +7,7 @@
 //! escrows, and the audit spine. Agents speak HTTPS to it; they never
 //! implement GAP themselves.
 
+use crate::amount::Amount;
 use crate::contract::{Contract, ContractState, Terms};
 use crate::discovery::{Announcement, Capability, Query, Reachability, Registry};
 use crate::error::{Error, Result};
@@ -169,6 +170,17 @@ pub struct NodeState {
     subscriptions: HashMap<String, crate::delivery::Subscription>,
     /// Pending webhook deliveries, drained outside the state lock.
     outbox: Vec<crate::delivery::PendingDelivery>,
+    /// What this node declares about who holds funds (RFC-0016).
+    custody: crate::custody::CustodyPolicy,
+    /// agent DID -> prefunded balance. Settling a five-cent contract on
+    /// chain costs about what the contract is worth, so below the
+    /// declared threshold settlement is a ledger entry instead.
+    balances: HashMap<String, crate::custody::Balance>,
+    /// contract id -> amount held on the ledger rail. Recorded rather
+    /// than inferred: "has no Escrow object" also describes the
+    /// on-chain path, and re-deriving it from the policy would break if
+    /// the policy changed between park and release.
+    balance_holds: HashMap<String, Amount>,
 }
 
 impl NodeState {
@@ -314,6 +326,10 @@ impl NodeState {
             load(&*storage, "escalations");
         let subscriptions: HashMap<String, crate::delivery::Subscription> =
             load(&*storage, "subscriptions");
+        // Balances are other people's money: losing them on a restart
+        // would be the most expensive amnesia of all.
+        let balances: HashMap<String, crate::custody::Balance> = load(&*storage, "balances");
+        let balance_holds: HashMap<String, Amount> = load(&*storage, "holds");
 
         // job_ref -> contract is derivable from the job history, so it
         // is rebuilt rather than stored twice and allowed to disagree.
@@ -380,6 +396,9 @@ impl NodeState {
             escalations,
             subscriptions,
             outbox: Vec::new(),
+            custody: crate::custody::CustodyPolicy::from_env(),
+            balances,
+            balance_holds,
         }
     }
 
@@ -997,6 +1016,72 @@ the content inline"
         .for_contract(contract_id)
         .sign(&client);
 
+        // Custodial path: the hold moves from the client's ledger to
+        // the provider's. No transaction, so no gas, which is the whole
+        // reason the balance exists.
+        if let Some(amount) = self.balance_holds.get(contract_id).copied() {
+            let client_did = contract.client.to_string();
+            let provider_did = contract.provider.to_string();
+            let currency = self.custody.currency.clone();
+
+            let payer = self
+                .balances
+                .get_mut(&client_did)
+                .ok_or_else(|| Error::EscrowViolation("no balance for the client".into()))?;
+            payer.settle_held(amount)?;
+            self.save_balance(&client_did);
+
+            let payee = self.balances.entry(provider_did.clone()).or_default();
+            if payee.currency.is_empty() {
+                payee.currency = currency.clone();
+            }
+            payee.credit(amount);
+            self.save_balance(&provider_did);
+
+            let c = self
+                .contracts
+                .get_mut(contract_id)
+                .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+            c.transition(ContractState::Accepted)?;
+            let saved = c.clone();
+            self.persist_contract(&saved);
+            self.persist_escrow(
+                contract_id,
+                crate::payment::EscrowState::Released,
+                Amount::ZERO,
+                &currency,
+            );
+            self.record(
+                "pay.released",
+                json!({
+                    "contract_id": contract_id,
+                    "amount": amount.to_string_decimal(),
+                    "rail": "balance",
+                }),
+            );
+            self.record("exe.accept", json!({ "contract_id": contract_id }));
+            let on_time = now_unix() <= contract.terms.deadline;
+            self.record_job(
+                &contract.provider,
+                &contract.client,
+                contract_id,
+                &contract.capability_id,
+                "accepted",
+                on_time,
+            );
+            self.credit_reputation(&contract.provider, true, on_time);
+            self.balance_holds.remove(contract_id);
+            self.forget_state("holds", contract_id);
+            return Ok(json!({
+                "state": "accepted",
+                "settlement": {
+                    "amount": amount.to_string_decimal(),
+                    "currency": currency,
+                    "rail": "balance"
+                }
+            }));
+        }
+
         // On-chain path: submit release() to the GapEscrow contract.
         if let Some(relayer) = &self.relayer {
             let hash = Self::contract_hash(contract_id);
@@ -1093,6 +1178,41 @@ the content inline"
                 "contract must be signed before parking (state: {})",
                 contract.state.wire_name()
             )));
+        }
+
+        // Custodial path (RFC-0016): below the declared threshold a
+        // park is a ledger hold, not a transaction. Settling a
+        // five-cent contract on chain costs about what the contract is
+        // worth, so the gas is paid twice per agent lifetime instead.
+        if self.custody.settles_from_balance(*amount) {
+            let did = client_did.to_string();
+            let currency = self.custody.currency.clone();
+            let entry = self.balances.entry(did.clone()).or_default();
+            if entry.currency.is_empty() {
+                entry.currency = currency;
+            }
+            // Refuses rather than going negative: a custodian that lets
+            // a balance go below zero has extended credit, which is a
+            // different regulated activity from holding deposits.
+            entry.hold(*amount)?;
+            self.save_balance(&did);
+            self.balance_holds.insert(contract_id.to_string(), *amount);
+            self.save_state("holds", contract_id, amount);
+            self.persist_escrow(
+                contract_id,
+                crate::payment::EscrowState::Parked,
+                *amount,
+                &self.custody.currency.clone(),
+            );
+            self.record(
+                "pay.parked",
+                json!({
+                    "contract_id": contract_id,
+                    "amount": amount.to_string_decimal(),
+                    "rail": "balance",
+                }),
+            );
+            return Ok(());
         }
 
         // On-chain path: submit park() to the GapEscrow contract.
@@ -2038,6 +2158,163 @@ digest {} - integrity verified against the provider's commitment{}]",
         }
     }
 
+
+    // ---- custody & balances (RFC-0016) ---------------------------
+
+    /// What this node declares about custody.
+    pub fn custody(&self) -> &crate::custody::CustodyPolicy {
+        &self.custody
+    }
+
+    /// Set the custody policy explicitly.
+    ///
+    /// Configuration normally comes from the environment, but that is
+    /// process-global: two tests setting it concurrently corrupt each
+    /// other, which is a flake that looks exactly like a real bug.
+    pub fn set_custody(&mut self, policy: crate::custody::CustodyPolicy) {
+        self.custody = policy;
+    }
+
+    /// An agent's balance, or a zeroed one if it has never deposited.
+    pub fn balance_of(&self, did: &str) -> crate::custody::Balance {
+        self.balances
+            .get(did)
+            .cloned()
+            .unwrap_or_else(|| crate::custody::Balance {
+                currency: self.custody.currency.clone(),
+                ..Default::default()
+            })
+    }
+
+    fn save_balance(&mut self, did: &str) {
+        if let Some(b) = self.balances.get(did).cloned() {
+            self.save_state("balances", did, &b);
+        }
+    }
+
+    /// Credit a deposit.
+    ///
+    /// `reference` is the on-chain transaction that funded it, when
+    /// there is one. It is recorded on the spine so a disputed credit
+    /// can be traced back to something outside this node's word
+    /// (RFC-0016 §8).
+    pub fn deposit(&mut self, token: &str, amount: &Amount, reference: &str) -> Result<Value> {
+        if !self.custody.mode.holds_funds() {
+            return Err(Error::EscrowViolation(
+                "this node is non-custodial and does not hold balances; \
+settle on chain instead"
+                    .into(),
+            ));
+        }
+        let did = self.agent_by_token(token)?.identity.did().to_string();
+        let currency = self.custody.currency.clone();
+        let entry = self.balances.entry(did.clone()).or_default();
+        if entry.currency.is_empty() {
+            entry.currency = currency;
+        }
+        entry.credit(*amount);
+        let balance = entry.clone();
+        self.save_balance(&did);
+        self.record(
+            "pay.deposit",
+            json!({
+                "agent_did": did,
+                "amount": amount.to_string_decimal(),
+                "currency": balance.currency,
+                "reference": reference,
+            }),
+        );
+        Ok(json!({
+            "available": balance.available.to_string_decimal(),
+            "held": balance.held.to_string_decimal(),
+            "currency": balance.currency,
+        }))
+    }
+
+    /// Take funds out, within the declared SLA.
+    pub fn withdraw(&mut self, token: &str, amount: &Amount, destination: &str) -> Result<Value> {
+        let did = self.agent_by_token(token)?.identity.did().to_string();
+        let entry = self
+            .balances
+            .get_mut(&did)
+            .ok_or_else(|| Error::EscrowViolation("no balance on this node".into()))?;
+        // Only `available` may leave: funds held against an open
+        // contract are already committed to somebody else.
+        entry.debit(*amount)?;
+        let balance = entry.clone();
+        self.save_balance(&did);
+        let sla = self.custody.withdrawal_sla_seconds;
+        self.record(
+            "pay.withdraw",
+            json!({
+                "agent_did": did,
+                "amount": amount.to_string_decimal(),
+                "destination": destination,
+            }),
+        );
+        Ok(json!({
+            "withdrawn": amount.to_string_decimal(),
+            "available": balance.available.to_string_decimal(),
+            "held": balance.held.to_string_decimal(),
+            "currency": balance.currency,
+            "destination": destination,
+            // The SLA is the promise; publishing it with the receipt is
+            // what makes a breach checkable rather than arguable.
+            "settles_within_seconds": sla,
+        }))
+    }
+
+    /// Total owed to agents: the number a reserves attestation has to
+    /// cover, and the one anyone can recompute from the spine.
+    pub fn liabilities(&self) -> Amount {
+        Amount::from_minor(
+            self.balances
+                .values()
+                .map(|b| b.total().minor_units())
+                .sum(),
+        )
+    }
+
+    /// A signed statement that holdings cover liabilities (RFC-0016 §6).
+    ///
+    /// `holdings` comes from configuration, because the node cannot see
+    /// the operator's wallet. That is exactly why the attestation is
+    /// pinned to a spine sequence: the liability side is verifiable by
+    /// replay, so only the holdings side rests on the operator's word.
+    pub fn reserves(&self) -> Value {
+        let liabilities = self.liabilities();
+        let holdings = std::env::var("GAP_RESERVE_HOLDINGS")
+            .ok()
+            .and_then(|h| Amount::parse(&h).ok())
+            .unwrap_or(liabilities);
+        let accounts: Vec<String> = std::env::var("GAP_RESERVE_ACCOUNTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .collect();
+        let mut attestation = crate::custody::ReserveAttestation {
+            at: now_unix(),
+            spine_seq: self.storage.event_count().unwrap_or(0),
+            liabilities: liabilities.to_string_decimal(),
+            holdings: holdings.to_string_decimal(),
+            currency: self.custody.currency.clone(),
+            accounts,
+            signature: None,
+        };
+        attestation.sign(&self.node.identity);
+        let solvent = attestation.is_solvent();
+        let mut out = serde_json::to_value(&attestation).unwrap_or_default();
+        out["solvent"] = json!(solvent);
+        out["custody"] = serde_json::to_value(&self.custody).unwrap_or_default();
+        out["note"] = json!(
+            "Liabilities are recomputable: replay the audit spine to spine_seq and fold the \
+balance events. Holdings are the operator's declaration. This is proof of reserves, not proof \
+of solvency."
+        );
+        out
+    }
+
     /// Is this contract's payment actually secured?
     ///
     /// One predicate, used by both `exe.start` and `exe.deliver`, so the
@@ -2045,7 +2322,9 @@ digest {} - integrity verified against the provider's commitment{}]",
     /// work. An on-chain relayer counts as funded: settlement lives in
     /// the contract rather than in this node's escrow map.
     pub fn escrow_is_funded(&self, contract_id: &str) -> bool {
-        self.escrows.contains_key(contract_id) || self.relayer.is_some()
+        self.escrows.contains_key(contract_id)
+            || self.balance_holds.contains_key(contract_id)
+            || self.relayer.is_some()
     }
 
     /// `exe.start` — the provider announces it has begun, with a plan
@@ -2640,6 +2919,12 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             "escalated": self.escalations.len(),
             "judges": judges,
             "events": self.storage.event_count().unwrap_or(0),
+            // RFC-0016: who holds the money here. A visitor should not
+            // have to read an AgentCard to find out.
+            "custody": self.custody,
+            "custody_gaps": self.custody.declaration_gaps(),
+            "liabilities": self.custody.mode.holds_funds()
+                .then(|| self.liabilities().to_string_decimal()),
         })
     }
 
@@ -2695,6 +2980,10 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                 "openapi": "https://github.com/autonomous-lab/GAP/blob/main/docs/openapi.yaml"
             },
             "auth": ["bearer"],
+            // RFC-0016: who holds funds between park and release. A
+            // buyer should not have to guess, and an agent can filter
+            // on it the way it already filters on reputation.
+            "custody": self.custody,
             "updated_at": now_unix()
         })
     }
@@ -2870,6 +3159,16 @@ pub fn drain_outbox(
         }
     }
     attempted
+}
+
+
+/// Read an `amount` field, accepting a decimal string or a number.
+fn amount_from(body: &Value) -> Result<Amount> {
+    match body.get("amount") {
+        Some(v) if v.is_string() => Amount::parse(v.as_str().unwrap_or("")),
+        Some(v) if v.is_number() => Ok(Amount::from_f64_rounding(v.as_f64().unwrap_or(0.0))),
+        _ => Err(Error::Other("amount required (decimal string)".into())),
+    }
 }
 
 /// Route with client IP for rate limiting (audit H-03).
@@ -3117,6 +3416,50 @@ pub fn route_with_ip(
                 None => Err(Error::UnknownContract(id.into())),
             }
         }
+
+        // ---- custody & balances (RFC-0016) ----
+        ("GET", "/v1/balance") => match token {
+            Some(t) => guard.agent_by_token(t).map(|a| a.identity.did().to_string()).map(|did| {
+                let b = guard.balance_of(&did);
+                json!({
+                    "agent_did": did,
+                    "available": b.available.to_string_decimal(),
+                    "held": b.held.to_string_decimal(),
+                    "total": b.total().to_string_decimal(),
+                    "currency": b.currency,
+                    "custody": guard.custody(),
+                })
+            }),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
+        ("POST", "/v1/balance/deposit") => {
+            let amount = amount_from(&body);
+            let reference = body
+                .get("reference")
+                .or_else(|| body.get("tx"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match (token, amount) {
+                (Some(t), Ok(a)) => guard.deposit(t, &a, reference),
+                (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
+                (_, Err(e)) => Err(e),
+            }
+        }
+        ("POST", "/v1/balance/withdraw") => {
+            let amount = amount_from(&body);
+            let destination = body
+                .get("destination")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match (token, amount) {
+                (Some(t), Ok(a)) => guard.withdraw(t, &a, destination),
+                (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
+                (_, Err(e)) => Err(e),
+            }
+        }
+        // Public on purpose: a reserves attestation nobody can read is
+        // not a reserves attestation.
+        ("GET", "/v1/reserves") => Ok(guard.reserves()),
 
         // ---- escrow ----
         ("POST", "/v1/escrow/park") => {

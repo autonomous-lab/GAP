@@ -28,6 +28,15 @@ fn node(path: &str) -> Arc<Mutex<NodeState>> {
     )))
 }
 
+/// Put a node in custodial mode without touching process-global state.
+fn custodial(n: &Arc<Mutex<NodeState>>) {
+    n.lock().unwrap().set_custody(gap::custody::CustodyPolicy {
+        mode: gap::custody::CustodyMode::Custodial,
+        currency: "USDC".into(),
+        ..Default::default()
+    });
+}
+
 fn post(n: &Arc<Mutex<NodeState>>, path: &str, body: Value, tok: &str) -> (u16, Value) {
     route(
         n,
@@ -176,5 +185,191 @@ fn a_principal_veto_survives_a_restart() {
         !vetoes.is_empty(),
         "a veto must outlive the node that recorded it: {status_body}"
     );
+    let _ = std::fs::remove_file(path);
+}
+
+/// A five-cent contract settled entirely from a prefunded balance
+/// (RFC-0016), with no on-chain transaction at any point.
+#[test]
+fn a_contract_settles_from_a_balance_and_the_ledger_balances() {
+    // Custodial mode, set on the node rather than through the
+    // environment: env vars are process-global and these tests run in
+    // parallel, so one test's configuration would corrupt another's.
+    let dir = std::env::temp_dir().join(format!("gap-balance-{}.db", std::process::id()));
+    let path = dir.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+    custodial(&n);
+
+    let (client_did, client) = n.lock().unwrap().create_identity();
+    let (provider_did, provider) = n.lock().unwrap().create_identity();
+
+    // One deposit funds many contracts: that is the entire point.
+    let (status, out) = post(
+        &n,
+        "/v1/balance/deposit",
+        json!({ "amount": "5.00", "reference": "0xdeadbeef" }),
+        &client,
+    );
+    assert_eq!(status, 200, "deposit rejected: {out}");
+    assert_eq!(out["available"], json!("5.000000"));
+
+    let now = gap::message::now_unix();
+    let (_, proposed) = post(
+        &n,
+        "/v1/contract/propose",
+        json!({
+            "provider": provider_did, "capability_id": "cap:x", "escrow": true,
+            "terms": { "input": {}, "deliverable": {}, "acceptance_criteria": ["ok"],
+                "deadline": now + 3600,
+                "price": { "amount": 0.05, "currency": "USDC", "model": "fixed", "cap": 1.0 },
+                "autonomy": "propose", "confidentiality": null }
+        }),
+        &client,
+    );
+    let id = proposed["contract_id"].as_str().unwrap().to_string();
+    post(&n, &format!("/v1/contract/{id}/accept"), json!({}), &provider);
+
+    let (status, out) = post(
+        &n,
+        "/v1/escrow/park",
+        json!({ "contract_id": id, "amount": "0.05" }),
+        &client,
+    );
+    assert_eq!(status, 200, "park rejected: {out}");
+
+    // Parked funds are held, not spent: still the client's money, but
+    // no longer available to commit twice.
+    let (_, bal) = route(
+        &n,
+        "GET",
+        "/v1/balance",
+        b"",
+        Some(&format!("Bearer {client}")),
+    );
+    assert_eq!(bal["available"], json!("4.950000"));
+    assert_eq!(bal["held"], json!("0.050000"));
+
+    post(&n, &format!("/v1/contract/{id}/start"), json!({}), &provider);
+    let digest = format!("sha256:{}", gap::sha256_hex(b"work"));
+    post(
+        &n,
+        &format!("/v1/contract/{id}/deliver"),
+        json!({ "deliverable_hash": digest, "content": "work" }),
+        &provider,
+    );
+    let (status, settled) = post(
+        &n,
+        &format!("/v1/contract/{id}/accept-delivery"),
+        json!({}),
+        &client,
+    );
+    assert_eq!(status, 200, "settlement failed: {settled}");
+    assert_eq!(settled["settlement"]["rail"], json!("balance"));
+
+    // The money moved from one ledger to the other, and nowhere else.
+    let (_, cbal) = route(
+        &n,
+        "GET",
+        "/v1/balance",
+        b"",
+        Some(&format!("Bearer {client}")),
+    );
+    assert_eq!(cbal["available"], json!("4.950000"));
+    assert_eq!(cbal["held"], json!("0.000000"));
+    let (_, pbal) = route(
+        &n,
+        "GET",
+        "/v1/balance",
+        b"",
+        Some(&format!("Bearer {provider}")),
+    );
+    assert_eq!(pbal["available"], json!("0.050000"));
+
+    // Liabilities equal what was deposited: the node owes exactly what
+    // it took in, and the attestation says so.
+    let (_, reserves) = route(&n, "GET", "/v1/reserves", b"", None);
+    assert_eq!(reserves["liabilities"], json!("5.000000"));
+    assert_eq!(reserves["solvent"], json!(true));
+    assert!(reserves["signature"].is_string());
+    assert!(reserves["spine_seq"].as_u64().unwrap_or(0) > 0);
+
+    // And it all survives a restart, because it is other people's money.
+    drop(n);
+    let n2 = node(path);
+    custodial(&n2);
+    let (_, after) = route(
+        &n2,
+        "GET",
+        "/v1/balance",
+        b"",
+        Some(&format!("Bearer {provider}")),
+    );
+    assert_eq!(
+        after["available"],
+        json!("0.050000"),
+        "a balance must outlive the process holding it: {after}"
+    );
+    let _ = client_did;
+    let _ = std::fs::remove_file(path);
+}
+
+/// A node that cannot pay must refuse before the contract advances.
+#[test]
+fn parking_more_than_the_balance_is_refused_not_overdrawn() {
+    let dir = std::env::temp_dir().join(format!("gap-overdraw-{}.db", std::process::id()));
+    let path = dir.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+    custodial(&n);
+
+    let (_, client) = n.lock().unwrap().create_identity();
+    let (provider_did, provider) = n.lock().unwrap().create_identity();
+    post(
+        &n,
+        "/v1/balance/deposit",
+        json!({ "amount": "0.01" }),
+        &client,
+    );
+
+    let now = gap::message::now_unix();
+    let (_, proposed) = post(
+        &n,
+        "/v1/contract/propose",
+        json!({
+            "provider": provider_did, "capability_id": "cap:x", "escrow": true,
+            "terms": { "input": {}, "deliverable": {}, "acceptance_criteria": ["ok"],
+                "deadline": now + 3600,
+                "price": { "amount": 1.0, "currency": "USDC", "model": "fixed", "cap": 2.0 },
+                "autonomy": "propose", "confidentiality": null }
+        }),
+        &client,
+    );
+    let id = proposed["contract_id"].as_str().unwrap().to_string();
+    post(&n, &format!("/v1/contract/{id}/accept"), json!({}), &provider);
+
+    let (status, out) = post(
+        &n,
+        "/v1/escrow/park",
+        json!({ "contract_id": id, "amount": "1.00" }),
+        &client,
+    );
+    assert_ne!(status, 200, "an overdraft must be refused");
+    assert!(
+        out.to_string().contains("insufficient balance"),
+        "and must say so plainly: {out}"
+    );
+
+    // A custodian that extends credit is a lender, which is a different
+    // regulated activity: the balance must be untouched.
+    let (_, bal) = route(
+        &n,
+        "GET",
+        "/v1/balance",
+        b"",
+        Some(&format!("Bearer {client}")),
+    );
+    assert_eq!(bal["available"], json!("0.010000"));
+    assert_eq!(bal["held"], json!("0.000000"));
     let _ = std::fs::remove_file(path);
 }

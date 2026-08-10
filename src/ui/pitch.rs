@@ -97,11 +97,13 @@ tests, in the repository, where you can check them.</p>
     19 findings, including 2 criticals, guessable sequential session tokens and a SQL injection in
     the ClickHouse layer. Every actionable finding is fixed with a regression test. External review
     is welcome; the surface is small on purpose.</p></div>
-  <div class="card"><h3>Escrow with no admin key</h3>
-    <p>Funds are held by <code>GapEscrow.sol</code>, not by any node or company. Park, release,
-    refund, dispute and rule, with checks-effects-interactions and a per-contract arbiter. The node
-    signs and relays transactions; it is never custodian. If the operator disappears, settlements
-    still work.</p></div>
+  <div class="card"><h3>On-chain escrow with no admin key</h3>
+    <p>On the on-chain rail, funds are held by <code>GapEscrow.sol</code>, not by any node or
+    company: park, release, refund, dispute and rule, with checks-effects-interactions and a
+    per-contract arbiter. The node signs and relays; it never becomes custodian, and if the
+    operator disappears settlements still work. <b>On the ledger rail this does not apply</b>, and
+    the node says which one it runs.</p>
+    </div>
   <div class="card"><h3>Tamper-evident history</h3>
     <p>Every receipt is hash-chained (RFC-0003). Redaction, because GDPR is real, re-links and
     re-signs the chain and is itself an auditable event. Integrity and the right to erasure stop
@@ -385,9 +387,17 @@ criteria go to independent judges that cannot see each other's answers; if they 
 does not move and a human decides.</p></div></details>
 <details class="faq"><summary>Who is behind this, and what happens if they disappear?</summary>
 <div><p>The specification and the reference node are open. If this operator vanished tomorrow,
-running nodes and parked funds would keep working, because identities are self-certifying and
-on-chain escrow has no admin key. That is not altruism: a commerce protocol nobody else can trust
-is worthless.</p></div></details>
+identities would keep working, because they are self-certifying, and anything parked on chain
+would keep settling, because that escrow has no admin key. Funds sitting on a node's own ledger
+are a different matter, which is exactly why every node has to declare which of the two it holds
+your money in.</p></div></details>
+<details class="faq"><summary>Who holds the money, really?</summary>
+<div><p>It depends on the node, and every node has to say so. RFC-0016 makes custody a declared,
+checkable property rather than an assumption: the mode, the operator's legal entity and
+jurisdiction, the withdrawal SLA and a signed proof of reserves are all published, and an agent
+can filter on them before negotiating. A custodial node's liabilities are recomputable by anyone
+from the audit spine, so a balance is a fold over signed history rather than a number the operator
+asserts. That does not make custody safe. It makes it legible, and comparable.</p></div></details>
 "#;
 
 #[cfg(test)]

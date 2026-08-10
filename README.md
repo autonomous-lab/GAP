@@ -482,11 +482,12 @@ Honest accounting of what the reference implementation covers today:
 | RFC-0013 | Event delivery: signed webhooks + resumable SSE stream | ✅ `src/delivery.rs` |
 | RFC-0014 | Delivery verification (2-tier) + public pseudonymous reputation | ✅ `src/verifier.rs` |
 | RFC-0015 | Judge panel, escalation to humans, one remedy attempt, dispute win rate | ✅ `src/verifier.rs` |
+| RFC-0016 | Declared custody mode, prefunded balances, signed proof of reserves | ✅ `src/custody.rs` |
 
 ## Testing
 
 ```bash
-cargo test            # 292 tests: 236 unit + 55 integration + 1 doc
+cargo test            # 394 tests, unit + integration + doc
 cargo clippy          # zero warnings
 cargo run --example lead_gen   # end-to-end demo
 ```

@@ -20,7 +20,7 @@ pub fn home_page(stats: &Value, dir: &Value, activity: &Value) -> String {
     // page that explains how settlement works should show the
     // settlements before it moves on to benchmarks.
     let body = format!(
-        "{hero}{numbers}{shift}{problem}{flow}{example}{agents}{feed}{trust}{compare}\
+        "{hero}{numbers}{shift}{problem}{flow}{example}{agents}{feed}{trust}{custody}{compare}\
 {security}{benchmarks}{architecture}{specs}{faq}{cta}",
         hero = hero(stats),
         numbers = numbers(),
@@ -49,6 +49,7 @@ Ed25519-signed by the party making it, and every event lands on a hash-chained a
         agents = featured_agents(dir),
         feed = recent(activity),
         trust = trust(stats),
+        custody = custody_card(stats),
         compare = section_aside(
             "positioning",
             "GAP does not replace MCP or A2A. It makes them economically useful.",
@@ -297,6 +298,97 @@ fn numbers() -> &'static str {
   <div><b>15+8</b><span>RFCs and normative spec parts, with a published conformance matrix</span></div>
   <div><b>0</b><span>admin keys in the escrow contract</span></div>
 </div></section>"#
+}
+
+/// What this node declares about custody (RFC-0016), read from its own
+/// policy.
+///
+/// A visitor should not have to fetch an AgentCard to learn who holds
+/// the money, and a node that has declared nothing should say so rather
+/// than let the reader assume the reassuring answer.
+fn custody_card(stats: &Value) -> String {
+    let c = &stats["custody"];
+    let mode = c["mode"].as_str().unwrap_or("non-custodial");
+    let (title, body) = match mode {
+        "custodial" => (
+            "This node holds your funds",
+            "Between park and release the operator holds the money, against a ledger. That is what makes a five-cent contract viable: settling it on chain would cost about what it is worth. It also means the trust boundary is the operator, not the protocol.",
+        ),
+        "hybrid" => (
+            "Ledger below the threshold, chain above it",
+            "Small amounts settle from a prefunded balance, because settling them on chain would cost about what they are worth. Above the declared threshold the funds go to an escrow contract the operator cannot move.",
+        ),
+        _ => (
+            "This node never holds your funds",
+            "Settlement goes to an escrow contract with no admin key. The node signs and relays; it cannot move the money, and if the operator disappears settlements still work.",
+        ),
+    };
+
+    let mut rows = format!(
+        r#"<div class="check"><b>Custody mode</b><span class="d mono">{}</span></div>"#,
+        esc(mode)
+    );
+    if let Some(t) = c["threshold"].as_str().or(c["threshold"]["amount"].as_str()) {
+        rows.push_str(&format!(
+            r#"<div class="check"><b>On-chain above</b><span class="d mono">{} {}</span></div>"#,
+            esc(t),
+            esc(c["currency"].as_str().unwrap_or(""))
+        ));
+    }
+    if let Some(op) = c["operator"].as_object() {
+        rows.push_str(&format!(
+            r#"<div class="check"><b>Operator</b><span class="d">{} ({})</span></div>"#,
+            esc(op.get("legal_name").and_then(|v| v.as_str()).unwrap_or("")),
+            esc(op.get("jurisdiction").and_then(|v| v.as_str()).unwrap_or(""))
+        ));
+    }
+    if let Some(sla) = c["withdrawal_sla_seconds"].as_u64() {
+        rows.push_str(&format!(
+            r#"<div class="check"><b>Withdrawal SLA</b><span class="d">{} hours, breaching it is
+            an incident under RFC-0012</span></div>"#,
+            sla / 3600
+        ));
+    }
+    if let Some(l) = stats["liabilities"].as_str() {
+        rows.push_str(&format!(
+            r#"<div class="check"><b>Owed to agents</b><span class="d mono">{} {}</span>
+            </div>"#,
+            esc(l),
+            esc(c["currency"].as_str().unwrap_or(""))
+        ));
+    }
+
+    // A node that holds funds without declaring who it is says so here,
+    // rather than letting a buyer find out afterwards.
+    let gaps = stats["custody_gaps"].as_array().cloned().unwrap_or_default();
+    let warning = if gaps.is_empty() {
+        String::new()
+    } else {
+        let mut items = String::new();
+        for g in &gaps {
+            items.push_str(&format!("<li>{}</li>", esc(g.as_str().unwrap_or(""))));
+        }
+        format!(
+            r#"<div class="note warn" style="margin-top:12px"><b>This node's declaration is
+            incomplete.</b><ul class="bul" style="margin:8px 0 0 18px">{items}</ul></div>"#
+        )
+    };
+
+    let proof = if stats["liabilities"].is_string() {
+        r#"<p style="margin-top:11px"><a href="/v1/reserves">Signed proof of reserves</a> - the
+        liabilities are recomputable from the audit spine, so only the holdings rest on the
+        operator's word.</p>"#
+    } else {
+        r#"<p style="margin-top:11px"><a href="/.well-known/gap-agent.json">Declared in the
+        AgentCard</a>, so an agent can filter on it before negotiating.</p>"#
+    };
+
+    section(
+        "custody",
+        title,
+        body,
+        &format!(r#"<div class="card">{rows}</div>{warning}{proof}"#),
+    )
 }
 fn hero(stats: &Value) -> String {
     let jobs = stats["jobs"].as_u64().unwrap_or(0);
@@ -816,6 +908,48 @@ mod tests {
         }
         assert!(html.contains(r#""@type":"FAQPage""#));
         assert!(html.contains(r#""@type":"SoftwareApplication""#));
+    }
+
+    #[test]
+    fn a_custodial_node_says_so_on_its_own_front_page() {
+        // RFC-0016: a visitor should not have to fetch an AgentCard to
+        // learn who holds the money.
+        let mut st = stats();
+        st["custody"] = json!({
+            "mode": "custodial", "currency": "USDC",
+            "operator": { "legal_name": "Geta.Team SAS", "jurisdiction": "FR" },
+            "withdrawal_sla_seconds": 86400
+        });
+        st["custody_gaps"] = json!([]);
+        st["liabilities"] = json!("1284.150000");
+        let html = home_page(&st, &json!({ "agents": [] }), &json!({ "jobs": [] }));
+        assert!(html.contains("This node holds your funds"));
+        assert!(html.contains("Geta.Team SAS"));
+        assert!(html.contains("1284.150000"));
+        assert!(html.contains("/v1/reserves"));
+    }
+
+    #[test]
+    fn a_node_holding_funds_without_declaring_itself_is_flagged_on_its_own_page() {
+        // The uncomfortable case has to be the visible one, or the
+        // declaration is decoration.
+        let mut st = stats();
+        st["custody"] = json!({ "mode": "custodial", "currency": "USDC" });
+        st["custody_gaps"] = json!([
+            "custodial node with no declared operator",
+            "custodial node with no declared withdrawal SLA"
+        ]);
+        let html = home_page(&st, &json!({ "agents": [] }), &json!({ "jobs": [] }));
+        assert!(html.contains("This node's declaration is"));
+        assert!(html.contains("no declared operator"));
+    }
+
+    #[test]
+    fn a_non_custodial_node_makes_the_stronger_claim() {
+        let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": [] }));
+        assert!(html.contains("This node never holds your funds"));
+        // ...and does not invite anyone to read reserves it does not hold.
+        assert!(!html.contains("Signed proof of reserves"));
     }
 
     #[test]
