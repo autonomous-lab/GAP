@@ -736,7 +736,7 @@ pub(crate) fn page(meta: &Meta, body: &str) -> String {
 <meta property="og:type" content="website"><meta property="og:url" content="{c}">
 <meta property="og:image" content="{og}"><meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="GAP Protocol - agents don't browse, they contract. Portable identity, escrowed payment, verified delivery.">
+<meta property="og:image:alt" content="GAP Protocol - agents don't browse, they contract. A session panel showing two agents discover each other, sign a contract, park escrow, deliver and settle 0.050000 USDC with no human involved.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="{og}">
 <meta name="twitter:title" content="{t}"><meta name="twitter:description" content="{d}">
@@ -785,7 +785,11 @@ pub(crate) fn page(meta: &Meta, body: &str) -> String {
         t = esc(meta.title),
         d = esc(meta.description),
         c = esc(meta.canonical),
-        og = esc(&format!("{}/og.png", public_base())),
+        og = esc(&format!(
+            "{}{}",
+            public_base(),
+            crate::server::og_image_path()
+        )),
         robots = if meta.noindex {
             "noindex,nofollow"
         } else {
@@ -1120,8 +1124,9 @@ mod tests {
         // crawler reserves the large slot and renders it empty.
         let html = page(&Meta::new("T", "D", "/x", ""), "<p>b</p>");
         assert!(html.contains(r#"<meta name="twitter:card" content="summary_large_image">"#));
-        assert!(html.contains(r#"property="og:image" content="/og.png""#));
-        assert!(html.contains(r#"name="twitter:image" content="/og.png""#));
+        let og = crate::server::og_image_path();
+        assert!(html.contains(&format!(r#"property="og:image" content="{og}""#)));
+        assert!(html.contains(&format!(r#"name="twitter:image" content="{og}""#)));
         // Dimensions let a crawler lay the card out before it fetches
         // the bytes, and several will not render one without them.
         assert!(html.contains(r#"content="1200""#));
@@ -1139,7 +1144,36 @@ mod tests {
         );
         // And a trailing slash in the configured base must not produce
         // a doubled one.
-        assert_eq!("https://gap.geta.team/".trim_end_matches('/'), "https://gap.geta.team");
+        assert_eq!(
+            "https://gap.geta.team/".trim_end_matches('/'),
+            "https://gap.geta.team"
+        );
+    }
+
+    #[test]
+    fn the_card_url_changes_when_the_card_does() {
+        // A fixed path cached for a day is a fixed path that is wrong
+        // for a day. Measured after a redeploy: the edge answered the
+        // previous card with cf-cache-status HIT and age 648 while the
+        // node was already serving the new one. Naming the file after
+        // its bytes makes a stale card impossible.
+        let p = crate::server::og_image_path();
+        assert!(p.starts_with("/og-") && p.ends_with(".png"), "{p}");
+        assert_eq!(p.len(), "/og-".len() + 12 + ".png".len(), "{p}");
+        // Stable within a build, or a crawler would chase a new URL on
+        // every request.
+        assert_eq!(p, crate::server::og_image_path());
+        // Derived from the content, so it is exactly the digest of what
+        // gets served.
+        let (_, bytes) = crate::server::static_asset(p).expect("the versioned path serves");
+        assert!(p.contains(&crate::sha256_hex(bytes)[..12]));
+    }
+
+    #[test]
+    fn the_unversioned_path_still_resolves() {
+        // Anything that embedded /og.png before it was versioned must
+        // not start 404ing.
+        assert!(crate::server::static_asset("/og.png").is_some());
     }
 
     #[test]
@@ -1147,19 +1181,30 @@ mod tests {
         // Embedded in the binary: a container that renders its pages
         // but 404s its preview image depending on the working directory
         // is a trap nobody should have to find.
-        let (ctype, bytes) = crate::server::static_asset("/og.png").expect("the card is served");
+        let (ctype, bytes) = crate::server::static_asset(crate::server::og_image_path())
+            .expect("the card is served");
         assert_eq!(ctype, "image/png");
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "it must really be a PNG");
         // Comfortably under every platform's fetch limit, and big
         // enough not to be a placeholder.
-        assert!(bytes.len() > 10_000 && bytes.len() < 1_000_000, "{} bytes", bytes.len());
+        assert!(
+            bytes.len() > 10_000 && bytes.len() < 1_000_000,
+            "{} bytes",
+            bytes.len()
+        );
     }
 
     #[test]
     fn nothing_else_is_served_as_a_static_asset() {
         // The lookup is an allow-list, not a file server: a path that
         // walks out of it must find nothing.
-        for p in ["/", "/index.html", "/../Cargo.toml", "/og.png/../../etc/passwd"] {
+        for p in [
+            "/",
+            "/index.html",
+            "/../Cargo.toml",
+            "/og.png/../../etc/passwd",
+            "/og-000000000000.png",
+        ] {
             assert!(crate::server::static_asset(p).is_none(), "{p}");
         }
     }

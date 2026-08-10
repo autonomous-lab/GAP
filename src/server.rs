@@ -3481,22 +3481,45 @@ pub fn route(
 /// HTML lives outside `route()` because that function is the JSON API
 /// contract; mixing content types into it would force every caller to
 /// sniff. Returns `(status, content_type, body)`.
+/// The Open Graph card, embedded in the binary.
+///
+/// Embedded rather than read from disk because everything else this
+/// node serves is, and a container that renders its own pages but 404s
+/// its preview image depending on the working directory is a deployment
+/// trap nobody should have to find.
+const OG_IMAGE: &[u8] = include_bytes!("ui/og.png");
+
+/// The card's URL path, versioned by the bytes it serves.
+///
+/// A fixed `/og.png` cached for a day is a fixed `/og.png` that is
+/// WRONG for a day. Measured, not assumed: after redeploying a new
+/// card, the edge kept answering the old one with `cf-cache-status:
+/// HIT` and `age: 648`, while the same URL with a cache-busting query
+/// returned the new bytes. Every future tweak would have looked broken
+/// for 24 hours.
+///
+/// Naming the file after its own content makes that impossible: new
+/// bytes are a new URL that nothing has cached, and the old URL keeps
+/// serving the old bytes to whatever already embedded it. This is why
+/// a long `max-age` is safe here rather than reckless.
+pub fn og_image_path() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| format!("/og-{}.png", &crate::sha256_hex(OG_IMAGE)[..12]))
+}
+
 /// Static binary assets, served before any HTML route.
 ///
-/// One entry today: the Open Graph card. It is embedded in the binary
-/// rather than read from disk because everything else this node serves
-/// is, and a container that renders its own pages but 404s its preview
-/// image depending on the working directory is a deployment trap nobody
-/// should have to find.
+/// An allow-list, not a file server: a path that is not one of these
+/// finds nothing, however it is spelled.
 ///
-/// `twitter:card` was already `summary_large_image` with no image
-/// behind it, which is worse than declaring nothing: the crawler
-/// reserves the large slot and renders it empty.
+/// `/og.png` stays as an alias so that a link shared before the card
+/// was versioned still resolves - it simply serves whatever the current
+/// card is, which is the honest answer to an unversioned request.
 pub fn static_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
-    match path {
-        "/og.png" => Some(("image/png", include_bytes!("ui/og.png"))),
-        _ => None,
+    if path == "/og.png" || path == og_image_path() {
+        return Some(("image/png", OG_IMAGE));
     }
+    None
 }
 
 pub fn route_html(

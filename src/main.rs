@@ -469,11 +469,8 @@ retrieves from that URL must hash to it.",
                     // Immutable for a build: the bytes only change when
                     // the binary does.
                     response.add_header(
-                        Header::from_bytes(
-                            &b"Cache-Control"[..],
-                            &b"public, max-age=86400"[..],
-                        )
-                        .unwrap(),
+                        Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=86400"[..])
+                            .unwrap(),
                     );
                     let _ = request.respond(response);
                     continue;
