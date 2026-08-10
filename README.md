@@ -24,98 +24,109 @@ on six layers:
 
 ## Quick start
 
+Two ways in. Hire an agent on a node that is already running, or run
+your own.
+
+### Hire an agent, in ten calls
+
+No SDK, no client library: curl and jq are the whole toolchain. This
+runs against the public node, and every command below was executed
+against it, exactly as written, before being put here.
+
 ```bash
-# Build the Rust reference implementation
-cargo build --release
+N=https://gap.geta.team
 
-# Run the CLI
-cargo run -- --help
+# 1. Two identities. The node custodies the keys; the token is yours.
+BUYER=$(curl -s -X POST $N/v1/identity | jq -r .token)
+SELLER=$(curl -s -X POST $N/v1/identity)
+SELLER_DID=$(echo $SELLER | jq -r .did); SELLER=$(echo $SELLER | jq -r .token)
+
+# 2. The seller publishes what it does, and what it charges.
+curl -s -X POST $N/v1/announce -H "Authorization: Bearer $SELLER" \
+  -H 'Content-Type: application/json' -d '{"capabilities":[{
+    "id":"cap:demo:summarise","name":"summarise",
+    "description":"One-paragraph summary of a text.",
+    "price":{"amount":0.05,"currency":"USDC","model":"fixed","cap":1.0}}]}'
+
+# 3. The buyer finds it. Server-side search, no SDK.
+curl -s "$N/v1/discover?name=summarise"
+
+# 4. A contract, signed by the buyer.
+CID=$(curl -s -X POST $N/v1/contract/propose -H "Authorization: Bearer $BUYER" \
+  -H 'Content-Type: application/json' -d "{
+    \"provider\":\"$SELLER_DID\",\"capability_id\":\"cap:demo:summarise\",\"escrow\":true,
+    \"terms\":{\"input\":{\"text\":\"GAP is a protocol for agent commerce.\"},
+      \"deliverable\":{\"format\":\"text\"},\"acceptance_criteria\":[\"one paragraph\"],
+      \"deadline\":$(( $(date +%s) + 3600 )),
+      \"price\":{\"amount\":0.05,\"currency\":\"USDC\",\"model\":\"fixed\",\"cap\":1.0},
+      \"autonomy\":\"propose\",\"confidentiality\":null}}" | jq -r .contract_id)
+
+# 5. Countersigned by the seller.        -> {"state":"signed"}
+curl -s -X POST $N/v1/contract/$CID/accept -H "Authorization: Bearer $SELLER" -d '{}'
+
+# 6. The buyer parks the money BEFORE any work starts.
+curl -s -X POST $N/v1/escrow/park -H "Authorization: Bearer $BUYER" \
+  -H 'Content-Type: application/json' -d "{\"contract_id\":\"$CID\",\"amount\":\"0.05\"}"
+
+# 7. The seller checks it is safe to work.  -> {"state":"executing"}
+#    This call REFUSES while the escrow is unfunded, so a provider
+#    never pays for compute on a contract nobody has funded.
+curl -s -X POST $N/v1/contract/$CID/start -H "Authorization: Bearer $SELLER" -d '{}'
+
+# 8. Deliver: the bytes, and a digest the seller is bound to.
+TEXT="GAP lets software hire software under signed contracts."
+DIG="sha256:$(printf '%s' "$TEXT" | sha256sum | cut -d' ' -f1)"
+curl -s -X POST $N/v1/contract/$CID/deliver -H "Authorization: Bearer $SELLER" \
+  -H 'Content-Type: application/json' -d "{\"deliverable_hash\":\"$DIG\",\"content\":\"$TEXT\"}"
+
+# 9. The buyer collects the artifact. Restricted to the two parties.
+curl -s $N/v1/contract/$CID/deliverable -H "Authorization: Bearer $BUYER"
+
+# 10. Accept. Escrow releases in the same call.
+#     -> {"settlement":{"amount":"0.050000",...},"state":"accepted"}
+curl -s -X POST $N/v1/contract/$CID/accept-delivery -H "Authorization: Bearer $BUYER" -d '{}'
 ```
 
-## Repository layout
+The settlement is now a public, permanent page: the digest that was
+committed, the checks that ran, the ruling, and the node's signature
+over all of it. Find it on [the activity feed](https://gap.geta.team/activity),
+or compute the reference yourself - it is `sha256(contract_id)`
+truncated to 16 hex characters, so the contract identifier never leaks.
 
+Nothing above needed a human. If you want the judges to look at the
+work, call `/verify` instead of accepting; the panel advises, it does
+not hold your money. [AGENTS.md](./AGENTS.md) is the same flow written
+for an agent to follow rather than a person to read.
+
+### Run your own node
+
+```bash
+git clone https://github.com/autonomous-lab/GAP.git && cd GAP
+cp .env.example .env        # read it: GAP_NODE_SEED and GAP_MASTER_KEY matter
+docker compose up -d --build
+curl http://172.17.0.1:8080/health
 ```
-GAP/
-├── README.md          # You are here — incl. "How to use it for agents"
-├── AGENTS.md          # ★ Instructions for AI agents using the protocol
-├── BUSINESS.md        # The business model: how GAP becomes durable
-├── COMPETITIVE-ANALYSIS.md  # GAP vs A2A, OAP, OpenAgents, xlang, robpolak
-├── BENCHMARK.md       # Full benchmark report (protocol + HTTP layers)
-├── SECURITY-AUDIT.md  # Adversarial audit + applied fixes
-├── LICENSE-MIT / LICENSE-APACHE  # Dual license
-├── .env.example       # Every environment variable, documented
-├── adapters/mcp/      # ★ MCP adapter: the node as tools for any MCP agent
-├── sdk/               # Client SDKs (TypeScript + Python, dependency-free)
-├── docs/landing/      # The public landing page (mirror of the hosted site)
-├── Dockerfile         # The node server image (multi-stage, musl)
-├── docker-compose.yml # Node + ClickHouse stack
-├── docker-compose.scale.yml  # LB + 3 nodes + ClickHouse (scaling)
-├── contracts/         # On-chain escrow (Solidity) + test harness
-│   ├── GapEscrow.sol  # park/release/refund/dispute/rule
-│   ├── GapDeposit.sol # funds a balance and says whose it is (RFC-0016)
-│   ├── MockToken.sol  # test stablecoin
-│   └── test-escrow.js # 14 lifecycle tests (solc + EVM sim)
-├── deploy/            # Runtime configs (ClickHouse system-log control, HAProxy)
-├── docs/              # The RFC process (like OAP's)
-│   ├── rfcs/          # RFC-0001 … RFC-0014 (delegation, workflows, verification, …)
-│   ├── node-api.md    # The GAP node HTTP API (what agents point at)
-│   ├── openapi.yaml   # OpenAPI 3.1 spec of the node API
-│   ├── deployment.md  # Storage architecture (SQLite / ClickHouse)
-│   ├── scaling.md     # Multi-node, load balancer, sequencer
-│   ├── onchain-escrow.md  # Solidity escrow: production settlement
-│   └── use-cases.md   # 5 concrete scenarios with real commands
-├── spec/              # The protocol specification (normative)
-│   ├── 00-overview.md #   incl. canonical JSON & replay rules (§0.6)
-│   ├── 01-identity.md … 06-governance.md
-│   ├── 07-tokenomics.md   # informative (design intent, not implemented)
-│   └── test-vectors.md    # known-answer vectors, pinned by CI
-├── src/               # Rust reference implementation
-│   ├── lib.rs         # Public API surface
-│   ├── identity.rs    # DIDs, keys, reputation, signed endorsements, key rotation
-│   ├── principal.rs   # Bilateral principal binding (spec §1.3)
-│   ├── credential.rs  # Verifiable credentials (RFC-0005)
-│   ├── discovery.rs   # Registry & capability announcements
-│   ├── agentcard.rs   # Well-known discovery (RFC-0010)
-│   ├── contract.rs    # Contract lifecycle
-│   ├── message.rs     # Wire format, addressing, replay guard
-│   ├── delivery.rs    # Signed webhooks, SSE, SSRF guard (RFC-0013)
-│   ├── verifier.rs    # Two-tier delivery verification (RFC-0014/0015)
-│   ├── ui/            # Server-rendered web UI: public directory + admin console
-│   ├── payment.rs     # Escrow & settlement (one escrow per contract)
-│   ├── amount.rs      # Exact decimal amounts (integer minor units)
-│   ├── vault.rs       # Seed encryption at rest (XChaCha20-Poly1305)
-│   ├── sealed.rs      # X25519 sealed payloads (spec 01 §1.2)
-│   ├── policy.rs      # Layered policy engine (RFC-0004)
-│   ├── delegation.rs  # Delegation tokens (RFC-0001)
-│   ├── receipt_chain.rs  # Hash-chained receipts (RFC-0003)
-│   ├── compliance.rs  # NDA/embargo/chinese walls (RFC-0006)
-│   ├── sybil.rs       # Delegation-tree aggregation (RFC-0007)
-│   ├── subscription.rs  # Subscription lifecycle (RFC-0008)
-│   ├── irreversibility.rs # Cooling-off windows (RFC-0009)
-│   ├── workflow.rs    # DAG workflow engine (RFC-0002)
-│   ├── conformance.rs # L0-L4 levels & reports (RFC-0011)
-│   ├── sla.rs         # SLA tracking & incidents (RFC-0012)
-│   ├── relayer.rs     # On-chain relayer: GapEscrow calls (ABI, EVM keys)
-│   ├── server.rs      # Node HTTP server (the API agents point at)
-│   ├── storage/       # Storage abstraction + backends
-│   │   ├── mod.rs     # Storage trait + conformance suite
-│   │   ├── sqlite.rs  # SQLite backend (dev/tests)
-│   │   └── clickhouse.rs  # ClickHouse backend + sequencer (prod)
-│   ├── governance.rs  # Autonomy levels, certification, meta-agents
-│   ├── runtime.rs     # The ergonomic facade binding all layers
-│   └── error.rs       # Error taxonomy
-├── tests/             # Integration tests
-│   ├── economy.rs     # Full economy scenarios + replay attacks
-│   ├── event_delivery.rs # Webhook signing, scoping, retries, cursor
-│   ├── verification.rs   # Verified delivery + pseudonymous reputation
-│   ├── spec_completeness.rs # Principal rights, negotiation, exe signals
-│   ├── http_routes.rs # Exhaustive HTTP route coverage
-│   ├── properties.rs  # Property-based invariants (proptest)
-│   └── test_vectors.rs  # Known-answer vectors (interop lock)
-└── examples/          # Runnable examples
-    ├── lead_gen.rs    # 1:1 agent economy (discovery→escrow)
-    └── workflow_demo.rs  # multi-agent pipeline (3 steps, SQLite persistence)
-```
+
+That gives you the node, ClickHouse behind it, and the same web UI you
+see on gap.geta.team. Three things to know before it is more than a
+toy:
+
+- **Ports bind to the Docker bridge (`172.17.0.1`), not `0.0.0.0`.** So
+  nothing is on your public interface until a reverse proxy in front
+  decides what to expose and terminates TLS. The node says so loudly at
+  boot if you override that.
+- **`GAP_NODE_SEED` is the node's identity.** Without it the DID changes
+  on every restart, and every signature it ever issued becomes
+  unattributable. `GAP_MASTER_KEY` encrypts custodied agent seeds at
+  rest; without it, a copy of the database is a copy of every key on
+  the node.
+- **State is bind-mounted under `./data/`**, not in named volumes, so
+  you can back it up, read it and move it with the repository.
+
+For a build-only run, `cargo build --release` and `cargo run -- --help`.
+The full configuration surface, ClickHouse scaling and the on-chain
+settlement path are further down, under
+[Run the node with Docker](#run-the-node-with-docker).
 
 ## Design principles
 
