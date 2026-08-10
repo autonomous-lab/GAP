@@ -1054,3 +1054,144 @@ fn an_agent_can_announce_again_after_deregistering() {
 
     let _ = std::fs::remove_file(path);
 }
+
+/// The spine must actually be a chain, not a list that says it is one.
+///
+/// The product claimed "every receipt is hash-chained" and "tamper
+/// evident" in three places on the public site while `EventRecord` had
+/// no link field at all and `receipt_chain.rs` was called from nowhere.
+/// A sequence number is not tamper evidence: deleting or editing a row
+/// left no cryptographic trace whatsoever.
+#[test]
+fn the_audit_spine_is_hash_chained_and_verifiable() {
+    let path = std::env::temp_dir().join(format!("gap-chain-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+
+    let (id, client, _p) = delivered(&n);
+    post(
+        &n,
+        &format!("/v1/contract/{id}/accept-delivery"),
+        json!({}),
+        &client,
+    );
+
+    let (s, v) = route(&n, "GET", "/v1/audit/verify", b"", None);
+    assert_eq!(s, 200, "verification must be public: {v}");
+    assert_eq!(v["intact"], json!(true), "{v}");
+    assert!(v["links_verified"].as_u64().unwrap() > 4, "{v}");
+    assert_eq!(v["broken_at_seq"], json!(null));
+    assert_eq!(
+        v["unchained_prefix"],
+        json!(0),
+        "a fresh node has no legacy: {v}"
+    );
+    assert!(v["tip_hash"].as_str().unwrap().starts_with("sha256:"));
+
+    // Each link must name its predecessor, and the rule must be
+    // recomputable by a stranger from what /v1/audit publishes.
+    let (_, audit) = route(
+        &n,
+        "GET",
+        "/v1/audit",
+        b"",
+        Some(&format!("Bearer {client}")),
+    );
+    let events = audit["events"].as_array().unwrap();
+    assert!(events.len() > 4);
+    let mut prev = String::new();
+    for e in events {
+        let recomputed = gap::storage::event_hash(
+            e["seq"].as_u64().unwrap(),
+            e["kind"].as_str().unwrap(),
+            e["at"].as_u64().unwrap(),
+            &e["payload"],
+            &prev,
+        );
+        assert_eq!(
+            e["hash"].as_str().unwrap(),
+            recomputed,
+            "seq {} does not hash to what it publishes",
+            e["seq"]
+        );
+        assert_eq!(e["prev_hash"].as_str().unwrap_or(""), prev);
+        prev = recomputed;
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Editing history must break the chain, or the chain is decoration.
+#[test]
+fn tampering_with_a_stored_event_is_detected() {
+    let path = std::env::temp_dir().join(format!("gap-tamper-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+
+    {
+        let n = node(path);
+        let (id, client, _p) = delivered(&n);
+        post(
+            &n,
+            &format!("/v1/contract/{id}/accept-delivery"),
+            json!({}),
+            &client,
+        );
+        let (_, v) = route(&n, "GET", "/v1/audit/verify", b"", None);
+        assert_eq!(v["intact"], json!(true));
+    }
+
+    // Someone with database access rewrites a payload. This is exactly
+    // the attack the claim is about, and before the chain existed it
+    // was completely undetectable.
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute(
+        "UPDATE events SET payload = '{\"contract_id\":\"forged\"}' WHERE seq = 3",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let n = node(path);
+    let (_, v) = route(&n, "GET", "/v1/audit/verify", b"", None);
+    assert_eq!(v["intact"], json!(false), "tampering must be caught: {v}");
+    assert_eq!(v["broken_at_seq"], json!(3), "and named: {v}");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A node whose history predates the chain must say so, not pretend.
+#[test]
+fn events_written_before_the_chain_are_declared_not_backfilled() {
+    let path = std::env::temp_dir().join(format!("gap-legacy-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+
+    {
+        let n = node(path);
+        let _ = delivered(&n);
+    }
+    // Strip the chain from the existing rows: this is what a database
+    // written by the previous version looks like.
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute("UPDATE events SET hash = '', prev_hash = ''", [])
+        .unwrap();
+    drop(conn);
+
+    let n = node(path);
+    let (did, tok) = n.lock().unwrap().create_identity();
+    let _ = did;
+    post(&n, "/v1/deregister", json!({}), &tok);
+
+    let (_, v) = route(&n, "GET", "/v1/audit/verify", b"", None);
+    // The new events chain; the old ones are counted and excluded.
+    assert_eq!(v["intact"], json!(true), "{v}");
+    assert!(v["unchained_prefix"].as_u64().unwrap() > 0, "{v}");
+    assert!(
+        v["chain_starts_at_seq"].as_u64().unwrap() > 1,
+        "it must say where the chain begins: {v}"
+    );
+
+    let _ = std::fs::remove_file(path);
+}

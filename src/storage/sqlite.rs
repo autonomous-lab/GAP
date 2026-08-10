@@ -21,6 +21,9 @@ pub struct SqliteStorage {
     /// process, which matches the node architecture (one storage
     /// instance, sequential writes).
     next_seq: u64,
+    /// Hash of the last event written, so the next one can link to it
+    /// without a SELECT per append.
+    tip_hash: String,
 }
 
 impl SqliteStorage {
@@ -28,7 +31,11 @@ impl SqliteStorage {
     pub fn open(path: &str) -> Result<Self> {
         let conn =
             Connection::open(path).map_err(|e| Error::Other(format!("sqlite open failed: {e}")))?;
-        let mut s = Self { conn, next_seq: 1 };
+        let mut s = Self {
+            conn,
+            next_seq: 1,
+            tip_hash: String::new(),
+        };
         s.init()?;
         // One-time O(n) scan to seed the counter (startup only).
         let max: i64 = s
@@ -37,7 +44,29 @@ impl SqliteStorage {
                 r.get(0)
             })
             .map_err(|e| Error::Other(format!("sqlite seq init failed: {e}")))?;
+        // Databases written before the chain existed have neither
+        // column. Adding them is additive and idempotent: the error on
+        // a second run is "duplicate column name", which is the desired
+        // state and not a failure.
+        for col in ["prev_hash", "hash"] {
+            let _ = s.conn.execute(
+                &format!("ALTER TABLE events ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"),
+                [],
+            );
+        }
         s.next_seq = max.max(1) as u64;
+        // Resume the chain from whatever is already on disk. An empty
+        // tip is correct for a fresh database AND for one written
+        // before the chain existed: in both cases the next event opens
+        // a new chain rather than pretending to continue one.
+        s.tip_hash = s
+            .conn
+            .query_row(
+                "SELECT hash FROM events ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_default();
         Ok(s)
     }
 
@@ -50,7 +79,9 @@ impl SqliteStorage {
                      seq INTEGER PRIMARY KEY,
                      kind TEXT NOT NULL,
                      at INTEGER NOT NULL,
-                     payload TEXT NOT NULL
+                     payload TEXT NOT NULL,
+                     prev_hash TEXT NOT NULL DEFAULT '',
+                     hash TEXT NOT NULL DEFAULT ''
                  );
                  CREATE TABLE IF NOT EXISTS contracts (
                      contract_id TEXT PRIMARY KEY,
@@ -110,12 +141,16 @@ impl Storage for SqliteStorage {
         // MAX(seq) per insert was quadratic under load).
         let seq = self.next_seq;
         self.next_seq += 1;
+        let prev = self.tip_hash.clone();
+        let hash = crate::storage::event_hash(seq, kind, at as u64, &payload, &prev);
         self.conn
             .execute(
-                "INSERT INTO events (seq, kind, at, payload) VALUES (?1, ?2, ?3, ?4)",
-                params![seq as i64, kind, at, payload.to_string()],
+                "INSERT INTO events (seq, kind, at, payload, prev_hash, hash) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![seq as i64, kind, at, payload.to_string(), prev, hash],
             )
             .map_err(|e| Error::Other(format!("sqlite insert failed: {e}")))?;
+        self.tip_hash = hash;
         Ok(seq)
     }
 
@@ -123,7 +158,8 @@ impl Storage for SqliteStorage {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT seq, kind, at, payload FROM events WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+                "SELECT seq, kind, at, payload, prev_hash, hash FROM events \
+                 WHERE seq > ?1 ORDER BY seq LIMIT ?2",
             )
             .map_err(|e| Error::Other(format!("sqlite prepare failed: {e}")))?;
         let rows = stmt
@@ -139,6 +175,8 @@ impl Storage for SqliteStorage {
                             Box::new(e),
                         )
                     })?,
+                    prev_hash: row.get(4).unwrap_or_default(),
+                    hash: row.get(5).unwrap_or_default(),
                 })
             })
             .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;

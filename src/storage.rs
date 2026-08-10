@@ -19,6 +19,34 @@ pub mod sqlite;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 
+/// The hash that links one spine event to the previous one.
+///
+/// Over a canonical form, not `Debug` or a struct layout: the value has
+/// to be recomputable by a stranger from the JSON they can read at
+/// `/v1/audit`, years from now, in another language. Field order is
+/// fixed here and never derived from a map.
+pub fn event_hash(
+    seq: u64,
+    kind: &str,
+    at: u64,
+    payload: &serde_json::Value,
+    prev: &str,
+) -> String {
+    // Compact, sorted-key JSON is what the rest of the protocol signs;
+    // reusing it means one canonicalisation to get wrong instead of two.
+    let canonical = serde_json::json!({
+        "at": at,
+        "kind": kind,
+        "payload": payload,
+        "prev_hash": prev,
+        "seq": seq,
+    });
+    format!(
+        "sha256:{}",
+        crate::sha256_hex(canonical.to_string().as_bytes())
+    )
+}
+
 /// A persisted protocol event (the append-only spine).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventRecord {
@@ -30,6 +58,19 @@ pub struct EventRecord {
     pub at: u64,
     /// The event payload (a signed artifact or its reference).
     pub payload: serde_json::Value,
+    /// Hash of the previous event in the spine (RFC-0003).
+    ///
+    /// Empty on the genesis link, and on every event written before the
+    /// chain existed. Those older rows CANNOT be chained retroactively:
+    /// computing hashes over them now would produce a chain that proves
+    /// only that nobody has touched them since this ran, while looking
+    /// exactly like one that proves they were never touched at all.
+    /// The chain therefore starts where it starts, and the API says so.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prev_hash: String,
+    /// This event's own hash, over its canonical form and `prev_hash`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hash: String,
 }
 
 /// A persisted contract (materialized state).

@@ -222,8 +222,14 @@ CREATE TABLE IF NOT EXISTS gap_events (
     seq UInt64,
     kind String,
     at UInt64,
-    payload String
+    payload String,
+    prev_hash String DEFAULT '',
+    hash String DEFAULT ''
 ) ENGINE = MergeTree ORDER BY seq;
+-- Additive for a table that predates the chain. Both are no-ops when
+-- the columns already exist.
+ALTER TABLE gap_events ADD COLUMN IF NOT EXISTS prev_hash String DEFAULT '';
+ALTER TABLE gap_events ADD COLUMN IF NOT EXISTS hash String DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS gap_contracts (
     contract_id String,
@@ -351,7 +357,9 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
     pub fn hydrate(&self) -> Result<HydrateSummary> {
         let mut summary = HydrateSummary::default();
 
-        for rec in self.select::<EventRecord>("SELECT seq, kind, at, payload FROM gap_events")? {
+        for rec in self.select::<EventRecord>(
+            "SELECT seq, kind, at, payload, prev_hash, hash FROM gap_events",
+        )? {
             self.events
                 .lock()
                 .map_err(|_| Error::Other("events lock poisoned".into()))?
@@ -496,21 +504,36 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
         // audit spine and hiding events from every cursor-based reader.
         let seq = events.iter().map(|e| e.seq).max().unwrap_or(0) + 1;
         let at = crate::message::now_unix();
+        // Link to the highest-sequence event, not to the last pushed:
+        // after a hydrate the vector is sorted, but nothing in the type
+        // guarantees it, and chaining to the wrong predecessor produces
+        // a chain that verifies against nothing.
+        let prev = events
+            .iter()
+            .max_by_key(|e| e.seq)
+            .map(|e| e.hash.clone())
+            .unwrap_or_default();
+        let hash = crate::storage::event_hash(seq, kind, at, &payload, &prev);
         events.push(EventRecord {
             seq,
             kind: kind.into(),
             at,
             payload: payload.clone(),
+            prev_hash: prev.clone(),
+            hash: hash.clone(),
         });
         // Fire-and-forget insert with BOUND parameters — never string
         // interpolation (audit fix C-02: SQL injection).
-        let q = "INSERT INTO gap_events (seq, kind, at, payload) \
-                 VALUES ({seq:UInt64}, {kind:String}, {at:UInt64}, {payload:String})";
+        let q = "INSERT INTO gap_events (seq, kind, at, payload, prev_hash, hash) \
+                 VALUES ({seq:UInt64}, {kind:String}, {at:UInt64}, {payload:String}, \
+                 {prev_hash:String}, {hash:String})";
         let params = [
             QueryParam::new("seq", seq.to_string()),
             QueryParam::new("kind", kind),
             QueryParam::new("at", at.to_string()),
             QueryParam::new("payload", payload.to_string()),
+            QueryParam::new("prev_hash", &prev),
+            QueryParam::new("hash", &hash),
         ];
         self.transport.post_params(q, &params)?;
         Ok(seq)
@@ -1114,7 +1137,26 @@ mod tests {
                 !s.contains(';'),
                 "statement still contains a separator: {s}"
             );
-            assert!(s.to_uppercase().contains("CREATE TABLE"));
+            let upper = s.to_uppercase();
+            assert!(
+                upper.contains("CREATE TABLE") || upper.contains("ALTER TABLE"),
+                "not a DDL statement: {s}"
+            );
+        }
+
+        // Migrations must be replayable. Every ALTER runs on every boot,
+        // including on a database that already has the column, so an
+        // unguarded one turns a restart into a startup failure.
+        let alters: Vec<&String> = stmts
+            .iter()
+            .filter(|s| s.to_uppercase().contains("ALTER TABLE"))
+            .collect();
+        assert!(!alters.is_empty(), "the chain migration must be here");
+        for a in alters {
+            assert!(
+                a.to_uppercase().contains("IF NOT EXISTS"),
+                "migration is not idempotent, a second boot will fail: {a}"
+            );
         }
     }
 

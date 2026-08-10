@@ -3455,6 +3455,63 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         ))
     }
 
+    /// Walk the audit spine and check every link.
+    ///
+    /// A chain nobody can check is decoration, so this is public and
+    /// unauthenticated in its summary form: anyone can ask whether this
+    /// node's history hangs together, and recompute it themselves from
+    /// `/v1/audit` using the rule in `storage::event_hash`.
+    ///
+    /// It reports where the chain STARTS, and that number is the honest
+    /// part. Events written before the chain existed carry no hash and
+    /// cannot be given one now: hashing them today would produce a
+    /// chain proving only that nobody has touched them since, while
+    /// looking identical to one proving they were never touched at all.
+    /// Saying "verified from seq N" is a smaller claim than the truth
+    /// would allow, and it is the one that is actually true.
+    pub fn verify_spine(&self) -> Value {
+        let events = self.storage.events_after(0, u64::MAX).unwrap_or_default();
+        let mut chain_starts_at: Option<u64> = None;
+        let mut checked = 0u64;
+        let mut broken_at: Option<u64> = None;
+        let mut expected_prev = String::new();
+
+        for e in &events {
+            if e.hash.is_empty() {
+                // Pre-chain event. Skipped, and it resets nothing: the
+                // first chained event opens the chain with an empty
+                // predecessor.
+                continue;
+            }
+            if chain_starts_at.is_none() {
+                chain_starts_at = Some(e.seq);
+                expected_prev = e.prev_hash.clone();
+            }
+            let recomputed =
+                crate::storage::event_hash(e.seq, &e.kind, e.at, &e.payload, &e.prev_hash);
+            if recomputed != e.hash || e.prev_hash != expected_prev {
+                broken_at = Some(e.seq);
+                break;
+            }
+            expected_prev = e.hash.clone();
+            checked += 1;
+        }
+
+        json!({
+            "intact": broken_at.is_none(),
+            "broken_at_seq": broken_at,
+            "chain_starts_at_seq": chain_starts_at,
+            "links_verified": checked,
+            "events_total": events.len(),
+            "unchained_prefix": events.iter().filter(|e| e.hash.is_empty()).count(),
+            "tip_hash": events.last().map(|e| e.hash.clone()).filter(|h| !h.is_empty()),
+            "algorithm": "sha256 over {at,kind,payload,prev_hash,seq} as compact sorted-key JSON",
+            "note": "Events written before the chain existed carry no hash. They are counted in \
+        unchained_prefix and excluded from verification rather than hashed retroactively, which would \
+        manufacture evidence this node does not have.",
+        })
+    }
+
     /// Headline numbers for the public home page.
     ///
     /// Every field is derived from state this node actually holds — no
@@ -4388,6 +4445,9 @@ with your agent id. Either way the node credits it after enough confirmations.",
         }
 
         // ---- audit ----
+        // Public on purpose: a tamper-evidence claim nobody can check
+        // is a claim, not evidence.
+        ("GET", "/v1/audit/verify") => Ok(guard.verify_spine()),
         ("GET", "/v1/audit") => {
             // Authenticated endpoint: the audit spine is tamper-evident
             // evidence; anonymous read access would leak every contract
