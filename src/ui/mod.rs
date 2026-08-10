@@ -25,6 +25,7 @@
 
 mod activity;
 mod admin;
+mod capability;
 mod agent;
 mod directory;
 mod guide;
@@ -34,6 +35,7 @@ mod pitch;
 
 pub use activity::activity_page;
 pub use admin::admin_page;
+pub use capability::capability_page;
 pub use agent::agent_page;
 pub use directory::directory;
 pub use guide::{docs_page, for_agents_page, for_humans_page, how_it_works_page};
@@ -674,11 +676,14 @@ pub(crate) fn page(meta: &Meta, body: &str) -> String {
         ));
     }
     let jsonld = match &meta.jsonld {
-        // Already valid JSON produced by serde; the only sequence that
-        // could escape a <script> block is "</", so neutralise it.
+        // Escape every `<` as <, not only the `</` that would close
+        // the block. It is valid JSON, renders identically, and holds
+        // whatever context the value lands in. Relying on one sequence
+        // being the only dangerous one is how the next parser quirk
+        // turns into an injection.
         Some(j) => format!(
             r#"<script type="application/ld+json">{}</script>"#,
-            j.replace("</", "<\\/")
+            j.replace('<', "\\u003c")
         ),
         None => String::new(),
     };
@@ -825,7 +830,7 @@ pub fn robots(base: &str) -> String {
 
 /// `sitemap.xml` — every public page plus one URL per agent and per
 /// settled job, so each track record is indexable on its own.
-pub fn sitemap(base: &str, dir: &Value, activity: &Value) -> String {
+pub fn sitemap(base: &str, dir: &Value, activity: &Value, capabilities: &[String]) -> String {
     let mut urls = String::new();
     for p in [
         "/",
@@ -846,6 +851,13 @@ pub fn sitemap(base: &str, dir: &Value, activity: &Value) -> String {
                 esc(did)
             ));
         }
+    }
+    for c in capabilities {
+        urls.push_str(&format!(
+            "<url><loc>{}/capability/{}</loc></url>",
+            esc(base),
+            esc(c)
+        ));
     }
     for j in activity["jobs"].as_array().unwrap_or(&vec![]) {
         if let Some(r) = j["job_ref"].as_str() {
@@ -931,6 +943,9 @@ mod tests {
             !html.contains("</script><script>alert"),
             "a closing tag inside JSON-LD must not terminate the block"
         );
+        // No raw `<` survives at all, whatever context it lands in.
+        assert!(!html.contains("<script>alert(1)"));
+        assert!(html.contains("\\u003c"));
         assert!(html.contains(r#"type="application/ld+json""#));
     }
 
@@ -1007,7 +1022,8 @@ mod tests {
     fn sitemap_has_one_url_per_agent_and_per_job() {
         let dir = json!({ "agents": [{ "did": "did:gap:aaa" }, { "did": "did:gap:bbb" }] });
         let act = json!({ "jobs": [{ "job_ref": "job-1" }] });
-        let s = sitemap("https://n.example", &dir, &act);
+        let s = sitemap("https://n.example", &dir, &act, &["cap:x".to_string()]);
+        assert!(s.contains("<loc>https://n.example/capability/cap:x</loc>"));
         assert!(s.contains("<loc>https://n.example/agent/did:gap:aaa</loc>"));
         assert!(s.contains("<loc>https://n.example/agent/did:gap:bbb</loc>"));
         assert!(s.contains("<loc>https://n.example/job/job-1</loc>"));

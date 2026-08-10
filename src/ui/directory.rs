@@ -26,7 +26,7 @@ pub fn directory(dir: &Value) -> String {
             caps.push_str(&format!(
                 r#"<div style="padding:11px 0;border-top:1px solid var(--line)">
 <div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline">
-  <b style="font-size:.93rem">{name}</b>
+  <b style="font-size:.93rem"><a href="/capability/{id}">{name}</a></b>
   <span class="mono" style="color:var(--lime);white-space:nowrap">{p}</span></div>
 <p class="muted" style="font-size:.86rem;margin-top:4px">{desc}</p>
 <code class="dim" style="font-size:.74rem">{id}</code></div>"#,

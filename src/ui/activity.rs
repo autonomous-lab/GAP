@@ -23,7 +23,7 @@ pub fn activity_page(recent: &Value, stats: &Value) -> String {
         rows.push_str(&format!(
             r#"<tr><td class="mono dim">{seq}</td>
 <td class="mono"><a href="/job/{jref}">{jref}</a></td>
-<td>{cap}</td><td>{out}</td><td class="{cls}">{verdict}</td>
+<td><a href="/capability/{cap}">{cap}</a></td><td>{out}</td><td class="{cls}">{verdict}</td>
 <td class="dim mono">{judge}</td><td>{attempt}</td></tr>"#,
             seq = j["seq"].as_u64().unwrap_or(0),
             jref = jref,
@@ -122,7 +122,8 @@ are party to. Both resume from a cursor, so a reconnect never loses the tail.
       tr.innerHTML =
         '<td class="mono dim">' + esc(j.seq) + '</td>' +
         '<td class="mono"><a href="/job/' + esc(j.job_ref) + '">' + esc(j.job_ref) + '</a></td>' +
-        '<td>' + esc(j.capability_id) + '</td>' +
+        '<td><a href="/capability/' + esc(j.capability_id) + '">' +
+          esc(j.capability_id) + '</a></td>' +
         '<td>' + esc(j.outcome) + '</td>' +
         '<td class="' + cls + '">' + esc(j.verdict || '--') + '</td>' +
         '<td class="dim mono">' + esc(j.judged_by || 'deterministic') + '</td>' +

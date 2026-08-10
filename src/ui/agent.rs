@@ -36,8 +36,8 @@ pub fn agent_page(did: &str, rep: &Value, announcement: Option<&Value>) -> Strin
                 let mut rows = String::new();
                 for c in &list {
                     rows.push_str(&format!(
-                        r#"<tr><td><b>{name}</b><p class="muted" style="font-size:.87rem;margin-top:3px">{desc}</p></td>
-<td class="mono dim">{id}</td>
+                        r#"<tr><td><b><a href="/capability/{id}">{name}</a></b><p class="muted" style="font-size:.87rem;margin-top:3px">{desc}</p></td>
+<td class="mono dim"><a href="/capability/{id}">{id}</a></td>
 <td class="mono" style="color:var(--lime);white-space:nowrap">{p}</td></tr>"#,
                         name = esc(c["name"].as_str().unwrap_or("")),
                         desc = esc(c["description"].as_str().unwrap_or("")),
@@ -68,7 +68,7 @@ pub fn agent_page(did: &str, rep: &Value, announcement: Option<&Value>) -> Strin
         let jref = esc(j["job_ref"].as_str().unwrap_or(""));
         jobs.push_str(&format!(
             r#"<tr><td class="mono"><a href="/job/{jref}">{jref}</a></td>
-<td>{cap}</td><td>{outcome}</td><td class="{cls}">{verdict}</td>
+<td><a href="/capability/{cap}">{cap}</a></td><td>{outcome}</td><td class="{cls}">{verdict}</td>
 <td class="dim mono">{judge}</td><td>{first}</td><td class="dim">{ontime}</td></tr>"#,
             jref = jref,
             cap = esc(j["capability_id"].as_str().unwrap_or("")),
@@ -247,6 +247,21 @@ mod tests {
         assert!(html.contains("translation"));
         assert!(html.contains("0.050000 USDC"));
         assert!(!html.contains("not announcing any capability"));
+    }
+
+    #[test]
+    fn every_capability_is_a_link_to_its_own_page() {
+        // A capability is the third audit axis and the one a buyer
+        // shops on; leaving it as plain text hides the history behind
+        // it.
+        let ann = json!({ "capabilities": [{
+            "id": "cap:x", "name": "translation", "description": "EN to FR.",
+            "price": { "amount": 0.05, "currency": "USDC" }
+        }]});
+        let html = agent_page("did:gap:aaa", &rep(), Some(&ann));
+        assert!(html.contains(r#"<a href="/capability/cap:x">translation</a>"#));
+        // ...and the job history links it too.
+        assert!(html.contains(r#"<a href="/capability/image-generation">"#));
     }
 
     #[test]

@@ -149,8 +149,8 @@ and the criteria, required to answer in strict JSON. They cannot see each other'
         s_ruling = super::stat(&esc(ruling), "ruling", cls),
         s_cap = super::stat(
             &format!(
-                r#"<span style="font-size:1rem">{}</span>"#,
-                esc(job["capability_id"].as_str().unwrap_or("--"))
+                r#"<a href="/capability/{c}" style="font-size:1rem">{c}</a>"#,
+                c = esc(job["capability_id"].as_str().unwrap_or("--"))
             ),
             "capability",
             ""

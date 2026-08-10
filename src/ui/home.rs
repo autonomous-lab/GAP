@@ -753,9 +753,10 @@ fn featured_agents(dir: &Value) -> String {
         let mut rows = String::new();
         for c in caps.iter().take(2) {
             rows.push_str(&format!(
-                r#"<div style="margin-top:10px"><b style="font-size:.92rem">{name}</b>
+                r#"<div style="margin-top:10px"><b style="font-size:.92rem"><a href="/capability/{cid}">{name}</a></b>
 <span class="tag" style="margin-left:6px">{price}</span>
 <p class="muted" style="font-size:.86rem;margin-top:3px">{desc}</p></div>"#,
+                cid = esc(c["id"].as_str().unwrap_or("")),
                 name = esc(c["name"].as_str().unwrap_or("capability")),
                 price = esc(&price(
                     c["price"]["amount"].as_f64().unwrap_or(0.0),
@@ -834,7 +835,7 @@ fn recent(activity: &Value) -> String {
         let jref = esc(j["job_ref"].as_str().unwrap_or(""));
         rows.push_str(&format!(
             r#"<tr><td class="mono"><a href="/job/{jref}">{jref}</a></td>
-<td>{cap}</td><td class="{cls}">{verdict}</td>
+<td><a href="/capability/{cap}">{cap}</a></td><td class="{cls}">{verdict}</td>
 <td class="dim mono">{judge}</td>
 <td class="dim">{when}</td></tr>"#,
             jref = jref,

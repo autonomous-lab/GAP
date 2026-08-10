@@ -3129,6 +3129,124 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         })
     }
 
+
+    /// One capability, in public: what it is, who offers it, and every
+    /// settled job that used it (RFC-0014 §5).
+    ///
+    /// The node already let a reader audit an *agent* and a *job*. This
+    /// is the third axis, and the one a buyer actually shops on: not
+    /// "is this agent good" but "has this particular service been
+    /// delivered before, and how did it go".
+    ///
+    /// Jobs stay pseudonymous exactly as elsewhere: the capability is
+    /// public, who bought it is not.
+    pub fn public_capability(&self, capability_id: &str) -> Result<Value> {
+        let anns = self.registry.query(&Query::default());
+        // The offer, and who makes it. An id is namespaced per agent, so
+        // there is normally one - but the registry does not enforce that
+        // and the page should not assume it.
+        let mut offers = Vec::new();
+        let mut name = String::new();
+        let mut description = String::new();
+        for a in &anns {
+            for c in &a.capabilities {
+                if c.id != capability_id {
+                    continue;
+                }
+                if name.is_empty() {
+                    name = c.name.clone();
+                    description = c.description.clone();
+                }
+                let did = a.agent_did.to_string();
+                let rep = self
+                    .agents_by_did
+                    .get(&did)
+                    .and_then(|t| self.agents.get(t))
+                    .map(|ag| ag.identity.reputation().clone())
+                    .unwrap_or_default();
+                offers.push(json!({
+                    "did": did,
+                    "name": a.name,
+                    "price": c.price,
+                    "score": rep.success_rate(),
+                    "n": rep.executions,
+                    "languages": a.languages,
+                    "regions": a.regions,
+                }));
+            }
+        }
+
+        // Every settled job that used it. Records outlive an
+        // announcement, so a capability withdrawn from the directory
+        // still has a readable history - which is the point of keeping
+        // one.
+        let mut jobs: Vec<Value> = self
+            .jobs
+            .values()
+            .flatten()
+            .filter(|r| r.capability_id == capability_id)
+            .map(|r| {
+                json!({
+                    "seq": r.seq,
+                    "job_ref": r.job_ref,
+                    "outcome": r.outcome,
+                    "verdict": r.verdict,
+                    "judged_by": r.judged_by,
+                    "remedied": r.remedied,
+                    "on_time": r.on_time,
+                    "at": r.at,
+                })
+            })
+            .collect();
+        jobs.sort_by_key(|j| std::cmp::Reverse(j["seq"].as_u64().unwrap_or(0)));
+
+        if offers.is_empty() && jobs.is_empty() {
+            return Err(Error::Other("unknown capability".into()));
+        }
+
+        let total = jobs.len() as u64;
+        let judged = jobs.iter().filter(|j| j["verdict"].is_string()).count() as u64;
+        let conforming = jobs
+            .iter()
+            .filter(|j| j["verdict"] == json!("conforms"))
+            .count() as u64;
+        let on_time = jobs.iter().filter(|j| j["on_time"] == json!(true)).count() as u64;
+        let remedied = jobs.iter().filter(|j| j["remedied"] == json!(true)).count() as u64;
+
+        Ok(json!({
+            "capability_id": capability_id,
+            "name": name,
+            "description": description,
+            "offers": offers,
+            "jobs": jobs,
+            "settled": total,
+            "judged": judged,
+            "conforming": conforming,
+            // Rates are absent rather than 1.0 on no evidence: a
+            // capability nobody has bought must not read as flawless.
+            "conform_rate": (judged > 0).then(|| conforming as f64 / judged as f64),
+            "on_time_rate": (total > 0).then(|| on_time as f64 / total as f64),
+            "remedied": remedied,
+            "node": self.node_did().to_string(),
+        }))
+    }
+
+    /// Every capability id this node knows about, announced or merely
+    /// remembered. Used for the sitemap, so a withdrawn capability with
+    /// a history stays indexable.
+    pub fn known_capabilities(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .registry
+            .query(&Query::default())
+            .iter()
+            .flat_map(|a| a.capabilities.iter().map(|c| c.id.clone()))
+            .chain(self.jobs.values().flatten().map(|r| r.capability_id.clone()))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     /// The most recent settlements, newest first. Same projection as
     /// the cursor form — one shape, so the page and the live stream can
     /// never disagree about what a settlement looks like.
@@ -3278,7 +3396,7 @@ pub fn route_html(
             Some((
                 200,
                 "application/xml; charset=utf-8",
-                crate::ui::sitemap(&base, &dir, &activity),
+                crate::ui::sitemap(&base, &dir, &activity, &guard.known_capabilities()),
             ))
         }
         "/admin" => {
@@ -3298,6 +3416,11 @@ pub fn route_html(
             let a = guard.public_activity(1000);
             let s = guard.public_stats();
             html(crate::ui::admin_page(&e, &d, &a, &s))
+        }
+        p if p.starts_with("/capability/") => {
+            let id = percent_decode(p.trim_start_matches("/capability/"));
+            let cap = guard.public_capability(&id).ok()?;
+            html(crate::ui::capability_page(&cap))
         }
         p if p.starts_with("/job/") => {
             let job_ref = percent_decode(p.trim_start_matches("/job/"));
@@ -3927,6 +4050,10 @@ with your agent id. Either way the node credits it after enough confirmations.",
             (None, _) => Err(Error::Unauthorized("admin token not configured".into())),
             _ => Err(Error::Unauthorized("admin token required".into())),
         },
+        ("GET", p) if p.starts_with("/v1/capability/") => {
+            let id = percent_decode(p.trim_start_matches("/v1/capability/"));
+            guard.public_capability(&id)
+        }
         ("GET", p) if p.starts_with("/v1/reputation/") => {
             let did = percent_decode(p.trim_start_matches("/v1/reputation/"));
             guard.reputation_of(&did)
