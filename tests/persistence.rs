@@ -548,3 +548,88 @@ fn onramp_links_are_refused_when_nothing_is_configured() {
     );
     let _ = std::fs::remove_file(path);
 }
+
+/// A settled job must stay reachable across a restart.
+///
+/// The reported symptom: an agent's public history rendered a row for
+/// job `e4f3f6e478ecd924`, the row linked to `/job/e4f3f6e478ecd924`,
+/// and the link answered `unknown route`. The row came from `jobs`,
+/// which survives. The link needed `jobs_by_ref`, which was rebuilt by
+/// scanning the *verdicts* for a contract whose pseudonym matched - so
+/// a job whose verdict failed to load lost its link while the page
+/// that generated the link carried on advertising it.
+///
+/// Rebuilding from the contracts removes that coupling: a job_ref is a
+/// contract's pseudonym and exists whether or not anyone judged it.
+#[test]
+fn a_job_link_survives_a_restart() {
+    let path = std::env::temp_dir().join(format!("gap-joblink-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+
+    let (job_ref, provider_did) = {
+        let n = node(path);
+        let (id, client, _p) = delivered(&n);
+        post(
+            &n,
+            &format!("/v1/contract/{id}/accept-delivery"),
+            json!({}),
+            &client,
+        );
+        let (_, act) = route(&n, "GET", "/v1/activity", b"", None);
+        let jr = act["jobs"][0]["job_ref"].as_str().unwrap().to_string();
+        let pd = act["jobs"][0]["provider"]
+            .as_str()
+            .map(String::from)
+            .unwrap_or_default();
+        (jr, pd)
+    };
+
+    // Same database, new node: this is the redeploy.
+    let n = node(path);
+
+    let (s, job) = route(&n, "GET", &format!("/v1/job/{job_ref}"), b"", None);
+    assert_eq!(s, 200, "the job its history links to must resolve: {job}");
+    assert_eq!(job["job_ref"], json!(job_ref));
+
+    // And the page a visitor actually clicks.
+    let (code, ctype, _) = gap::server::route_html(&n, "GET", &format!("/job/{job_ref}"), None)
+        .expect("an entity route must answer rather than fall through");
+    assert_eq!(code, 200);
+    assert!(ctype.contains("text/html"));
+
+    let _ = provider_did;
+    let _ = std::fs::remove_file(path);
+}
+
+/// A URL shaped like ours but naming nothing must say so as a page.
+///
+/// Returning `None` handed the request to the JSON API, so a visitor
+/// clicking a link on our own agent page was told the route was
+/// unknown. The route was ours; only the record was missing, and the
+/// two are not the same thing to whoever is reading.
+#[test]
+fn a_missing_record_is_a_404_page_not_an_unknown_route() {
+    let path = std::env::temp_dir().join(format!("gap-404-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+
+    for (p, kind) in [
+        ("/job/0000000000000000", "job"),
+        ("/agent/did:gap:nope", "agent"),
+        ("/capability/nope", "capability"),
+    ] {
+        let (code, ctype, body) = gap::server::route_html(&n, "GET", p, None)
+            .unwrap_or_else(|| panic!("{p} fell through to the JSON API instead of answering"));
+        assert_eq!(code, 404, "{p}");
+        assert!(ctype.contains("text/html"), "{p}");
+        assert!(
+            body.contains(&format!("no {kind} by that name")),
+            "{p} must name what was missing"
+        );
+        // A miss must never be indexed.
+        assert!(body.contains("noindex"), "{p}");
+    }
+    let _ = std::fs::remove_file(path);
+}

@@ -350,15 +350,32 @@ impl NodeState {
 
         // job_ref -> contract is derivable from the job history, so it
         // is rebuilt rather than stored twice and allowed to disagree.
+        //
+        // Derive it from the CONTRACTS, not from the verdicts. A job_ref
+        // is the pseudonym of a contract id and exists for every settled
+        // contract; a verdict is optional and, before the deterministic
+        // tier started running on acceptance, most settlements had none.
+        // Rebuilding from verdicts therefore dropped exactly those jobs:
+        // they still appeared in an agent's public history, because that
+        // is read from `jobs`, but their links resolved to nothing. The
+        // page rendered a row and the link under it 404'd.
+        //
+        // Verdicts stay in as a second source so that a job whose
+        // contract has gone missing from storage still resolves.
+        let mut by_pseudonym: HashMap<String, String> = contracts
+            .keys()
+            .map(|cid| (pseudonym(cid), cid.clone()))
+            .collect();
+        for cid in verdicts.keys() {
+            by_pseudonym
+                .entry(pseudonym(cid))
+                .or_insert_with(|| cid.clone());
+        }
         let mut jobs_by_ref = HashMap::new();
         for records in jobs.values() {
             for r in records {
-                if let Some(cid) = verdicts
-                    .iter()
-                    .find(|(cid, _)| pseudonym(cid) == r.job_ref)
-                    .map(|(cid, _)| cid.clone())
-                {
-                    jobs_by_ref.insert(r.job_ref.clone(), cid);
+                if let Some(cid) = by_pseudonym.get(&r.job_ref) {
+                    jobs_by_ref.insert(r.job_ref.clone(), cid.clone());
                 }
             }
         }
@@ -3437,6 +3454,13 @@ pub fn route_html(
         std::env::var("GAP_PUBLIC_URL").unwrap_or_else(|_| String::from("http://localhost:8080"));
 
     let html = |b: String| Some((200u16, "text/html; charset=utf-8", b));
+    let missing = |kind: &str, what: &str| {
+        Some((
+            404u16,
+            "text/html; charset=utf-8",
+            crate::ui::not_found_page(kind, what),
+        ))
+    };
     match clean {
         // The home page is not the directory. A visitor who has never
         // heard of GAP needs the mechanism explained before a list of
@@ -3514,19 +3538,31 @@ pub fn route_html(
             let s = guard.public_stats();
             html(crate::ui::admin_page(&e, &d, &a, &s))
         }
+        // These three answer 404 rather than falling through. Returning
+        // `None` here handed the request to the JSON API, which told a
+        // visitor clicking a link on our own pages that the route was
+        // unknown - when the route was ours and only the record was
+        // missing.
         p if p.starts_with("/capability/") => {
             let id = percent_decode(p.trim_start_matches("/capability/"));
-            let cap = guard.public_capability(&id).ok()?;
-            html(crate::ui::capability_page(&cap))
+            match guard.public_capability(&id) {
+                Ok(cap) => html(crate::ui::capability_page(&cap)),
+                Err(_) => missing("capability", &id),
+            }
         }
         p if p.starts_with("/job/") => {
             let job_ref = percent_decode(p.trim_start_matches("/job/"));
-            let job = guard.public_job(&job_ref).ok()?;
-            html(crate::ui::job_page(&job))
+            match guard.public_job(&job_ref) {
+                Ok(job) => html(crate::ui::job_page(&job)),
+                Err(_) => missing("job", &job_ref),
+            }
         }
         p if p.starts_with("/agent/") => {
             let did = percent_decode(p.trim_start_matches("/agent/"));
-            let rep = guard.reputation_of(&did).ok()?;
+            let rep = match guard.reputation_of(&did) {
+                Ok(r) => r,
+                Err(_) => return missing("agent", &did),
+            };
             let ann = guard
                 .registry
                 .query(&Query::default())

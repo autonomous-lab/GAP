@@ -58,7 +58,11 @@ pub trait HttpTransport: Send {
         // encoding the query itself.
         let mut url = format!("{}/?query={}", self.base_url(), urlencode(query));
         for p in params {
-            url.push_str(&format!("&param_{}={}", p.name, urlencode(&p.value)));
+            url.push_str(&format!(
+                "&param_{}={}",
+                p.name,
+                urlencode(&escape_param(&p.value))
+            ));
         }
         self.post_url(&url)
     }
@@ -68,6 +72,36 @@ pub trait HttpTransport: Send {
 
     /// POST to a fully-built URL.
     fn post_url(&self, url: &str) -> Result<String>;
+}
+
+/// Protect a parameter value from ClickHouse's own unescaping.
+///
+/// A `param_x=` binding is not delivered verbatim: ClickHouse parses it
+/// with the escaping rules of its text formats, so a backslash is an
+/// escape introducer and is consumed. Everything this node stores in
+/// `gap_state` is JSON, and JSON escapes quotes as `\"` - which arrived
+/// as a bare `"` and turned a valid document into an invalid one.
+///
+/// Nothing complained. The write returned 200, the row was there, and
+/// the value looked almost right. It only failed on the way back, at
+/// `serde_json::from_str`, where a record that will not parse is a
+/// record that silently disappears: a verdict that vanished from the
+/// index took its job page with it, and an agent's public history went
+/// on advertising a link to it.
+///
+/// Measured against a live ClickHouse 24.8, not inferred:
+///
+/// ```text
+/// sent    {"a":"say \"hi\" ok"}
+/// naive   {"a":"say "hi" ok"}      <- does not parse
+/// escaped {"a":"say \"hi\" ok"}    <- exact round trip
+/// ```
+///
+/// Doubling backslashes is enough and is a no-op on any value that has
+/// none, which is why it is applied to every parameter rather than to
+/// the ones that happen to look like JSON today.
+fn escape_param(value: &str) -> String {
+    value.replace('\\', "\\\\")
 }
 
 /// A real transport using `ureq`.
@@ -1054,5 +1088,43 @@ mod tests {
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].starts_with("CREATE TABLE a"));
         assert!(stmts[1].starts_with("CREATE TABLE b"));
+    }
+
+    #[test]
+    fn a_json_value_survives_clickhouse_parameter_unescaping() {
+        // The defect this pins, measured against a live ClickHouse
+        // 24.8: a `param_x=` binding is parsed with text-format escape
+        // rules, so JSON's `\"` arrived as a bare `"` and the stored
+        // document no longer parsed. The write returned 200 and the row
+        // was present, so nothing anywhere reported a problem; the
+        // record simply vanished on the next load, and with it the job
+        // page that an agent's public history was still linking to.
+        let doc = serde_json::json!({
+            "reasons": ["The report has the title \"Quarterly Signal Report.\""],
+            "multiline": "line1\nline2",
+            "windows_path": "C:\\tmp\\x",
+        })
+        .to_string();
+
+        // What ClickHouse does to the value it receives.
+        let unescaped = escape_param(&doc).replace("\\\\", "\\");
+        assert_eq!(unescaped, doc, "the round trip must be exact");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&unescaped).is_ok(),
+            "and the result must still parse"
+        );
+
+        // Without the escaping it does not, which is the bug.
+        let naive = doc.replace("\\\"", "\"");
+        assert!(serde_json::from_str::<serde_json::Value>(&naive).is_err());
+    }
+
+    #[test]
+    fn escaping_is_a_no_op_on_ordinary_values() {
+        // Applied to every parameter, so it must not disturb the ones
+        // that carry no backslash at all.
+        for v in ["urn:gap:ctr:abc", "did:gap:0123", "1786365080", ""] {
+            assert_eq!(escape_param(v), v);
+        }
     }
 }

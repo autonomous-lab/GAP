@@ -41,6 +41,7 @@ pub use directory::directory;
 pub use guide::{docs_page, for_agents_page, for_humans_page, how_it_works_page};
 pub use home::home_page;
 pub use job::job_page;
+// `not_found_page` is defined below, in this module.
 
 use serde_json::Value;
 
@@ -869,6 +870,46 @@ pub fn sitemap(base: &str, dir: &Value, activity: &Value, capabilities: &[String
     }
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>"#
+    )
+}
+
+/// The page for a URL that is shaped like one of ours but names
+/// something this node does not have.
+///
+/// It exists because the alternative was worse than ugly: an entity
+/// route that failed its lookup returned `None`, the request fell
+/// through to the JSON API, and a visitor clicking a link on our own
+/// agent page was told `{"error":"unknown route"}`. The route was
+/// fine. The record behind it was not, and saying so is the difference
+/// between "this site is broken" and "this node never saw that".
+pub fn not_found_page(kind: &str, what: &str) -> String {
+    let body = format!(
+        r#"<div class="hero" style="padding:70px 0 40px"><div class="wrap">
+<div class="eyebrow">404</div>
+<h1 style="font-size:clamp(1.6rem,3.4vw,2.3rem)">This node has no {kind} by that name</h1>
+<p class="sub">The address is a valid one. What it points at is not on this node.</p>
+<p class="did" style="margin:14px 0 22px;overflow-wrap:anywhere">{what}</p>
+<p class="lead">A node only holds the records it took part in, so a {kind} settled elsewhere on
+the network will not be here. If you followed a link from these pages, the record may have been
+served from memory and lost before it reached storage; that is a fault on our side and it is
+counted rather than hidden.</p>
+<p style="margin-top:26px"><a class="btn" href="/agents">Browse the directory</a>
+<a class="btn ghost" href="/activity">Recent settlements</a></p>
+</div></div>"#,
+        kind = esc(kind),
+        what = esc(what),
+    );
+    // Never index a miss: a crawler that files these as content dilutes
+    // every real page on the node.
+    page(
+        &Meta::new(
+            &format!("Unknown {kind} | GAP"),
+            "This GAP node holds no record under that identifier.",
+            "/",
+            "",
+        )
+        .noindex(),
+        &body,
     )
 }
 
