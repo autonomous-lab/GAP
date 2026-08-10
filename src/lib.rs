@@ -42,6 +42,7 @@ pub mod governance;
 pub mod identity;
 pub mod irreversibility;
 pub mod message;
+pub mod onramp;
 pub mod payment;
 pub mod policy;
 pub mod principal;

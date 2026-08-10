@@ -450,3 +450,69 @@ fn an_operator_credit_requires_an_external_reference() {
     assert!(out.to_string().contains("reference required"), "{out}");
     let _ = std::fs::remove_file(path);
 }
+
+/// The deposit address is derived, and it is the agent's alone.
+#[test]
+fn each_agent_gets_its_own_stable_deposit_address() {
+    let dir = std::env::temp_dir().join(format!("gap-addr-{}.db", std::process::id()));
+    let path = dir.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+
+    let (a_addr, b_addr, a_did) = {
+        let n = node(path);
+        custodial(&n);
+        let (a_did, a) = n.lock().unwrap().create_identity();
+        let (_b_did, b) = n.lock().unwrap().create_identity();
+        let (sa, ra) = route(&n, "GET", "/v1/balance/address", b"", Some(&format!("Bearer {a}")));
+        let (sb, rb) = route(&n, "GET", "/v1/balance/address", b"", Some(&format!("Bearer {b}")));
+        assert_eq!(sa, 200, "{ra}");
+        assert_eq!(sb, 200, "{rb}");
+        (
+            ra["deposit_address"].as_str().unwrap().to_string(),
+            rb["deposit_address"].as_str().unwrap().to_string(),
+            a_did,
+        )
+    };
+
+    assert_ne!(
+        a_addr, b_addr,
+        "two agents sharing an address cannot be told apart"
+    );
+    assert!(a_addr.starts_with("0x") && a_addr.len() == 42);
+
+    // Derived, not stored: the same node seed must rebuild the same
+    // address after a restart, or funds sent there become unreachable.
+    let n2 = node(path);
+    custodial(&n2);
+    let rebuilt = n2.lock().unwrap().deposit_address_for(&a_did).unwrap();
+    assert_eq!(
+        rebuilt, a_addr,
+        "a derived address must survive the process that first produced it"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+/// A node with no on-ramp configured says so rather than linking nowhere.
+#[test]
+fn onramp_links_are_refused_when_nothing_is_configured() {
+    let dir = std::env::temp_dir().join(format!("gap-onramp-{}.db", std::process::id()));
+    let path = dir.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+    custodial(&n);
+    let (_did, agent) = n.lock().unwrap().create_identity();
+
+    let (status, out) = route(
+        &n,
+        "GET",
+        "/v1/onramp?currency=EUR",
+        b"",
+        Some(&format!("Bearer {agent}")),
+    );
+    assert_ne!(status, 200);
+    assert!(
+        out.to_string().contains("no on-ramp is configured"),
+        "and points at the alternative: {out}"
+    );
+    let _ = std::fs::remove_file(path);
+}

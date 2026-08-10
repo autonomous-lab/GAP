@@ -2453,6 +2453,69 @@ of solvency."
     }
 
 
+
+    /// The deposit address derived for one agent (RFC-0016 §5.3).
+    ///
+    /// Derived from the node seed, never stored: the address holds
+    /// other people's money until it is swept, and a lost database must
+    /// not mean lost funds.
+    pub fn deposit_address_for(&self, agent_did: &str) -> Result<String> {
+        let key = crate::deposit::deposit_key_for(&self.node.identity.seed_bytes(), agent_did);
+        let evm = crate::relayer::EvmKey::from_bytes(&key)?;
+        Ok(format!("0x{}", hex::encode(evm.address())))
+    }
+
+    /// Links a buyer with no crypto can use to fund an agent's balance.
+    ///
+    /// Every configured provider is returned rather than one chosen for
+    /// the caller: coverage, fees and payment methods differ by country,
+    /// and the buyer knows their country. Returning both is also what
+    /// keeps either from becoming load-bearing.
+    pub fn onramp_links(
+        &self,
+        token: &str,
+        fiat_currency: &str,
+        amount: Option<&str>,
+    ) -> Result<Value> {
+        if !self.custody.mode.holds_funds() {
+            return Err(Error::EscrowViolation(
+                "this node is non-custodial and holds no balances to fund".into(),
+            ));
+        }
+        let did = self.agent_by_token(token)?.identity.did().to_string();
+        let address = self.deposit_address_for(&did)?;
+        let config = crate::onramp::OnrampConfig::from_env();
+        let available = config.available();
+        if available.is_empty() {
+            return Err(Error::Other(
+                "no on-ramp is configured on this node: fund the balance on chain, or ask the \
+operator".into(),
+            ));
+        }
+        let req = crate::onramp::OnrampRequest {
+            deposit_address: address.clone(),
+            fiat_currency: fiat_currency.to_uppercase(),
+            fiat_amount: amount.map(|a| a.to_string()),
+            reference: did.clone(),
+        };
+        let mut links = Vec::new();
+        for provider in available {
+            match crate::onramp::build_url(provider, &config, &req) {
+                Ok(url) => links.push(json!({ "provider": provider.as_str(), "url": url })),
+                // One misconfigured provider must not deny the other.
+                Err(e) => eprintln!("gap-node: {} link unavailable: {e}", provider.as_str()),
+            }
+        }
+        Ok(json!({
+            "agent_did": did,
+            "deposit_address": address,
+            "currency": self.custody.currency,
+            "links": links,
+            "note": "Pay through one of these and the stablecoin lands on your deposit address; \
+the node credits it once it has enough confirmations. Nothing to send yourself.",
+        }))
+    }
+
     /// Is this contract's payment actually secured?
     ///
     /// One predicate, used by both `exe.start` and `exe.deliver`, so the
@@ -3607,6 +3670,38 @@ pub fn route_with_ip(
                 (_, Err(e)) => Err(e),
             }
         }
+        // Where a buyer with no crypto goes to fund a balance.
+        ("GET", p) if p.starts_with("/v1/onramp") => {
+            let params = parse_url_params(path);
+            let currency = params
+                .get("currency")
+                .cloned()
+                .unwrap_or_else(|| "EUR".into());
+            let amount = params.get("amount").cloned();
+            match token {
+                Some(t) => guard.onramp_links(t, &currency, amount.as_deref()),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        // The agent's own deposit address, for funding it directly.
+        ("GET", "/v1/balance/address") => match token {
+            Some(t) => guard
+                .agent_by_token(t)
+                .map(|a| a.identity.did().to_string())
+                .and_then(|did| {
+                    guard.deposit_address_for(&did).map(|addr| {
+                        json!({
+                            "agent_did": did,
+                            "deposit_address": addr,
+                            "currency": guard.custody().currency,
+                            "note": "Send the settlement token here, or use the deposit contract \
+with your agent id. Either way the node credits it after enough confirmations.",
+                        })
+                    })
+                }),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
+
         // Public on purpose: a reserves attestation nobody can read is
         // not a reserves attestation.
         ("GET", "/v1/reserves") => Ok(guard.reserves()),

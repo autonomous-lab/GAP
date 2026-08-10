@@ -25,6 +25,8 @@ hkdf = "0.12.4"
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 rand_core = "0.10.1"
 base64 = "0.22.1"
+# On-ramp URL signing (MoonPay). Removed with Stripe, back for this.
+hmac = "0.12.1"
 
 [dev-dependencies]
 criterion = "0.8.2"

@@ -217,6 +217,14 @@ pub struct EvmKey {
 
 impl EvmKey {
     /// Create a random key.
+    /// Rebuild a key from raw bytes, so a deterministically derived
+    /// deposit key can produce its address without being stored.
+    pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self> {
+        let signing_key = SigningKey::from_bytes(bytes.into())
+            .map_err(|_| Error::Other("invalid EVM key bytes".into()))?;
+        Ok(Self { signing_key })
+    }
+
     pub fn generate() -> Self {
         use rand::RngCore;
         let mut bytes = [0u8; 32];
