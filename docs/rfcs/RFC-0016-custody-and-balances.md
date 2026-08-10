@@ -210,13 +210,22 @@ admin-gated and MUST carry an external reference. An operator crediting
 a balance out of nothing is precisely what proof of reserves exposes, so
 it had better point at something outside this node.
 
+This is the only off-chain rail the reference node implements. A card
+processor integration was written and then removed: the processors that
+matter treat anything adjacent to crypto as a reason to close an
+account, so building on one puts the operator's whole funding path at
+the mercy of a risk review it cannot appeal. The guidance below stands
+for anyone who integrates one anyway.
+
 A custodial node that can verify neither rail MUST refuse deposits
 rather than credit them on trust.
 
-**Chargebacks.** A card payment reversed after the balance has been
-spent is an unrecoverable loss for the operator, not for the protocol.
-Operators using reversible rails SHOULD hold a settlement delay at least
-as long as the chargeback window.
+**Chargebacks (for any reversible rail).** A card payment reversed after
+the balance has been spent is an unrecoverable loss for the operator,
+not for the protocol, and an attacker can make it a method rather than
+an accident. Operators using reversible rails SHOULD hold a settlement
+delay at least as long as the dispute window, and SHOULD gate large
+lifetime balances behind identity verification.
 
 ### 5.4 Insufficient funds
 

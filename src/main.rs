@@ -447,43 +447,6 @@ retrieves from that URL must hash to it.",
                 continue;
             }
 
-            // The Stripe webhook needs the RAW body and a header the
-            // generic router never sees: the signature covers those
-            // exact bytes, so re-serializing the JSON first breaks
-            // every one.
-            if path.starts_with("/v1/gateway/stripe/webhook") {
-                let signature = request
-                    .headers()
-                    .iter()
-                    .find(|h| h.field.equiv("Stripe-Signature"))
-                    .map(|h| h.value.as_str().to_string())
-                    .unwrap_or_default();
-                let (status, out) = match state.lock() {
-                    Ok(mut guard) => match guard.stripe_webhook(&body, &signature) {
-                        Ok(v) => (200u16, v),
-                        // Same classes the JSON router uses: a webhook
-                        // caller distinguishes "not allowed" from
-                        // "malformed" like any other client.
-                        Err(e) => {
-                            let status = match e {
-                                gap::Error::Unauthorized(_) => 401,
-                                gap::Error::UnknownContract(_) => 404,
-                                _ => 400,
-                            };
-                            (status, serde_json::json!({ "error": e.to_string() }))
-                        }
-                    },
-                    Err(_) => (500, serde_json::json!({ "error": "state lock poisoned" })),
-                };
-                let response = Response::from_string(out.to_string())
-                    .with_status_code(status)
-                    .with_header(
-                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                    );
-                let _ = request.respond(response);
-                continue;
-            }
-
             let wants_sse = path.starts_with("/v1/events")
                 && request.headers().iter().any(|h| {
                     h.field.equiv("Accept") && h.value.as_str().contains("text/event-stream")

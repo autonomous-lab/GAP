@@ -181,9 +181,6 @@ pub struct NodeState {
     credited_deposits: std::collections::HashSet<String>,
     /// Read-only chain access used to verify deposits.
     deposit_chain: Option<Box<dyn crate::relayer::Chain>>,
-    /// Agents that have passed identity verification, for the card rail
-    /// above its declared threshold.
-    kyc_verified: std::collections::HashSet<String>,
     /// contract id -> amount held on the ledger rail. Recorded rather
     /// than inferred: "has no Escrow object" also describes the
     /// on-chain path, and re-deriving it from the policy would break if
@@ -338,12 +335,6 @@ impl NodeState {
         // would be the most expensive amnesia of all.
         let balances: HashMap<String, crate::custody::Balance> = load(&*storage, "balances");
         let balance_holds: HashMap<String, Amount> = load(&*storage, "holds");
-        let kyc_verified: std::collections::HashSet<String> = storage
-            .list_state("kyc")
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| r.key)
-            .collect();
         let credited_deposits: std::collections::HashSet<String> = storage
             .list_state("credited")
             .unwrap_or_default()
@@ -421,7 +412,6 @@ impl NodeState {
             balance_holds,
             credited_deposits,
             deposit_chain: None,
-            kyc_verified,
         }
     }
 
@@ -2463,121 +2453,6 @@ of solvency."
     }
 
 
-    /// Credit a balance from a verified Stripe webhook (RFC-0016 §5.3).
-    ///
-    /// Takes the **raw** body: the signature covers those exact bytes,
-    /// so re-serializing the JSON before checking breaks every one.
-    pub fn stripe_webhook(&mut self, raw: &[u8], signature: &str) -> Result<Value> {
-        let gw = crate::stripe::StripeGateway::from_env();
-        if let Some(why) = gw.refusal() {
-            return Err(Error::Unauthorized(why));
-        }
-        if !self.custody.mode.holds_funds() {
-            return Err(Error::EscrowViolation(
-                "this node is non-custodial and holds no balances to credit".into(),
-            ));
-        }
-        crate::stripe::verify_signature(
-            raw,
-            signature,
-            &gw.webhook_secret,
-            now_unix(),
-            gw.tolerance_seconds,
-        )?;
-        let event: Value =
-            serde_json::from_slice(raw).map_err(|e| Error::Json(e.to_string()))?;
-        let payment = crate::stripe::payment_from_event(&event)?;
-
-        // Stripe retries a webhook until it gets a 2xx, so the event id
-        // is the idempotency key. Without it a retry funds the balance
-        // twice, and Stripe retries by design rather than by accident.
-        let key = format!("stripe:{}", payment.event_id);
-        if self.credited_deposits.contains(&key) {
-            return Ok(json!({ "status": "already credited", "event": payment.event_id }));
-        }
-
-        if !gw.accepts_risk(payment.risk) {
-            // Recorded, not silently dropped: a refused payment is
-            // something the operator has to be able to see and refund.
-            self.record(
-                "pay.deposit.refused",
-                json!({
-                    "agent_did": payment.agent_did,
-                    "rail": "stripe",
-                    "event": payment.event_id,
-                    "risk": payment.risk.as_str(),
-                }),
-            );
-            return Err(Error::EscrowViolation(format!(
-                "refused: Radar scored this charge {} and this node blocks at {}",
-                payment.risk.as_str(),
-                gw.block_at.as_str()
-            )));
-        }
-
-        let entry = self.balances.entry(payment.agent_did.clone()).or_default();
-        if entry.currency.is_empty() {
-            entry.currency = payment.currency.clone();
-        }
-        let after = Amount::from_minor(entry.total().minor_units() + payment.amount.minor_units());
-        if gw.requires_kyc(after) && !self.kyc_verified.contains(&payment.agent_did) {
-            self.record(
-                "pay.deposit.refused",
-                json!({
-                    "agent_did": payment.agent_did,
-                    "rail": "stripe",
-                    "event": payment.event_id,
-                    "reason": "kyc_required",
-                }),
-            );
-            return Err(Error::EscrowViolation(
-                "refused: this credit would take the balance past the threshold that requires identity verification".into(),
-            ));
-        }
-        entry.credit(payment.amount);
-        let balance = entry.clone();
-        self.save_balance(&payment.agent_did);
-        self.credited_deposits.insert(key.clone());
-        self.save_state("credited", &key, &payment.agent_did);
-        self.record(
-            "pay.deposit",
-            json!({
-                "agent_did": payment.agent_did,
-                "amount": payment.amount.to_string_decimal(),
-                "currency": payment.currency,
-                "rail": "stripe",
-                "event": payment.event_id,
-                "risk": payment.risk.as_str(),
-                "livemode": payment.livemode,
-                // A card payment can be reversed weeks later, so the
-                // funds are credited but not yet spendable.
-                "spendable_at": gw.spendable_at(now_unix()),
-            }),
-        );
-        Ok(json!({
-            "credited": payment.amount.to_string_decimal(),
-            "available": balance.available.to_string_decimal(),
-            "currency": balance.currency,
-            "spendable_at": gw.spendable_at(now_unix()),
-            "risk": payment.risk.as_str(),
-        }))
-    }
-
-    /// Mark an agent as having passed identity verification.
-    pub fn set_kyc_verified(&mut self, admin: &str, agent_did: &str, reference: &str) -> Result<Value> {
-        match self.admin_token.as_deref() {
-            Some(t) if t == admin => {}
-            _ => return Err(Error::Unauthorized("operator token required".into())),
-        }
-        self.kyc_verified.insert(agent_did.to_string());
-        self.save_state("kyc", agent_did, &reference.to_string());
-        self.record(
-            "gov.certify",
-            json!({ "agent_did": agent_did, "kind": "kyc", "reference": reference }),
-        );
-        Ok(json!({ "agent_did": agent_did, "kyc": "verified" }))
-    }
-
     /// Is this contract's payment actually secured?
     ///
     /// One predicate, used by both `exe.start` and `exe.deliver`, so the
@@ -3730,14 +3605,6 @@ pub fn route_with_ip(
                 (Some(t), Ok(a)) => guard.withdraw(t, &a, destination),
                 (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
                 (_, Err(e)) => Err(e),
-            }
-        }
-        ("POST", "/v1/kyc/verify") => {
-            let agent = body.get("agent_did").and_then(|v| v.as_str()).unwrap_or("");
-            let reference = body.get("reference").and_then(|v| v.as_str()).unwrap_or("");
-            match token {
-                Some(t) => guard.set_kyc_verified(t, agent, reference),
-                None => Err(Error::Unauthorized("operator token required".into())),
             }
         }
         // Public on purpose: a reserves attestation nobody can read is
