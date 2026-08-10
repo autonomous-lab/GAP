@@ -2241,7 +2241,7 @@ settle on chain instead"
             ));
         }
         let policy = crate::deposit::DepositPolicy::from_env();
-        if !policy.is_configured() {
+        if !policy.is_configured() && policy.contract().trim().is_empty() {
             return Err(Error::EscrowViolation(
                 "this node cannot verify deposits: no settlement token or deposit address is \
 configured, and crediting one on the depositor's word is not an option"
@@ -2265,15 +2265,31 @@ configured, and crediting one on the depositor's word is not an option"
             .ok_or_else(|| Error::EscrowViolation("no chain connection configured".into()))?;
         let receipt = chain.transaction_receipt(tx)?;
         let head = chain.block_number()?;
-        let observed = crate::deposit::transfer_from_receipt(&receipt, head).ok_or_else(|| {
-            Error::EscrowViolation(
-                "that transaction carries no token transfer this node can credit".into(),
-            )
-        })?;
-        let raw = policy.accept(&observed)?;
-        let amount = crate::deposit::units_to_amount(raw.minor_units(), policy.decimals);
-
         let did = self.agent_by_token(token)?.identity.did().to_string();
+
+        // The deposit contract first: it carries the agent identifier,
+        // so it answers "whose money is this?" without anyone having to
+        // be believed. A plain transfer only answers "how much", and is
+        // accepted solely when the node runs per-agent addresses, where
+        // the destination is the attribution.
+        let (raw, from, confirmations) =
+            match crate::deposit::deposit_from_receipt(&receipt, head) {
+                Some(d) => {
+                    let amount = policy.accept_contract_deposit(&d, &did)?;
+                    (amount, d.from, d.confirmations)
+                }
+                None => {
+                    let observed = crate::deposit::transfer_from_receipt(&receipt, head)
+                        .ok_or_else(|| {
+                            Error::EscrowViolation(
+                                "that transaction carries no deposit this node can credit".into(),
+                            )
+                        })?;
+                    let amount = policy.accept(&observed)?;
+                    (amount, observed.from, observed.confirmations)
+                }
+            };
+        let amount = crate::deposit::units_to_amount(raw.minor_units(), policy.decimals);
         let currency = self.custody.currency.clone();
         let entry = self.balances.entry(did.clone()).or_default();
         if entry.currency.is_empty() {
@@ -2291,8 +2307,8 @@ configured, and crediting one on the depositor's word is not an option"
                 "amount": amount.to_string_decimal(),
                 "currency": balance.currency,
                 "tx": tx,
-                "from": observed.from,
-                "confirmations": observed.confirmations,
+                "from": from,
+                "confirmations": confirmations,
             }),
         );
         Ok(json!({

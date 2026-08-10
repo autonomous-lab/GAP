@@ -385,3 +385,230 @@ mod address_tests {
         assert_ne!(deposit_key_for(&seed, "did:gap:aaa"), seed);
     }
 }
+
+// ---------------------------------------------------------------
+// The deposit-contract rail (contracts/GapDeposit.sol)
+// ---------------------------------------------------------------
+//
+// A plain ERC-20 transfer says how much arrived and never whose it is.
+// The deposit contract carries the agent identifier in its calldata and
+// emits it back in an indexed event, so one address serves every agent
+// and there is nothing to sweep.
+
+/// `keccak256("Deposited(bytes32,address,uint256)")`.
+///
+/// Computed rather than hardcoded: a mistyped constant would silently
+/// match no event at all, and every deposit would look like "not a
+/// deposit" forever.
+pub fn deposited_topic() -> [u8; 32] {
+    keccak(b"Deposited(bytes32,address,uint256)")
+}
+
+/// `keccak256(did)`, the identifier the contract emits.
+pub fn agent_id(did: &str) -> [u8; 32] {
+    keccak(did.as_bytes())
+}
+
+fn keccak(input: &[u8]) -> [u8; 32] {
+    use tiny_keccak::{Hasher, Keccak};
+    let mut k = Keccak::v256();
+    k.update(input);
+    let mut out = [0u8; 32];
+    k.finalize(&mut out);
+    out
+}
+
+/// A deposit as the contract reported it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractDeposit {
+    pub contract: String,
+    /// keccak256 of the agent DID, hex without `0x`.
+    pub agent_id: String,
+    pub from: String,
+    pub amount: Amount,
+    pub confirmations: u64,
+}
+
+/// Pull a `Deposited` event out of a transaction receipt.
+pub fn deposit_from_receipt(
+    receipt: &serde_json::Value,
+    current_block: u64,
+) -> Option<ContractDeposit> {
+    if receipt.get("status").and_then(|s| s.as_str()) != Some("0x1") {
+        return None;
+    }
+    let block = receipt
+        .get("blockNumber")
+        .and_then(|b| b.as_str())
+        .and_then(|b| u64::from_str_radix(b.trim_start_matches("0x"), 16).ok())?;
+    let confirmations = current_block.saturating_sub(block).saturating_add(1);
+    let want = hex::encode(deposited_topic());
+
+    for log in receipt.get("logs")?.as_array()? {
+        let topics = log.get("topics")?.as_array()?;
+        if topics.len() < 3 {
+            continue;
+        }
+        let topic0 = topics[0].as_str().unwrap_or("").trim_start_matches("0x");
+        if !topic0.eq_ignore_ascii_case(&want) {
+            continue;
+        }
+        let raw = log
+            .get("data")
+            .and_then(|d| d.as_str())
+            .and_then(|d| u128::from_str_radix(d.trim_start_matches("0x"), 16).ok())?;
+        return Some(ContractDeposit {
+            contract: log.get("address").and_then(|a| a.as_str())?.to_string(),
+            agent_id: topics[1]
+                .as_str()
+                .unwrap_or("")
+                .trim_start_matches("0x")
+                .to_lowercase(),
+            from: topic_to_address(topics[2].as_str().unwrap_or("")),
+            amount: Amount::from_minor(raw),
+            confirmations,
+        });
+    }
+    None
+}
+
+impl DepositPolicy {
+    /// The deposit contract, when one is configured. Preferred over the
+    /// plain-transfer rail because it answers "whose money is this?"
+    /// without anyone having to be believed.
+    pub fn contract(&self) -> String {
+        std::env::var("GAP_DEPOSIT_CONTRACT").unwrap_or_default()
+    }
+
+    /// Accept or reject a contract deposit, for a known agent.
+    ///
+    /// The agent identifier is checked against the DID of the caller
+    /// asking for the credit. Without that, one agent could point at
+    /// another's deposit and take the balance.
+    pub fn accept_contract_deposit(
+        &self,
+        observed: &ContractDeposit,
+        claiming_did: &str,
+    ) -> Result<Amount> {
+        let configured = self.contract();
+        if !eq_address(&observed.contract, &configured) {
+            return Err(Error::EscrowViolation(format!(
+                "event came from {}, not this node's deposit contract",
+                observed.contract
+            )));
+        }
+        let expected = hex::encode(agent_id(claiming_did));
+        if observed.agent_id != expected {
+            return Err(Error::EscrowViolation(
+                "that deposit was made for a different agent".into(),
+            ));
+        }
+        if observed.confirmations < self.min_confirmations {
+            return Err(Error::EscrowViolation(format!(
+                "only {} confirmation(s); {} required before crediting",
+                observed.confirmations, self.min_confirmations
+            )));
+        }
+        if observed.amount.minor_units() == 0 {
+            return Err(Error::EscrowViolation("deposit of zero".into()));
+        }
+        Ok(observed.amount)
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    const CONTRACT: &str = "0x5555555555555555555555555555555555555555";
+    const DID: &str = "did:gap:aaa";
+
+    fn receipt(agent_topic: &str, emitter: &str, amount_hex: &str, status: &str) -> serde_json::Value {
+        json!({
+            "status": status,
+            "blockNumber": "0x64",
+            "logs": [{
+                "address": emitter,
+                "topics": [
+                    format!("0x{}", hex::encode(deposited_topic())),
+                    agent_topic,
+                    "0x0000000000000000000000002222222222222222222222222222222222222222"
+                ],
+                "data": amount_hex
+            }]
+        })
+    }
+
+    fn policy() -> DepositPolicy {
+        std::env::set_var("GAP_DEPOSIT_CONTRACT", CONTRACT);
+        DepositPolicy {
+            min_confirmations: 12,
+            decimals: 6,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_topic_is_derived_not_typed() {
+        // A mistyped constant would match no event at all, and every
+        // deposit would look like "not a deposit" forever.
+        assert_eq!(deposited_topic().len(), 32);
+        assert_ne!(deposited_topic(), [0u8; 32]);
+    }
+
+    #[test]
+    fn a_deposit_for_this_agent_is_credited() {
+        let topic = format!("0x{}", hex::encode(agent_id(DID)));
+        let r = receipt(&topic, CONTRACT, "0x4c4b40", "0x1");
+        let d = deposit_from_receipt(&r, 200).expect("a deposit");
+        let amount = policy().accept_contract_deposit(&d, DID).unwrap();
+        assert_eq!(amount.minor_units(), 5_000_000);
+    }
+
+    #[test]
+    fn one_agent_cannot_claim_anothers_deposit() {
+        // The attack the whole design exists to stop: point at somebody
+        // else's payment and take the credit.
+        let topic = format!("0x{}", hex::encode(agent_id("did:gap:someone-else")));
+        let r = receipt(&topic, CONTRACT, "0x4c4b40", "0x1");
+        let d = deposit_from_receipt(&r, 200).unwrap();
+        let err = policy()
+            .accept_contract_deposit(&d, DID)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("made for a different agent"), "{err}");
+    }
+
+    #[test]
+    fn an_event_from_another_contract_is_refused() {
+        // Any contract can emit an identical-looking event.
+        let topic = format!("0x{}", hex::encode(agent_id(DID)));
+        let r = receipt(&topic, "0x9999999999999999999999999999999999999999", "0x4c4b40", "0x1");
+        let d = deposit_from_receipt(&r, 200).unwrap();
+        let err = policy()
+            .accept_contract_deposit(&d, DID)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not this node's deposit contract"), "{err}");
+    }
+
+    #[test]
+    fn a_shallow_or_reverted_deposit_credits_nothing() {
+        let topic = format!("0x{}", hex::encode(agent_id(DID)));
+        let r = receipt(&topic, CONTRACT, "0x4c4b40", "0x1");
+        let d = deposit_from_receipt(&r, 100).unwrap();
+        assert!(policy().accept_contract_deposit(&d, DID).is_err());
+
+        let reverted = receipt(&topic, CONTRACT, "0x4c4b40", "0x0");
+        assert!(deposit_from_receipt(&reverted, 200).is_none());
+    }
+
+    #[test]
+    fn the_agent_id_is_the_keccak_of_the_did() {
+        // The node and the contract must agree on this, or every
+        // deposit is attributed to nobody.
+        assert_eq!(agent_id(DID), agent_id("did:gap:aaa"));
+        assert_ne!(agent_id(DID), agent_id("did:gap:aab"));
+    }
+}

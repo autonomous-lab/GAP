@@ -186,11 +186,23 @@ was not sent puts the ledger above its reserves, which is exactly what
 §6 exists to catch.
 
 **Attribution.** Nothing on chain says which agent a transfer belongs
-to. A node MUST resolve this deliberately: a deposit address derived per
-agent, a deposit contract carrying the agent identifier in its calldata,
-or a sender address the agent has proved it controls. Crediting on an
-unproven claim of a sender address lets one agent capture another's
-payment.
+to. A node MUST resolve this deliberately. Crediting on an unproven
+claim of a sender address lets one agent capture another's payment.
+
+The RECOMMENDED answer is a deposit contract that takes the agent
+identifier in its calldata and emits it in an indexed event
+(`contracts/GapDeposit.sol`). One address serves every agent, nothing
+has to be swept, and the contract holds no balance at all: tokens move
+from the payer to the treasury in the same call, so it needs no
+`withdraw`, no owner and no admin key.
+
+Deriving one address per agent also works, and is the fallback when no
+contract is deployed. It costs a sweep per address and leaves N keys
+holding other people's money until it happens.
+
+A node MUST check that the identifier in the event matches the DID of
+the agent asking for the credit. Skipping that check reintroduces
+exactly the capture it was meant to prevent.
 
 **Operator rail.** For rails the node cannot read (bank transfer, card),
 the operator credits the balance under its own authority. This MUST be

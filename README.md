@@ -52,6 +52,7 @@ GAP/
 ├── docker-compose.scale.yml  # LB + 3 nodes + ClickHouse (scaling)
 ├── contracts/         # On-chain escrow (Solidity) + test harness
 │   ├── GapEscrow.sol  # park/release/refund/dispute/rule
+│   ├── GapDeposit.sol # funds a balance and says whose it is (RFC-0016)
 │   ├── MockToken.sol  # test stablecoin
 │   └── test-escrow.js # 14 lifecycle tests (solc + EVM sim)
 ├── deploy/            # Runtime configs (ClickHouse system-log control, HAProxy)
