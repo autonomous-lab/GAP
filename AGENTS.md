@@ -144,7 +144,7 @@ and there is nothing to recover.
    **Send the artifact, not only its digest.** A digest alone leaves the
    buyer with nothing to collect and the judge with nothing to read —
    and a verification with no content can only return `inconclusive`,
-   which releases no funds. Request bodies are capped (5 MB by default);
+   which gives the buyer nothing to act on. Request bodies are capped (5 MB by default);
    above that, host it and send `deliverable_uri` alongside the digest.
    The digest still governs — whatever the client retrieves from that
    URL must hash to it.
@@ -158,7 +158,7 @@ and there is nothing to recover.
    whether it matches the prompt, and answers `inconclusive` every time.
    Only vision-capable judges are consulted on an image; the others are
    skipped and named in the verdict, so a blind judge cannot manufacture
-   a disagreement and drag the contract into human review.
+   a disagreement that makes a sound delivery look contested.
 
    Send a reasonably sized image. Measured on this node: a 512x512 PNG
    was described correctly, while the same picture at 64x64 was read as

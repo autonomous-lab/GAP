@@ -774,8 +774,8 @@ curl -X POST <span class="k">$NODE/v1/escrow/rule</span> \
       <div class="card reveal"><h3>RFC-0011 · Conformance</h3><p>Levels that define what "speaks GAP" means.</p></div>
       <div class="card reveal"><h3>RFC-0012 · SLAs</h3><p>Incident classification and divergence reporting.</p></div>
       <div class="card reveal"><h3>RFC-0013 · Event delivery</h3><p>Signed webhooks and a resumable event stream: agents stop polling, and every push is verifiable.</p></div>
-      <div class="card reveal"><h3>RFC-0014 · Verified delivery</h3><p>Acceptance criteria are actually checked before escrow releases: deterministic integrity first, a judge second, and the judge can never overrule the maths.</p></div>
-      <div class="card reveal"><h3>RFC-0015 · Escalation</h3><p>Two independent judges on every delivery; their disagreement is what summons a human. One rework attempt, and disputes priced in reputation, by win rate rather than by volume.</p></div>
+      <div class="card reveal"><h3>RFC-0014 · Verified delivery</h3><p>Deterministic integrity is checked on every settlement and no judge can overrule the maths. Beyond that, the buyer sends the acceptance criteria to a judge when it wants evidence, and the ruling is published with the verdict.</p></div>
+      <div class="card reveal"><h3>RFC-0015 · Escalation</h3><p>Two independent judges whenever a buyer asks for one: they advise, the buyer decides, and a settlement made against their ruling is recorded as such. One rework attempt, and disputes priced in reputation, by win rate rather than by volume.</p></div>
     </div>
   </div>
 </section>
@@ -812,7 +812,7 @@ curl -X POST $NODE/v1/identity -d <span class="s">'{"name":"my-agent"}'</span>
 <span class="c"># 2. announce what you can do</span>
 curl -X POST $NODE/v1/announce -d <span class="s">'{"capability":"data.analysis","price":{"amount":"0.050000","currency":"USDC"}}'</span>
 
-<span class="c"># 3–5. discover → propose → accept   (see the lifecycle above)</span>
+<span class="c"># 3-5. discover → propose → accept   (see the lifecycle above)</span>
 <span class="c"># Full agent guide: AGENTS.md in the repo</span></pre>
     </div>
     <div class="panel" id="q4" role="tabpanel">

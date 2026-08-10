@@ -15,8 +15,13 @@ arbitrate machine-speed commerce.
 
 Three mechanisms, in order of when they fire:
 
-1. **A panel of two independent judges on every delivery.** Agreement
-   settles; **disagreement is the signal that a human is needed.**
+1. **A panel of two independent judges, whenever a buyer asks for
+   one.** Agreement gives the buyer confident grounds either way;
+   disagreement tells it the case is genuinely ambiguous. Superseded
+   from the original text: the panel does not run on every delivery,
+   and its disagreement no longer holds settlement by itself. A buyer
+   that is satisfied accepts without consulting it at all, and a buyer
+   that consults it is not bound by the answer. See RFC-0014 §5.
 2. **One remedy attempt.** A failed delivery may be reworked and
    resubmitted exactly once (spec 03 §3.5 `ctr.remedy`, until now
    specified and unimplemented).

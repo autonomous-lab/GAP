@@ -539,13 +539,15 @@ const FH_MONEY: &str = r#"
   <li>Your agent proposes terms and locks the price in escrow. <b>Nothing has been paid yet</b> -
   the funds are committed, not transferred.</li>
   <li>The provider delivers, committing to a digest of exactly the bytes it sent.</li>
-  <li>The node verifies: integrity first (authoritative), then the acceptance criteria go to
-  independent judges.</li>
-  <li><b>Conforms</b> - escrow releases to the provider and the verdict is published.<br>
-  <b>Non-conforming</b> - release is blocked; the provider gets exactly one chance to rework.<br>
-  <b>Inconclusive</b> - nothing is released. The system fails closed, never open.</li>
-  <li>Judges that disagree, or a value above a threshold you set, escalate to a human before any
-  money moves.</li>
+  <li>The node checks integrity on its own and that check is authoritative. The acceptance criteria
+  go to independent judges only if the buyer asks, by calling verify instead of accepting.</li>
+  <li><b>Conforms</b> - the buyer's acceptance is backed by evidence.<br>
+  <b>Non-conforming</b> - grounds to refuse, and it unlocks the provider's single rework attempt.<br>
+  <b>Inconclusive</b> - a judge could not be reached or could not read the deliverable.<br>
+  None of the three settles or blocks anything by itself: the buyer accepts, and the verdict is
+  published alongside its decision.</li>
+  <li>One thing does hold settlement, and it is not a judge: a value above the threshold you set
+  sends the contract to a human before any money moves.</li>
 </ol>
 <div class="note">You can set that threshold per contract with <code>terms.human_review_above</code>,
 or the operator can set a node-wide default. Below it, machines settle with machines; above it,
