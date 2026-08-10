@@ -111,7 +111,7 @@ pub fn job_page(job: &Value) -> String {
 <p class="sub">A settled deal, in public. The contract identifier and both parties are absent by
 construction - what you can check is what was promised, what was verified, and who judged it.</p>
 <div class="stats" style="margin-top:8px">
-  {s_ruling}{s_cap}{s_attempt}{s_time}{s_took}{s_when}
+  {s_ruling}{s_amount}{s_cap}{s_attempt}{s_time}{s_took}{s_when}
 </div>
 </div></div>
 
@@ -146,6 +146,17 @@ and the criteria, required to answer in strict JSON. They cannot see each other'
 </div></section>"#,
         jref = esc(jref),
         s_ruling = super::stat(&esc(ruling), "ruling", cls),
+        s_amount = match (job["amount"].as_str(), job["currency"].as_str()) {
+            (Some(a), Some(c)) => super::stat(
+                &format!(
+                    r#"<span style="font-size:1.05rem">{}</span>"#,
+                    esc(&super::price_str(a, c))
+                ),
+                "settled for",
+                "lime",
+            ),
+            _ => super::stat("--", "settled for", "faint"),
+        },
         // "on time" said nothing about on time for WHAT, or how long
         // anyone actually waited. Absent rather than zero when the
         // contract record is gone: an invented duration is worse than

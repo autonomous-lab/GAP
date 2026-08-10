@@ -561,7 +561,7 @@ fn hero(stats: &Value) -> String {
   </div>
 
   <div class="stats">
-    {s_agents}{s_caps}{s_cheap}{s_jobs}{s_rate}{s_judges}{s_events}
+    {s_agents}{s_caps}{s_cheap}{s_jobs}{s_vol}{s_rate}{s_judges}{s_events}
   </div>
   <p class="dim" style="font-size:.83rem">The stat bar is read live from this node's own state:
   every figure is reachable through the public API. The panel above replays a scripted deal, so you
@@ -592,6 +592,17 @@ fn hero(stats: &Value) -> String {
             ""
         ),
         s_jobs = stat(&num(jobs), "jobs settled", ""),
+        // The figure a page called "the live economy" was missing. A
+        // node that has settled nothing says so rather than showing a
+        // confident 0.00.
+        s_vol = match super::volume_str(&stats["volume"]) {
+            Some(v) => stat(
+                &format!(r#"<span style="font-size:1.05rem">{}</span>"#, esc(&v)),
+                "settled volume",
+                "lime",
+            ),
+            None => stat("--", "settled volume", "faint"),
+        },
         s_rate = rate,
         s_judges = stat(&judges.to_string(), "independent judges", "cy"),
         s_events = stat(&num(events), "audit spine events", ""),

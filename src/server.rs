@@ -3369,6 +3369,8 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                         // on the job record, so it is right for jobs
                         // settled before this existed - and absent,
                         // rather than zero, when the contract is gone.
+                        "amount": self.job_amount(&r.job_ref).map(|(a, _)| a),
+                        "currency": self.job_amount(&r.job_ref).map(|(_, c)| c),
                         "duration_seconds": self
                             .jobs_by_ref
                             .get(&r.job_ref)
@@ -3409,6 +3411,9 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             // When it settled, and how long it took end to end. The
             // page said "on time" without ever saying on time for what,
             // or how long anyone waited.
+            "amount": contract
+                .map(|c| crate::amount::Amount::from_f64_rounding(c.terms.price.amount).to_string_decimal()),
+            "currency": contract.map(|c| c.terms.price.currency.clone()),
             "duration_seconds": contract
                 .filter(|c| c.created_at > 0 && record.at >= c.created_at)
                 .map(|c| record.at - c.created_at),
@@ -3429,6 +3434,25 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                 "signature": v.signature,
             })),
         }))
+    }
+
+    /// What a settled job was worth, from the contract it settled.
+    ///
+    /// Not stored on `JobRecord`, for the same reason its duration is
+    /// not: the contract is where the agreed price lives, so deriving
+    /// it keeps the figure right for every job settled before this
+    /// existed and makes the two impossible to desynchronise.
+    ///
+    /// Returns `None` when the contract is gone, and the pages render a
+    /// dash for that rather than a zero. A marketplace that reports
+    /// 0.00 for work it cannot price is understating its own volume.
+    fn job_amount(&self, job_ref: &str) -> Option<(String, String)> {
+        let cid = self.jobs_by_ref.get(job_ref)?;
+        let c = self.contracts.get(cid)?;
+        Some((
+            crate::amount::Amount::from_f64_rounding(c.terms.price.amount).to_string_decimal(),
+            c.terms.price.currency.clone(),
+        ))
     }
 
     /// Headline numbers for the public home page.
@@ -3467,6 +3491,38 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         .flatten()
         .collect();
 
+        // Volume settled, BROKEN DOWN BY CURRENCY and never summed
+        // across them. This node already carries both EUR and USDC, so
+        // a single headline figure would be adding two different things
+        // and calling the result money.
+        //
+        // Jobs whose contract is no longer in storage are counted in
+        // `unpriced` rather than as zero: understating volume is still
+        // misreporting it, and saying how many could not be priced is
+        // the only honest way to publish the rest.
+        let mut by_currency: std::collections::BTreeMap<String, u128> = Default::default();
+        let mut unpriced = 0u64;
+        for r in self.jobs.values().flatten() {
+            match self.job_amount(&r.job_ref) {
+                Some((amount, currency)) => {
+                    let minor = crate::amount::Amount::parse(&amount)
+                        .map(|a| a.minor_units())
+                        .unwrap_or(0);
+                    *by_currency.entry(currency).or_insert(0) += minor;
+                }
+                None => unpriced += 1,
+            }
+        }
+        let volume = json!({
+            "by_currency": by_currency
+                .into_iter()
+                .map(|(c, minor)| {
+                    (c, crate::amount::Amount::from_minor(minor).to_string_decimal())
+                })
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            "unpriced_jobs": unpriced,
+        });
+
         json!({
             "node": self.node_did().to_string(),
             "version": crate::VERSION,
@@ -3483,6 +3539,7 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             "conform_rate": (judged > 0).then(|| conforming as f64 / judged as f64),
             "on_time_rate": (total > 0).then(|| on_time as f64 / total as f64),
             "remedied": remedied,
+            "volume": volume,
             "escalated": self.escalations.len(),
             "judges": judges,
             "events": self.storage.event_count().unwrap_or(0),

@@ -23,6 +23,7 @@ pub fn activity_page(recent: &Value, stats: &Value) -> String {
         rows.push_str(&format!(
             r#"<tr><td class="mono dim">{seq}</td>
 <td class="mono nowrap dim">{when}</td><td class="mono nowrap">{dur}</td>
+<td class="mono nowrap lime">{amt}</td>
 <td class="mono"><a href="/job/{jref}">{jref}</a></td>
 <td><a href="/capability/{cap}">{cap}</a></td><td>{out}</td><td class="{cls}">{verdict}</td>
 <td class="dim mono">{judge}</td><td>{attempt}</td></tr>"#,
@@ -33,6 +34,13 @@ pub fn activity_page(recent: &Value, stats: &Value) -> String {
             },
             // Absent, not zero: a contract whose record is gone cannot
             // be timed, and printing "0s" would invent a fact.
+            // A job whose contract is gone cannot be priced. A dash,
+            // not 0.00: a marketplace that reports zero for work it
+            // cannot price is understating its own volume.
+            amt = match (j["amount"].as_str(), j["currency"].as_str()) {
+                (Some(a), Some(c)) => esc(&super::price_str(a, c)),
+                _ => r#"<span class="faint">--</span>"#.into(),
+            },
             dur = match j["duration_seconds"].as_u64() {
                 Some(d) => esc(&took(d)),
                 None => r#"<span class="faint">--</span>"#.into(),
@@ -51,7 +59,7 @@ pub fn activity_page(recent: &Value, stats: &Value) -> String {
         ));
     }
     if rows.is_empty() {
-        rows = r#"<tr><td colspan="9" class="dim" style="padding:30px 14px">Nothing has settled on
+        rows = r#"<tr><td colspan="10" class="dim" style="padding:30px 14px">Nothing has settled on
             this node yet. This table fills itself the moment a contract completes - no refresh
             needed.</td></tr>"#
             .into();
@@ -80,7 +88,7 @@ pub fn activity_page(recent: &Value, stats: &Value) -> String {
 audit what was delivered and how it was judged without learning who traded with whom. Click any
 job to read its full verdict - criteria, checks, judge reasoning and the node's signature.</p>
 <div class="stats" style="margin-top:6px">
-  {s_jobs}{s_rate}{s_remedied}{s_events}
+  {s_jobs}{s_vol}{s_rate}{s_remedied}{s_events}
 </div>
 </div></div>
 
@@ -90,7 +98,7 @@ job to read its full verdict - criteria, checks, judge reasoning and the node's 
 are recorded</span></p>
 
 <div class="tablewrap"><table id="feed" data-seq="{seq}"><tbody>
-<tr><th>Seq</th><th>Settled</th><th>Took</th><th>Job</th><th>Capability</th><th>Outcome</th><th>Verdict</th><th>Judged by</th><th>Attempt</th></tr>
+<tr><th>Seq</th><th>Settled</th><th>Took</th><th>Amount</th><th>Job</th><th>Capability</th><th>Outcome</th><th>Verdict</th><th>Judged by</th><th>Attempt</th></tr>
 {rows}</tbody></table></div>
 
 <div class="note" style="margin-top:22px">Consuming this as an agent? Do not poll.
@@ -154,6 +162,9 @@ are party to. Both resume from a cursor, so a reconnect never loses the tail.
         '<td class="mono dim">' + esc(j.seq) + '</td>' +
         '<td class="mono nowrap dim">' + esc(when) + '</td>' +
         '<td class="mono nowrap">' + dur + '</td>' +
+        '<td class="mono nowrap lime">' +
+          ((j.amount && j.currency) ? esc(j.amount + ' ' + j.currency)
+                                    : '<span class="faint">--</span>') + '</td>' +
         '<td class="mono"><a href="/job/' + esc(j.job_ref) + '">' + esc(j.job_ref) + '</a></td>' +
         '<td><a href="/capability/' + esc(j.capability_id) + '">' +
           esc(j.capability_id) + '</a></td>' +
@@ -179,6 +190,14 @@ are party to. Both resume from a cursor, so a reconnect never loses the tail.
             "jobs settled",
             ""
         ),
+        s_vol = match super::volume_str(&stats["volume"]) {
+            Some(v) => super::stat(
+                &format!(r#"<span style="font-size:1.05rem">{}</span>"#, esc(&v)),
+                "settled volume",
+                "lime",
+            ),
+            None => super::stat("--", "settled volume", "faint"),
+        },
         s_rate = rate,
         s_remedied = super::stat(
             &num(stats["remedied"].as_u64().unwrap_or(0)),
@@ -325,5 +344,38 @@ mod tests {
         // And the empty-state placeholder must span them all.
         let html_empty = activity_page(&json!({ "jobs": [] }), &json!({ "jobs": 0 }));
         assert!(html_empty.contains(&format!(r#"colspan="{headers}""#)));
+    }
+
+    #[test]
+    fn the_feed_shows_what_each_deal_was_worth() {
+        let html = activity_page(
+            &json!({ "jobs": [{
+                "seq": 254, "job_ref": "abc", "capability_id": "cap:x",
+                "outcome": "accepted", "verdict": "conforms",
+                "at": 1_786_393_036u64, "duration_seconds": 8_073u64,
+                "amount": "0.050000", "currency": "USDC"
+            }]}),
+            &json!({ "jobs": 1, "volume": { "by_currency": { "USDC": "0.050000" } } }),
+        );
+        assert!(html.contains("<th>Amount</th>"));
+        assert!(html.contains("0.050000 USDC"));
+        assert!(html.contains("settled volume"));
+    }
+
+    #[test]
+    fn a_job_that_cannot_be_priced_shows_a_dash_not_a_zero() {
+        // Reporting 0.00 for work whose contract is gone understates
+        // the node's own volume, which is still misreporting it.
+        let html = activity_page(
+            &json!({ "jobs": [{
+                "seq": 1, "job_ref": "abc", "capability_id": "cap:x",
+                "outcome": "accepted", "verdict": "conforms", "at": 1_786_393_036u64
+            }]}),
+            &json!({ "jobs": 1, "volume": { "by_currency": {} } }),
+        );
+        let table = html.split("<tbody>").nth(1).unwrap();
+        let row = table.split("</table>").next().unwrap();
+        assert!(!row.contains("0.000000"), "no invented price: {row}");
+        assert!(row.contains(r#"<span class="faint">--</span>"#));
     }
 }

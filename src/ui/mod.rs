@@ -55,6 +55,67 @@ use serde_json::Value;
 /// string is a dependency, a supply chain and an audit surface. This is
 /// Howard Hinnant's civil-from-days, which is exact for every date this
 /// node will ever stamp.
+/// An already-decimal amount and its currency, for display.
+///
+/// Takes the decimal string the node produced rather than a float:
+/// re-parsing money into an f64 to print it is how 0.05 becomes
+/// 0.05000000000000000277.
+/// Settled volume, one line per currency.
+///
+/// Never a single total. This node already carries EUR and USDC, and
+/// adding those together produces a number that is not money in any
+/// currency. Two are shown; beyond that it says how many more, because
+/// a stat tile that wraps to four lines stops being a stat tile.
+pub fn volume_str(volume: &Value) -> Option<String> {
+    let by = volume.get("by_currency")?.as_object()?;
+    if by.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = by
+        .iter()
+        .map(|(currency, amount)| {
+            format!(
+                "{} {}",
+                trim_zeros(amount.as_str().unwrap_or("0")),
+                currency
+            )
+        })
+        .collect();
+    parts.sort();
+    let extra = parts.len().saturating_sub(2);
+    parts.truncate(2);
+    let mut out = parts.join(" + ");
+    if extra > 0 {
+        out.push_str(&format!(" +{extra}"));
+    }
+    Some(out)
+}
+
+/// Drop trailing zeros for display, never below two decimals.
+///
+/// Six decimals is the ledger's precision, not a reader's. Printed in
+/// full, two currencies wrapped a headline tile onto three lines and
+/// pushed the whole stat band onto a second row. The exact figure stays
+/// one API call away; this is the glance version.
+fn trim_zeros(decimal: &str) -> String {
+    let Some((whole, frac)) = decimal.split_once('.') else {
+        return decimal.to_string();
+    };
+    let trimmed = frac.trim_end_matches('0');
+    // Two decimals is what money looks like; below that it reads as a
+    // count rather than an amount.
+    let frac = if trimmed.len() < 2 {
+        format!("{trimmed:0<2}")
+    } else {
+        trimmed.to_string()
+    };
+    format!("{whole}.{frac}")
+}
+
+pub fn price_str(amount: &str, currency: &str) -> String {
+    format!("{amount} {currency}")
+}
+
 pub fn stamp(unix: u64) -> String {
     let days = (unix / 86_400) as i64;
     let secs = unix % 86_400;
@@ -1280,5 +1341,65 @@ mod tests {
         assert_eq!(took(8_073), "2h 14m");
         assert_eq!(took(86_400), "1d 0h");
         assert_eq!(took(200_000), "2d 7h");
+    }
+
+    #[test]
+    fn settled_volume_is_never_summed_across_currencies() {
+        // This node already carries EUR and USDC. Adding them produces
+        // a number that is not money in any currency, and a headline
+        // figure is exactly where that lie would be most convincing.
+        let v = json!({ "by_currency": { "EUR": "1.500000", "USDC": "0.250000" } });
+        let out = volume_str(&v).unwrap();
+        assert!(out.contains("1.50 EUR"));
+        assert!(out.contains("0.25 USDC"));
+        assert!(!out.contains("1.75"), "the two must not be added: {out}");
+    }
+
+    #[test]
+    fn a_node_that_has_settled_nothing_shows_no_volume_at_all() {
+        // Not 0.00: a confident zero and "we have no data" read the
+        // same to a visitor and only one of them is true.
+        assert_eq!(volume_str(&json!({ "by_currency": {} })), None);
+        assert_eq!(volume_str(&json!({})), None);
+    }
+
+    #[test]
+    fn a_long_currency_list_is_truncated_rather_than_wrapped() {
+        // A stat tile that wraps to four lines stops being a stat tile.
+        let v = json!({ "by_currency": {
+            "AAA": "1.000000", "BBB": "2.000000", "CCC": "3.000000", "DDD": "4.000000"
+        }});
+        let out = volume_str(&v).unwrap();
+        assert!(out.ends_with("+2"), "must admit what it dropped: {out}");
+        assert_eq!(out.matches('+').count(), 2);
+    }
+
+    #[test]
+    fn money_is_printed_from_the_decimal_string_not_a_float() {
+        // Re-parsing money into an f64 to display it is how 0.05
+        // becomes 0.05000000000000000277.
+        assert_eq!(price_str("0.050000", "USDC"), "0.050000 USDC");
+    }
+
+    #[test]
+    fn a_headline_amount_drops_noise_without_losing_the_number() {
+        assert_eq!(trim_zeros("0.255000"), "0.255");
+        assert_eq!(trim_zeros("2.050000"), "2.05");
+        assert_eq!(trim_zeros("1.000000"), "1.00");
+        assert_eq!(trim_zeros("0.000000"), "0.00");
+        assert_eq!(trim_zeros("1.500000"), "1.50");
+        // Precision that matters is kept.
+        assert_eq!(trim_zeros("0.000123"), "0.000123");
+        assert_eq!(trim_zeros("42"), "42");
+    }
+
+    #[test]
+    fn the_volume_tile_stays_short_enough_to_be_a_tile() {
+        // Two currencies at six decimals wrapped onto three lines and
+        // pushed the whole stat band onto a second row.
+        let v = json!({ "by_currency": { "EUR": "0.255000", "USDC": "2.050000" } });
+        let out = volume_str(&v).unwrap();
+        assert_eq!(out, "0.255 EUR + 2.05 USDC");
+        assert!(out.len() < 32, "too long for a stat tile: {out}");
     }
 }
