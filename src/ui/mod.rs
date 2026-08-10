@@ -49,6 +49,48 @@ use serde_json::Value;
 /// module goes through it — agent-supplied capability names and
 /// descriptions are attacker-controlled, so an unescaped one is stored
 /// XSS on the node's own domain.
+/// A UNIX timestamp as `2026-08-10 20:14 UTC`.
+///
+/// Written out rather than pulled in: a date crate for one format
+/// string is a dependency, a supply chain and an audit surface. This is
+/// Howard Hinnant's civil-from-days, which is exact for every date this
+/// node will ever stamp.
+pub fn stamp(unix: u64) -> String {
+    let days = (unix / 86_400) as i64;
+    let secs = unix % 86_400;
+    // Shift the epoch to 0000-03-01 so leap days land at the end of the
+    // cycle and the month arithmetic below has no special cases.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        secs / 3600,
+        (secs % 3600) / 60
+    )
+}
+
+/// A span in seconds, at the precision a reader can actually use.
+///
+/// Rounded on purpose. "2h 14m" answers what a buyer asks - was this
+/// minutes or days - and "8073 seconds" does not.
+pub fn took(seconds: u64) -> String {
+    match seconds {
+        0 => "under 1s".into(),
+        s if s < 60 => format!("{s}s"),
+        s if s < 3_600 => format!("{}m {:02}s", s / 60, s % 60),
+        s if s < 86_400 => format!("{}h {:02}m", s / 3_600, (s % 3_600) / 60),
+        s => format!("{}d {}h", s / 86_400, (s % 86_400) / 3_600),
+    }
+}
+
 pub fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -266,6 +308,7 @@ background:var(--panel-3);border:1px solid var(--line-2);font-family:ui-monospac
 .step code{color:var(--dim);font-size:.76rem;display:block;word-break:break-all}
 
 /* ---------------------------------------------------------- pills */
+.nowrap{white-space:nowrap}
 .pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line-2);border-radius:99px;
 padding:3px 10px;font-size:.75rem;color:var(--muted);margin:3px 5px 3px 0;white-space:nowrap}
 /* The directory card's four figures. A 2x2 on a narrow card and a
@@ -1207,5 +1250,35 @@ mod tests {
         ] {
             assert!(crate::server::static_asset(p).is_none(), "{p}");
         }
+    }
+
+    #[test]
+    fn a_timestamp_reads_as_a_date_a_human_can_check() {
+        // Hand-rolled civil-from-days rather than a date crate for one
+        // format string, so it is worth pinning against known values.
+        assert_eq!(stamp(0), "1970-01-01 00:00 UTC");
+        assert_eq!(stamp(1_786_393_036), "2026-08-10 20:17 UTC");
+        // A leap day, which is the case a naive implementation gets
+        // wrong and nobody notices for four years.
+        assert_eq!(stamp(1_709_164_800), "2024-02-29 00:00 UTC");
+        // ...and the day after, across the leap boundary.
+        assert_eq!(stamp(1_709_251_200), "2024-03-01 00:00 UTC");
+        // A century year that IS a leap year, the case that breaks the
+        // "divisible by 4" shortcut.
+        assert_eq!(stamp(951_782_400), "2000-02-29 00:00 UTC");
+    }
+
+    #[test]
+    fn a_duration_is_rounded_to_what_a_reader_can_use() {
+        // "was this minutes or days" is the question. "8073 seconds"
+        // does not answer it.
+        assert_eq!(took(0), "under 1s");
+        assert_eq!(took(43), "43s");
+        assert_eq!(took(60), "1m 00s");
+        assert_eq!(took(3_599), "59m 59s");
+        assert_eq!(took(3_600), "1h 00m");
+        assert_eq!(took(8_073), "2h 14m");
+        assert_eq!(took(86_400), "1d 0h");
+        assert_eq!(took(200_000), "2d 7h");
     }
 }

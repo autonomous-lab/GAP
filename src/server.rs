@@ -3353,6 +3353,17 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                         "remedied": r.remedied,
                         "on_time": r.on_time,
                         "at": r.at,
+                        // How long the deal actually took, end to end.
+                        // Derived from the contract rather than stored
+                        // on the job record, so it is right for jobs
+                        // settled before this existed - and absent,
+                        // rather than zero, when the contract is gone.
+                        "duration_seconds": self
+                            .jobs_by_ref
+                            .get(&r.job_ref)
+                            .and_then(|cid| self.contracts.get(cid))
+                            .filter(|c| c.created_at > 0 && r.at >= c.created_at)
+                            .map(|c| r.at - c.created_at),
                     })
                 })
             })
@@ -3384,6 +3395,13 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             "capability_id": record.capability_id,
             "outcome": record.outcome,
             "on_time": record.on_time,
+            // When it settled, and how long it took end to end. The
+            // page said "on time" without ever saying on time for what,
+            // or how long anyone waited.
+            "duration_seconds": contract
+                .filter(|c| c.created_at > 0 && record.at >= c.created_at)
+                .map(|c| record.at - c.created_at),
+            "started_at": contract.map(|c| c.created_at),
             "remedied": record.remedied,
             "at": record.at,
             // The criteria are public: they are what the verdict judged.
