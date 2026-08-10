@@ -128,6 +128,13 @@ pub struct NodeState {
     relayer: Option<Relayer>,
     /// The audit spine.
     pub storage: Box<dyn Storage>,
+    /// Projection writes that failed. The spine itself is checked at
+    /// the call site; these secondary tables were not, and a dropped
+    /// `Result` here is how a contract can be served from memory for
+    /// weeks and then vanish on the next restart, with nothing anywhere
+    /// saying when it was lost. Counted and surfaced rather than
+    /// swallowed.
+    persist_failures: u64,
     /// Per-token rate counters (audit H-03: API rate limiting).
     rate_limits: std::collections::HashMap<String, RateCounters>,
     /// Per-source-IP rate counters (audit H-03).
@@ -386,6 +393,7 @@ impl NodeState {
             workflows: HashMap::new(),
             relayer: None,
             storage,
+            persist_failures: 0,
             rate_limits: std::collections::HashMap::new(),
             ip_limits: std::collections::HashMap::new(),
             token_cap,
@@ -430,7 +438,26 @@ impl NodeState {
             contract_json: serde_json::to_string(contract).unwrap_or_else(|_| "{}".into()),
             updated_at: now_unix(),
         };
-        let _ = self.storage.upsert_contract(&record);
+        let r = self.storage.upsert_contract(&record);
+        self.note_persist(r, "contract", &record.contract_id.clone());
+    }
+
+    /// Record a projection write outcome. Never fails the request: a
+    /// deliverable that is already committed to the spine must not be
+    /// rejected because a secondary table hiccuped. But it is no longer
+    /// invisible.
+    fn note_persist<T>(&mut self, r: Result<T>, kind: &str, key: &str) {
+        if let Err(e) = r {
+            self.persist_failures += 1;
+            eprintln!("gap-node: cannot persist {kind} {key}: {e}");
+        }
+    }
+
+    /// How many projection writes have failed since this process
+    /// started. Exposed so "the node looks fine" and "the node is
+    /// silently losing records" stop looking identical.
+    pub fn persist_failures(&self) -> u64 {
+        self.persist_failures
     }
 
     fn persist_escrow(
@@ -447,7 +474,8 @@ impl NodeState {
             currency: currency.into(),
             updated_at: now_unix(),
         };
-        let _ = self.storage.upsert_escrow(&record);
+        let r = self.storage.upsert_escrow(&record);
+        self.note_persist(r, "escrow", &record.contract_id.clone());
     }
 
     /// Enforce per-token and per-IP rate limits before processing a
@@ -1005,6 +1033,7 @@ the content inline"
                 // Deterministic tier only: no criteria means no judge is
                 // consulted even if one is configured.
                 acceptance_criteria: vec![],
+                brief: None,
                 deadline: contract.terms.deadline,
                 delivered_at: now_unix(),
                 declared_hash: contract.deliverable_hash.clone().unwrap_or_default(),
@@ -1727,8 +1756,9 @@ the content inline"
                         let looks_like_image = d.media_type.starts_with("image/");
                         (
                             Some(format!(
-                                "[binary artifact held by the node: {} bytes, media type {}, \
-digest {} - integrity verified against the provider's commitment{}]",
+                                "[the provider delivered the artifact inline to the node: {} \
+base64 characters, media type {}, digest {}. The node recomputed the digest from the bytes it \
+received and it MATCHES the commitment, so the deliverable was supplied in full{}]",
                                 d.content.len(),
                                 if d.media_type.is_empty() {
                                     "unspecified"
@@ -1737,7 +1767,8 @@ digest {} - integrity verified against the provider's commitment{}]",
                                 },
                                 d.digest,
                                 if looks_like_image {
-                                    ". The image itself is attached to this message; judge it"
+                                    ". The image itself is attached to this message; judge it \
+directly rather than reasoning about its metadata"
                                 } else {
                                     ""
                                 }
@@ -1761,6 +1792,9 @@ digest {} - integrity verified against the provider's commitment{}]",
             contract_id: contract_id.to_string(),
             capability_id: contract.capability_id.clone(),
             acceptance_criteria: contract.terms.acceptance_criteria.clone(),
+            // What was ordered. A criterion like "matches the source
+            // image" is unanswerable without it.
+            brief: brief_of(&contract.terms),
             deadline: contract.terms.deadline,
             delivered_at: now_unix(),
             declared_hash: contract.deliverable_hash.clone().unwrap_or_default(),
@@ -4182,6 +4216,58 @@ fn parse_query(body: &Value, path: &str) -> Query {
         }
     }
     q
+}
+
+/// Render the contract's `input` as a brief the judge can read.
+///
+/// This is what was ORDERED. Until it existed, a judge asked to check
+/// "the output matches the source image" or "the translation is
+/// faithful to the original" received only the answer, never the
+/// question, and had no honest option other than `inconclusive`.
+///
+/// Two things it deliberately does:
+///
+///  - it strips embedded blobs. An input can legitimately carry a
+///    base64 source file, and pasting a megabyte of it into a prompt
+///    would push the criteria out of the window it was meant to serve.
+///    The shape is kept, the payload is not.
+///  - it returns `None` for an empty input rather than `"{}"`, so the
+///    prompt says nothing instead of saying "the brief was blank".
+fn brief_of(terms: &Terms) -> Option<String> {
+    fn strip(v: &Value) -> Value {
+        match v {
+            // Long opaque strings are payloads, not instructions.
+            Value::String(s) if s.len() > 512 => {
+                Value::String(format!("[{} characters, elided]", s.len()))
+            }
+            Value::Array(a) => Value::Array(a.iter().map(strip).collect()),
+            Value::Object(o) => {
+                Value::Object(o.iter().map(|(k, v)| (k.clone(), strip(v))).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    let empty = match &terms.input {
+        Value::Null => true,
+        Value::Object(o) => o.is_empty(),
+        Value::Array(a) => a.is_empty(),
+        Value::String(s) => s.trim().is_empty(),
+        _ => false,
+    };
+    if empty {
+        return None;
+    }
+    let mut brief = serde_json::to_string_pretty(&strip(&terms.input)).ok()?;
+    // The expected deliverable is part of the order too.
+    if !matches!(terms.deliverable, Value::Null) {
+        if let Ok(d) = serde_json::to_string(&strip(&terms.deliverable)) {
+            if d != "null" && d != "{}" {
+                brief.push_str(&format!("\n\nExpected deliverable: {d}"));
+            }
+        }
+    }
+    Some(brief)
 }
 
 fn parse_url_params(path: &str) -> HashMap<String, String> {
