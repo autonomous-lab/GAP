@@ -680,6 +680,21 @@ pub(crate) fn node_label(did: &str) -> Option<String> {
     Some(format!("Node {}", &key[..8]))
 }
 
+/// The site's absolute base, for the tags that cannot take a path.
+///
+/// `og:image` is one of them: a crawler resolves it against nothing and
+/// several of them refuse a relative value outright. Read from the
+/// environment the deployment already sets for robots.txt and the
+/// sitemap, so there is one answer rather than two that can disagree.
+/// Empty in tests, which keeps every existing assertion on relative
+/// URLs true.
+fn public_base() -> String {
+    std::env::var("GAP_PUBLIC_URL")
+        .unwrap_or_default()
+        .trim_end_matches('/')
+        .to_string()
+}
+
 pub(crate) fn page(meta: &Meta, body: &str) -> String {
     let mut nav = String::new();
     for (href, label) in NAV {
@@ -719,7 +734,11 @@ pub(crate) fn page(meta: &Meta, body: &str) -> String {
 <meta property="og:site_name" content="GAP - Geta Agent Protocol">
 <meta property="og:title" content="{t}"><meta property="og:description" content="{d}">
 <meta property="og:type" content="website"><meta property="og:url" content="{c}">
+<meta property="og:image" content="{og}"><meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="GAP Protocol - agents don't browse, they contract. Portable identity, escrowed payment, verified delivery.">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="{og}">
 <meta name="twitter:title" content="{t}"><meta name="twitter:description" content="{d}">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2304060c'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%2345e6a0'/%3E%3C/svg%3E">
 {jsonld}
@@ -766,6 +785,7 @@ pub(crate) fn page(meta: &Meta, body: &str) -> String {
         t = esc(meta.title),
         d = esc(meta.description),
         c = esc(meta.canonical),
+        og = esc(&format!("{}/og.png", public_base())),
         robots = if meta.noindex {
             "noindex,nofollow"
         } else {
@@ -1091,5 +1111,56 @@ mod tests {
         assert!(s.contains("<loc>https://n.example/job/job-1</loc>"));
         assert!(s.contains("<loc>https://n.example/how-it-works</loc>"));
         assert!(s.starts_with("<?xml"));
+    }
+
+    #[test]
+    fn a_large_image_card_actually_has_an_image() {
+        // twitter:card was already summary_large_image with nothing
+        // behind it, which is worse than declaring nothing at all: the
+        // crawler reserves the large slot and renders it empty.
+        let html = page(&Meta::new("T", "D", "/x", ""), "<p>b</p>");
+        assert!(html.contains(r#"<meta name="twitter:card" content="summary_large_image">"#));
+        assert!(html.contains(r#"property="og:image" content="/og.png""#));
+        assert!(html.contains(r#"name="twitter:image" content="/og.png""#));
+        // Dimensions let a crawler lay the card out before it fetches
+        // the bytes, and several will not render one without them.
+        assert!(html.contains(r#"content="1200""#));
+        assert!(html.contains(r#"content="630""#));
+        assert!(html.contains(r#"property="og:image:alt""#));
+    }
+
+    #[test]
+    fn the_card_image_is_absolute_when_the_deployment_says_where_it_lives() {
+        // A relative og:image is resolved against nothing by several
+        // crawlers, which then show no card at all.
+        assert_eq!(
+            format!("{}/og.png", "https://gap.geta.team".trim_end_matches('/')),
+            "https://gap.geta.team/og.png"
+        );
+        // And a trailing slash in the configured base must not produce
+        // a doubled one.
+        assert_eq!("https://gap.geta.team/".trim_end_matches('/'), "https://gap.geta.team");
+    }
+
+    #[test]
+    fn the_card_image_is_served_and_is_a_png() {
+        // Embedded in the binary: a container that renders its pages
+        // but 404s its preview image depending on the working directory
+        // is a trap nobody should have to find.
+        let (ctype, bytes) = crate::server::static_asset("/og.png").expect("the card is served");
+        assert_eq!(ctype, "image/png");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "it must really be a PNG");
+        // Comfortably under every platform's fetch limit, and big
+        // enough not to be a placeholder.
+        assert!(bytes.len() > 10_000 && bytes.len() < 1_000_000, "{} bytes", bytes.len());
+    }
+
+    #[test]
+    fn nothing_else_is_served_as_a_static_asset() {
+        // The lookup is an allow-list, not a file server: a path that
+        // walks out of it must find nothing.
+        for p in ["/", "/index.html", "/../Cargo.toml", "/og.png/../../etc/passwd"] {
+            assert!(crate::server::static_asset(p).is_none(), "{p}");
+        }
     }
 }

@@ -3481,6 +3481,24 @@ pub fn route(
 /// HTML lives outside `route()` because that function is the JSON API
 /// contract; mixing content types into it would force every caller to
 /// sniff. Returns `(status, content_type, body)`.
+/// Static binary assets, served before any HTML route.
+///
+/// One entry today: the Open Graph card. It is embedded in the binary
+/// rather than read from disk because everything else this node serves
+/// is, and a container that renders its own pages but 404s its preview
+/// image depending on the working directory is a deployment trap nobody
+/// should have to find.
+///
+/// `twitter:card` was already `summary_large_image` with no image
+/// behind it, which is worse than declaring nothing: the crawler
+/// reserves the large slot and renders it empty.
+pub fn static_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
+    match path {
+        "/og.png" => Some(("image/png", include_bytes!("ui/og.png"))),
+        _ => None,
+    }
+}
+
 pub fn route_html(
     state: &Arc<Mutex<NodeState>>,
     method: &str,

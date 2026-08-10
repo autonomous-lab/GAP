@@ -456,6 +456,30 @@ retrieves from that URL must hash to it.",
                 continue;
             }
 
+            // Static binary assets first: the Open Graph card is fetched
+            // by crawlers that never send an Accept header we could
+            // route on.
+            if method == "GET" {
+                let clean = path.split('?').next().unwrap_or(&path);
+                if let Some((ctype, bytes)) = gap::server::static_asset(clean) {
+                    let mut response = Response::from_data(bytes).with_status_code(200);
+                    response.add_header(
+                        Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap(),
+                    );
+                    // Immutable for a build: the bytes only change when
+                    // the binary does.
+                    response.add_header(
+                        Header::from_bytes(
+                            &b"Cache-Control"[..],
+                            &b"public, max-age=86400"[..],
+                        )
+                        .unwrap(),
+                    );
+                    let _ = request.respond(response);
+                    continue;
+                }
+            }
+
             // Web UI (public directory + operator console) before the
             // JSON API: browsers ask for HTML, agents ask for JSON.
             if let Some((status, ctype, body)) =
