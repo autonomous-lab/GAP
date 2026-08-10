@@ -200,17 +200,62 @@ fn build_moonpay(config: &OnrampConfig, req: &OnrampRequest) -> Result<String> {
 /// MoonPay names a currency by asset and chain together, e.g.
 /// `usdc_base`. Sending `usdc` alone lands the funds on Ethereum
 /// mainnet, where the deposit rail is not watching.
+///
+/// Verified against `GET https://api.moonpay.com/v3/currencies` on
+/// 2026-08-10, which is public and needs no key. `usdc_base` exists,
+/// is not suspended, and carries `chainId: 8453` with the canonical
+/// Base USDC contract `0x8335...2913`. So does the `{asset}_{chain}`
+/// shape for the EVM L2s.
+///
+/// It does NOT hold in general, and that was a live bug waiting for a
+/// config change. MoonPay abbreviates several networks, so the obvious
+/// construction produces a code that does not exist:
+///
+/// ```text
+/// network            real code               naive construction
+/// solana             usdc_sol                usdc_solana
+/// stellar            usdc_xlm                usdc_stellar
+/// avalanche_c_chain  usdc_cchain             usdc_avalanche_c_chain
+/// ```
+///
+/// A code MoonPay does not recognise is not a silent no-op either way:
+/// the widget refuses it, which is survivable, but the failure would
+/// have appeared only after someone repointed `GAP_ONRAMP_NETWORK` at
+/// a chain nobody tested. The irregular names are listed rather than
+/// derived, and anything outside the list is still constructed - it
+/// simply must be checked against the catalogue before it is used.
 fn moonpay_currency(config: &OnrampConfig) -> String {
     let asset = config.crypto_code.to_lowercase();
     let chain = config.network.to_lowercase();
     if chain.is_empty() || chain == "ethereum" {
-        asset
-    } else {
-        format!("{asset}_{chain}")
+        return asset;
     }
+    // Networks whose MoonPay suffix is not simply the network name.
+    let suffix = match chain.as_str() {
+        "solana" => "sol",
+        "stellar" => "xlm",
+        "avalanche" | "avalanche_c_chain" | "c_chain" => "cchain",
+        other => other,
+    };
+    format!("{asset}_{suffix}")
 }
 
 /// HMAC-SHA256 over the query string, base64-encoded.
+///
+/// **The scheme itself is still unverified**, but that a signature is
+/// REQUIRED is no longer a guess. Loading a fully-formed unsigned
+/// widget URL with a live test key on 2026-08-10 returned MoonPay's
+/// own error page, "Signature check failed - we couldn't validate the
+/// signature sent from the partner environment", with their Test Mode
+/// badge shown. That confirms the fallback below behaves as intended:
+/// an unsigned link fails visibly at MoonPay rather than quietly
+/// sending somebody's money to an address we pre-filled.
+///
+/// The same run settled a second question. Both `buy.moonpay.com` and
+/// `buy-sandbox.moonpay.com` answered identically and both showed Test
+/// Mode, so MoonPay picks the environment from the key prefix and not
+/// from the host. One host is correct for both, which is the opposite
+/// of Transak, where staging is a different origin.
 ///
 /// **Unverified against MoonPay's current documentation.** Validate in
 /// their sandbox before real money depends on it; an incorrect
@@ -383,5 +428,42 @@ mod tests {
             assert_eq!(Provider::parse(p.as_str()).unwrap(), p);
         }
         assert!(Provider::parse("ramp").is_err());
+    }
+
+    #[test]
+    fn moonpay_currency_codes_match_the_published_catalogue() {
+        // Checked against GET https://api.moonpay.com/v3/currencies on
+        // 2026-08-10 (public, no key needed). These are the codes
+        // MoonPay actually publishes, not the ones the obvious
+        // construction produces.
+        let cfg = |network: &str| OnrampConfig {
+            network: network.into(),
+            crypto_code: "USDC".into(),
+            ..config()
+        };
+        assert_eq!(moonpay_currency(&cfg("base")), "usdc_base");
+        assert_eq!(moonpay_currency(&cfg("arbitrum")), "usdc_arbitrum");
+        assert_eq!(moonpay_currency(&cfg("optimism")), "usdc_optimism");
+        assert_eq!(moonpay_currency(&cfg("polygon")), "usdc_polygon");
+        // Bare `usdc` is Ethereum mainnet, where the deposit rail is
+        // not watching. Naming the chain is what keeps funds on Base.
+        assert_eq!(moonpay_currency(&cfg("ethereum")), "usdc");
+        assert_eq!(moonpay_currency(&cfg("")), "usdc");
+    }
+
+    #[test]
+    fn the_networks_moonpay_abbreviates_do_not_get_the_naive_name() {
+        // The latent bug: `{asset}_{chain}` is right for the EVM L2s
+        // and wrong for these, so it would have shipped a code that
+        // does not exist the moment somebody repointed the network.
+        let cfg = |network: &str| OnrampConfig {
+            network: network.into(),
+            crypto_code: "USDC".into(),
+            ..config()
+        };
+        assert_eq!(moonpay_currency(&cfg("solana")), "usdc_sol");
+        assert_eq!(moonpay_currency(&cfg("stellar")), "usdc_xlm");
+        assert_eq!(moonpay_currency(&cfg("avalanche")), "usdc_cchain");
+        assert_eq!(moonpay_currency(&cfg("avalanche_c_chain")), "usdc_cchain");
     }
 }
