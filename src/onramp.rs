@@ -18,14 +18,20 @@
 //!
 //! # What is verified and what is not
 //!
-//! Parameter names come from each provider's published widget
-//! documentation. **MoonPay's URL-signing scheme could not be verified
-//! from public docs** at the time of writing: the signature is
-//! implemented as HMAC-SHA256 over the query string, base64-encoded,
-//! which is the documented-in-general form, and it MUST be checked
-//! against a live sandbox before real money depends on it. Signing is
-//! only applied when a secret is configured, so an unconfigured node
-//! produces an unsigned link rather than a wrong one.
+//! MoonPay was implemented here and then removed. Its card rail is
+//! 4.50% with a **3.99 EUR floor**, and the floor is what makes it
+//! unusable for this node rather than the percentage: it dominates any
+//! top-up below 89 EUR on card and below 399 EUR on SEPA, so their own
+//! 20 EUR minimum purchase costs the buyer 20%. Measured, not quoted
+//! from marketing.
+//!
+//! The removal is not a claim that a competitor is cheaper on card -
+//! 4-5% is the going rate for that rail everywhere. It is that a fixed
+//! floor is the wrong shape for a node whose contracts cost five
+//! cents, and that an on-ramp is an acquisition funnel rather than a
+//! payment rail here: money in is already solved by operator credit
+//! and by a direct USDC transfer to the deposit address, which costs a
+//! fraction of a cent on Base.
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -34,26 +40,25 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
-    /// Cheaper on card (roughly 2-5% all-in), white-label, 64+
-    /// countries. The default for that reason.
+    /// The only on-ramp this node knows about.
+    ///
+    /// It requires a sales conversation to obtain a key, so the
+    /// practical coverage here is currently zero. Kept because the
+    /// shape of the integration is right and the key is the only thing
+    /// missing; see the module docs.
     Transak,
-    /// Wider reach (160+ countries) and cross-app identity, at a higher
-    /// card cost. The fallback where Transak does not operate.
-    Moonpay,
 }
 
 impl Provider {
     pub fn as_str(&self) -> &'static str {
         match self {
             Provider::Transak => "transak",
-            Provider::Moonpay => "moonpay",
         }
     }
 
     pub fn parse(s: &str) -> Result<Self> {
         Ok(match s.trim().to_lowercase().as_str() {
             "transak" => Provider::Transak,
-            "moonpay" => Provider::Moonpay,
             other => return Err(Error::Other(format!("unknown on-ramp: {other}"))),
         })
     }
@@ -67,10 +72,6 @@ pub struct OnrampConfig {
     /// live node at staging produces links that take real intent and
     /// deliver nothing.
     pub transak_staging: bool,
-    pub moonpay_api_key: String,
-    /// Signing secret. Absent means unsigned links, which providers
-    /// reject once a wallet address is pre-filled.
-    pub moonpay_secret: String,
     /// What the buyer ends up holding.
     pub crypto_code: String,
     /// The chain it lands on. Wrong here means funds arrive somewhere
@@ -88,8 +89,6 @@ impl OnrampConfig {
                     .trim(),
                 "1" | "true" | "yes"
             ),
-            moonpay_api_key: std::env::var("GAP_MOONPAY_API_KEY").unwrap_or_default(),
-            moonpay_secret: std::env::var("GAP_MOONPAY_SECRET").unwrap_or_default(),
             crypto_code: std::env::var("GAP_ONRAMP_CRYPTO").unwrap_or_else(|_| "USDC".into()),
             network: std::env::var("GAP_ONRAMP_NETWORK").unwrap_or_else(|_| "base".into()),
         }
@@ -100,9 +99,6 @@ impl OnrampConfig {
         let mut out = Vec::new();
         if !self.transak_api_key.trim().is_empty() {
             out.push(Provider::Transak);
-        }
-        if !self.moonpay_api_key.trim().is_empty() {
-            out.push(Provider::Moonpay);
         }
         out
     }
@@ -131,7 +127,6 @@ pub fn build_url(provider: Provider, config: &OnrampConfig, req: &OnrampRequest)
     }
     match provider {
         Provider::Transak => build_transak(config, req),
-        Provider::Moonpay => build_moonpay(config, req),
     }
 }
 
@@ -166,110 +161,6 @@ fn build_transak(config: &OnrampConfig, req: &OnrampRequest) -> Result<String> {
     Ok(format!("{host}?{}", encode_query(&q)))
 }
 
-fn build_moonpay(config: &OnrampConfig, req: &OnrampRequest) -> Result<String> {
-    if config.moonpay_api_key.trim().is_empty() {
-        return Err(Error::Other("no MoonPay API key configured".into()));
-    }
-    let mut q = vec![
-        ("apiKey", config.moonpay_api_key.clone()),
-        ("walletAddress", req.deposit_address.clone()),
-        // MoonPay's docs are explicit that pre-filling a wallet address
-        // requires currencyCode alongside it.
-        ("currencyCode", moonpay_currency(config)),
-        ("baseCurrencyCode", req.fiat_currency.to_lowercase()),
-        ("externalTransactionId", req.reference.clone()),
-    ];
-    if let Some(amount) = &req.fiat_amount {
-        q.push(("baseCurrencyAmount", amount.clone()));
-    }
-    let query = encode_query(&q);
-
-    if config.moonpay_secret.trim().is_empty() {
-        // Unsigned rather than wrongly signed. MoonPay rejects an
-        // unsigned URL that pre-fills an address, so this fails
-        // visibly at their end instead of silently misrouting funds.
-        return Ok(format!("https://buy.moonpay.com?{query}"));
-    }
-    let signature = sign_moonpay(&format!("?{query}"), &config.moonpay_secret)?;
-    Ok(format!(
-        "https://buy.moonpay.com?{query}&signature={}",
-        urlencode(&signature)
-    ))
-}
-
-/// MoonPay names a currency by asset and chain together, e.g.
-/// `usdc_base`. Sending `usdc` alone lands the funds on Ethereum
-/// mainnet, where the deposit rail is not watching.
-///
-/// Verified against `GET https://api.moonpay.com/v3/currencies` on
-/// 2026-08-10, which is public and needs no key. `usdc_base` exists,
-/// is not suspended, and carries `chainId: 8453` with the canonical
-/// Base USDC contract `0x8335...2913`. So does the `{asset}_{chain}`
-/// shape for the EVM L2s.
-///
-/// It does NOT hold in general, and that was a live bug waiting for a
-/// config change. MoonPay abbreviates several networks, so the obvious
-/// construction produces a code that does not exist:
-///
-/// ```text
-/// network            real code               naive construction
-/// solana             usdc_sol                usdc_solana
-/// stellar            usdc_xlm                usdc_stellar
-/// avalanche_c_chain  usdc_cchain             usdc_avalanche_c_chain
-/// ```
-///
-/// A code MoonPay does not recognise is not a silent no-op either way:
-/// the widget refuses it, which is survivable, but the failure would
-/// have appeared only after someone repointed `GAP_ONRAMP_NETWORK` at
-/// a chain nobody tested. The irregular names are listed rather than
-/// derived, and anything outside the list is still constructed - it
-/// simply must be checked against the catalogue before it is used.
-fn moonpay_currency(config: &OnrampConfig) -> String {
-    let asset = config.crypto_code.to_lowercase();
-    let chain = config.network.to_lowercase();
-    if chain.is_empty() || chain == "ethereum" {
-        return asset;
-    }
-    // Networks whose MoonPay suffix is not simply the network name.
-    let suffix = match chain.as_str() {
-        "solana" => "sol",
-        "stellar" => "xlm",
-        "avalanche" | "avalanche_c_chain" | "c_chain" => "cchain",
-        other => other,
-    };
-    format!("{asset}_{suffix}")
-}
-
-/// HMAC-SHA256 over the query string, base64-encoded.
-///
-/// **The scheme itself is still unverified**, but that a signature is
-/// REQUIRED is no longer a guess. Loading a fully-formed unsigned
-/// widget URL with a live test key on 2026-08-10 returned MoonPay's
-/// own error page, "Signature check failed - we couldn't validate the
-/// signature sent from the partner environment", with their Test Mode
-/// badge shown. That confirms the fallback below behaves as intended:
-/// an unsigned link fails visibly at MoonPay rather than quietly
-/// sending somebody's money to an address we pre-filled.
-///
-/// The same run settled a second question. Both `buy.moonpay.com` and
-/// `buy-sandbox.moonpay.com` answered identically and both showed Test
-/// Mode, so MoonPay picks the environment from the key prefix and not
-/// from the host. One host is correct for both, which is the opposite
-/// of Transak, where staging is a different origin.
-///
-/// **Unverified against MoonPay's current documentation.** Validate in
-/// their sandbox before real money depends on it; an incorrect
-/// signature is rejected at their end, which is the safe failure, but
-/// it is still a failure.
-fn sign_moonpay(query_with_question_mark: &str, secret: &str) -> Result<String> {
-    use base64::Engine;
-    use hmac::{Hmac, Mac};
-    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
-        .map_err(|_| Error::Other("invalid MoonPay secret".into()))?;
-    mac.update(query_with_question_mark.as_bytes());
-    Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
-}
-
 fn encode_query(pairs: &[(&str, String)]) -> String {
     pairs
         .iter()
@@ -301,8 +192,6 @@ mod tests {
         OnrampConfig {
             transak_api_key: "tk_live_1".into(),
             transak_staging: false,
-            moonpay_api_key: "pk_live_1".into(),
-            moonpay_secret: "sk_live_secret".into(),
             crypto_code: "USDC".into(),
             network: "base".into(),
         }
@@ -346,36 +235,6 @@ mod tests {
     }
 
     #[test]
-    fn moonpay_names_the_chain_in_the_currency_code() {
-        // `usdc` alone lands on Ethereum mainnet, where nothing is
-        // watching for it.
-        let url = build_url(Provider::Moonpay, &config(), &request()).unwrap();
-        assert!(url.contains("currencyCode=usdc_base"), "{url}");
-        assert!(url.contains("baseCurrencyCode=eur"));
-        assert!(url.contains("baseCurrencyAmount=50"));
-    }
-
-    #[test]
-    fn a_moonpay_link_is_signed_when_a_secret_exists() {
-        let url = build_url(Provider::Moonpay, &config(), &request()).unwrap();
-        assert!(url.contains("&signature="));
-        // Deterministic: the same request signs identically, so a
-        // mismatch means the query changed, not that signing is random.
-        let again = build_url(Provider::Moonpay, &config(), &request()).unwrap();
-        assert_eq!(url, again);
-    }
-
-    #[test]
-    fn without_a_secret_the_link_is_unsigned_rather_than_wrongly_signed() {
-        let mut c = config();
-        c.moonpay_secret = String::new();
-        let url = build_url(Provider::Moonpay, &c, &request()).unwrap();
-        assert!(!url.contains("signature="));
-        // MoonPay refuses an unsigned URL that pre-fills an address, so
-        // this fails at their end instead of misrouting funds here.
-    }
-
-    #[test]
     fn a_provider_with_no_key_is_refused_rather_than_linked_to() {
         let c = OnrampConfig {
             crypto_code: "USDC".into(),
@@ -383,7 +242,6 @@ mod tests {
             ..Default::default()
         };
         assert!(build_url(Provider::Transak, &c, &request()).is_err());
-        assert!(build_url(Provider::Moonpay, &c, &request()).is_err());
         assert!(c.available().is_empty());
     }
 
@@ -413,57 +271,14 @@ mod tests {
     }
 
     #[test]
-    fn both_providers_are_offered_when_both_are_configured() {
-        // Two providers on purpose: neither is allowed to be
-        // load-bearing, so losing one costs a funnel and not a rail.
-        assert_eq!(
-            config().available(),
-            vec![Provider::Transak, Provider::Moonpay]
-        );
-    }
-
-    #[test]
     fn provider_names_round_trip() {
-        for p in [Provider::Transak, Provider::Moonpay] {
-            assert_eq!(Provider::parse(p.as_str()).unwrap(), p);
-        }
+        let p = Provider::Transak;
+        assert_eq!(Provider::parse(p.as_str()).unwrap(), p);
+        // A name we do not know is refused rather than guessed at. This
+        // matters more now than it did with two providers: an operator
+        // migrating a config that still says `moonpay` gets an error,
+        // not a silent fallback to a rail they did not choose.
+        assert!(Provider::parse("moonpay").is_err());
         assert!(Provider::parse("ramp").is_err());
-    }
-
-    #[test]
-    fn moonpay_currency_codes_match_the_published_catalogue() {
-        // Checked against GET https://api.moonpay.com/v3/currencies on
-        // 2026-08-10 (public, no key needed). These are the codes
-        // MoonPay actually publishes, not the ones the obvious
-        // construction produces.
-        let cfg = |network: &str| OnrampConfig {
-            network: network.into(),
-            crypto_code: "USDC".into(),
-            ..config()
-        };
-        assert_eq!(moonpay_currency(&cfg("base")), "usdc_base");
-        assert_eq!(moonpay_currency(&cfg("arbitrum")), "usdc_arbitrum");
-        assert_eq!(moonpay_currency(&cfg("optimism")), "usdc_optimism");
-        assert_eq!(moonpay_currency(&cfg("polygon")), "usdc_polygon");
-        // Bare `usdc` is Ethereum mainnet, where the deposit rail is
-        // not watching. Naming the chain is what keeps funds on Base.
-        assert_eq!(moonpay_currency(&cfg("ethereum")), "usdc");
-        assert_eq!(moonpay_currency(&cfg("")), "usdc");
-    }
-
-    #[test]
-    fn the_networks_moonpay_abbreviates_do_not_get_the_naive_name() {
-        // The latent bug: `{asset}_{chain}` is right for the EVM L2s
-        // and wrong for these, so it would have shipped a code that
-        // does not exist the moment somebody repointed the network.
-        let cfg = |network: &str| OnrampConfig {
-            network: network.into(),
-            crypto_code: "USDC".into(),
-            ..config()
-        };
-        assert_eq!(moonpay_currency(&cfg("solana")), "usdc_sol");
-        assert_eq!(moonpay_currency(&cfg("stellar")), "usdc_xlm");
-        assert_eq!(moonpay_currency(&cfg("avalanche")), "usdc_cchain");
-        assert_eq!(moonpay_currency(&cfg("avalanche_c_chain")), "usdc_cchain");
     }
 }
