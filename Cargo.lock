@@ -651,6 +651,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hkdf",
+ "hmac 0.12.1",
  "k256",
  "proptest",
  "rand 0.8.7",

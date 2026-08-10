@@ -326,3 +326,62 @@ mod tests {
         assert!(transfer_from_receipt(&r, 200).is_none());
     }
 }
+
+/// A deposit address derived for one agent, from the node's own seed.
+///
+/// This is what makes attribution work. Nothing on chain says which
+/// agent a transfer belongs to, and crediting on an unproven claim of a
+/// sender address lets one agent capture another's payment. Giving each
+/// agent its own address makes the destination the attribution: whatever
+/// arrives there belongs to that agent, and nobody has to be believed.
+///
+/// Derived, not stored. The key is recomputable from the node seed at
+/// any time, so a lost database is not lost funds - which is a real
+/// risk, because these addresses hold other people's money until they
+/// are swept.
+pub fn deposit_key_for(node_seed: &[u8; 32], agent_did: &str) -> [u8; 32] {
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(agent_did.as_bytes()), node_seed);
+    let mut okm = [0u8; 32];
+    hk.expand(b"gap/deposit-address/v1", &mut okm)
+        .expect("32 bytes is a valid HKDF length");
+    okm
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+
+    #[test]
+    fn each_agent_gets_its_own_deposit_key() {
+        let seed = [3u8; 32];
+        let a = deposit_key_for(&seed, "did:gap:aaa");
+        let b = deposit_key_for(&seed, "did:gap:bbb");
+        assert_ne!(a, b, "two agents sharing an address cannot be told apart");
+    }
+
+    #[test]
+    fn the_same_agent_always_gets_the_same_one() {
+        // Derived, not stored: a lost database must not mean lost funds.
+        let seed = [3u8; 32];
+        assert_eq!(
+            deposit_key_for(&seed, "did:gap:aaa"),
+            deposit_key_for(&seed, "did:gap:aaa")
+        );
+    }
+
+    #[test]
+    fn a_different_node_derives_different_addresses() {
+        assert_ne!(
+            deposit_key_for(&[1u8; 32], "did:gap:aaa"),
+            deposit_key_for(&[2u8; 32], "did:gap:aaa")
+        );
+    }
+
+    #[test]
+    fn the_deposit_key_is_not_the_signing_seed() {
+        // Domain separation: a deposit key that equalled the identity
+        // seed would let anyone who saw one spend from the other.
+        let seed = [7u8; 32];
+        assert_ne!(deposit_key_for(&seed, "did:gap:aaa"), seed);
+    }
+}

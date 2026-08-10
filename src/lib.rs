@@ -52,6 +52,7 @@ pub mod sealed;
 pub mod server;
 pub mod sla;
 pub mod storage;
+pub mod stripe;
 pub mod subscription;
 pub mod sybil;
 pub mod ui;
