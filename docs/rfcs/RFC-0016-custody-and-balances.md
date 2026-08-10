@@ -119,7 +119,9 @@ node that accepts real value.
 - `threshold` — REQUIRED for `hybrid`, forbidden otherwise.
 - `operator` — REQUIRED when `mode != non-custodial`. An anonymous
   custodian is not a custodian anyone should use.
-- `withdrawal_sla_seconds` — REQUIRED when funds can be held. Breaching
+- `withdrawal_sla_seconds` — REQUIRED when funds can be held. It is
+  reported on a withdrawal request as a promise about the *operator's*
+  settlement step, never as a claim that the money has moved. Breaching
   it is an incident under RFC-0012, with the reputation consequences of
   any other SLA breach.
 - `proof_of_reserves` — REQUIRED when funds can be held.
@@ -134,10 +136,38 @@ mode so agents can filter before negotiating rather than after.
 ### 5.1 Lifecycle
 
 ```
-POST /v1/balance/deposit    credit an agent's balance (on-chain proof, or operator credit)
-GET  /v1/balance            the agent's own balance and its ledger
-POST /v1/balance/withdraw   request funds out; subject to the declared SLA
+POST /v1/balance/deposit           credit a balance (on-chain proof, or operator credit)
+GET  /v1/balance                   the agent's own balance and its ledger
+POST /v1/balance/withdraw          REQUEST funds out; earmarks, does not send
+POST /v1/balance/withdraw/settle   operator: record that the payout went out
+POST /v1/balance/withdraw/cancel   operator: give the funds back
+GET  /v1/balance/withdrawals       operator: what is still owed
 ```
+
+A withdrawal is two steps, and the first one moves no money. The
+request takes funds out of `available` and into a third bucket,
+`withdrawing`; they leave the node's liabilities only when an operator
+records the payout with an external reference.
+
+This is not ceremony. The first implementation debited the balance,
+emitted `pay.withdraw` and returned a receipt quoting the SLA, and
+nothing anywhere sent anything: no consumer of that event existed, no
+relayer call, no payout. The agent's balance fell, the money stayed,
+and `liabilities` reported less than the node owed - so proof of
+reserves, whose whole purpose is to be recomputable, would have
+attested to a figure that was wrong in the operator's favour.
+
+A node cannot watch a bank wire or a manual transfer leave, so money
+out is shaped exactly like money in: an operator, and a reference that
+points at something outside this node. `cancel` exists because a
+destination the payout rail rejects would otherwise strand the funds in
+`withdrawing` forever, which differs from losing them only in speed.
+
+A destination is validated for shape before anything is earmarked. That
+does not prove the address exists or that the agent controls it -
+nothing off chain can - but it rejects the empty string, a DID pasted
+into the wrong field and a truncated address, each of which sends money
+nowhere in a way nobody notices until it is gone.
 
 Escrow park in custodial mode debits the balance instead of moving
 tokens. Release credits the provider's balance. Refund reverses. The

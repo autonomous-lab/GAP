@@ -128,6 +128,9 @@ pub struct NodeState {
     relayer: Option<Relayer>,
     /// The audit spine.
     pub storage: Box<dyn Storage>,
+    /// Payout requests, by id. Persisted under the "withdrawals" scope
+    /// so a restart cannot lose money somebody is owed.
+    withdrawals: HashMap<String, Value>,
     /// Projection writes that failed. The spine itself is checked at
     /// the call site; these secondary tables were not, and a dropped
     /// `Result` here is how a contract can be served from memory for
@@ -413,6 +416,8 @@ impl NodeState {
             }
         }
 
+        let withdrawals: HashMap<String, Value> = load(&*storage, "withdrawals");
+
         let mut jobs_by_ref = HashMap::new();
         for records in jobs.values() {
             for r in records {
@@ -451,6 +456,7 @@ impl NodeState {
             workflows: HashMap::new(),
             relayer: None,
             storage,
+            withdrawals,
             persist_failures: 0,
             rate_limits: std::collections::HashMap::new(),
             ip_limits: std::collections::HashMap::new(),
@@ -2467,6 +2473,7 @@ configured, and crediting one on the depositor's word is not an option"
             "credited": amount.to_string_decimal(),
             "available": balance.available.to_string_decimal(),
             "held": balance.held.to_string_decimal(),
+            "withdrawing": balance.withdrawing.to_string_decimal(),
             "currency": balance.currency,
             "tx": tx,
         }))
@@ -2522,36 +2529,214 @@ configured, and crediting one on the depositor's word is not an option"
     }
 
     /// Take funds out, within the declared SLA.
-    pub fn withdraw(&mut self, token: &str, amount: &Amount, destination: &str) -> Result<Value> {
+    /// Request a payout. Earmarks the funds; it does not send them.
+    ///
+    /// The previous version debited the balance, emitted `pay.withdraw`
+    /// and returned a receipt quoting a settlement SLA - and then
+    /// nothing sent anything. There was no consumer of that event
+    /// anywhere in the tree, no relayer call and no payout. The agent's
+    /// balance fell and the money stayed, which is the one failure mode
+    /// a custodian must never have. It also had no custody gate, unlike
+    /// both of its neighbours, so it was inert on this node only by
+    /// accident: `balances` is empty in non-custodial mode, so it
+    /// happened to fail with "no balance" rather than by design.
+    ///
+    /// Money out is now shaped like money in. `credit_off_chain`
+    /// requires an operator and an external reference because the node
+    /// cannot see a bank transfer; a payout is the same fact in the
+    /// other direction, so it takes an operator and a reference too.
+    /// Between the two steps the funds sit in `withdrawing`, counted in
+    /// liabilities, visible to the agent and to proof of reserves.
+    pub fn request_withdrawal(
+        &mut self,
+        token: &str,
+        amount: &Amount,
+        destination: &str,
+    ) -> Result<Value> {
+        if !self.custody.mode.holds_funds() {
+            return Err(Error::EscrowViolation(
+                "this node is non-custodial and holds no balances to withdraw from".into(),
+            ));
+        }
+        // An unvalidated destination was accepted before, including the
+        // empty string: a payout instruction pointing nowhere is how
+        // money gets sent nowhere.
+        let destination = destination.trim();
+        if destination.is_empty() {
+            return Err(Error::Other(
+                "destination required: a payout must say where it is going".into(),
+            ));
+        }
+        if !is_payout_destination(destination) {
+            return Err(Error::Other(format!(
+                "destination is not a payable address: expected 0x followed by 40 hex \
+characters, got {destination:?}"
+            )));
+        }
+        if amount.minor_units() == 0 {
+            return Err(Error::Other("amount must be positive".into()));
+        }
+
         let did = self.agent_by_token(token)?.identity.did().to_string();
         let entry = self
             .balances
             .get_mut(&did)
             .ok_or_else(|| Error::EscrowViolation("no balance on this node".into()))?;
-        // Only `available` may leave: funds held against an open
+        // Only `available` may be earmarked: funds held against an open
         // contract are already committed to somebody else.
-        entry.debit(*amount)?;
+        entry.start_withdrawal(*amount)?;
         let balance = entry.clone();
         self.save_balance(&did);
-        let sla = self.custody.withdrawal_sla_seconds;
-        self.record(
-            "pay.withdraw",
-            json!({
-                "agent_did": did,
-                "amount": amount.to_string_decimal(),
-                "destination": destination,
-            }),
+
+        let request_id = format!(
+            "wd_{}",
+            &crate::sha256_hex(
+                format!(
+                    "{did}|{destination}|{}|{}",
+                    amount.to_string_decimal(),
+                    now_unix()
+                )
+                .as_bytes()
+            )[..16]
         );
-        Ok(json!({
-            "withdrawn": amount.to_string_decimal(),
-            "available": balance.available.to_string_decimal(),
-            "held": balance.held.to_string_decimal(),
+        let record = json!({
+            "request_id": request_id,
+            "agent_did": did,
+            "amount": amount.to_string_decimal(),
             "currency": balance.currency,
             "destination": destination,
-            // The SLA is the promise; publishing it with the receipt is
-            // what makes a breach checkable rather than arguable.
-            "settles_within_seconds": sla,
+            "requested_at": now_unix(),
+            "state": "pending",
+        });
+        self.save_state("withdrawals", &request_id, &record);
+        self.withdrawals.insert(request_id.clone(), record.clone());
+        self.record("pay.withdraw.requested", record.clone());
+
+        Ok(json!({
+            "request_id": request_id,
+            // Not "withdrawn". Nothing has moved yet, and a receipt that
+            // says otherwise is the bug this replaces.
+            "state": "pending",
+            "amount": amount.to_string_decimal(),
+            "available": balance.available.to_string_decimal(),
+            "held": balance.held.to_string_decimal(),
+            "withdrawing": balance.withdrawing.to_string_decimal(),
+            "currency": balance.currency,
+            "destination": destination,
+            "settles_within_seconds": self.custody.withdrawal_sla_seconds,
+            "note": "The funds have left your spendable balance and have not left the node. \
+        They stay in this node's liabilities until an operator records the payout.",
         }))
+    }
+
+    /// Record that a payout actually went out.
+    ///
+    /// Operator-only and reference-required, exactly like the credit
+    /// rail: the node cannot watch a bank wire or a manual transfer
+    /// leave, so the only honest thing it can do is record who said it
+    /// did and what it can be checked against.
+    pub fn settle_withdrawal(
+        &mut self,
+        admin: &str,
+        request_id: &str,
+        reference: &str,
+    ) -> Result<Value> {
+        match self.admin_token.as_deref() {
+            Some(t) if t == admin => {}
+            _ => return Err(Error::Unauthorized("operator token required".into())),
+        }
+        if reference.trim().is_empty() {
+            return Err(Error::Other(
+                "reference required: a payout must point at something outside this node \
+(a transaction hash, a wire reference)"
+                    .into(),
+            ));
+        }
+        let mut record = self
+            .withdrawals
+            .get(request_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("unknown withdrawal request: {request_id}")))?;
+        if record["state"] != json!("pending") {
+            return Err(Error::EscrowViolation(format!(
+                "withdrawal {request_id} is already {}",
+                record["state"].as_str().unwrap_or("resolved")
+            )));
+        }
+        let did = record["agent_did"].as_str().unwrap_or("").to_string();
+        let amount = Amount::parse(record["amount"].as_str().unwrap_or("0"))?;
+
+        let entry = self
+            .balances
+            .get_mut(&did)
+            .ok_or_else(|| Error::EscrowViolation("no balance on this node".into()))?;
+        entry.finish_withdrawal(amount)?;
+        self.save_balance(&did);
+
+        record["state"] = json!("settled");
+        record["reference"] = json!(reference);
+        record["settled_at"] = json!(now_unix());
+        self.save_state("withdrawals", request_id, &record);
+        self.withdrawals.insert(request_id.into(), record.clone());
+        self.record("pay.withdraw.settled", record.clone());
+        Ok(record)
+    }
+
+    /// Give up on a payout and return the funds.
+    ///
+    /// Without this a bad destination stranded the money in
+    /// `withdrawing` forever, which is the same defect as losing it,
+    /// only slower.
+    pub fn cancel_withdrawal(
+        &mut self,
+        admin: &str,
+        request_id: &str,
+        reason: &str,
+    ) -> Result<Value> {
+        match self.admin_token.as_deref() {
+            Some(t) if t == admin => {}
+            _ => return Err(Error::Unauthorized("operator token required".into())),
+        }
+        let mut record = self
+            .withdrawals
+            .get(request_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("unknown withdrawal request: {request_id}")))?;
+        if record["state"] != json!("pending") {
+            return Err(Error::EscrowViolation(format!(
+                "withdrawal {request_id} is already {}",
+                record["state"].as_str().unwrap_or("resolved")
+            )));
+        }
+        let did = record["agent_did"].as_str().unwrap_or("").to_string();
+        let amount = Amount::parse(record["amount"].as_str().unwrap_or("0"))?;
+
+        let entry = self
+            .balances
+            .get_mut(&did)
+            .ok_or_else(|| Error::EscrowViolation("no balance on this node".into()))?;
+        entry.cancel_withdrawal(amount)?;
+        self.save_balance(&did);
+
+        record["state"] = json!("cancelled");
+        record["reason"] = json!(reason);
+        record["cancelled_at"] = json!(now_unix());
+        self.save_state("withdrawals", request_id, &record);
+        self.withdrawals.insert(request_id.into(), record.clone());
+        self.record("pay.withdraw.cancelled", record.clone());
+        Ok(record)
+    }
+
+    /// Payout requests an operator still owes somebody.
+    pub fn pending_withdrawals(&self) -> Value {
+        let mut pending: Vec<Value> = self
+            .withdrawals
+            .values()
+            .filter(|w| w["state"] == json!("pending"))
+            .cloned()
+            .collect();
+        pending.sort_by_key(|w| w["requested_at"].as_u64().unwrap_or(0));
+        json!({ "count": pending.len(), "withdrawals": pending })
     }
 
     /// Total owed to agents: the number a reserves attestation has to
@@ -3969,6 +4154,10 @@ pub fn route_with_ip(
                         "agent_did": did,
                         "available": b.available.to_string_decimal(),
                         "held": b.held.to_string_decimal(),
+                        // Money the agent has asked for and the node
+                        // has not sent yet. Omitting it made a pending
+                        // payout look like a vanished one.
+                        "withdrawing": b.withdrawing.to_string_decimal(),
                         "total": b.total().to_string_decimal(),
                         "currency": b.currency,
                         "custody": guard.custody(),
@@ -4008,10 +4197,51 @@ pub fn route_with_ip(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             match (token, amount) {
-                (Some(t), Ok(a)) => guard.withdraw(t, &a, destination),
+                (Some(t), Ok(a)) => guard.request_withdrawal(t, &a, destination),
                 (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
                 (_, Err(e)) => Err(e),
             }
+        }
+        // The other half of the rail. A payout the node cannot watch
+        // leave is a payout an operator has to attest to, exactly as it
+        // does for an incoming bank transfer.
+        ("POST", "/v1/balance/withdraw/settle") => {
+            let id = body
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let reference = body.get("reference").and_then(|v| v.as_str()).unwrap_or("");
+            match token {
+                Some(t) => guard.settle_withdrawal(t, id, reference),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("POST", "/v1/balance/withdraw/cancel") => {
+            let id = body
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let reason = body
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("no reason given");
+            match token {
+                Some(t) => guard.cancel_withdrawal(t, id, reason),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("GET", "/v1/balance/withdrawals") => {
+            let authed = token
+                .map(|t| guard.admin_token_ref() == Some(t))
+                .unwrap_or(false);
+            if !authed {
+                return (
+                    403,
+                    json!({"error":{"code":"forbidden",
+                        "message":"the payout queue names agents and destinations; operator token required"}}),
+                );
+            }
+            Ok(guard.pending_withdrawals())
         }
         // Where a buyer with no crypto goes to fund a balance.
         ("GET", p) if p.starts_with("/v1/onramp") => {
@@ -4454,6 +4684,24 @@ fn brief_of(terms: &Terms) -> Option<String> {
         }
     }
     Some(brief)
+}
+
+/// Does this look like something a payout can actually be sent to?
+///
+/// The node settles in an ERC-20 stablecoin, so a destination is an
+/// EVM address. Checking the shape is not checking that the address
+/// exists or is controlled by the agent - nothing off chain can - but
+/// it does stop the failure that was reachable before: an empty string,
+/// a DID pasted into the wrong field, or a truncated address, all of
+/// which send money nowhere in a way nobody notices until it is gone.
+fn is_payout_destination(value: &str) -> bool {
+    match value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        Some(hex) => hex.len() == 40 && hex.chars().all(|c| c.is_ascii_hexdigit()),
+        None => false,
+    }
 }
 
 fn parse_url_params(path: &str) -> HashMap<String, String> {

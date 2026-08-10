@@ -167,12 +167,26 @@ impl CustodyPolicy {
 pub struct Balance {
     pub available: Amount,
     pub held: Amount,
+    /// Requested for withdrawal but not yet paid out.
+    ///
+    /// A third bucket exists because the second one lied. `withdraw`
+    /// used to take funds straight out of `available` and emit a
+    /// receipt, while nothing anywhere sent anything: the agent's
+    /// balance fell, the money stayed, and the node's own liabilities
+    /// figure said it owed less than it did. Funds sitting here have
+    /// left the agent's spendable balance and have NOT left the node,
+    /// which is the truth in between, and `total` counts them because
+    /// they are still owed.
+    #[serde(default)]
+    pub withdrawing: Amount,
     pub currency: String,
 }
 
 impl Balance {
     pub fn total(&self) -> Amount {
-        Amount::from_minor(self.available.minor_units() + self.held.minor_units())
+        Amount::from_minor(
+            self.available.minor_units() + self.held.minor_units() + self.withdrawing.minor_units(),
+        )
     }
 
     /// Credit a deposit.
@@ -210,6 +224,36 @@ impl Balance {
     /// Return held funds to available (a refund).
     pub fn unhold(&mut self, amount: Amount) -> Result<()> {
         self.settle_held(amount)?;
+        self.credit(amount);
+        Ok(())
+    }
+
+    /// Earmark funds for a payout that has not happened yet.
+    ///
+    /// Deliberately not a debit: until an operator has actually sent
+    /// the money and said so, the node still owes it.
+    pub fn start_withdrawal(&mut self, amount: Amount) -> Result<()> {
+        self.debit(amount)?;
+        self.withdrawing =
+            Amount::from_minor(self.withdrawing.minor_units() + amount.minor_units());
+        Ok(())
+    }
+
+    /// The payout went out. Now, and only now, the node owes less.
+    pub fn finish_withdrawal(&mut self, amount: Amount) -> Result<()> {
+        if amount.minor_units() > self.withdrawing.minor_units() {
+            return Err(Error::EscrowViolation(
+                "more withdrawing than exists".into(),
+            ));
+        }
+        self.withdrawing =
+            Amount::from_minor(self.withdrawing.minor_units() - amount.minor_units());
+        Ok(())
+    }
+
+    /// The payout could not be made: give it back rather than strand it.
+    pub fn cancel_withdrawal(&mut self, amount: Amount) -> Result<()> {
+        self.finish_withdrawal(amount)?;
         self.credit(amount);
         Ok(())
     }

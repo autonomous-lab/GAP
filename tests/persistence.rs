@@ -712,3 +712,255 @@ fn a_reputation_survives_a_restart() {
 
     let _ = std::fs::remove_file(path);
 }
+
+/// A payout must not reduce a balance until the money has left.
+///
+/// The defect this pins: `withdraw` debited `available`, emitted
+/// `pay.withdraw` and returned a receipt quoting a settlement SLA -
+/// and nothing anywhere sent anything. No consumer of that event
+/// existed in the tree, no relayer call, no payout. The agent's balance
+/// fell, the money stayed, and the node's own liabilities figure said
+/// it owed less than it did. It had no custody gate either, so it was
+/// inert on a non-custodial node only by accident.
+#[test]
+fn a_payout_request_does_not_pretend_the_money_has_gone() {
+    let path = std::env::temp_dir().join(format!("gap-wd-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+    custodial(&n);
+
+    let (did, tok) = n.lock().unwrap().create_identity();
+    assert_eq!(credit(&n, &did, "5.00").0, 200);
+
+    let dest = "0x00112233445566778899aabbccddeeff00112233";
+    let (s, v) = post(
+        &n,
+        "/v1/balance/withdraw",
+        json!({ "amount": "2.00", "destination": dest }),
+        &tok,
+    );
+    assert_eq!(s, 200, "{v}");
+    // Not "withdrawn": nothing has moved.
+    assert_eq!(v["state"], json!("pending"));
+    assert_eq!(v["available"], json!("3.000000"));
+    assert_eq!(v["withdrawing"], json!("2.000000"));
+    let req = v["request_id"].as_str().unwrap().to_string();
+
+    // The money is still owed, so it is still a liability. This is the
+    // assertion the old code could not have passed.
+    let (_, res) = route(&n, "GET", "/v1/reserves", b"", None);
+    assert_eq!(
+        res["liabilities"],
+        json!("5.000000"),
+        "a pending payout is still owed: {res}"
+    );
+
+    // Only an operator can say it went out, and only with a reference.
+    let (s, _) = post(
+        &n,
+        "/v1/balance/withdraw/settle",
+        json!({ "request_id": req, "reference": "0xdead" }),
+        &tok,
+    );
+    assert_eq!(s, 401, "an agent must not settle its own payout");
+    let (s, v) = post(
+        &n,
+        "/v1/balance/withdraw/settle",
+        json!({ "request_id": req }),
+        "operator-token",
+    );
+    assert_ne!(
+        s, 200,
+        "a payout with no external reference is unverifiable: {v}"
+    );
+
+    let (s, v) = post(
+        &n,
+        "/v1/balance/withdraw/settle",
+        json!({ "request_id": req, "reference": "0xabc123" }),
+        "operator-token",
+    );
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["state"], json!("settled"));
+
+    // Now, and only now, the node owes less.
+    let (_, res) = route(&n, "GET", "/v1/reserves", b"", None);
+    assert_eq!(res["liabilities"], json!("3.000000"), "{res}");
+
+    // And it cannot be settled twice.
+    let (s, _) = post(
+        &n,
+        "/v1/balance/withdraw/settle",
+        json!({ "request_id": req, "reference": "0xabc123" }),
+        "operator-token",
+    );
+    assert_ne!(s, 200, "paying the same request twice pays twice");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A payout instruction pointing nowhere must be refused.
+#[test]
+fn a_payout_destination_is_validated() {
+    let path = std::env::temp_dir().join(format!("gap-wd2-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+    custodial(&n);
+    let (did, tok) = n.lock().unwrap().create_identity();
+    assert_eq!(credit(&n, &did, "5.00").0, 200);
+
+    // The empty string was accepted before, because the route read the
+    // field with unwrap_or("").
+    for bad in [
+        "",
+        "   ",
+        "not-an-address",
+        &did,
+        "0x1234",
+        "0xZZ112233445566778899aabbccddeeff00112233",
+    ] {
+        let (s, v) = post(
+            &n,
+            "/v1/balance/withdraw",
+            json!({ "amount": "1.00", "destination": bad }),
+            &tok,
+        );
+        assert_ne!(s, 200, "destination {bad:?} must be refused: {v}");
+    }
+    // And nothing was taken while refusing.
+    let (_, b) = route(
+        &n,
+        "GET",
+        "/v1/balance",
+        b"",
+        Some(&format!("Bearer {tok}")),
+    );
+    let me = b["balances"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|x| x["agent_did"] == json!(did))
+        .cloned()
+        .unwrap_or(b.clone());
+    assert!(
+        me.to_string().contains("5.000000"),
+        "a refused payout must not move money: {me}"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A non-custodial node holds nothing, so it can pay nothing out.
+#[test]
+fn a_non_custodial_node_refuses_payouts_by_design_not_by_accident() {
+    let path = std::env::temp_dir().join(format!("gap-wd3-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    // No `custodial()` call: this is the default the live node runs in.
+    let n = node(path);
+    let (_did, tok) = n.lock().unwrap().create_identity();
+
+    let (s, v) = post(
+        &n,
+        "/v1/balance/withdraw",
+        json!({ "amount": "1.00", "destination": "0x00112233445566778899aabbccddeeff00112233" }),
+        &tok,
+    );
+    assert_ne!(s, 200, "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("non-custodial"),
+        "it must refuse for the right reason, not because the map happens to be empty: {v}"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A failed payout gives the money back rather than stranding it.
+#[test]
+fn a_cancelled_payout_returns_the_funds() {
+    let path = std::env::temp_dir().join(format!("gap-wd4-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+    custodial(&n);
+    let (did, tok) = n.lock().unwrap().create_identity();
+    assert_eq!(credit(&n, &did, "4.00").0, 200);
+
+    let (_, v) = post(
+        &n,
+        "/v1/balance/withdraw",
+        json!({ "amount": "4.00", "destination": "0x00112233445566778899aabbccddeeff00112233" }),
+        &tok,
+    );
+    let req = v["request_id"].as_str().unwrap().to_string();
+
+    let (s, v) = post(
+        &n,
+        "/v1/balance/withdraw/cancel",
+        json!({ "request_id": req, "reason": "address rejected by the exchange" }),
+        "operator-token",
+    );
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["state"], json!("cancelled"));
+
+    // Spendable again, and still exactly what it was.
+    let (_, v2) = post(
+        &n,
+        "/v1/balance/withdraw",
+        json!({ "amount": "4.00", "destination": "0x00112233445566778899aabbccddeeff00112233" }),
+        &tok,
+    );
+    assert_eq!(v2["available"], json!("0.000000"));
+    assert_eq!(v2["withdrawing"], json!("4.000000"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A payout somebody is owed must survive a restart.
+#[test]
+fn a_pending_payout_survives_a_restart() {
+    let path = std::env::temp_dir().join(format!("gap-wd5-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+
+    let (did, req) = {
+        let n = node(path);
+        custodial(&n);
+        let (did, tok) = n.lock().unwrap().create_identity();
+        assert_eq!(credit(&n, &did, "3.00").0, 200);
+        let (_, v) = post(
+            &n,
+            "/v1/balance/withdraw",
+            json!({ "amount": "3.00", "destination": "0x00112233445566778899aabbccddeeff00112233" }),
+            &tok,
+        );
+        (did, v["request_id"].as_str().unwrap().to_string())
+    };
+
+    // Same spine, new node: a queue that evaporates is a debt that
+    // evaporates with it.
+    let n = node(path);
+    custodial(&n);
+    let (s, q) = route(
+        &n,
+        "GET",
+        "/v1/balance/withdrawals",
+        b"",
+        Some("Bearer operator-token"),
+    );
+    assert_eq!(s, 200, "{q}");
+    assert_eq!(q["count"], json!(1), "the payout queue must survive: {q}");
+    assert_eq!(q["withdrawals"][0]["request_id"], json!(req));
+    assert_eq!(q["withdrawals"][0]["agent_did"], json!(did));
+
+    // The queue names agents and destinations, so it is not public.
+    let (s, _) = route(&n, "GET", "/v1/balance/withdrawals", b"", None);
+    assert_eq!(s, 403);
+
+    let _ = std::fs::remove_file(path);
+}
