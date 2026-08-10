@@ -304,7 +304,6 @@ impl NodeState {
             }
         }
 
-
         // Reload the projections that used to live only in RAM.
         //
         // Each is best-effort per entry: a row that no longer
@@ -990,23 +989,50 @@ the content inline"
         // prerogative — it is its money), but it cannot release funds
         // against signed evidence that the work does not conform; that
         // path is the dispute, where an arbitrator splits.
+        // The buyer is the authority on its own money.
+        //
+        // The judges are advisers, and they are consulted only when the
+        // buyer asks - by calling /verify instead of accepting. So a
+        // subjective ruling, however adverse, cannot overrule a buyer
+        // who has looked at the work and says it is fine. Letting it do
+        // so produced the failure that motivated this: a buyer asked for
+        // a review, the panel escalated on `judge_disagreement`, and the
+        // contract stranded in `delivered` - not `nonconforming`, so no
+        // remedy for the provider, and not acceptable either, so the
+        // escrow sat parked with nobody able to move it. Neither party
+        // had done anything wrong.
+        //
+        // One escalation still blocks, and it is not the judges
+        // speaking. `value_threshold` is the *principal's* own rule
+        // (RFC-0015 `human_review_above`): the human who owns the buying
+        // agent said that above this amount a person looks first. That
+        // is not a judge overruling a buyer, it is a buyer's owner
+        // overruling the buyer, which is the whole point of setting it.
         if let Some(v) = self.verdicts.get(contract_id) {
-            if v.ruling == crate::verifier::Ruling::Nonconforming {
-                return Err(Error::EscrowViolation(format!(
-                    "delivery was verified non-conforming ({}); dispute it instead of releasing",
-                    v.reasons.first().cloned().unwrap_or_default()
-                )));
-            }
-            // An escalated case is provisional: a human closes it
-            // (RFC-0015). Releasing early would make the escalation
-            // decorative.
-            if let Some(e) = v.escalation {
-                return Err(Error::EscrowViolation(format!(
-                    "verdict escalated for human review ({}); await arbitration",
-                    e.as_str()
-                )));
+            if v.escalation == Some(crate::verifier::Escalation::ValueThreshold) {
+                return Err(Error::EscrowViolation(
+                    "this contract is above the principal's human-review threshold (RFC-0015); a person closes it before escrow moves"
+                        .into(),
+                ));
             }
         }
+
+        // Accepting against an adverse ruling is allowed, but it is not
+        // invisible: it goes on the record. A marketplace where buyers
+        // quietly wave through work the judges called non-conforming is
+        // one where the conformance rate stops meaning anything.
+        let overridden = self
+            .verdicts
+            .get(contract_id)
+            .filter(|v| {
+                v.ruling == crate::verifier::Ruling::Nonconforming || v.escalation.is_some()
+            })
+            .map(|v| {
+                (
+                    v.ruling.as_str().to_string(),
+                    v.escalation.map(|e| e.as_str().to_string()),
+                )
+            });
 
         // A client may settle without ever asking for verification, and
         // in practice they do: the observed sequence is deliver then
@@ -1048,13 +1074,21 @@ the content inline"
             self.verdicts.insert(contract_id.to_string(), verdict);
         }
 
-
         // Build the signed acceptance + release envelopes.
         let acceptance = Envelope::new(
             client.did().clone(),
             contract.provider.clone(),
             Kind::ExeAccept,
-            json!({ "verdict": "accepted" }),
+            match &overridden {
+                None => json!({ "verdict": "accepted" }),
+                // Signed by the client, so the record shows the buyer
+                // knew what it was waving through.
+                Some((ruling, escalation)) => json!({
+                    "verdict": "accepted",
+                    "overrode_verdict": ruling,
+                    "overrode_escalation": escalation,
+                }),
+            },
         )
         .for_contract(contract_id)
         .sign(&client);
@@ -1110,7 +1144,17 @@ the content inline"
                     "rail": "balance",
                 }),
             );
-            self.record("exe.accept", json!({ "contract_id": contract_id }));
+            self.record(
+                "exe.accept",
+                match &overridden {
+                    None => json!({ "contract_id": contract_id }),
+                    Some((ruling, escalation)) => json!({
+                        "contract_id": contract_id,
+                        "overrode_verdict": ruling,
+                        "overrode_escalation": escalation,
+                    }),
+                },
+            );
             let on_time = now_unix() <= contract.terms.deadline;
             self.record_job(
                 &contract.provider,
@@ -1154,7 +1198,17 @@ the content inline"
                 crate::amount::Amount::ZERO,
                 "USDC",
             );
-            self.record("exe.accept", json!({ "contract_id": contract_id }));
+            self.record(
+                "exe.accept",
+                match &overridden {
+                    None => json!({ "contract_id": contract_id }),
+                    Some((ruling, escalation)) => json!({
+                        "contract_id": contract_id,
+                        "overrode_verdict": ruling,
+                        "overrode_escalation": escalation,
+                    }),
+                },
+            );
             let on_time = crate::message::now_unix() <= saved.terms.deadline;
             self.credit_reputation(&saved.provider, true, on_time);
             return Ok(json!({
@@ -1186,7 +1240,17 @@ the content inline"
             &currency,
         );
 
-        self.record("exe.accept", json!({ "contract_id": contract_id }));
+        self.record(
+            "exe.accept",
+            match &overridden {
+                None => json!({ "contract_id": contract_id }),
+                Some((ruling, escalation)) => json!({
+                    "contract_id": contract_id,
+                    "overrode_verdict": ruling,
+                    "overrode_escalation": escalation,
+                }),
+            },
+        );
         let on_time = crate::message::now_unix() <= saved.terms.deadline;
         self.credit_reputation(&saved.provider, true, on_time);
         self.record_job(
@@ -1806,9 +1870,7 @@ directly rather than reasoning about its metadata"
             // for a binary artifact would compute the digest of a
             // sentence and fail integrity on a delivery that is sound.
             computed_hash: match content_origin {
-                "client" => {
-                    content.map(|c| format!("sha256:{}", crate::sha256_hex(c.as_bytes())))
-                }
+                "client" => content.map(|c| format!("sha256:{}", crate::sha256_hex(c.as_bytes()))),
                 "node" | "node-binary" => held.as_ref().map(|d| d.digest.clone()),
                 _ => None,
             },
@@ -2171,7 +2233,6 @@ directly rather than reasoning about its metadata"
         Ok(json!({ "contract_id": contract_id, "state": "cancelled", "escrow_refunded": refunded }))
     }
 
-
     // ---- durable projections -------------------------------------
     //
     // Contracts, escrows, identities and announcements each had a typed
@@ -2213,7 +2274,6 @@ directly rather than reasoning about its metadata"
             eprintln!("gap-node: cannot delete {scope}/{key}: {e}");
         }
     }
-
 
     // ---- custody & balances (RFC-0016) ---------------------------
 
@@ -2305,23 +2365,23 @@ configured, and crediting one on the depositor's word is not an option"
         // be believed. A plain transfer only answers "how much", and is
         // accepted solely when the node runs per-agent addresses, where
         // the destination is the attribution.
-        let (raw, from, confirmations) =
-            match crate::deposit::deposit_from_receipt(&receipt, head) {
-                Some(d) => {
-                    let amount = policy.accept_contract_deposit(&d, &did)?;
-                    (amount, d.from, d.confirmations)
-                }
-                None => {
-                    let observed = crate::deposit::transfer_from_receipt(&receipt, head)
-                        .ok_or_else(|| {
-                            Error::EscrowViolation(
-                                "that transaction carries no deposit this node can credit".into(),
-                            )
-                        })?;
-                    let amount = policy.accept(&observed)?;
-                    (amount, observed.from, observed.confirmations)
-                }
-            };
+        let (raw, from, confirmations) = match crate::deposit::deposit_from_receipt(&receipt, head)
+        {
+            Some(d) => {
+                let amount = policy.accept_contract_deposit(&d, &did)?;
+                (amount, d.from, d.confirmations)
+            }
+            None => {
+                let observed =
+                    crate::deposit::transfer_from_receipt(&receipt, head).ok_or_else(|| {
+                        Error::EscrowViolation(
+                            "that transaction carries no deposit this node can credit".into(),
+                        )
+                    })?;
+                let amount = policy.accept(&observed)?;
+                (amount, observed.from, observed.confirmations)
+            }
+        };
         let amount = crate::deposit::units_to_amount(raw.minor_units(), policy.decimals);
         let currency = self.custody.currency.clone();
         let entry = self.balances.entry(did.clone()).or_default();
@@ -2486,8 +2546,6 @@ of solvency."
         out
     }
 
-
-
     /// The deposit address derived for one agent (RFC-0016 §5.3).
     ///
     /// Derived from the node seed, never stored: the address holds
@@ -2523,7 +2581,8 @@ of solvency."
         if available.is_empty() {
             return Err(Error::Other(
                 "no on-ramp is configured on this node: fund the balance on chain, or ask the \
-operator".into(),
+operator"
+                    .into(),
             ));
         }
         let req = crate::onramp::OnrampRequest {
@@ -2546,7 +2605,7 @@ operator".into(),
             "currency": self.custody.currency,
             "links": links,
             "note": "Pay through one of these and the stablecoin lands on your deposit address; \
-the node credits it once it has enough confirmations. Nothing to send yourself.",
+        the node credits it once it has enough confirmations. Nothing to send yourself.",
         }))
     }
 
@@ -3163,7 +3222,6 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         })
     }
 
-
     /// One capability, in public: what it is, who offers it, and every
     /// settled job that used it (RFC-0014 §5).
     ///
@@ -3274,7 +3332,12 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             .query(&Query::default())
             .iter()
             .flat_map(|a| a.capabilities.iter().map(|c| c.id.clone()))
-            .chain(self.jobs.values().flatten().map(|r| r.capability_id.clone()))
+            .chain(
+                self.jobs
+                    .values()
+                    .flatten()
+                    .map(|r| r.capability_id.clone()),
+            )
             .collect();
         ids.sort();
         ids.dedup();
@@ -3519,7 +3582,6 @@ pub fn drain_outbox(
     attempted
 }
 
-
 /// Read an `amount` field, accepting a decimal string or a number.
 fn amount_from(body: &Value) -> Result<Amount> {
     match body.get("amount") {
@@ -3633,7 +3695,9 @@ pub fn route_with_ip(
             // update call to forget to implement.
             let profile = crate::discovery::AgentProfile::new(
                 body.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                body.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                body.get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
             );
             match (token, caps.is_empty()) {
                 (Some(t), false) => guard
@@ -3777,17 +3841,20 @@ pub fn route_with_ip(
 
         // ---- custody & balances (RFC-0016) ----
         ("GET", "/v1/balance") => match token {
-            Some(t) => guard.agent_by_token(t).map(|a| a.identity.did().to_string()).map(|did| {
-                let b = guard.balance_of(&did);
-                json!({
-                    "agent_did": did,
-                    "available": b.available.to_string_decimal(),
-                    "held": b.held.to_string_decimal(),
-                    "total": b.total().to_string_decimal(),
-                    "currency": b.currency,
-                    "custody": guard.custody(),
-                })
-            }),
+            Some(t) => guard
+                .agent_by_token(t)
+                .map(|a| a.identity.did().to_string())
+                .map(|did| {
+                    let b = guard.balance_of(&did);
+                    json!({
+                        "agent_did": did,
+                        "available": b.available.to_string_decimal(),
+                        "held": b.held.to_string_decimal(),
+                        "total": b.total().to_string_decimal(),
+                        "currency": b.currency,
+                        "custody": guard.custody(),
+                    })
+                }),
             None => Err(Error::Unauthorized("missing bearer token".into())),
         },
         // The amount is deliberately NOT read from the body: the
@@ -4668,7 +4735,8 @@ mod tests {
         );
         assert_ne!(status, 200);
         assert!(
-            out.to_string().contains("does not match the content supplied"),
+            out.to_string()
+                .contains("does not match the content supplied"),
             "and says exactly what disagreed: {out}"
         );
     }
@@ -4696,7 +4764,10 @@ mod tests {
             b"",
             Some(&format!("Bearer {stranger_tok}")),
         );
-        assert_eq!(status, 401, "the work belongs to the parties, not the world");
+        assert_eq!(
+            status, 401,
+            "the work belongs to the parties, not the world"
+        );
 
         // ...and the provider, who authored it, still can.
         let (status, _) = route(

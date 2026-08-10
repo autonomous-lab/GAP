@@ -292,7 +292,8 @@ mod tests {
 
     #[test]
     fn the_listing_is_marked_up_for_crawlers() {
-        let d = dir_with(json!([{ "did": "did:gap:aaa", "score": 0.5, "n": 0, "capabilities": [] }]));
+        let d =
+            dir_with(json!([{ "did": "did:gap:aaa", "score": 0.5, "n": 0, "capabilities": [] }]));
         let html = directory(&d);
         assert!(html.contains(r#""@type":"ItemList""#));
         assert!(html.contains(r#""url":"/agent/did:gap:aaa""#));

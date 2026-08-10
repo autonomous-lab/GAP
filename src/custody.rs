@@ -251,8 +251,7 @@ impl ReserveAttestation {
         clone.signature = None;
         // Same canonical form as every other signed GAP artifact: the
         // signature field is absent from the bytes it covers.
-        serde_json::to_vec(&serde_json::to_value(&clone).unwrap_or_default())
-            .unwrap_or_default()
+        serde_json::to_vec(&serde_json::to_value(&clone).unwrap_or_default()).unwrap_or_default()
     }
 
     pub fn sign(&mut self, node: &crate::identity::AgentIdentity) {

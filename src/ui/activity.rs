@@ -141,7 +141,11 @@ are party to. Both resume from a cursor, so a reconnect never loses the tail.
   connect();
 }})();
 </script>"#,
-        s_jobs = super::stat(&num(stats["jobs"].as_u64().unwrap_or(0)), "jobs settled", ""),
+        s_jobs = super::stat(
+            &num(stats["jobs"].as_u64().unwrap_or(0)),
+            "jobs settled",
+            ""
+        ),
         s_rate = rate,
         s_remedied = super::stat(
             &num(stats["remedied"].as_u64().unwrap_or(0)),
@@ -188,7 +192,10 @@ mod tests {
               "verdict": "nonconforming", "judged_by": "m", "remedied": true }
         ]});
         let html = activity_page(&recent, &stats());
-        assert!(html.contains(r#"data-seq="7""#), "cursor is the highest seq");
+        assert!(
+            html.contains(r#"data-seq="7""#),
+            "cursor is the highest seq"
+        );
         assert!(html.contains(r#"href="/job/j7""#));
         assert!(html.contains(r#"href="/job/j4""#));
         assert!(html.contains("reworked"));

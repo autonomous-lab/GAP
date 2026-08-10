@@ -151,7 +151,7 @@ fn conforming_delivery_is_verified_signed_and_settles() {
 }
 
 #[test]
-fn nonconforming_verdict_blocks_release_and_points_at_the_dispute() {
+fn a_buyer_may_release_against_an_adverse_ruling_but_it_is_recorded() {
     let (state, _) = node_with(Some(MockVerifier::new(Ruling::Nonconforming)));
     let (_c, ct) = register(&state);
     let (pd, pt) = register(&state);
@@ -165,17 +165,35 @@ fn nonconforming_verdict_blocks_release_and_points_at_the_dispute() {
     );
     assert_eq!(v["ruling"], "nonconforming");
 
-    // Even the client — whose money it is — cannot release against
-    // signed evidence that the work does not conform.
+    // The judges advise; the buyer decides. It is the buyer's money,
+    // it asked for the review, and it is entitled to disagree with the
+    // answer it got. Blocking here stranded contracts that neither
+    // party could move.
     let (s, v) = post(
         &state,
         &format!("/v1/contract/{cid}/accept-delivery"),
         &json!({}),
         &ct,
     );
-    assert_ne!(s, 200, "release must be refused: {v}");
-    assert_eq!(v["error"]["code"], "escrow_violation");
-    assert!(v["error"]["message"].as_str().unwrap().contains("dispute"));
+    assert_eq!(s, 200, "the buyer is the authority on its own money: {v}");
+    assert_eq!(v["state"], "accepted");
+
+    // But waving through work the judges called non-conforming is a
+    // fact about this buyer, and it is on the record. A marketplace
+    // where that happens silently has a conformance rate that means
+    // nothing.
+    let (_, audit) = route(
+        &state,
+        "GET",
+        "/v1/audit",
+        &[],
+        Some(&format!("Bearer {ct}")),
+    );
+    let spine = audit.to_string();
+    assert!(
+        spine.contains("overrode_verdict") && spine.contains("nonconforming"),
+        "the override must be visible in the spine: {spine}"
+    );
 }
 
 #[test]
@@ -462,18 +480,19 @@ fn disagreeing_judges_escalate_to_a_human_and_hold_the_money() {
         .collect();
     assert!(both.contains(&"conforms") && both.contains(&"nonconforming"));
 
-    // Escalated cases do not settle until a human closes them.
+    // A disagreement among advisers is not a veto over the buyer.
+    // This exact case - two judges splitting on a perfectly good
+    // delivery - left contracts stuck in `delivered`: not
+    // `nonconforming`, so the provider had no remedy, and not
+    // acceptable either, so the escrow sat parked indefinitely.
     let (s, v) = post(
         &state,
         &format!("/v1/contract/{cid}/accept-delivery"),
         &json!({}),
         &ct,
     );
-    assert_ne!(s, 200);
-    assert!(v["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("human review"));
+    assert_eq!(s, 200, "a split panel must not strand the contract: {v}");
+    assert_eq!(v["state"], "accepted");
 
     // And it lands in the operator's queue.
     let (s, q) = route(

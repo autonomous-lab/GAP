@@ -33,13 +33,11 @@ pub fn admin_page(escalations: &Value, dir: &Value, activity: &Value, stats: &Va
                     _ => "a",
                 },
                 ruling = esc(r),
-                why = esc(
-                    o["reasons"]
-                        .as_array()
-                        .and_then(|r| r.first())
-                        .and_then(|r| r.as_str())
-                        .unwrap_or("no reasoning recorded")
-                )
+                why = esc(o["reasons"]
+                    .as_array()
+                    .and_then(|r| r.first())
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("no reasoning recorded"))
             ));
         }
         let cid = esc(e["contract_id"].as_str().unwrap_or(""));
@@ -122,7 +120,11 @@ records - including yours as the deciding operator, in the audit spine.</p>
             Some(r) => super::stat(&format!("{:.0}%", r * 100.0), "conforming", "ok"),
             None => super::stat("--", "conforming", "faint"),
         },
-        s_events = super::stat(&num(stats["events"].as_u64().unwrap_or(0)), "audit events", ""),
+        s_events = super::stat(
+            &num(stats["events"].as_u64().unwrap_or(0)),
+            "audit events",
+            ""
+        ),
         badge = if n > 0 {
             format!(r#" <span class="pill a">{n} open</span>"#)
         } else {

@@ -509,9 +509,11 @@ impl Storage for SqliteStorage {
             .query_map([contract_id], row_to_deliverable)
             .map_err(|e| Error::Other(format!("sqlite query failed: {e}")))?;
         match rows.next() {
-            Some(r) => Ok(Some(
-                r.map_err(|e| Error::Other(format!("sqlite row failed: {e}")))?,
-            )),
+            Some(r) => {
+                Ok(Some(r.map_err(|e| {
+                    Error::Other(format!("sqlite row failed: {e}"))
+                })?))
+            }
             None => Ok(None),
         }
     }

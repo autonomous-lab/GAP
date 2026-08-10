@@ -146,7 +146,10 @@ judge's reasoning.</p>
         blurb = if blurb.is_empty() {
             String::new()
         } else {
-            format!(r#"<p class="sub" style="margin-bottom:8px">{}</p>"#, esc(blurb))
+            format!(
+                r#"<p class="sub" style="margin-bottom:8px">{}</p>"#,
+                esc(blurb)
+            )
         },
         did = esc(did),
         // A name proves nothing. Saying so once, next to the name, is
@@ -163,7 +166,11 @@ judge's reasoning.</p>
         s_score = super::stat(&format!("{score:.2}"), "reputation score", "score"),
         s_jobs = super::stat(&num(n), "verified jobs", ""),
         s_ontime = super::stat(&format!("{:.0}%", on_time * 100.0), "delivered on time", ""),
-        s_disputes = super::stat(&num(raised), "disputes raised", if raised > 0 { "warn" } else { "" }),
+        s_disputes = super::stat(
+            &num(raised),
+            "disputes raised",
+            if raised > 0 { "warn" } else { "" }
+        ),
         n = num(n),
         raised = num(raised),
         win = esc(&win),

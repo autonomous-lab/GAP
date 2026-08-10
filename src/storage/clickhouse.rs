@@ -386,9 +386,9 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             summary.deliverables += 1;
         }
 
-        for rec in self.select::<StateRecord>(
-            "SELECT scope, key, value, updated_at FROM gap_state FINAL",
-        )? {
+        for rec in
+            self.select::<StateRecord>("SELECT scope, key, value, updated_at FROM gap_state FINAL")?
+        {
             // A tombstone: deleted entries are written back with an
             // empty value rather than mutated away, because a
             // ReplacingMergeTree collapses on the sort key and a delete

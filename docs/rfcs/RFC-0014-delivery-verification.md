@@ -215,11 +215,31 @@ job refs are pseudonyms, not secrets.
 
 ## 5. Backward compatibility
 
-Additive. Contracts without verification behave exactly as before,
-except that a recorded `nonconforming` verdict blocks release — which
-can only exist if someone asked for verification. `Contract` gains an
-optional `deliverable_hash` field; older serialized contracts
-deserialize with `None`.
+Additive. Contracts without verification behave exactly as before, and
+a verdict is advisory: it never blocks the buyer's own acceptance.
+
+This supersedes the original rule, under which a recorded
+`nonconforming` verdict blocked release. That rule stranded contracts.
+A buyer would ask for a review, the panel would split and escalate on
+`judge_disagreement`, and the contract sat in `delivered` — not
+`nonconforming`, so the provider had no remedy, and not acceptable
+either, so the escrow stayed parked with neither party able to move it.
+Both parties had behaved correctly; the protocol had simply left itself
+no exit.
+
+The buyer is the authority on its own money. It accepts directly when
+satisfied, and consults the panel only when it is not. An acceptance
+made against an adverse ruling carries `overrode_verdict` in both the
+signed envelope and the spine event, so the override is auditable
+rather than silent.
+
+One escalation still holds settlement, and it is not the judges
+speaking: `value_threshold` is the principal's own rule (RFC-0015
+`human_review_above`), where the human who owns the buying agent has
+said that above some amount a person looks first.
+
+`Contract` gains an optional `deliverable_hash` field; older serialized
+contracts deserialize with `None`.
 
 ## 6. Reference implementation
 

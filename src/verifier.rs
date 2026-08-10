@@ -344,7 +344,6 @@ pub trait Verifier: Send + Sync {
     }
 }
 
-
 /// Put the evidence to every judge on a panel and reconcile the answers.
 ///
 /// Judges never see each other's opinions - that is the whole point of a
@@ -481,9 +480,8 @@ pub fn verify_panel(
         {
             let (sighted, blind): (Vec<&dyn Verifier>, Vec<&dyn Verifier>) =
                 judges.iter().partition(|j| j.supports_vision());
-            let names = |v: &[&dyn Verifier]| {
-                v.iter().map(|j| j.name()).collect::<Vec<_>>().join(", ")
-            };
+            let names =
+                |v: &[&dyn Verifier]| v.iter().map(|j| j.name()).collect::<Vec<_>>().join(", ");
             reasons.push(format!(
                 "image deliverable: judged by {} ({} cannot read images and was not consulted)",
                 names(&sighted),
@@ -642,9 +640,20 @@ pub fn model_reads_images(model: &str) -> bool {
         // No vision as of this writing, and it is the default judge.
         return false;
     }
-    ["gpt-", "o1", "o3", "o4", "claude", "gemini", "llama-3.2", "pixtral", "qwen-vl", "-vl"]
-        .iter()
-        .any(|k| m.contains(k))
+    [
+        "gpt-",
+        "o1",
+        "o3",
+        "o4",
+        "claude",
+        "gemini",
+        "llama-3.2",
+        "pixtral",
+        "qwen-vl",
+        "-vl",
+    ]
+    .iter()
+    .any(|k| m.contains(k))
 }
 
 /// The instruction given to the judge.
@@ -748,7 +757,10 @@ impl OpenRouterVerifier {
         // back. Fenced separately so a judge can tell them apart, and
         // both marked untrusted because both were written by a party.
         let brief = match evidence.brief.as_deref().filter(|b| !b.trim().is_empty()) {
-            Some(b) => format!("<brief>\n{}\n</brief>\n\n", fence(b, self.config.max_excerpt)),
+            Some(b) => format!(
+                "<brief>\n{}\n</brief>\n\n",
+                fence(b, self.config.max_excerpt)
+            ),
             None => String::new(),
         };
         format!(
@@ -962,9 +974,7 @@ impl Verifier for MockVerifier {
         ))
     }
     fn name(&self) -> String {
-        self.label
-            .clone()
-            .unwrap_or_else(|| "mock-verifier".into())
+        self.label.clone().unwrap_or_else(|| "mock-verifier".into())
     }
 
     fn supports_vision(&self) -> bool {
@@ -1153,7 +1163,10 @@ mod tests {
         // work; see `a_truncated_deliverable_says_it_was_truncated`.
         let content = body.split("[TRUNCATED BY THE NODE").next().unwrap();
         assert!(content.trim().chars().count() <= 40);
-        assert!(body.contains("[TRUNCATED BY THE NODE"), "a cut must announce itself");
+        assert!(
+            body.contains("[TRUNCATED BY THE NODE"),
+            "a cut must announce itself"
+        );
         // And the system prompt tells the judge that content is data.
         assert!(SYSTEM_PROMPT.contains("UNTRUSTED DATA"));
         assert!(SYSTEM_PROMPT.contains("injection"));
@@ -1346,7 +1359,9 @@ mod vision_tests {
     fn the_system_prompt_treats_an_image_as_untrusted_data_too() {
         // Text rendered into an image bypasses every text-level fence.
         assert!(SYSTEM_PROMPT.contains("ANY IMAGE ATTACHED"));
-        assert!(SYSTEM_PROMPT.to_lowercase().contains("rendered inside an image"));
+        assert!(SYSTEM_PROMPT
+            .to_lowercase()
+            .contains("rendered inside an image"));
     }
 
     #[test]
@@ -1432,5 +1447,4 @@ mod vision_tests {
         e.brief = None;
         assert!(!v.build_prompt(&e).contains("<brief>"));
     }
-
 }

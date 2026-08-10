@@ -135,7 +135,10 @@ pub fn sanitize_label(raw: &str, max: usize) -> String {
         .chars()
         .map(|c| if c.is_whitespace() { ' ' } else { c })
         // Cf = zero-width joiners, bidi overrides, and friends.
-        .filter(|c| !c.is_control() && !matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{feff}'))
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{feff}')
+        })
         .collect();
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().take(max).collect::<String>()
@@ -491,7 +494,8 @@ mod tests {
         let json = serde_json::to_string(&ann).unwrap();
         assert!(!json.contains("\"name\""));
         assert!(!json.contains("\"description\""));
-        ann.verify().expect("an unnamed announcement still verifies");
+        ann.verify()
+            .expect("an unnamed announcement still verifies");
     }
 
     #[test]
@@ -504,7 +508,10 @@ mod tests {
         ann.verify().expect("a named announcement verifies");
         // ...and tampering with the name after signing does not.
         ann.name = "Someone Else".into();
-        assert!(ann.verify().is_err(), "the name is covered by the signature");
+        assert!(
+            ann.verify().is_err(),
+            "the name is covered by the signature"
+        );
     }
 
     fn make_agent(name: &str) -> (AgentIdentity, Capability) {

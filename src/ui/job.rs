@@ -42,8 +42,7 @@ pub fn job_page(job: &Value) -> String {
         ));
     }
     if checks.is_empty() {
-        checks =
-            r#"<p class="dim">No verification was requested for this job.</p>"#.to_string();
+        checks = r#"<p class="dim">No verification was requested for this job.</p>"#.to_string();
     }
 
     let mut opinions = String::new();

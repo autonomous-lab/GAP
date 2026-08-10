@@ -187,7 +187,6 @@ fn strip_tags(html: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-
 /// The replaying deal beside the headline.
 ///
 /// Scripted, and labelled as such on the page: it shows the *shape* of a
@@ -287,7 +286,6 @@ const DEAL_JS: &str = r##"
 })();
 "##;
 
-
 /// The four headline figures that are properties of the protocol rather
 /// than of this node's traffic, so they belong beside the live stat bar
 /// rather than inside it.
@@ -329,7 +327,10 @@ fn custody_card(stats: &Value) -> String {
         r#"<div class="check"><b>Custody mode</b><span class="d mono">{}</span></div>"#,
         esc(mode)
     );
-    if let Some(t) = c["threshold"].as_str().or(c["threshold"]["amount"].as_str()) {
+    if let Some(t) = c["threshold"]
+        .as_str()
+        .or(c["threshold"]["amount"].as_str())
+    {
         rows.push_str(&format!(
             r#"<div class="check"><b>On-chain above</b><span class="d mono">{} {}</span></div>"#,
             esc(t),
@@ -340,7 +341,10 @@ fn custody_card(stats: &Value) -> String {
         rows.push_str(&format!(
             r#"<div class="check"><b>Operator</b><span class="d">{} ({})</span></div>"#,
             esc(op.get("legal_name").and_then(|v| v.as_str()).unwrap_or("")),
-            esc(op.get("jurisdiction").and_then(|v| v.as_str()).unwrap_or(""))
+            esc(op
+                .get("jurisdiction")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""))
         ));
     }
     if let Some(sla) = c["withdrawal_sla_seconds"].as_u64() {
@@ -361,7 +365,10 @@ fn custody_card(stats: &Value) -> String {
 
     // A node that holds funds without declaring who it is says so here,
     // rather than letting a buyer find out afterwards.
-    let gaps = stats["custody_gaps"].as_array().cloned().unwrap_or_default();
+    let gaps = stats["custody_gaps"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let warning = if gaps.is_empty() {
         String::new()
     } else {
@@ -512,9 +519,7 @@ fn hero(stats: &Value) -> String {
         (Some(r), _) => stat(&format!("{:.0}%", r * 100.0), "verified conforming", "ok"),
         (None, 0) => stat("--", "verified conforming", "faint"),
         (None, n) => stat(
-            &format!(
-                r#"0<span style="font-size:.9rem;color:var(--dim)">/{n}</span>"#
-            ),
+            &format!(r#"0<span style="font-size:.9rem;color:var(--dim)">/{n}</span>"#),
             "verified conforming",
             "faint",
         ),
@@ -605,7 +610,11 @@ fn trust(stats: &Value) -> String {
         for (i, j) in judges.iter().enumerate() {
             list.push_str(&format!(
                 r#"<div class="check"><b>{role}</b><span class="d mono">{name}</span></div>"#,
-                role = if i == 0 { "Primary judge" } else { "Second judge" },
+                role = if i == 0 {
+                    "Primary judge"
+                } else {
+                    "Second judge"
+                },
                 name = esc(j.as_str().unwrap_or(""))
             ));
         }
@@ -737,8 +746,14 @@ fn featured_agents(dir: &Value) -> String {
     // Best-evidenced first: score, then how much evidence backs it. A
     // fresh 0.50 with no history should not outrank a proven 0.50.
     agents.sort_by(|a, b| {
-        let ka = (a["score"].as_f64().unwrap_or(0.0), a["n"].as_u64().unwrap_or(0));
-        let kb = (b["score"].as_f64().unwrap_or(0.0), b["n"].as_u64().unwrap_or(0));
+        let ka = (
+            a["score"].as_f64().unwrap_or(0.0),
+            a["n"].as_u64().unwrap_or(0),
+        );
+        let kb = (
+            b["score"].as_f64().unwrap_or(0.0),
+            b["n"].as_u64().unwrap_or(0),
+        );
         kb.partial_cmp(&ka).unwrap_or(std::cmp::Ordering::Equal)
     });
     let total = agents.len();
@@ -929,7 +944,10 @@ mod tests {
         assert!(html.contains(r#"<div class="v faint">--</div>"#));
         assert!(html.contains("No agent is announcing yet"));
         assert!(html.contains("Nothing has settled here yet"));
-        assert!(html.contains("verifies integrity only"), "no judge configured");
+        assert!(
+            html.contains("verifies integrity only"),
+            "no judge configured"
+        );
     }
 
     #[test]
@@ -1010,7 +1028,10 @@ mod tests {
         let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": [] }));
         assert!(html.contains(r#"class="tick ex""#), "examples are marked");
         assert!(html.contains("example</span>"), "and carry a visible tag");
-        assert!(html.contains("tagged as an example"), "and the caption says so");
+        assert!(
+            html.contains("tagged as an example"),
+            "and the caption says so"
+        );
         // An example must not look clickable, or it implies a verdict
         // page that does not exist.
         assert!(!html.contains(r#"<a class="tick ex""#));
@@ -1023,7 +1044,9 @@ mod tests {
               "verdict": "conforms", "judged_by": "luna" }
         ]});
         let html = home_page(&stats(), &json!({ "agents": [] }), &act);
-        let real = html.find(r#"<a class="tick" href="/job/j-1""#).expect("a real entry");
+        let real = html
+            .find(r#"<a class="tick" href="/job/j-1""#)
+            .expect("a real entry");
         let example = html.find(r#"class="tick ex""#).expect("padding follows");
         assert!(real < example, "real settlements lead the band");
     }
@@ -1031,8 +1054,10 @@ mod tests {
     #[test]
     fn a_busy_node_needs_no_examples_at_all() {
         let jobs: Vec<Value> = (0..14)
-            .map(|i| json!({ "job_ref": format!("j{i}"), "capability_id": "c",
-                             "verdict": "conforms", "judged_by": "m" }))
+            .map(|i| {
+                json!({ "job_ref": format!("j{i}"), "capability_id": "c",
+                             "verdict": "conforms", "judged_by": "m" })
+            })
             .collect();
         let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": jobs }));
         assert!(!html.contains(r#"class="tick ex""#));

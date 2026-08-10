@@ -25,8 +25,8 @@
 
 mod activity;
 mod admin;
-mod capability;
 mod agent;
+mod capability;
 mod directory;
 mod guide;
 mod home;
@@ -35,8 +35,8 @@ mod pitch;
 
 pub use activity::activity_page;
 pub use admin::admin_page;
-pub use capability::capability_page;
 pub use agent::agent_page;
+pub use capability::capability_page;
 pub use directory::directory;
 pub use guide::{docs_page, for_agents_page, for_humans_page, how_it_works_page};
 pub use home::home_page;
@@ -646,7 +646,6 @@ const COPY_JS: &str = r#"<script>
 </script>
 "#;
 
-
 /// "Node 815a191c" from a `did:gap:` identifier, or `None` when there is
 /// nothing meaningful to show.
 ///
@@ -987,7 +986,10 @@ mod tests {
 
     #[test]
     fn a_node_label_needs_a_real_identifier() {
-        assert_eq!(node_label("did:gap:abcdef0123"), Some("Node abcdef01".into()));
+        assert_eq!(
+            node_label("did:gap:abcdef0123"),
+            Some("Node abcdef01".into())
+        );
         assert_eq!(node_label("abcdef0123"), Some("Node abcdef01".into()));
         assert_eq!(node_label("did:gap:"), None);
         assert_eq!(node_label(""), None);

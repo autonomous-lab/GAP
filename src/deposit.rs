@@ -261,7 +261,12 @@ mod tests {
     fn a_transfer_of_a_different_token_is_refused() {
         // Any contract can emit something that looks like a Transfer.
         // Only the token we settle in counts.
-        let r = receipt(TO_NODE, "0xdeadbeef00000000000000000000000000000000", "0x4c4b40", "0x1");
+        let r = receipt(
+            TO_NODE,
+            "0xdeadbeef00000000000000000000000000000000",
+            "0x4c4b40",
+            "0x1",
+        );
         let t = transfer_from_receipt(&r, 200).unwrap();
         let err = policy().accept(&t).unwrap_err().to_string();
         assert!(err.contains("not the settlement token"), "{err}");
@@ -298,7 +303,10 @@ mod tests {
     #[test]
     fn decimals_are_converted_without_inventing_value() {
         // USDC: 6 decimals, same as ours.
-        assert_eq!(units_to_amount(5_000_000, 6).to_string_decimal(), "5.000000");
+        assert_eq!(
+            units_to_amount(5_000_000, 6).to_string_decimal(),
+            "5.000000"
+        );
         // An 18-decimal token: 1.5 tokens.
         assert_eq!(
             units_to_amount(1_500_000_000_000_000_000, 18).to_string_decimal(),
@@ -307,7 +315,10 @@ mod tests {
         // Sub-minor-unit dust truncates DOWN. Rounding up would credit
         // value that was never sent, and a ledger above its reserves is
         // exactly what proof of reserves exists to catch.
-        assert_eq!(units_to_amount(1_999_999_999_999, 18).to_string_decimal(), "0.000001");
+        assert_eq!(
+            units_to_amount(1_999_999_999_999, 18).to_string_decimal(),
+            "0.000001"
+        );
         // A 2-decimal token scales up.
         assert_eq!(units_to_amount(150, 2).to_string_decimal(), "1.500000");
     }
@@ -524,7 +535,12 @@ mod contract_tests {
     const CONTRACT: &str = "0x5555555555555555555555555555555555555555";
     const DID: &str = "did:gap:aaa";
 
-    fn receipt(agent_topic: &str, emitter: &str, amount_hex: &str, status: &str) -> serde_json::Value {
+    fn receipt(
+        agent_topic: &str,
+        emitter: &str,
+        amount_hex: &str,
+        status: &str,
+    ) -> serde_json::Value {
         json!({
             "status": status,
             "blockNumber": "0x64",
@@ -584,7 +600,12 @@ mod contract_tests {
     fn an_event_from_another_contract_is_refused() {
         // Any contract can emit an identical-looking event.
         let topic = format!("0x{}", hex::encode(agent_id(DID)));
-        let r = receipt(&topic, "0x9999999999999999999999999999999999999999", "0x4c4b40", "0x1");
+        let r = receipt(
+            &topic,
+            "0x9999999999999999999999999999999999999999",
+            "0x4c4b40",
+            "0x1",
+        );
         let d = deposit_from_receipt(&r, 200).unwrap();
         let err = policy()
             .accept_contract_deposit(&d, DID)

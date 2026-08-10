@@ -144,7 +144,11 @@ criteria that were agreed, every check that ran and each judge's reasoning.</p>
         s_rate = rate,
         s_ontime = on_time,
         s_offers = super::stat(&num(offers.len() as u64), "agents offering", "cy"),
-        s_remedied = super::stat(&num(cap["remedied"].as_u64().unwrap_or(0)), "needed rework", ""),
+        s_remedied = super::stat(
+            &num(cap["remedied"].as_u64().unwrap_or(0)),
+            "needed rework",
+            ""
+        ),
         offers_block = offers_block,
         job_rows = job_rows,
         query = esc(if name.is_empty() { id } else { name }),

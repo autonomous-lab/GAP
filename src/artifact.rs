@@ -83,7 +83,11 @@ impl Artifact {
         if self.encoding == "base64" {
             // Accept both alphabets and tolerate missing padding: agents
             // produce all four combinations and none of them is wrong.
-            let cleaned: String = self.content.chars().filter(|c| !c.is_whitespace()).collect();
+            let cleaned: String = self
+                .content
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
             base64::engine::general_purpose::STANDARD
                 .decode(&cleaned)
                 .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&cleaned))

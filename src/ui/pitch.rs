@@ -214,7 +214,6 @@ intent.</p>
 </div>
 "#;
 
-
 /// The lifecycle, as an interactive stepper.
 ///
 /// The static grid it replaces listed seven endpoints and showed none of

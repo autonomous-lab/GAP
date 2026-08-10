@@ -82,7 +82,12 @@ fn delivered(n: &Arc<Mutex<NodeState>>) -> (String, String, String) {
         &client,
     );
     let id = out["contract_id"].as_str().unwrap().to_string();
-    post(n, &format!("/v1/contract/{id}/accept"), json!({}), &provider);
+    post(
+        n,
+        &format!("/v1/contract/{id}/accept"),
+        json!({}),
+        &provider,
+    );
     post(
         n,
         "/v1/escrow/park",
@@ -240,7 +245,12 @@ fn a_contract_settles_from_a_balance_and_the_ledger_balances() {
         &client,
     );
     let id = proposed["contract_id"].as_str().unwrap().to_string();
-    post(&n, &format!("/v1/contract/{id}/accept"), json!({}), &provider);
+    post(
+        &n,
+        &format!("/v1/contract/{id}/accept"),
+        json!({}),
+        &provider,
+    );
 
     let (status, out) = post(
         &n,
@@ -262,7 +272,12 @@ fn a_contract_settles_from_a_balance_and_the_ledger_balances() {
     assert_eq!(bal["available"], json!("4.950000"));
     assert_eq!(bal["held"], json!("0.050000"));
 
-    post(&n, &format!("/v1/contract/{id}/start"), json!({}), &provider);
+    post(
+        &n,
+        &format!("/v1/contract/{id}/start"),
+        json!({}),
+        &provider,
+    );
     let digest = format!("sha256:{}", gap::sha256_hex(b"work"));
     post(
         &n,
@@ -352,7 +367,12 @@ fn parking_more_than_the_balance_is_refused_not_overdrawn() {
         &client,
     );
     let id = proposed["contract_id"].as_str().unwrap().to_string();
-    post(&n, &format!("/v1/contract/{id}/accept"), json!({}), &provider);
+    post(
+        &n,
+        &format!("/v1/contract/{id}/accept"),
+        json!({}),
+        &provider,
+    );
 
     let (status, out) = post(
         &n,
@@ -463,8 +483,20 @@ fn each_agent_gets_its_own_stable_deposit_address() {
         custodial(&n);
         let (a_did, a) = n.lock().unwrap().create_identity();
         let (_b_did, b) = n.lock().unwrap().create_identity();
-        let (sa, ra) = route(&n, "GET", "/v1/balance/address", b"", Some(&format!("Bearer {a}")));
-        let (sb, rb) = route(&n, "GET", "/v1/balance/address", b"", Some(&format!("Bearer {b}")));
+        let (sa, ra) = route(
+            &n,
+            "GET",
+            "/v1/balance/address",
+            b"",
+            Some(&format!("Bearer {a}")),
+        );
+        let (sb, rb) = route(
+            &n,
+            "GET",
+            "/v1/balance/address",
+            b"",
+            Some(&format!("Bearer {b}")),
+        );
         assert_eq!(sa, 200, "{ra}");
         assert_eq!(sb, 200, "{rb}");
         (

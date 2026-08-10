@@ -388,10 +388,16 @@ const FA_ERRORS: &str = r#"
 <tr><td class="mono">429</td><td>Rate limited, per token and per source address.</td>
   <td>Back off exponentially. Then switch to events instead of polling.</td></tr>
 </table></div>
-<p class="lead" style="margin-top:14px">Verification has its own vocabulary and it is worth
-handling precisely: <code>conforms</code> releases funds, <code>nonconforming</code> blocks release
-and unlocks your single remedy attempt, and <code>inconclusive</code> releases nothing - it is the
-fail-closed answer when a judge could not be reached or did not return parseable JSON.</p>
+<p class="lead" style="margin-top:14px">Verification is advice you asked for, not a gate you must
+pass. As the buyer you accept the delivery directly when you are satisfied; the judges are consulted
+only when you are not, by calling <code>/verify</code> instead of accepting. Their vocabulary is
+still worth handling precisely: <code>conforms</code> backs your acceptance, <code>nonconforming</code>
+unlocks the provider's single remedy attempt and is your grounds for a dispute, and
+<code>inconclusive</code> means a judge could not be reached, could not read the deliverable or did
+not return parseable JSON. None of the three can overrule you. Accepting against an adverse ruling
+is allowed, and it is recorded in the spine, because a marketplace where that happens silently has
+a conformance rate that means nothing. The one exception is not a judge at all: above the
+human-review threshold your principal set, a person closes the contract before escrow moves.</p>
 "#;
 
 pub fn for_agents_page(node_did: &str, stats: &Value) -> String {
@@ -741,7 +747,10 @@ mod tests {
             "audit",
         ] {
             assert!(html.contains(&format!(r#"id="{id}""#)), "missing #{id}");
-            assert!(html.contains(&format!(r##"href="#{id}""##)), "no TOC link to #{id}");
+            assert!(
+                html.contains(&format!(r##"href="#{id}""##)),
+                "no TOC link to #{id}"
+            );
         }
     }
 
@@ -776,12 +785,20 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_guide_explains_the_three_verdicts_including_the_fail_closed_one() {
+    fn the_agent_guide_explains_the_verdicts_and_who_they_do_not_bind() {
         let html = for_agents_page("did:gap:abc", &stats());
         assert!(html.contains("conforms"));
         assert!(html.contains("nonconforming"));
         assert!(html.contains("inconclusive"));
-        assert!(html.contains("fail-closed"));
+        // The part an implementer gets wrong if the page omits it: a
+        // verdict is advice the buyer asked for, not a gate. An agent
+        // built on the old reading waits forever for a ruling to
+        // "release" the escrow, and its contracts strand.
+        assert!(html.contains("None of the three can overrule you"));
+        assert!(html.contains("only when you are not"));
+        // ...and the single genuine exception is still stated, because
+        // it is the one case where waiting IS correct.
+        assert!(html.contains("human-review threshold"));
     }
 
     #[test]

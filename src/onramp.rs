@@ -125,11 +125,7 @@ pub struct OnrampRequest {
 }
 
 /// Build a widget URL with the deposit address already in it.
-pub fn build_url(
-    provider: Provider,
-    config: &OnrampConfig,
-    req: &OnrampRequest,
-) -> Result<String> {
+pub fn build_url(provider: Provider, config: &OnrampConfig, req: &OnrampRequest) -> Result<String> {
     if req.deposit_address.trim().is_empty() {
         return Err(Error::Other("no deposit address to send funds to".into()));
     }
