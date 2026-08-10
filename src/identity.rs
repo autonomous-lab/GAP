@@ -10,9 +10,31 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// A GAP decentralized identifier: `did:gap:<64 hex chars of pubkey>`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// The shape is an invariant, not a convention. `pubkey` slices past
+/// the prefix and hex-decodes what follows, so a `Did` that never went
+/// through validation is a panic waiting for the right input - and the
+/// input arrives over the network, as `from` and `to` on every envelope
+/// and as `client` and `provider` on every contract.
+///
+/// It used to derive `Deserialize` transparently, which accepted any
+/// string at all. `serde_json::from_str::<Did>("\"x\"")` succeeded, and
+/// the first signature check on it panicked with "start byte index 8 is
+/// out of bounds for string of length 1" - inside a worker holding the
+/// node's mutex, which poisons it for every request after. Measured,
+/// not imagined; the test below is the reproduction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Did(String);
+
+impl<'de> Deserialize<'de> for Did {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        // The same parser the rest of the code uses, so there is exactly
+        // one definition of what a DID is.
+        Did::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
 
 impl Did {
     /// Build a DID from a raw Ed25519 public key.
@@ -324,6 +346,54 @@ pub fn verify_rotation_chain(origin: &Did, current: &Did, chain: &[KeyRotation])
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_hostile_did_is_refused_at_the_door_rather_than_panicking_later() {
+        // The reproduction. Before validation moved into Deserialize,
+        // this string round-tripped happily and the first signature
+        // check on it panicked with "start byte index 8 is out of
+        // bounds for string of length 1" - inside a worker holding the
+        // node's mutex, poisoning it for every request afterwards.
+        // `from` and `to` on an envelope are DIDs, so the input arrives
+        // over the network.
+        for hostile in [
+            "\"x\"",
+            "\"\"",
+            "\"did:gap:\"",
+            "\"did:gap:zzzz\"",
+            "\"did:web:example.com\"",
+            // Right length, wrong alphabet: the case a length check
+            // alone would wave through.
+            "\"did:gap:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"",
+        ] {
+            assert!(
+                serde_json::from_str::<Did>(hostile).is_err(),
+                "{hostile} must be refused at deserialization"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_did_still_round_trips() {
+        let did = Did::from_pubkey(&[7u8; 32]);
+        let json = serde_json::to_string(&did).unwrap();
+        assert_eq!(serde_json::from_str::<Did>(&json).unwrap(), did);
+        // And the invariant the panic depended on now holds by
+        // construction: anything that deserializes can be keyed.
+        assert_eq!(
+            serde_json::from_str::<Did>(&json).unwrap().pubkey(),
+            [7u8; 32]
+        );
+    }
+
+    #[test]
+    fn an_envelope_with_a_malformed_did_is_rejected_not_fatal() {
+        // End to end: this is the shape that actually arrives on the
+        // wire.
+        let body = r#"{"protocol":"gap","version":"1.0","message_id":"m1",
+            "from":"x","to":"did:gap:aa","kind":"ctr.propose","at":0,"body":{}}"#;
+        assert!(serde_json::from_str::<crate::message::Envelope>(body).is_err());
+    }
+
     use super::*;
 
     #[test]

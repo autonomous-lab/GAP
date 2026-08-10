@@ -382,6 +382,12 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
         for rec in self.select::<AnnouncementRecord>(
             "SELECT agent_did, announcement_json, expires_at FROM gap_announcements FINAL",
         )? {
+            // An empty body is a tombstone from `delete_announcement`.
+            // Loading it would put a withdrawn agent back in the
+            // directory, which is the bug the tombstone exists to fix.
+            if rec.announcement_json.trim().is_empty() {
+                continue;
+            }
             self.announcements
                 .lock()
                 .map_err(|_| Error::Other("announcements lock poisoned".into()))?
@@ -506,7 +512,7 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             QueryParam::new("at", at.to_string()),
             QueryParam::new("payload", payload.to_string()),
         ];
-        let _ = self.transport.post_params(q, &params);
+        self.transport.post_params(q, &params)?;
         Ok(seq)
     }
 
@@ -550,7 +556,7 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             QueryParam::new("contract_json", &record.contract_json),
             QueryParam::new("updated_at", record.updated_at.to_string()),
         ];
-        let _ = self.transport.post_params(q, &params);
+        self.transport.post_params(q, &params)?;
         Ok(())
     }
 
@@ -596,7 +602,7 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             QueryParam::new("announcement_json", &record.announcement_json),
             QueryParam::new("expires_at", record.expires_at.to_string()),
         ];
-        let _ = self.transport.post_params(q, &params);
+        self.transport.post_params(q, &params)?;
         Ok(())
     }
 
@@ -616,6 +622,37 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
         Ok(announcements.values().cloned().collect())
     }
 
+    fn delete_announcement(&mut self, agent_did: &str) -> Result<()> {
+        let previous = {
+            let mut announcements = self
+                .announcements
+                .lock()
+                .map_err(|_| Error::Other("announcements lock poisoned".into()))?;
+            announcements.remove(agent_did)
+        };
+        // A tombstone, not an ALTER DELETE: mutations are asynchronous,
+        // and a restart in between resurrects the row (same reasoning as
+        // `delete_state`).
+        //
+        // The version column here is `expires_at`, which is a FUTURE
+        // timestamp, so a tombstone written at "now" would lose to the
+        // row it is meant to bury. It has to outrank whatever is there,
+        // and by exactly one - using u64::MAX would win forever and the
+        // agent could never announce again.
+        let version = previous
+            .map(|p| p.expires_at)
+            .unwrap_or_else(crate::message::now_unix)
+            .saturating_add(1);
+        let q = "INSERT INTO gap_announcements (agent_did, announcement_json, expires_at) \
+                 VALUES ({agent_did:String}, '', {expires_at:UInt64})";
+        let params = [
+            QueryParam::new("agent_did", agent_did),
+            QueryParam::new("expires_at", version.to_string()),
+        ];
+        self.transport.post_params(q, &params)?;
+        Ok(())
+    }
+
     fn reap_expired(&mut self) -> Result<usize> {
         let now = crate::message::now_unix();
         let mut announcements = self
@@ -627,7 +664,7 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
         let removed = before - announcements.len();
         let q = "ALTER TABLE gap_announcements DELETE WHERE expires_at <= {now:UInt64}";
         let params = [QueryParam::new("now", now.to_string())];
-        let _ = self.transport.post_params(q, &params);
+        self.transport.post_params(q, &params)?;
         Ok(removed)
     }
 
@@ -645,7 +682,7 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             QueryParam::new("seed_hex", &record.seed_hex),
             QueryParam::new("created_at", record.created_at.to_string()),
         ];
-        let _ = self.transport.post_params(q, &params);
+        self.transport.post_params(q, &params)?;
         Ok(())
     }
 
@@ -680,7 +717,7 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             QueryParam::new("currency", &record.currency),
             QueryParam::new("updated_at", record.updated_at.to_string()),
         ];
-        let _ = self.transport.post_params(q, &params);
+        self.transport.post_params(q, &params)?;
         Ok(())
     }
 
@@ -719,7 +756,7 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             QueryParam::new("uri", &record.uri),
             QueryParam::new("delivered_at", record.delivered_at.to_string()),
         ];
-        let _ = self.transport.post_params(q, &params);
+        self.transport.post_params(q, &params)?;
         Ok(())
     }
 
@@ -744,7 +781,7 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             QueryParam::new("value", &record.value),
             QueryParam::new("updated_at", record.updated_at.to_string()),
         ];
-        let _ = self.transport.post_params(q, &params);
+        self.transport.post_params(q, &params)?;
         Ok(())
     }
 
@@ -777,7 +814,7 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             QueryParam::new("key", key),
             QueryParam::new("updated_at", crate::message::now_unix().to_string()),
         ];
-        let _ = self.transport.post_params(q, &params);
+        self.transport.post_params(q, &params)?;
         Ok(())
     }
 

@@ -306,6 +306,16 @@ impl Storage for SqliteStorage {
         }
     }
 
+    fn delete_announcement(&mut self, agent_did: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM announcements WHERE agent_did = ?1",
+                [agent_did],
+            )
+            .map_err(|e| Error::Other(format!("sqlite delete failed: {e}")))?;
+        Ok(())
+    }
+
     fn list_announcements(&self) -> Result<Vec<AnnouncementRecord>> {
         let mut stmt = self
             .conn

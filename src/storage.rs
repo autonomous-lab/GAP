@@ -163,6 +163,14 @@ pub trait Storage: Send {
     /// List all materialized announcements.
     fn list_announcements(&self) -> Result<Vec<AnnouncementRecord>>;
 
+    /// Withdraw an announcement for good.
+    ///
+    /// Deregistration used to drop the announcement from memory and
+    /// leave the row untouched, so the next restart put the agent back
+    /// in the directory. A withdrawal that a redeploy undoes is not a
+    /// withdrawal, and the agent that asked for it has no way to know.
+    fn delete_announcement(&mut self, agent_did: &str) -> Result<()>;
+
     /// Remove expired announcements. Returns the number removed.
     fn reap_expired(&mut self) -> Result<usize>;
 

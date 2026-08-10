@@ -964,3 +964,93 @@ fn a_pending_payout_survives_a_restart() {
 
     let _ = std::fs::remove_file(path);
 }
+
+/// A withdrawal a redeploy undoes is not a withdrawal.
+///
+/// `deregister` dropped the announcement from the in-memory registry
+/// and left the stored row untouched, so the next restart hydrated it
+/// again and the agent was back in the public directory. Observed, not
+/// hypothesised: an agent delisted by hand reappeared on /agents when a
+/// push triggered a redeploy an hour later.
+#[test]
+fn a_deregistration_survives_a_restart() {
+    let path = std::env::temp_dir().join(format!("gap-dereg-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+
+    let did = {
+        let n = node(path);
+        let (did, tok) = n.lock().unwrap().create_identity();
+        let (s, v) = post(
+            &n,
+            "/v1/announce",
+            json!({ "capabilities": [{
+                "id": "cap:test", "name": "test-only", "description": "a throwaway",
+                "price": { "amount": 0.01, "currency": "USDC", "model": "fixed", "cap": 1.0 }
+            }]}),
+            &tok,
+        );
+        assert_eq!(s, 200, "announce failed: {v}");
+
+        let (_, dir) = route(&n, "GET", "/v1/discover", b"", None);
+        assert!(dir.to_string().contains(&did), "it announced: {dir}");
+
+        let (s, v) = post(&n, "/v1/deregister", json!({}), &tok);
+        assert_eq!(s, 200, "{v}");
+        let (_, dir) = route(&n, "GET", "/v1/discover", b"", None);
+        assert!(!dir.to_string().contains(&did), "gone in memory: {dir}");
+        did
+    };
+
+    // Same spine, new node: this is the redeploy that used to undo it.
+    let n = node(path);
+    let (_, dir) = route(&n, "GET", "/v1/discover", b"", None);
+    assert!(
+        !dir.to_string().contains(&did),
+        "a deregistered agent must not come back on restart: {dir}"
+    );
+
+    // The history stays reachable under the DID: records outlive an
+    // announcement, and that is deliberate - otherwise a provider could
+    // erase a bad record by withdrawing and re-announcing.
+    let (s, rep) = route(&n, "GET", &format!("/v1/reputation/{did}"), b"", None);
+    assert_eq!(s, 200, "the track record survives delisting: {rep}");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Withdrawing must not be a one-way door.
+#[test]
+fn an_agent_can_announce_again_after_deregistering() {
+    let path = std::env::temp_dir().join(format!("gap-rereg-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+
+    let (did, tok) = {
+        let n = node(path);
+        let (did, tok) = n.lock().unwrap().create_identity();
+        let ann = json!({ "capabilities": [{
+            "id": "cap:test", "name": "test-only", "description": "d",
+            "price": { "amount": 0.01, "currency": "USDC", "model": "fixed", "cap": 1.0 }
+        }]});
+        post(&n, "/v1/announce", ann.clone(), &tok);
+        post(&n, "/v1/deregister", json!({}), &tok);
+        // Announce again on the same node.
+        let (s, v) = post(&n, "/v1/announce", ann, &tok);
+        assert_eq!(s, 200, "re-announcing must work: {v}");
+        (did, tok)
+    };
+    let _ = tok;
+
+    // And the second announcement must outrank the tombstone across a
+    // restart. A tombstone written at u64::MAX would win forever and
+    // lock the agent out of its own directory entry.
+    let n = node(path);
+    let (_, dir) = route(&n, "GET", "/v1/discover", b"", None);
+    assert!(
+        dir.to_string().contains(&did),
+        "the new announcement must survive the tombstone: {dir}"
+    );
+
+    let _ = std::fs::remove_file(path);
+}

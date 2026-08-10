@@ -673,12 +673,15 @@ impl NodeState {
             },
         );
         self.agents_by_did.insert(did.clone(), token.clone());
-        let _ = self.storage.upsert_identity(&IdentityRecord {
+        let r = self.storage.upsert_identity(&IdentityRecord {
             token: token.clone(),
             did: did.clone(),
             seed_hex,
             created_at: now_unix(),
         });
+        // An identity that does not land is an agent that loses its key
+        // and its history at the next restart. Worth a line in the log.
+        self.note_persist(r, "identity", &did.clone());
         (did, token)
     }
 
@@ -762,11 +765,13 @@ impl NodeState {
         let id = format!("urn:gap:ann:{}", &ann.agent_did.to_string()[..16]);
         agent.announcement = Some(ann);
         if let Some(saved) = &agent.announcement {
-            let _ = self.storage.upsert_announcement(&AnnouncementRecord {
-                agent_did: saved.agent_did.to_string(),
+            let did = saved.agent_did.to_string();
+            let r = self.storage.upsert_announcement(&AnnouncementRecord {
+                agent_did: did.clone(),
                 announcement_json: serde_json::to_string(saved).unwrap_or_else(|_| "{}".into()),
                 expires_at: now_unix().saturating_add(saved.ttl_seconds),
             });
+            self.note_persist(r, "announcement", &did);
         }
         self.record("cap.announce", json!({ "agent_did": self.agent_by_token(token).map(|a| a.identity.did().to_string()).unwrap_or_default() }));
         Ok(id)
@@ -2945,6 +2950,12 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         if let Some(agent) = self.agents.get_mut(token) {
             agent.announcement = None;
         }
+        // The row too, or the next restart puts it straight back. This
+        // was not theoretical: an agent delisted by hand reappeared on
+        // the directory page an hour later, when a deploy restarted the
+        // node.
+        let r = self.storage.delete_announcement(&did.to_string());
+        self.note_persist(r, "announcement removal", &did.to_string());
         self.record("cap.deregister", json!({ "agent_did": did.to_string() }));
         Ok(json!({ "deregistered": did.to_string() }))
     }
