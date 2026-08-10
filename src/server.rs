@@ -505,6 +505,15 @@ impl NodeState {
     }
 
     /// Attach the on-chain relayer (GapEscrow contract).
+    /// Give the node read access to a chain, so it can verify deposits.
+    ///
+    /// Separate from the relayer: reading receipts needs no keys and no
+    /// escrow contract, and a node can perfectly well verify incoming
+    /// deposits while settling everything else off chain.
+    pub fn set_deposit_chain(&mut self, chain: Box<dyn Chain>) {
+        self.deposit_chain = Some(chain);
+    }
+
     pub fn set_relayer(&mut self, chain: Box<dyn Chain>, escrow_address: &str) {
         self.relayer = Some(Relayer::new(chain, escrow_address));
     }

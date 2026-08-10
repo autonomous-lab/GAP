@@ -291,6 +291,20 @@ fn main() -> Result<()> {
         println!("[gap-node] arbitration disabled: set GAP_ADMIN_TOKEN to enable /v1/escrow/rule");
     }
 
+    // Read access to a chain, so deposits can be verified. Independent
+    // of the relayer: checking a receipt needs no keys and no escrow
+    // contract, and without it the on-chain deposit rail is dead code
+    // that answers "no chain connection configured" to every caller.
+    if let Ok(rpc_url) = env::var("GAP_RPC_URL") {
+        let reader = gap::relayer::JsonRpcChain::new(&rpc_url, 1);
+        state.set_deposit_chain(Box::new(reader));
+        println!("[gap-node] deposit verification: reading {rpc_url}");
+    } else {
+        println!(
+            "[gap-node] deposit verification: no GAP_RPC_URL, on-chain deposits cannot be checked"
+        );
+    }
+
     // Optional on-chain escrow: when GAP_ESCROW_ADDRESS is set, escrow
     // operations go to the GapEscrow contract via the relayer.
     if let Ok(escrow_address) = env::var("GAP_ESCROW_ADDRESS") {
