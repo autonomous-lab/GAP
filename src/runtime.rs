@@ -288,6 +288,7 @@ mod tests {
             autonomy: "execute-notify".into(),
             confidentiality: None,
             human_review_above: None,
+            cooling_off_seconds: None,
         }
     }
 

@@ -500,6 +500,7 @@ mod tests {
             autonomy: "execute-notify".into(),
             confidentiality: None,
             human_review_above: None,
+            cooling_off_seconds: None,
         };
         Contract::propose(client, provider.did().clone(), "cap:test", terms, true)
             .accept_by_provider(provider)
@@ -844,6 +845,7 @@ mod tests {
                 autonomy: "execute-notify".into(),
                 confidentiality: None,
                 human_review_above: None,
+                cooling_off_seconds: None,
             },
             true,
         );

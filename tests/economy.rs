@@ -50,6 +50,7 @@ fn signed_terms(deadline_offset: u64) -> Terms {
         autonomy: "execute-notify".into(),
         confidentiality: None,
         human_review_above: None,
+        cooling_off_seconds: None,
     }
 }
 

@@ -89,6 +89,11 @@ pub struct Terms {
     /// decimal string; unset falls back to the node's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_review_above: Option<String>,
+    /// Cooling-off window in seconds before an accepted delivery
+    /// actually settles (RFC-0009). Absent means none, which is the
+    /// right default for a five-cent contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_off_seconds: Option<u64>,
     #[serde(default)]
     pub confidentiality: Option<String>,
 }
@@ -324,6 +329,7 @@ mod tests {
             autonomy: "execute-notify".into(),
             confidentiality: None,
             human_review_above: None,
+            cooling_off_seconds: None,
         }
     }
 

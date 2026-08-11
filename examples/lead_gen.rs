@@ -80,6 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         autonomy: "execute-notify".into(),
         confidentiality: None,
         human_review_above: None,
+        cooling_off_seconds: None,
     };
     let contract = Contract::propose(
         &client,

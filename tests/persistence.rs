@@ -66,6 +66,11 @@ fn post(n: &Arc<Mutex<NodeState>>, path: &str, body: Value, tok: &str) -> (u16, 
 
 /// A funded, delivered contract. Returns (contract id, client, provider).
 fn delivered(n: &Arc<Mutex<NodeState>>) -> (String, String, String) {
+    delivered_with(n, None)
+}
+
+/// The same, with a cooling-off window agreed in the terms.
+fn delivered_with(n: &Arc<Mutex<NodeState>>, cooling_off: Option<u64>) -> (String, String, String) {
     let (_, client) = n.lock().unwrap().create_identity();
     let (pdid, provider) = n.lock().unwrap().create_identity();
     let now = gap::message::now_unix();
@@ -77,7 +82,8 @@ fn delivered(n: &Arc<Mutex<NodeState>>) -> (String, String, String) {
             "terms": { "input": {}, "deliverable": {}, "acceptance_criteria": ["ok"],
                 "deadline": now + 3600,
                 "price": { "amount": 0.2, "currency": "USDC", "model": "fixed", "cap": 1.0 },
-                "autonomy": "propose", "confidentiality": null }
+                "autonomy": "propose", "confidentiality": null,
+                "cooling_off_seconds": cooling_off }
         }),
         &client,
     );
@@ -1482,6 +1488,178 @@ fn a_contract_shows_its_events_however_busy_the_node_has_been() {
             .iter()
             .all(|e| e["payload"]["contract_id"] == json!(id)),
         "and every one must belong to this contract"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A cooling-off window defers the money without stranding it.
+///
+/// RFC-0009 puts a delay between consent and an irreversible action.
+/// The module was written, tested, and called from nowhere while the
+/// landing advertised "irreversibility windows on settlements".
+#[test]
+fn a_cooling_off_window_defers_settlement_then_lets_it_through() {
+    let path = std::env::temp_dir().join(format!("gap-cool-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+
+    // A two-second window, agreed in the contract itself.
+    let (id, client, _p) = delivered_with(&n, Some(2));
+
+    let (s, v) = post(
+        &n,
+        &format!("/v1/contract/{id}/accept-delivery"),
+        json!({}),
+        &client,
+    );
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        v["state"],
+        json!("cooling_off"),
+        "the money must not move yet: {v}"
+    );
+    assert!(v["receipt"]["kind"] == json!("irreversible_pending"), "{v}");
+
+    // Nothing settled: the job record is what the public reads.
+    let (_, act) = route(&n, "GET", "/v1/activity", b"", None);
+    assert_eq!(
+        act["count"],
+        json!(0),
+        "nothing may settle inside the window: {act}"
+    );
+
+    // Asking again inside the window is a status check, not an error.
+    let (s, again) = post(
+        &n,
+        &format!("/v1/contract/{id}/accept-delivery"),
+        json!({}),
+        &client,
+    );
+    assert_eq!(s, 200, "{again}");
+    assert_eq!(again["state"], json!("cooling_off"));
+
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    // And now it goes through, on the same call. The window defers the
+    // acceptance rather than the release, so the settlement path runs
+    // exactly as it always did.
+    let (s, done) = post(
+        &n,
+        &format!("/v1/contract/{id}/accept-delivery"),
+        json!({}),
+        &client,
+    );
+    assert_eq!(s, 200, "{done}");
+    assert_eq!(done["state"], json!("accepted"), "{done}");
+    let (_, act) = route(&n, "GET", "/v1/activity", b"", None);
+    assert_eq!(
+        act["count"],
+        json!(1),
+        "it must settle after the window: {act}"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Withdrawing inside the window releases nothing.
+#[test]
+fn withdrawing_consent_inside_the_window_moves_no_money() {
+    let path = std::env::temp_dir().join(format!("gap-cool2-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+
+    let (id, client, provider) = delivered_with(&n, Some(600));
+    post(
+        &n,
+        &format!("/v1/contract/{id}/accept-delivery"),
+        json!({}),
+        &client,
+    );
+
+    // The provider must not be able to cancel the buyer's withdrawal
+    // right, nor exercise it.
+    let (s, _) = post(
+        &n,
+        &format!("/v1/contract/{id}/withdraw-consent"),
+        json!({}),
+        &provider,
+    );
+    assert_eq!(s, 401, "only the buyer withdraws its own consent");
+
+    let (s, v) = post(
+        &n,
+        &format!("/v1/contract/{id}/withdraw-consent"),
+        json!({}),
+        &client,
+    );
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["state"], json!("consent_withdrawn"));
+
+    let (_, act) = route(&n, "GET", "/v1/activity", b"", None);
+    assert_eq!(act["count"], json!(0), "nothing may have settled: {act}");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The window must stay off for the contracts this node actually runs.
+#[test]
+fn a_five_cent_contract_settles_immediately_as_before() {
+    let path = std::env::temp_dir().join(format!("gap-cool3-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+
+    // No window agreed, no threshold configured: unchanged behaviour.
+    // A blanket hour on a five-cent contract would destroy the property
+    // the protocol exists to demonstrate while protecting nobody.
+    let (id, client, _p) = delivered(&n);
+    let (s, v) = post(
+        &n,
+        &format!("/v1/contract/{id}/accept-delivery"),
+        json!({}),
+        &client,
+    );
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["state"], json!("accepted"), "must settle at once: {v}");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A pending window must survive a restart, or the delay becomes a
+/// silent release.
+#[test]
+fn a_pending_cooling_off_survives_a_restart() {
+    let path = std::env::temp_dir().join(format!("gap-cool4-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+
+    let (id, client) = {
+        let n = node(path);
+        let (id, client, _p) = delivered_with(&n, Some(600));
+        post(
+            &n,
+            &format!("/v1/contract/{id}/accept-delivery"),
+            json!({}),
+            &client,
+        );
+        (id, client)
+    };
+
+    let n = node(path);
+    let (s, v) = post(
+        &n,
+        &format!("/v1/contract/{id}/accept-delivery"),
+        json!({}),
+        &client,
+    );
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        v["state"],
+        json!("cooling_off"),
+        "a restart must not wave the window through: {v}"
     );
 
     let _ = std::fs::remove_file(path);

@@ -36,6 +36,7 @@ fn terms() -> Terms {
         autonomy: "propose".into(),
         confidentiality: None,
         human_review_above: None,
+        cooling_off_seconds: None,
     }
 }
 

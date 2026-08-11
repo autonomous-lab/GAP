@@ -128,6 +128,9 @@ pub struct NodeState {
     relayer: Option<Relayer>,
     /// The audit spine.
     pub storage: Box<dyn Storage>,
+    /// Settlements consented to but still inside their cooling-off
+    /// window (RFC-0009), contract id -> pending record.
+    cooling_off: HashMap<String, Value>,
     /// Registered delegation chains, agent DID -> chain (RFC-0001).
     ///
     /// The node has to know which tree an agent belongs to before it
@@ -429,6 +432,7 @@ impl NodeState {
         let withdrawals: HashMap<String, Value> = load(&*storage, "withdrawals");
         let delegations: HashMap<String, crate::delegation::TokenChain> =
             load(&*storage, "delegations");
+        let cooling_off: HashMap<String, Value> = load(&*storage, "cooling_off");
 
         let mut jobs_by_ref = HashMap::new();
         for records in jobs.values() {
@@ -470,6 +474,7 @@ impl NodeState {
             storage,
             withdrawals,
             delegations,
+            cooling_off,
             tree_limits: crate::sybil::TreeBucket::new(),
             persist_failures: 0,
             rate_limits: std::collections::HashMap::new(),
@@ -1089,6 +1094,74 @@ the content inline"
                 to: "accepted".into(),
             });
         }
+        // RFC-0009: hold the money for a while before it moves.
+        //
+        // The window defers the ACCEPTANCE, not the release. Every line
+        // of the settlement below - three payment paths, signed
+        // envelopes, receipts, job records, reputation - runs later
+        // unchanged, by re-entering this same function once the window
+        // has elapsed. Extracting that block to call it from two places
+        // would have been the larger and far riskier change, and a
+        // mistake in it does not fail loudly: it pays the wrong party,
+        // or pays twice.
+        if let Some(window) = self.cooling_off_for(&contract) {
+            let now = now_unix();
+            match self.cooling_off.get(contract_id).cloned() {
+                None => {
+                    let settles_at = now.saturating_add(window);
+                    let (_guard, receipt) = crate::irreversibility::IrreversibilityGuard::begin(
+                        crate::irreversibility::IrreversibilityClass::Financial,
+                        contract_id,
+                        now,
+                        Some(window),
+                        &self.node.identity,
+                    );
+                    let pending = json!({
+                        "contract_id": contract_id,
+                        "consented_at": now,
+                        "settles_at": settles_at,
+                        "window_seconds": window,
+                        "receipt": receipt,
+                    });
+                    self.save_state("cooling_off", contract_id, &pending);
+                    self.cooling_off.insert(contract_id.into(), pending);
+                    self.record(
+                        "pay.cooling_off.pending",
+                        json!({ "contract_id": contract_id, "settles_at": settles_at }),
+                    );
+                    return Ok(json!({
+                        "contract_id": contract_id,
+                        "state": "cooling_off",
+                        "settles_at": settles_at,
+                        "window_seconds": window,
+                        "receipt": receipt,
+                        "note": "Consent is recorded and the escrow stays parked. It settles \
+                    when the window elapses - call accept-delivery again then, or POST \
+                    /v1/contract/{id}/withdraw-consent before it to cancel.",
+                    }));
+                }
+                Some(p) if p["settles_at"].as_u64().unwrap_or(u64::MAX) > now => {
+                    // Idempotent: asking again inside the window is not
+                    // an error, it is a status check.
+                    return Ok(json!({
+                        "contract_id": contract_id,
+                        "state": "cooling_off",
+                        "settles_at": p["settles_at"],
+                        "seconds_remaining": p["settles_at"].as_u64().unwrap_or(0) - now,
+                    }));
+                }
+                Some(_) => {
+                    // Elapsed. Clear it and fall through to settle.
+                    self.cooling_off.remove(contract_id);
+                    self.forget_state("cooling_off", contract_id);
+                    self.record(
+                        "pay.cooling_off.elapsed",
+                        json!({ "contract_id": contract_id }),
+                    );
+                }
+            }
+        }
+
         // RFC-0014: a recorded non-conforming verdict blocks release.
         // The client may accept an *inconclusive* delivery (that is its
         // prerogative — it is its money), but it cannot release funds
@@ -3619,6 +3692,81 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         })
     }
 
+    /// How long this settlement waits before the money moves
+    /// (RFC-0009), or `None` when it moves immediately.
+    ///
+    /// OFF unless asked for, and that is a decision rather than an
+    /// omission. RFC-0009 classes a settlement as `financial` with a
+    /// one-hour default, but the contracts here are worth five cents
+    /// and settle in seconds: a blanket hour would destroy the property
+    /// this protocol exists to demonstrate while protecting nobody from
+    /// anything. The RFC's own table says "transfer > threshold", so a
+    /// threshold is what this reads.
+    ///
+    /// Note the overlap with RFC-0015 `human_review_above`, which gates
+    /// the same moment. They are not redundant: one waits for a PERSON
+    /// and the other waits for TIME, and a principal who is asleep is
+    /// protected by exactly one of them.
+    fn cooling_off_for(&self, contract: &Contract) -> Option<u64> {
+        // The parties agreeing on a window beats whatever the operator
+        // configured.
+        if let Some(secs) = contract.terms.cooling_off_seconds {
+            return (secs > 0).then_some(secs);
+        }
+        let threshold = std::env::var("GAP_COOLING_OFF_ABOVE")
+            .ok()
+            .and_then(|v| Amount::parse(&v).ok())?;
+        let value = Amount::from_f64_rounding(contract.terms.price.amount);
+        if value.minor_units() < threshold.minor_units() {
+            return None;
+        }
+        Some(
+            std::env::var("GAP_COOLING_OFF_SECONDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| {
+                    crate::irreversibility::IrreversibilityClass::Financial.default_cooling_off()
+                }),
+        )
+    }
+
+    /// The buyer changes its mind inside the window (RFC-0009 §3.3).
+    pub fn withdraw_consent(&mut self, token: &str, contract_id: &str) -> Result<Value> {
+        let did = self.agent_by_token(token)?.identity.did().clone();
+        let contract = self
+            .contracts
+            .get(contract_id)
+            .cloned()
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.client != did {
+            return Err(Error::Unauthorized(
+                "only the buyer may withdraw its own consent".into(),
+            ));
+        }
+        let pending = self
+            .cooling_off
+            .get(contract_id)
+            .cloned()
+            .ok_or_else(|| Error::Other("nothing is cooling off for this contract".into()))?;
+        if pending["settles_at"].as_u64().unwrap_or(0) <= now_unix() {
+            return Err(Error::Other(
+                "the window has elapsed; accept-delivery will settle it".into(),
+            ));
+        }
+        self.cooling_off.remove(contract_id);
+        self.forget_state("cooling_off", contract_id);
+        self.record(
+            "pay.cooling_off.withdrawn",
+            json!({ "contract_id": contract_id }),
+        );
+        Ok(json!({
+            "contract_id": contract_id,
+            "state": "consent_withdrawn",
+            "note": "Nothing was released. The escrow stays parked; the buyer may accept again \
+        or dispute.",
+        }))
+    }
+
     /// What this node can honestly claim to speak (RFC-0011).
     ///
     /// A SELF-declaration, and it says so. RFC-0011 §3.3 defines an
@@ -4785,6 +4933,19 @@ with your agent id. Either way the node credits it after enough confirmations.",
         // Public: a node that will not say what it speaks is a node you
         // have to guess about.
         ("GET", "/v1/conformance") => Ok(guard.conformance()),
+        (m, p)
+            if m == "POST"
+                && p.starts_with("/v1/contract/")
+                && p.ends_with("/withdraw-consent") =>
+        {
+            let id = p
+                .trim_start_matches("/v1/contract/")
+                .trim_end_matches("/withdraw-consent");
+            match token {
+                Some(t) => guard.withdraw_consent(t, id),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
         ("POST", "/v1/delegation") => {
             let chain = body.get("chain").cloned().unwrap_or(body.clone());
             match token {
@@ -5927,6 +6088,7 @@ mod tests {
             autonomy: "propose".into(),
             confidentiality: None,
             human_review_above: None,
+            cooling_off_seconds: None,
         };
         let body = json!({ "provider": provider_did, "capability_id": "cap:p:analyze", "terms": terms, "escrow": true });
         let (s, v) = route(
@@ -6077,6 +6239,7 @@ mod tests {
             autonomy: "propose".into(),
             confidentiality: None,
             human_review_above: None,
+            cooling_off_seconds: None,
         };
         let (client_tok, provider_tok, contract_id) = {
             let arc = Arc::new(Mutex::new(NodeState::with_rate_limits(
@@ -6303,6 +6466,7 @@ mod tests {
             autonomy: "propose".into(),
             confidentiality: None,
             human_review_above: None,
+            cooling_off_seconds: None,
         };
         let body = json!({ "provider": provider_did, "capability_id": "cap:p:analyze", "terms": terms, "escrow": true });
         let (s, v) = route(
