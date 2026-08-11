@@ -1156,7 +1156,14 @@ fn tampering_with_a_stored_event_is_detected() {
     let n = node(path);
     let (_, v) = route(&n, "GET", "/v1/audit/verify", b"", None);
     assert_eq!(v["intact"], json!(false), "tampering must be caught: {v}");
-    assert_eq!(v["broken_at_seq"], json!(3), "and named: {v}");
+    assert_eq!(v["breaks_at_seq"], json!([3]), "and named: {v}");
+    // Verification continues past the break: the stretches either side
+    // are still worth something, and reporting only the first failure
+    // would let one edit hide the state of everything after it.
+    assert!(
+        !v["segments"].as_array().unwrap().is_empty(),
+        "the unbroken stretches must still be reported: {v}"
+    );
 
     let _ = std::fs::remove_file(path);
 }
@@ -1188,8 +1195,9 @@ fn events_written_before_the_chain_are_declared_not_backfilled() {
     // The new events chain; the old ones are counted and excluded.
     assert_eq!(v["intact"], json!(true), "{v}");
     assert!(v["unchained_prefix"].as_u64().unwrap() > 0, "{v}");
+    let first = &v["segments"][0];
     assert!(
-        v["chain_starts_at_seq"].as_u64().unwrap() > 1,
+        first["from_seq"].as_u64().unwrap() > 1,
         "it must say where the chain begins: {v}"
     );
 
@@ -1387,6 +1395,93 @@ fn an_agent_cannot_file_itself_under_a_strangers_tree() {
     assert_ne!(
         s, 200,
         "presenting a chain that delegates to someone else must be refused: {v}"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A float in a payload must not break the chain.
+///
+/// serde_json is round-trip correct on VALUES without being byte-stable
+/// on STRINGS: 0.9090909090909091 parses to a double whose shortest
+/// representation is ...092. Both denote the same number, so nothing is
+/// wrong - but the spine hashed a document it re-parses on the next
+/// boot, so the hash written and the hash recomputed differed. A
+/// reputation score is a float, so node.reputation.update broke the
+/// live chain while every value in it was correct.
+#[test]
+fn a_float_payload_survives_a_restart_with_its_link_intact() {
+    let path = std::env::temp_dir().join(format!("gap-float-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+
+    {
+        let n = node(path);
+        // Settling produces node.reputation.update, whose payload
+        // carries the smoothed score - the exact shape that broke.
+        let (id, client, _p) = delivered(&n);
+        post(
+            &n,
+            &format!("/v1/contract/{id}/accept-delivery"),
+            json!({}),
+            &client,
+        );
+        let (_, v) = route(&n, "GET", "/v1/audit/verify", b"", None);
+        assert_eq!(v["intact"], json!(true), "intact when freshly written: {v}");
+    }
+
+    // The restart is what used to reveal it: the chain verified in the
+    // process that wrote it and failed in the next one.
+    let n = node(path);
+    let (_, v) = route(&n, "GET", "/v1/audit/verify", b"", None);
+    assert_eq!(
+        v["intact"],
+        json!(true),
+        "a float payload must still verify after a reload: {v}"
+    );
+    assert!(v["links_verified"].as_u64().unwrap() > 4, "{v}");
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A contract's history must not depend on how old the node is.
+#[test]
+fn a_contract_shows_its_events_however_busy_the_node_has_been() {
+    let path = std::env::temp_dir().join(format!("gap-evwin-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+
+    // Push the spine past the old hard-coded window of 100 events.
+    for _ in 0..30 {
+        let (id, client, _p) = delivered(&n);
+        post(
+            &n,
+            &format!("/v1/contract/{id}/accept-delivery"),
+            json!({}),
+            &client,
+        );
+    }
+    let (id, client, _p) = delivered(&n);
+    post(
+        &n,
+        &format!("/v1/contract/{id}/accept-delivery"),
+        json!({}),
+        &client,
+    );
+
+    let (s, c) = route(&n, "GET", &format!("/v1/contract/{id}"), b"", None);
+    assert_eq!(s, 200);
+    let events = c["events"].as_array().unwrap();
+    assert!(
+        !events.is_empty(),
+        "the events are in storage; the endpoint scanned only the first 100 ever written: {c}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e["payload"]["contract_id"] == json!(id)),
+        "and every one must belong to this contract"
     );
 
     let _ = std::fs::remove_file(path);

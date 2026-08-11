@@ -136,6 +136,9 @@ impl SqliteStorage {
 impl Storage for SqliteStorage {
     fn append_event(&mut self, kind: &str, payload: serde_json::Value) -> Result<u64> {
         validate_event(kind, &payload)?;
+        // Fix the bytes before they are hashed AND stored, so the next
+        // boot re-parses to the same document.
+        let payload = crate::storage::canonical_payload(payload);
         let at = crate::message::now_unix() as i64;
         // O(1) sequence from the in-memory counter (see struct docs:
         // MAX(seq) per insert was quadratic under load).

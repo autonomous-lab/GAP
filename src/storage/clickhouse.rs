@@ -490,6 +490,7 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
 impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
     fn append_event(&mut self, kind: &str, payload: serde_json::Value) -> Result<u64> {
         validate_event(kind, &payload)?;
+        let payload = crate::storage::canonical_payload(payload);
         let mut events = self
             .events
             .lock()

@@ -19,6 +19,55 @@ pub mod sqlite;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 
+/// Accept a payload that arrives as JSON, or as a string CONTAINING
+/// JSON.
+///
+/// ClickHouse stores the payload in a String column and `select` reads
+/// rows with `FORMAT JSONEachRow`, so a hydrated row carries
+/// `"payload":"{\"contract_id\":...}"` - a string, where an append in
+/// the same process carries an object. Nothing complained, because
+/// `serde_json::Value` happily holds either.
+///
+/// It broke three things, all only after a restart and all silently:
+/// `GET /v1/contract/{id}` returned ZERO events, because the filter
+/// asks `payload.get("contract_id")` and a string has no keys; the
+/// audit output changed shape mid-life; and the spine hash recomputed
+/// over a different document than the one it was written from, so the
+/// chain verified in the process that wrote it and failed in the next
+/// one.
+fn de_payload<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<serde_json::Value, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    match v {
+        // Only re-parse when the string really is JSON. A payload that
+        // is genuinely a string stays one.
+        serde_json::Value::String(s) => {
+            Ok(serde_json::from_str(&s).unwrap_or(serde_json::Value::String(s)))
+        }
+        other => Ok(other),
+    }
+}
+
+/// Normalise a payload to the exact form it will be stored in.
+///
+/// JSON floats have no canonical text form, and serde_json is
+/// round-trip correct on VALUES without being byte-stable on STRINGS:
+/// `0.9090909090909091` parses to a double whose shortest
+/// representation is `0.9090909090909092`. Both denote the same
+/// number, so nothing is wrong - but a hash taken before that
+/// normalisation and recomputed after it differs, and the spine hashes
+/// a document it re-parses on the next boot.
+///
+/// A reputation score is a float, so `node.reputation.update` broke the
+/// chain in production while every value in it was correct. Passing the
+/// payload through one parse/serialise cycle before it is stored AND
+/// hashed makes the stored bytes a fixed point: the next parse yields a
+/// value that serialises to exactly the same string.
+pub fn canonical_payload(v: serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(&v.to_string()).unwrap_or(v)
+}
+
 /// The hash that links one spine event to the previous one.
 ///
 /// Over a canonical form, not `Debug` or a struct layout: the value has
@@ -57,6 +106,7 @@ pub struct EventRecord {
     /// ISO-ish timestamp (unix seconds).
     pub at: u64,
     /// The event payload (a signed artifact or its reference).
+    #[serde(deserialize_with = "de_payload")]
     pub payload: serde_json::Value,
     /// Hash of the previous event in the spine (RFC-0003).
     ///
@@ -381,5 +431,63 @@ pub(crate) mod test_helpers {
             "5.000000"
         );
         assert_eq!(storage.list_escrows().unwrap().len(), 1);
+    }
+}
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+
+    /// A hydrated ClickHouse row must rebuild the same document the
+    /// append wrote, or everything downstream reads a string where it
+    /// expects an object.
+    #[test]
+    fn a_clickhouse_row_rebuilds_its_payload_as_json() {
+        // Exactly what FORMAT JSONEachRow emits for a String column.
+        let row = r#"{"seq":308,"kind":"ctr.propose","at":1786400000,
+            "payload":"{\"contract_id\":\"urn:gap:ctr:abc\"}",
+            "prev_hash":"","hash":"sha256:x"}"#;
+        let rec: EventRecord = serde_json::from_str(row).unwrap();
+        assert!(rec.payload.is_object(), "got {:?}", rec.payload);
+        assert_eq!(rec.payload["contract_id"], "urn:gap:ctr:abc");
+    }
+
+    /// The shape SQLite and an in-process append produce must survive
+    /// untouched.
+    #[test]
+    fn a_native_json_payload_is_left_alone() {
+        let row = r#"{"seq":1,"kind":"ctr.propose","at":1,
+            "payload":{"contract_id":"urn:gap:ctr:abc"}}"#;
+        let rec: EventRecord = serde_json::from_str(row).unwrap();
+        assert_eq!(rec.payload["contract_id"], "urn:gap:ctr:abc");
+    }
+
+    /// A payload that is genuinely a string stays a string. Re-parsing
+    /// everything that looks vaguely parseable would turn the word
+    /// "null" into JSON null and a bare number into an integer.
+    #[test]
+    fn a_payload_that_is_really_a_string_is_not_reinterpreted() {
+        let row = r#"{"seq":1,"kind":"k","at":1,"payload":"not json at all"}"#;
+        let rec: EventRecord = serde_json::from_str(row).unwrap();
+        assert_eq!(
+            rec.payload,
+            serde_json::Value::String("not json at all".into())
+        );
+    }
+
+    /// Both shapes must hash identically, or the chain verifies in the
+    /// process that wrote it and fails in the next one - which is
+    /// exactly what production did.
+    #[test]
+    fn both_shapes_hash_to_the_same_link() {
+        let native: EventRecord =
+            serde_json::from_str(r#"{"seq":9,"kind":"ctr.accept","at":7,"payload":{"a":1}}"#)
+                .unwrap();
+        let hydrated: EventRecord =
+            serde_json::from_str(r#"{"seq":9,"kind":"ctr.accept","at":7,"payload":"{\"a\":1}"}"#)
+                .unwrap();
+        assert_eq!(
+            event_hash(9, "ctr.accept", 7, &native.payload, ""),
+            event_hash(9, "ctr.accept", 7, &hydrated.payload, "")
+        );
     }
 }

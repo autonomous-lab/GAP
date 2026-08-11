@@ -3561,44 +3561,61 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
     /// would allow, and it is the one that is actually true.
     pub fn verify_spine(&self) -> Value {
         let events = self.storage.events_after(0, u64::MAX).unwrap_or_default();
-        let mut chain_starts_at: Option<u64> = None;
-        let mut checked = 0u64;
-        let mut broken_at: Option<u64> = None;
+        let mut segments: Vec<Value> = vec![];
+        let mut breaks: Vec<u64> = vec![];
+        let mut seg_from: Option<u64> = None;
+        let mut seg_links = 0u64;
+        let mut seg_last = 0u64;
         let mut expected_prev = String::new();
 
         for e in &events {
             if e.hash.is_empty() {
-                // Pre-chain event. Skipped, and it resets nothing: the
-                // first chained event opens the chain with an empty
-                // predecessor.
-                continue;
-            }
-            if chain_starts_at.is_none() {
-                chain_starts_at = Some(e.seq);
-                expected_prev = e.prev_hash.clone();
+                continue; // written before the chain existed
             }
             let recomputed =
                 crate::storage::event_hash(e.seq, &e.kind, e.at, &e.payload, &e.prev_hash);
-            if recomputed != e.hash || e.prev_hash != expected_prev {
-                broken_at = Some(e.seq);
-                break;
+            let links_here = seg_from.is_some() && e.prev_hash == expected_prev;
+            if recomputed != e.hash || (seg_from.is_some() && !links_here) {
+                // Close the running stretch and start a new one HERE.
+                // Stopping dead at the first break lets one historical
+                // incident hide every link after it, and the useful
+                // question is not "is this perfect" but "which parts of
+                // this history can I trust".
+                if let Some(from) = seg_from {
+                    segments
+                        .push(json!({ "from_seq": from, "to_seq": seg_last, "links": seg_links }));
+                }
+                breaks.push(e.seq);
+                seg_from = None;
             }
+            if seg_from.is_none() {
+                seg_from = Some(e.seq);
+                seg_links = 0;
+            }
+            seg_links += 1;
+            seg_last = e.seq;
             expected_prev = e.hash.clone();
-            checked += 1;
+        }
+        if let Some(from) = seg_from {
+            segments.push(json!({ "from_seq": from, "to_seq": seg_last, "links": seg_links }));
         }
 
+        let unchained = events.iter().filter(|e| e.hash.is_empty()).count();
+        let verified: u64 = segments.iter().filter_map(|s| s["links"].as_u64()).sum();
         json!({
-            "intact": broken_at.is_none(),
-            "broken_at_seq": broken_at,
-            "chain_starts_at_seq": chain_starts_at,
-            "links_verified": checked,
+            "intact": breaks.is_empty(),
+            "breaks_at_seq": breaks,
+            "segments": segments,
+            "links_verified": verified,
             "events_total": events.len(),
-            "unchained_prefix": events.iter().filter(|e| e.hash.is_empty()).count(),
+            "unchained_prefix": unchained,
             "tip_hash": events.last().map(|e| e.hash.clone()).filter(|h| !h.is_empty()),
-            "algorithm": "sha256 over {at,kind,payload,prev_hash,seq} as compact sorted-key JSON",
+            "algorithm": "sha256 over {at,kind,payload,prev_hash,seq} as compact sorted-key JSON, \
+        payload normalised through one parse/serialise cycle before it is stored and hashed",
             "note": "Events written before the chain existed carry no hash. They are counted in \
-        unchained_prefix and excluded from verification rather than hashed retroactively, which would \
-        manufacture evidence this node does not have.",
+        unchained_prefix and excluded rather than hashed retroactively, which would manufacture evidence \
+        this node does not have. A break does not stop verification: each unbroken stretch is reported \
+        separately.",
         })
     }
 
@@ -4588,7 +4605,13 @@ pub fn route_with_ip(
                     "escrow_funded": guard.escrow_is_funded(id),
                     "provider_may_start": !c.escrow || guard.escrow_is_funded(id),
                     "contract": c,
-                    "events": guard.storage.events_after(0, 100).unwrap_or_default()
+                    // The whole spine, not the first hundred events ever
+                    // written. `events_after(0, 100)` returns sequences
+                    // 1..100, so every contract after the hundredth
+                    // event on this node showed an EMPTY history while
+                    // its events sat in storage - and the older the node,
+                    // the more contracts it silently applied to.
+                    "events": guard.storage.events_after(0, u64::MAX).unwrap_or_default()
                         .into_iter()
                         .filter(|e| e.payload.get("contract_id").and_then(|v| v.as_str()) == Some(id))
                         .collect::<Vec<_>>(),
