@@ -1195,3 +1195,63 @@ fn events_written_before_the_chain_are_declared_not_backfilled() {
 
     let _ = std::fs::remove_file(path);
 }
+
+/// The declared conformance level must match what the binary can do.
+///
+/// A hand-set level is exactly the kind of claim that stays true in the
+/// config long after it stopped being true in the code - which is how
+/// the site ended up promising a hash-chained spine it did not have.
+/// So the areas are checked against the router, not trusted.
+#[test]
+fn conformance_areas_match_reality() {
+    let path = std::env::temp_dir().join(format!("gap-conf-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+
+    let (s, c) = route(&n, "GET", "/v1/conformance", b"", None);
+    assert_eq!(s, 200, "a node must say what it speaks: {c}");
+
+    // Every area claimed as served must have a live route behind it.
+    let probes: &[(&str, &str, &str)] = &[
+        ("identity", "POST", "/v1/identity"),
+        ("discovery", "GET", "/v1/discover"),
+        ("agentcard", "GET", "/.well-known/gap-agent.json"),
+        ("receipt_chain", "GET", "/v1/audit/verify"),
+    ];
+    let served: Vec<&str> = c["why"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["served"] == json!(true))
+        .map(|a| a["area"].as_str().unwrap())
+        .collect();
+    for (area, method, p) in probes {
+        assert!(served.contains(area), "{area} should be served");
+        let (code, _) = route(&n, method, p, b"{}", None);
+        assert_ne!(
+            code, 400,
+            "{area} is claimed but {method} {p} is not routed"
+        );
+    }
+
+    // And the three that are NOT served must stay declared false while
+    // their modules remain unreachable. This test fails the day someone
+    // wires one and forgets to say so - which is the point.
+    for unreachable in ["policy", "delegation", "compliance"] {
+        assert!(
+            !served.contains(&unreachable),
+            "{unreachable} is declared served: wire it or do not claim it"
+        );
+    }
+
+    // Which caps the node at L2, honestly.
+    assert_eq!(c["level"], json!("L2"), "{c}");
+    assert_eq!(c["missing_for_next_level"], json!(["policy"]));
+
+    // The report is signed by the node, so the claim is attributable.
+    assert!(c["sig"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(c["suite_version"], json!("self-declared"));
+
+    let _ = std::fs::remove_file(path);
+}

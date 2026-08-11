@@ -3512,6 +3512,151 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         })
     }
 
+    /// What this node can honestly claim to speak (RFC-0011).
+    ///
+    /// A SELF-declaration, and it says so. RFC-0011 §3.3 defines an
+    /// external Conformance Kit; running one is a stronger claim than
+    /// this, and until that exists a node reporting its own level is
+    /// telling you what it believes, not what a third party measured.
+    ///
+    /// The level is DERIVED, never configured. Each area below is
+    /// backed by something that either exists in this binary or does
+    /// not, and `conformance_areas_match_reality` in the test module
+    /// checks the list against the router rather than trusting it. That
+    /// matters more than it sounds: a hand-set level is exactly the
+    /// kind of claim that stays true in the config long after it stopped
+    /// being true in the code.
+    ///
+    /// Three areas are deliberately false today. `policy`, `delegation`
+    /// and `compliance` have modules with tests and no way to reach
+    /// them, so the node caps at L2 rather than claiming the L3 its
+    /// feature list might suggest.
+    pub fn conformance(&self) -> Value {
+        use crate::conformance::{AreaResult, ConformanceReport, Level};
+
+        // (area, served, why)
+        let areas: &[(&str, bool, &str)] = &[
+            (
+                "identity",
+                true,
+                "DIDs, Ed25519 signing, key rotation, POST /v1/identity",
+            ),
+            (
+                "message",
+                true,
+                "signed envelopes, replay window, message_id dedup",
+            ),
+            (
+                "discovery",
+                true,
+                "POST /v1/announce, GET /v1/discover, TTL, deregister",
+            ),
+            ("agentcard", true, "GET /.well-known/gap-agent.json"),
+            (
+                "contract",
+                true,
+                "propose, accept, counter, reject, cancel, remedy",
+            ),
+            (
+                "execution",
+                true,
+                "start, progress, deliver, verify, accept-delivery",
+            ),
+            (
+                "payment",
+                true,
+                "escrow park, release, refund, arbitrated split",
+            ),
+            (
+                "governance",
+                true,
+                "autonomy levels, principal binding, veto, budgets",
+            ),
+            (
+                "receipt_chain",
+                true,
+                "hash-chained spine, GET /v1/audit/verify",
+            ),
+            ("policy", false, "src/policy.rs exists and nothing calls it"),
+            (
+                "delegation",
+                false,
+                "src/delegation.rs exists and nothing calls it",
+            ),
+            (
+                "compliance",
+                false,
+                "src/compliance.rs exists and nothing calls it",
+            ),
+            (
+                "tokenomics",
+                false,
+                "spec part 07 is informative; no implementation",
+            ),
+        ];
+
+        let served: std::collections::HashSet<&str> = areas
+            .iter()
+            .filter(|(_, ok, _)| *ok)
+            .map(|(a, _, _)| *a)
+            .collect();
+        let level = [Level::L4, Level::L3, Level::L2, Level::L1, Level::L0]
+            .into_iter()
+            .find(|l| l.required_areas().iter().all(|a| served.contains(a)))
+            .unwrap_or(Level::L0);
+
+        let report = ConformanceReport {
+            report_id: format!(
+                "urn:gap:conf:{}",
+                &crate::sha256_hex(format!("{}|{}", self.node_did(), crate::VERSION).as_bytes())
+                    [..16]
+            ),
+            level,
+            suite_version: "self-declared".into(),
+            per_area: areas
+                .iter()
+                .map(|(area, ok, _)| AreaResult {
+                    area: (*area).to_string(),
+                    tests_run: 1,
+                    tests_passed: usize::from(*ok),
+                })
+                .collect(),
+            implementation_version: crate::VERSION.to_string(),
+            generated_at: now_unix(),
+            signed_by: self.node_did(),
+            sig: None,
+        }
+        .sign(&self.node.identity);
+
+        let mut out = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+        out["missing_for_next_level"] = json!(match level {
+            Level::L4 => vec![],
+            other => {
+                let next = match other {
+                    Level::L0 => Level::L1,
+                    Level::L1 => Level::L2,
+                    Level::L2 => Level::L3,
+                    _ => Level::L4,
+                };
+                next.required_areas()
+                    .iter()
+                    .filter(|a| !served.contains(*a))
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+            }
+        });
+        out["why"] = json!(areas
+            .iter()
+            .map(|(a, ok, why)| json!({ "area": a, "served": ok, "detail": why }))
+            .collect::<Vec<_>>());
+        out["note"] = json!(
+            "Self-declared, not measured by an external Conformance Kit \
+(RFC-0011 section 3.3). The level is derived from the areas below, never configured, and a test \
+checks that list against the router."
+        );
+        out
+    }
+
     /// Headline numbers for the public home page.
     ///
     /// Every field is derived from state this node actually holds — no
@@ -4448,6 +4593,9 @@ with your agent id. Either way the node credits it after enough confirmations.",
         // Public on purpose: a tamper-evidence claim nobody can check
         // is a claim, not evidence.
         ("GET", "/v1/audit/verify") => Ok(guard.verify_spine()),
+        // Public: a node that will not say what it speaks is a node you
+        // have to guess about.
+        ("GET", "/v1/conformance") => Ok(guard.conformance()),
         ("GET", "/v1/audit") => {
             // Authenticated endpoint: the audit spine is tamper-evident
             // evidence; anonymous read access would leak every contract
