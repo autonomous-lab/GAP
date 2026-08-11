@@ -1252,16 +1252,20 @@ fn conformance_areas_match_reality() {
     // And the three that are NOT served must stay declared false while
     // their modules remain unreachable. This test fails the day someone
     // wires one and forgets to say so - which is the point.
-    for unreachable in ["policy", "delegation", "compliance"] {
-        assert!(
-            !served.contains(&unreachable),
-            "{unreachable} is declared served: wire it or do not claim it"
-        );
-    }
+    // compliance is the last module with tests and no way to reach it.
+    // This fails the day someone wires it and forgets to say so.
+    assert!(
+        !served.contains(&"compliance"),
+        "compliance is declared served: wire it or do not claim it"
+    );
 
-    // Which caps the node at L2, honestly.
-    assert_eq!(c["level"], json!("L2"), "{c}");
-    assert_eq!(c["missing_for_next_level"], json!(["policy"]));
+    // policy is wired now, so the honest cap moved to L3. L4 still
+    // needs compliance, which is still a module nothing calls.
+    assert_eq!(c["level"], json!("L3"), "{c}");
+    assert!(c["missing_for_next_level"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("compliance")));
 
     // The report is signed by the node, so the claim is attributable.
     assert!(c["sig"].as_str().is_some_and(|s| !s.is_empty()));
@@ -1661,6 +1665,134 @@ fn a_pending_cooling_off_survives_a_restart() {
         json!("cooling_off"),
         "a restart must not wave the window through: {v}"
     );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A policy must be able to stop a contract before it exists.
+///
+/// RFC-0004's engine - four layers, first deny terminal, signed
+/// decision records - was written, tested, and called from nowhere,
+/// which is also what capped this node's honest conformance at L2.
+#[test]
+fn a_policy_denies_a_contract_and_says_why() {
+    let path = std::env::temp_dir().join(format!("gap-pol-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+    n.lock()
+        .unwrap()
+        .set_admin_token(String::from("operator-token"));
+
+    // Nothing installed: contracts flow exactly as before.
+    let (_id, _c, _p) = delivered(&n);
+
+    let (s, v) = post(
+        &n,
+        "/v1/policy",
+        json!({
+            "policy_id": "pol:test:spend",
+            "layer": "organizational",
+            "rules": [{
+                "rule_id": "no-big-spends",
+                "effect": "deny",
+                "if": { "field": "action.amount", "op": "gt", "value": 0.1 }
+            }]
+        }),
+        "operator-token",
+    );
+    assert_eq!(s, 200, "{v}");
+
+    // An agent must not be able to install one: a deny is terminal, so
+    // letting any caller add a policy lets any caller block somebody
+    // else's business.
+    let (did, tok) = n.lock().unwrap().create_identity();
+    let _ = did;
+    let (s, _) = post(
+        &n,
+        "/v1/policy",
+        json!({ "policy_id": "p2", "layer": "personal",
+                "rules": [{ "rule_id": "r", "effect": "deny",
+                            "if": { "field": "action.amount", "op": "gt", "value": 0 }}]}),
+        &tok,
+    );
+    assert_eq!(s, 401, "policies are operator-gated");
+
+    // The fixture proposes at 0.2, over the limit.
+    let (_, client) = n.lock().unwrap().create_identity();
+    let (pdid, _ptok) = n.lock().unwrap().create_identity();
+    let now = gap::message::now_unix();
+    let (s, v) = post(
+        &n,
+        "/v1/contract/propose",
+        json!({
+            "provider": pdid, "capability_id": "cap:x", "escrow": true,
+            "terms": { "input": {}, "deliverable": {}, "acceptance_criteria": ["ok"],
+                "deadline": now + 3600,
+                "price": { "amount": 0.2, "currency": "USDC", "model": "fixed", "cap": 1.0 },
+                "autonomy": "propose", "confidentiality": null }
+        }),
+        &client,
+    );
+    assert_ne!(s, 200, "the policy must stop it: {v}");
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(msg.contains("policy denied"), "{msg}");
+    assert!(
+        msg.contains("no-big-spends"),
+        "it must name the rule, or nobody can argue with it: {msg}"
+    );
+
+    // Under the limit still goes through.
+    let (s, v) = post(
+        &n,
+        "/v1/contract/propose",
+        json!({
+            "provider": pdid, "capability_id": "cap:x", "escrow": true,
+            "terms": { "input": {}, "deliverable": {}, "acceptance_criteria": ["ok"],
+                "deadline": now + 3600,
+                "price": { "amount": 0.05, "currency": "USDC", "model": "fixed", "cap": 1.0 },
+                "autonomy": "propose", "confidentiality": null }
+        }),
+        &client,
+    );
+    assert_eq!(s, 200, "an allowed contract must proceed: {v}");
+
+    // And the decision is on the spine either way.
+    let (_, audit) = route(
+        &n,
+        "GET",
+        "/v1/audit",
+        b"",
+        Some(&format!("Bearer {client}")),
+    );
+    let kinds: Vec<&str> = audit["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert!(
+        kinds.contains(&"pol.decision"),
+        "decisions must be recorded: {kinds:?}"
+    );
+    assert!(kinds.contains(&"pol.install"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Wiring the engine must move the declared conformance level.
+#[test]
+fn the_node_now_claims_l3() {
+    let path = std::env::temp_dir().join(format!("gap-l3-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+
+    let (_, c) = route(&n, "GET", "/v1/conformance", b"", None);
+    assert_eq!(c["level"], json!("L3"), "policy is wired now: {c}");
+    // L4 still honestly out of reach.
+    let missing = c["missing_for_next_level"].as_array().unwrap();
+    assert!(missing.contains(&json!("compliance")), "{c}");
 
     let _ = std::fs::remove_file(path);
 }

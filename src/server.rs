@@ -128,6 +128,9 @@ pub struct NodeState {
     relayer: Option<Relayer>,
     /// The audit spine.
     pub storage: Box<dyn Storage>,
+    /// Policies, by id (RFC-0004). Rebuilt into an `Engine` per
+    /// evaluation so that adding one takes effect immediately.
+    policies: HashMap<String, crate::policy::Policy>,
     /// Settlements consented to but still inside their cooling-off
     /// window (RFC-0009), contract id -> pending record.
     cooling_off: HashMap<String, Value>,
@@ -433,6 +436,7 @@ impl NodeState {
         let delegations: HashMap<String, crate::delegation::TokenChain> =
             load(&*storage, "delegations");
         let cooling_off: HashMap<String, Value> = load(&*storage, "cooling_off");
+        let policies: HashMap<String, crate::policy::Policy> = load(&*storage, "policies");
 
         let mut jobs_by_ref = HashMap::new();
         for records in jobs.values() {
@@ -475,6 +479,7 @@ impl NodeState {
             withdrawals,
             delegations,
             cooling_off,
+            policies,
             tree_limits: crate::sybil::TreeBucket::new(),
             persist_failures: 0,
             rate_limits: std::collections::HashMap::new(),
@@ -849,7 +854,6 @@ impl NodeState {
         let client = self.agent_by_token(client_token)?;
         let client_did = client.identity.did().clone();
         self.check_veto(&client_did, "")?;
-        let client = self.agent_by_token(client_token)?;
         let provider = crate::identity::Did::parse(provider_did)?;
         // O(1) provider lookup via the DID index (previously a scan of
         // every registered agent — quadratic once the node serves
@@ -859,6 +863,30 @@ impl NodeState {
                 "provider {provider_did} not registered on this node"
             )));
         }
+        // RFC-0004: the layered policy engine, evaluated before a
+        // contract exists rather than after. A deny that arrives once
+        // both parties have signed is an argument, not a guardrail.
+        if let Some(decision) = self.evaluate_policy(&client_did, &provider, capability_id, &terms)
+        {
+            let denied = decision.outcome == "deny";
+            self.record(
+                "pol.decision",
+                json!({
+                    "outcome": decision.outcome,
+                    "capability_id": capability_id,
+                    "applied_rules": decision.applied_rules,
+                    "decision_id": decision.decision_id,
+                    "explanation": decision.explanation,
+                }),
+            );
+            if denied {
+                return Err(Error::AutonomyViolation(format!(
+                    "policy denied this contract: {}",
+                    decision.explanation
+                )));
+            }
+        }
+        let client = self.agent_by_token(client_token)?;
         let contract =
             Contract::propose(&client.identity, provider, capability_id, terms, use_escrow);
         let id = contract.contract_id.clone();
@@ -3767,6 +3795,65 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         }))
     }
 
+    /// Install a policy (RFC-0004).
+    ///
+    /// Operator-gated for every layer, including the personal one. That
+    /// is narrower than the RFC allows - it envisages a principal
+    /// managing its own rules - but a node that lets any caller add a
+    /// policy lets any caller DENY somebody else's contracts, and a
+    /// deny is terminal. Widening this needs principal-scoped
+    /// ownership, which is real work rather than a looser check.
+    pub fn add_policy(&mut self, admin: &str, policy_json: &Value) -> Result<Value> {
+        match self.admin_token.as_deref() {
+            Some(t) if t == admin => {}
+            _ => return Err(Error::Unauthorized("operator token required".into())),
+        }
+        let policy: crate::policy::Policy = serde_json::from_value(policy_json.clone())
+            .map_err(|e| Error::Other(format!("malformed policy: {e}")))?;
+        if policy.rules.is_empty() {
+            return Err(Error::Other(
+                "a policy with no rules decides nothing; refusing to store it".into(),
+            ));
+        }
+        let id = policy.policy_id.clone();
+        self.save_state("policies", &id, &policy);
+        self.policies.insert(id.clone(), policy);
+        self.record("pol.install", json!({ "policy_id": id }));
+        Ok(json!({ "policy_id": id, "policies": self.policies.len() }))
+    }
+
+    /// Evaluate a proposed contract against every layer (RFC-0004).
+    ///
+    /// Returns the signed decision record. `deny` is terminal and the
+    /// caller refuses the proposal; anything else proceeds, with the
+    /// record on the spine either way. A policy engine whose verdicts
+    /// are not recorded is one nobody can argue with afterwards, which
+    /// is most of what the RFC is for.
+    fn evaluate_policy(
+        &self,
+        client: &crate::identity::Did,
+        provider: &crate::identity::Did,
+        capability_id: &str,
+        terms: &Terms,
+    ) -> Option<crate::policy::DecisionRecord> {
+        if self.policies.is_empty() {
+            return None; // nothing installed: no evaluation, no record
+        }
+        let mut engine = crate::policy::Engine::new();
+        for p in self.policies.values() {
+            engine.add_policy(p.clone());
+        }
+        let mut ctx = crate::policy::ActionContext::new();
+        ctx.set("action.kind", json!("ctr.propose"));
+        ctx.set("action.capability", json!(capability_id));
+        ctx.set("action.amount", json!(terms.price.amount));
+        ctx.set("action.currency", json!(terms.price.currency));
+        ctx.set("action.autonomy", json!(terms.autonomy));
+        ctx.set("actor.did", json!(client.to_string()));
+        ctx.set("counterparty.did", json!(provider.to_string()));
+        Some(engine.evaluate(&ctx, &self.node.identity, None))
+    }
+
     /// What this node can honestly claim to speak (RFC-0011).
     ///
     /// A SELF-declaration, and it says so. RFC-0011 §3.3 defines an
@@ -3832,7 +3919,11 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                 true,
                 "hash-chained spine, GET /v1/audit/verify",
             ),
-            ("policy", false, "src/policy.rs exists and nothing calls it"),
+            (
+                "policy",
+                true,
+                "layered engine evaluated on ctr.propose, POST /v1/policy, signed decision records",
+            ),
             (
                 "delegation",
                 false,
@@ -4946,6 +5037,10 @@ with your agent id. Either way the node credits it after enough confirmations.",
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
+        ("POST", "/v1/policy") => match token {
+            Some(t) => guard.add_policy(t, &body),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
         ("POST", "/v1/delegation") => {
             let chain = body.get("chain").cloned().unwrap_or(body.clone());
             match token {
