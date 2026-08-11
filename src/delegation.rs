@@ -130,7 +130,7 @@ impl DelegationToken {
 }
 
 /// The full chain from root to a delegate.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenChain {
     pub tokens: Vec<DelegationToken>,
 }

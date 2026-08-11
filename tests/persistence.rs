@@ -1255,3 +1255,139 @@ fn conformance_areas_match_reality() {
 
     let _ = std::fs::remove_file(path);
 }
+
+/// Spawning sub-agents must not buy more shelf space (RFC-0007).
+///
+/// The landing promises "delegation-tree aggregation, one bid per
+/// tree". Nothing enforced it: src/sybil.rs had tree_root,
+/// is_sub_agent, enforce_restricted and TreeBucket, and server.rs
+/// imported exactly one thing from it - the rate counter struct - so
+/// the Sybil defences were unreachable code behind a public claim.
+#[test]
+fn a_delegation_tree_gets_one_directory_entry_not_one_per_agent() {
+    use gap::delegation::{Budget, DelegationToken, Mandate, TokenChain};
+
+    let path = std::env::temp_dir().join(format!("gap-sybil-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+
+    let announce = |tok: &str, id: &str| {
+        post(
+            &n,
+            "/v1/announce",
+            json!({ "capabilities": [{
+                "id": id, "name": "flood", "description": "d",
+                "price": { "amount": 0.01, "currency": "USDC", "model": "fixed", "cap": 1.0 }
+            }]}),
+            tok,
+        )
+    };
+
+    // The principal, and two sub-agents it delegates to.
+    let (root_did, root_tok) = n.lock().unwrap().create_identity();
+    let root_identity = n.lock().unwrap().agent_identity_for(&root_did).unwrap();
+    announce(&root_tok, "cap:a");
+
+    let mut subs = vec![];
+    for i in 0..2 {
+        let (sub_did, sub_tok) = n.lock().unwrap().create_identity();
+        let mandate = Mandate {
+            capabilities: vec!["cap:a".into()],
+            budget: Budget::default(),
+            autonomy_level: "propose".into(),
+            jurisdictions: vec![],
+            channels: vec![],
+            expires_at: gap::message::now_unix() + 3600,
+            mode: "standing".into(),
+        };
+        let root_id = gap::identity::Did::parse(&root_did).unwrap();
+        let token = DelegationToken::issue(
+            &root_identity,
+            gap::identity::Did::parse(&sub_did).unwrap(),
+            root_id,
+            "urn:gap:dlg:0".into(),
+            mandate,
+        );
+        let mut chain = TokenChain::default();
+        chain.push(token).unwrap();
+
+        announce(&sub_tok, &format!("cap:sub{i}"));
+        let (s, v) = post(&n, "/v1/delegation", json!({ "chain": chain }), &sub_tok);
+        assert_eq!(s, 200, "registering a chain must work: {v}");
+        assert_eq!(v["tree_root"], json!(root_did), "{v}");
+        subs.push(sub_did);
+    }
+
+    // Three agents announced. One tree, so one entry.
+    let (_, dir) = route(&n, "GET", "/v1/directory", b"", None);
+    let listed: Vec<&str> = dir["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["did"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        listed.len(),
+        1,
+        "three agents of one tree must get one entry, got {listed:?}"
+    );
+    assert_eq!(
+        listed[0], root_did,
+        "the tree is represented by its root here"
+    );
+    for sub in &subs {
+        assert!(!listed.contains(&sub.as_str()), "{sub} should be collapsed");
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A chain that delegates to somebody else must be refused.
+#[test]
+fn an_agent_cannot_file_itself_under_a_strangers_tree() {
+    use gap::delegation::{Budget, DelegationToken, Mandate, TokenChain};
+
+    let path = std::env::temp_dir().join(format!("gap-sybil2-{}.db", std::process::id()));
+    let path = path.to_str().unwrap();
+    let _ = std::fs::remove_file(path);
+    let n = node(path);
+
+    let (root_did, _root_tok) = n.lock().unwrap().create_identity();
+    let root_identity = n.lock().unwrap().agent_identity_for(&root_did).unwrap();
+    let (victim_did, _) = n.lock().unwrap().create_identity();
+    let (_attacker_did, attacker_tok) = n.lock().unwrap().create_identity();
+
+    // A perfectly valid chain - for somebody else.
+    let mandate = Mandate {
+        capabilities: vec!["cap:a".into()],
+        budget: Budget::default(),
+        autonomy_level: "propose".into(),
+        jurisdictions: vec![],
+        channels: vec![],
+        expires_at: gap::message::now_unix() + 3600,
+        mode: "standing".into(),
+    };
+    let token = DelegationToken::issue(
+        &root_identity,
+        gap::identity::Did::parse(&victim_did).unwrap(),
+        gap::identity::Did::parse(&root_did).unwrap(),
+        "urn:gap:dlg:0".into(),
+        mandate,
+    );
+    let mut chain = TokenChain::default();
+    chain.push(token).unwrap();
+
+    let (s, v) = post(
+        &n,
+        "/v1/delegation",
+        json!({ "chain": chain }),
+        &attacker_tok,
+    );
+    assert_ne!(
+        s, 200,
+        "presenting a chain that delegates to someone else must be refused: {v}"
+    );
+
+    let _ = std::fs::remove_file(path);
+}

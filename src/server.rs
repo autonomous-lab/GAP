@@ -128,6 +128,16 @@ pub struct NodeState {
     relayer: Option<Relayer>,
     /// The audit spine.
     pub storage: Box<dyn Storage>,
+    /// Registered delegation chains, agent DID -> chain (RFC-0001).
+    ///
+    /// The node has to know which tree an agent belongs to before it
+    /// can aggregate anything per tree, and RFC-0007 is entirely about
+    /// aggregating per tree. Without this the sybil defences had
+    /// nothing to key on, which is why they were never called.
+    delegations: HashMap<String, crate::delegation::TokenChain>,
+    /// Per-tree rate counters (RFC-0007). Keyed by tree root, so
+    /// spawning sub-agents multiplies nothing.
+    tree_limits: crate::sybil::TreeBucket,
     /// Payout requests, by id. Persisted under the "withdrawals" scope
     /// so a restart cannot lose money somebody is owed.
     withdrawals: HashMap<String, Value>,
@@ -417,6 +427,8 @@ impl NodeState {
         }
 
         let withdrawals: HashMap<String, Value> = load(&*storage, "withdrawals");
+        let delegations: HashMap<String, crate::delegation::TokenChain> =
+            load(&*storage, "delegations");
 
         let mut jobs_by_ref = HashMap::new();
         for records in jobs.values() {
@@ -457,6 +469,8 @@ impl NodeState {
             relayer: None,
             storage,
             withdrawals,
+            delegations,
+            tree_limits: crate::sybil::TreeBucket::new(),
             persist_failures: 0,
             rate_limits: std::collections::HashMap::new(),
             ip_limits: std::collections::HashMap::new(),
@@ -573,6 +587,27 @@ impl NodeState {
                 .entry(src.to_string())
                 .or_default()
                 .record_invocation(now, self.ip_cap)?; // per-IP cap
+        }
+        // PER-TREE cap (RFC-0007). The per-token cap above is what a
+        // Sybil walks straight through: spawn ten sub-agents, get ten
+        // tokens, get ten times the budget. Aggregating by delegation
+        // root is the entire point of the RFC, and it was written and
+        // never called.
+        //
+        // Applied only to actors that registered a chain, because an
+        // agent with no chain IS its own tree and the per-token cap
+        // already is its per-tree cap. Same ceiling either way, so
+        // declaring a chain can only tighten, never loosen.
+        if let Some(t) = token {
+            if let Some(chain) = self
+                .agents
+                .get(t)
+                .map(|a| a.identity.did().to_string())
+                .and_then(|did| self.delegations.get(&did))
+            {
+                self.tree_limits
+                    .record_invocation(chain, now, self.token_cap)?;
+            }
         }
         Ok(())
     }
@@ -3335,6 +3370,61 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             })
             .filter(|a| min_score.is_none_or(|min| a["score"].as_f64().unwrap_or(0.0) >= min))
             .collect();
+
+        // ONE BID PER TREE (RFC-0007 section 3).
+        //
+        // The point of the whole RFC: a principal that spawns sub-agents
+        // must not get more shelf space than one that does not.
+        // Announcing from ten delegates of the same root used to produce
+        // ten directory entries, which is a Sybil attack costing nothing
+        // and needing no crypto.
+        //
+        // The survivor is the best-scored of the tree, ties broken by
+        // DID so the answer is stable across calls - a directory that
+        // reshuffles on every request is one nobody can audit.
+        let mut best: std::collections::BTreeMap<String, Value> = Default::default();
+        for a in agents {
+            let did = a["did"].as_str().unwrap_or("").to_string();
+            let tree = self.tree_of(&did);
+            // The root represents its own tree whenever it is announcing.
+            // Anything else picks a delegate essentially at random and
+            // shows a buyer a sub-agent while the principal it answers
+            // to sits invisible one line away.
+            //
+            // Otherwise: best score, ties broken by DID, so the listing
+            // is stable across calls. A directory that reshuffles on
+            // every request is one nobody can audit.
+            let rank = |v: &Value, d: &str| {
+                (
+                    u8::from(d == tree),
+                    v["score"].as_f64().unwrap_or(0.0),
+                    std::cmp::Reverse(d.to_string()),
+                )
+            };
+            match best.get(&tree) {
+                Some(kept) => {
+                    if rank(&a, &did) > rank(kept, kept["did"].as_str().unwrap_or("")) {
+                        best.insert(tree, a);
+                    }
+                }
+                None => {
+                    best.insert(tree, a);
+                }
+            }
+        }
+        let agents: Vec<Value> = best
+            .into_values()
+            .map(|mut a| {
+                let did = a["did"].as_str().unwrap_or("").to_string();
+                let tree = self.tree_of(&did);
+                // Said out loud: a buyer comparing two entries deserves
+                // to know when one of them speaks for a whole tree.
+                if tree != did {
+                    a["tree_root"] = json!(tree);
+                }
+                a
+            })
+            .collect();
         json!({
             "node": self.node_did().to_string(),
             "query": q,
@@ -3655,6 +3745,82 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
 checks that list against the router."
         );
         out
+    }
+
+    /// Register a delegation chain, so this agent is known to belong to
+    /// a tree (RFC-0001, RFC-0007).
+    ///
+    /// Everything RFC-0007 promises - "one bid per tree", per-tree rate
+    /// limits, restricted actions a sub-agent may not perform - needs to
+    /// know which tree an actor is in. Nothing could answer that, which
+    /// is the whole reason those defences were dead code.
+    ///
+    /// The chain must end at the CALLER. Accepting a chain that
+    /// delegates to somebody else would let an agent file itself under
+    /// a stranger's tree, which is either impersonation or a way to
+    /// exhaust another tree's quota.
+    pub fn register_delegation(&mut self, token: &str, chain_json: &Value) -> Result<Value> {
+        let did = self.agent_by_token(token)?.identity.did().clone();
+        let chain: crate::delegation::TokenChain = serde_json::from_value(chain_json.clone())
+            .map_err(|e| Error::Other(format!("malformed delegation chain: {e}")))?;
+        // Signatures, parent linkage, depth, expiry, no escalation.
+        chain.verify(now_unix())?;
+        match chain.delegate() {
+            Some(d) if *d == did => {}
+            Some(other) => {
+                return Err(Error::Unauthorized(format!(
+                    "this chain delegates to {other}, not to you"
+                )))
+            }
+            None => return Err(Error::Other("empty delegation chain".into())),
+        }
+
+        let root = crate::sybil::tree_root(&chain);
+        let sub = crate::sybil::is_sub_agent(&chain);
+        let budget = chain.effective_budget();
+        let depth = chain.tokens.len();
+        self.save_state("delegations", &did.to_string(), &chain);
+        self.delegations.insert(did.to_string(), chain);
+        self.record(
+            "dlg.register",
+            json!({ "agent_did": did.to_string(), "tree_root": root.to_string(), "depth": depth }),
+        );
+        Ok(json!({
+            "agent_did": did.to_string(),
+            "tree_root": root.to_string(),
+            "depth": depth,
+            "is_sub_agent": sub,
+            "effective_budget": budget,
+            "note": "Rate limits, contract caps and directory listings now aggregate across \
+        this whole tree rather than per agent.",
+        }))
+    }
+
+    /// The tree an agent belongs to; itself when it has no chain.
+    ///
+    /// An unregistered agent is its own tree, which keeps the aggregate
+    /// rules total: there is no actor the per-tree limits do not apply
+    /// to, so registering a chain can only ever tighten what an agent
+    /// may do, never loosen it. A defence you can escape by declining
+    /// to declare anything is not a defence.
+    pub fn tree_of(&self, did: &str) -> String {
+        self.delegations
+            .get(did)
+            .map(|c| crate::sybil::tree_root(c).to_string())
+            .unwrap_or_else(|| did.to_string())
+    }
+
+    /// Refuse an action a sub-agent may never perform (RFC-0007 §3).
+    pub fn check_restricted(
+        &self,
+        did: &str,
+        action: crate::sybil::RestrictedAction,
+    ) -> Result<()> {
+        match self.delegations.get(did) {
+            Some(chain) => crate::sybil::enforce_restricted(chain, action),
+            // No chain means no delegation, which means not a sub-agent.
+            None => Ok(()),
+        }
     }
 
     /// Headline numbers for the public home page.
@@ -4596,6 +4762,13 @@ with your agent id. Either way the node credits it after enough confirmations.",
         // Public: a node that will not say what it speaks is a node you
         // have to guess about.
         ("GET", "/v1/conformance") => Ok(guard.conformance()),
+        ("POST", "/v1/delegation") => {
+            let chain = body.get("chain").cloned().unwrap_or(body.clone());
+            match token {
+                Some(t) => guard.register_delegation(t, &chain),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
         ("GET", "/v1/audit") => {
             // Authenticated endpoint: the audit spine is tamper-evident
             // evidence; anonymous read access would leak every contract
