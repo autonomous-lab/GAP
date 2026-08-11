@@ -3925,9 +3925,16 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                 "layered engine evaluated on ctr.propose, POST /v1/policy, signed decision records",
             ),
             (
+                // Partially served, and partial is not served. Chains
+                // are registered, verified and drive per-tree
+                // aggregation (RFC-0007), but mandate budgets are not
+                // enforced against contracts and there is no
+                // revocation, so claiming the area would be claiming
+                // the half that is missing.
                 "delegation",
                 false,
-                "src/delegation.rs exists and nothing calls it",
+                "chains registered and verified (POST /v1/delegation), but mandate budgets \
+unenforced and no revocation",
             ),
             (
                 "compliance",
