@@ -2457,6 +2457,183 @@ directly rather than reasoning about its metadata"
         Ok(json!({ "contract_id": contract_id, "state": "cancelled", "escrow_refunded": refunded }))
     }
 
+    /// Close the deals that time has already ended.
+    ///
+    /// A contract carries a deadline, and past it no delivery can be on
+    /// time and no acceptance is coming. Nothing in the protocol said
+    /// so: a contract nobody funded or nobody answered stayed `draft` or
+    /// `signed` for ever, any parked escrow stayed parked, and the
+    /// public feed showed as in-flight a deal that had been abandoned
+    /// days earlier.
+    ///
+    /// This CLOSES them, it does not erase them: `ctr.cancel` on the
+    /// spine, escrow refunded, exactly what a party calling cancel would
+    /// produce. Deleting a contract from an audit chain would remove the
+    /// one property this node sells, and the chain would no longer
+    /// verify. An abandoned deal is a fact; the honest way to stop
+    /// showing it as live is to record that it ended, not to pretend it
+    /// never happened.
+    ///
+    /// Two rules, and a contract needs only one of them:
+    ///   * its own deadline passed more than `grace` ago — the terms
+    ///     both parties signed say the deal is over;
+    ///   * nothing has happened to it for longer than `max_idle` — for
+    ///     a deal whose deadline is years out, or is not worth the name,
+    ///     silence is the only signal there is.
+    ///
+    /// "Nothing has happened" is read off the SPINE, not off
+    /// `created_at`. Age-since-creation would expire a contract raised
+    /// six hours ago and signed a minute ago, which is a live deal being
+    /// killed mid-negotiation. The spine knows when each contract last
+    /// moved, and that is the question being asked.
+    ///
+    /// `Delivered` is deliberately NOT expired. The provider did the
+    /// work; cancelling would refund the buyer and strip the provider of
+    /// its claim, which is a ruling, not housekeeping. Those need a
+    /// dispute or an acceptance, and are reported separately.
+    pub fn expire_stale_contracts(
+        &mut self,
+        admin: &str,
+        now: u64,
+        grace: u64,
+        max_idle: u64,
+        dry_run: bool,
+    ) -> Result<Value> {
+        match self.admin_token.as_deref() {
+            Some(t) if t == admin => {}
+            _ => return Err(Error::Unauthorized("operator token required".into())),
+        }
+
+        // When each contract last moved, straight off the audit chain.
+        // One pass over the spine, reused for every contract below.
+        let mut last_move: HashMap<String, u64> = HashMap::new();
+        for e in self.storage.events_after(0, u64::MAX).unwrap_or_default() {
+            if let Some(cid) = e.payload["contract_id"].as_str() {
+                let slot = last_move.entry(cid.to_string()).or_insert(0);
+                *slot = (*slot).max(e.at);
+            }
+        }
+
+        let mut doomed: Vec<(String, &'static str)> = Vec::new();
+        let mut stranded = 0usize;
+        for (id, c) in self.contracts.iter() {
+            match c.state {
+                ContractState::Draft | ContractState::Signed | ContractState::Executing => {}
+                // Work was handed over. Not ours to cancel.
+                ContractState::Delivered => {
+                    stranded += 1;
+                    continue;
+                }
+                _ => continue,
+            }
+            let past_deadline = c.terms.deadline > 0 && now > c.terms.deadline.saturating_add(grace);
+            // Fall back to creation only when the spine has nothing for
+            // this contract; a contract with neither is left alone
+            // rather than expired on no evidence at all.
+            let seen = last_move
+                .get(id)
+                .copied()
+                .filter(|t| *t > 0)
+                .unwrap_or(c.created_at);
+            let idle = seen > 0 && now > seen.saturating_add(max_idle);
+            if past_deadline {
+                doomed.push((id.clone(), "deadline passed"));
+            } else if idle {
+                doomed.push((id.clone(), "abandoned before completion"));
+            }
+        }
+
+        let mut closed = Vec::new();
+        for (id, why) in doomed {
+            let state = self.contracts.get(&id).map(|c| c.state.wire_name());
+            if dry_run {
+                closed.push(json!({
+                    "deal_ref": pseudonym(&id),
+                    "was": state,
+                    "reason": why,
+                }));
+                continue;
+            }
+            match self.expire_one(&id, why) {
+                Ok(refunded) => closed.push(json!({
+                    "deal_ref": pseudonym(&id),
+                    "was": state,
+                    "reason": why,
+                    "escrow_refunded": refunded,
+                })),
+                // A contract that refuses the transition is left alone
+                // and counted, not retried into a different state.
+                Err(_) => stranded += 1,
+            }
+        }
+
+        Ok(json!({
+            "dry_run": dry_run,
+            "closed": closed.len(),
+            "left_alone": stranded,
+            "contracts": closed,
+        }))
+    }
+
+    /// Cancel one contract on the node's own authority, refunding any
+    /// parked escrow. Split out so the sweep above holds no borrow
+    /// across the mutation.
+    fn expire_one(&mut self, contract_id: &str, reason: &str) -> Result<bool> {
+        let contract = self
+            .contracts
+            .get_mut(contract_id)
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        contract.transition(ContractState::Cancelled)?;
+        let saved = contract.clone();
+        self.persist_contract(&saved);
+
+        // Parked funds go home. A deal the node closed must strand
+        // money even less than one a party closed.
+        let refunded = {
+            let node_did = self.node_did();
+            let client_identity = self
+                .agents_by_did
+                .get(&saved.client.to_string())
+                .and_then(|t| self.agents.get(t))
+                .map(|a| a.identity.clone());
+            match (client_identity, self.escrows.get_mut(contract_id)) {
+                (Some(identity), Some(escrow)) => {
+                    let instruction = Envelope::new(
+                        identity.did().clone(),
+                        node_did,
+                        Kind::PayRefund,
+                        json!({ "reason": "contract expired" }),
+                    )
+                    .for_contract(contract_id)
+                    .sign(&identity);
+                    escrow.refund(&instruction).is_ok()
+                }
+                _ => false,
+            }
+        };
+        if refunded {
+            self.persist_escrow(
+                contract_id,
+                crate::payment::EscrowState::Refunded,
+                Amount::ZERO,
+                &saved.terms.price.currency,
+            );
+        }
+        // `by` is the node, not a party: whoever reads this back must be
+        // able to tell an operator sweep from a buyer changing its mind.
+        self.record(
+            "ctr.cancel",
+            json!({
+                "contract_id": contract_id,
+                "by": self.node_did().to_string(),
+                "reason": reason,
+                "expired_by_node": true,
+                "refunded": refunded,
+            }),
+        );
+        Ok(refunded)
+    }
+
     // ---- durable projections -------------------------------------
     //
     // Contracts, escrows, identities and announcements each had a typed
@@ -5058,6 +5235,31 @@ pub fn route_with_ip(
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
+        // Close the deals time already ended. Operator authority, and
+        // it defaults to a DRY RUN: a bulk state change on contracts is
+        // the one call where "show me first" must be what happens when
+        // the caller says nothing.
+        ("POST", "/v1/admin/expire") => {
+            let secs = |k: &str, d: u64| body.get(k).and_then(|v| v.as_u64()).unwrap_or(d);
+            let dry_run = body
+                .get("dry_run")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            match token {
+                Some(t) => guard.expire_stale_contracts(
+                    t,
+                    now_unix(),
+                    secs("grace_seconds", 86_400),
+                    // Six hours of silence. Deals on this node run
+                    // start to finish in under two minutes, so a
+                    // contract that has not moved since breakfast is
+                    // not slow, it is abandoned.
+                    secs("max_idle_seconds", 21_600),
+                    dry_run,
+                ),
+                None => Err(Error::Unauthorized("operator token required".into())),
+            }
+        }
         // Rails the node cannot read itself (bank, card). Operator
         // authority, and it must point at an external reference.
         ("POST", "/v1/balance/credit") => {
@@ -5729,6 +5931,178 @@ mod tests {
         );
         assert_eq!(status, 200, "accept failed: {out}");
         (id, client_tok, provider_tok)
+    }
+
+    #[test]
+    fn expiry_defaults_to_a_dry_run_and_changes_nothing() {
+        // A bulk state change over every contract on the node is the one
+        // call where saying nothing must mean "show me first".
+        let arc = state();
+        arc.lock().unwrap().set_admin_token("adm");
+        let (id, _, _) = signed_contract(&arc);
+        arc.lock()
+            .unwrap()
+            .contracts
+            .get_mut(&id)
+            .unwrap()
+            .terms
+            .deadline = 1;
+
+        let (status, out) = route(
+            &arc,
+            "POST",
+            "/v1/admin/expire",
+            b"{}",
+            Some("Bearer adm"),
+        );
+        assert_eq!(status, 200, "{out}");
+        assert_eq!(out["dry_run"], true);
+        assert_eq!(out["closed"], 1);
+        assert_eq!(
+            arc.lock().unwrap().contracts.get(&id).unwrap().state,
+            ContractState::Signed,
+            "a dry run must not move the contract"
+        );
+    }
+
+    #[test]
+    fn expiry_closes_a_contract_whose_deadline_has_passed() {
+        let arc = state();
+        arc.lock().unwrap().set_admin_token("adm");
+        let (id, _, _) = signed_contract(&arc);
+        arc.lock()
+            .unwrap()
+            .contracts
+            .get_mut(&id)
+            .unwrap()
+            .terms
+            .deadline = 1;
+
+        let (status, out) = route(
+            &arc,
+            "POST",
+            "/v1/admin/expire",
+            br#"{"dry_run":false}"#,
+            Some("Bearer adm"),
+        );
+        assert_eq!(status, 200, "{out}");
+        assert_eq!(out["closed"], 1);
+        assert_eq!(out["contracts"][0]["reason"], "deadline passed");
+        assert_eq!(
+            arc.lock().unwrap().contracts.get(&id).unwrap().state,
+            ContractState::Cancelled
+        );
+        // Closed, not erased: the cancellation is on the spine, and the
+        // spine still verifies. Deleting the deal instead would remove
+        // the only property this node sells.
+        let guard = arc.lock().unwrap();
+        let kinds: Vec<String> = guard
+            .storage
+            .events_after(0, 500)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert!(kinds.contains(&"ctr.cancel".to_string()));
+        assert!(kinds.contains(&"ctr.propose".to_string()), "history kept");
+        assert_eq!(guard.verify_spine()["intact"], true);
+    }
+
+    #[test]
+    fn expiry_leaves_a_live_contract_alone() {
+        let arc = state();
+        arc.lock().unwrap().set_admin_token("adm");
+        let (id, _, _) = signed_contract(&arc);
+        // Deadline an hour out, created just now: neither rule applies.
+        let (status, out) = route(
+            &arc,
+            "POST",
+            "/v1/admin/expire",
+            br#"{"dry_run":false}"#,
+            Some("Bearer adm"),
+        );
+        assert_eq!(status, 200, "{out}");
+        assert_eq!(out["closed"], 0);
+        assert_eq!(
+            arc.lock().unwrap().contracts.get(&id).unwrap().state,
+            ContractState::Signed
+        );
+    }
+
+    #[test]
+    fn idleness_is_measured_from_the_last_move_not_from_creation() {
+        // The trap: a contract raised six hours ago and signed one
+        // minute ago is a live negotiation. Judging it by age since
+        // creation kills it mid-deal. The spine says when it last
+        // moved, and propose/accept above are both on the spine.
+        let arc = state();
+        arc.lock().unwrap().set_admin_token("adm");
+        let (id, _, _) = signed_contract(&arc);
+        {
+            let mut guard = arc.lock().unwrap();
+            let c = guard.contracts.get_mut(&id).unwrap();
+            c.created_at = 1; // ancient
+            c.terms.deadline = crate::message::now_unix() + 3600;
+        }
+        let (status, out) = route(
+            &arc,
+            "POST",
+            "/v1/admin/expire",
+            br#"{"dry_run":false,"max_idle_seconds":60}"#,
+            Some("Bearer adm"),
+        );
+        assert_eq!(status, 200, "{out}");
+        assert_eq!(out["closed"], 0, "it moved a moment ago: {out}");
+        assert_eq!(
+            arc.lock().unwrap().contracts.get(&id).unwrap().state,
+            ContractState::Signed
+        );
+    }
+
+    #[test]
+    fn expiry_never_cancels_work_that_was_delivered() {
+        // The provider spent real compute and handed over an artifact.
+        // Cancelling refunds the buyer and strips the provider of its
+        // claim - that is a ruling, not housekeeping. It needs a dispute
+        // or an acceptance, so the sweep reports it and moves on.
+        let arc = state();
+        arc.lock().unwrap().set_admin_token("adm");
+        let (id, _, _) = signed_contract(&arc);
+        {
+            let mut guard = arc.lock().unwrap();
+            let c = guard.contracts.get_mut(&id).unwrap();
+            c.state = ContractState::Delivered;
+            c.terms.deadline = 1;
+        }
+        let (status, out) = route(
+            &arc,
+            "POST",
+            "/v1/admin/expire",
+            br#"{"dry_run":false}"#,
+            Some("Bearer adm"),
+        );
+        assert_eq!(status, 200, "{out}");
+        assert_eq!(out["closed"], 0);
+        assert_eq!(out["left_alone"], 1);
+        assert_eq!(
+            arc.lock().unwrap().contracts.get(&id).unwrap().state,
+            ContractState::Delivered
+        );
+    }
+
+    #[test]
+    fn expiry_requires_the_operator_token() {
+        let arc = state();
+        arc.lock().unwrap().set_admin_token("adm");
+        let (_, _, provider_tok) = signed_contract(&arc);
+        let (status, _) = route(
+            &arc,
+            "POST",
+            "/v1/admin/expire",
+            br#"{"dry_run":false}"#,
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_eq!(status, 401, "a party must not be able to sweep the node");
     }
 
     #[test]
