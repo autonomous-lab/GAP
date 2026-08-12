@@ -429,7 +429,10 @@ fn node_with_panel(
 
 #[test]
 fn agreeing_judges_produce_one_ruling_and_release() {
-    let (state, ja, jb) = node_with_panel(Ruling::Conforms, Ruling::Conforms);
+    // Both judges reject, so both are consulted: only a `conforms`
+    // ends the panel early, because only a rejection costs the provider
+    // anything and needs confirming.
+    let (state, ja, jb) = node_with_panel(Ruling::Nonconforming, Ruling::Nonconforming);
     let (_c, ct) = register(&state);
     let (pd, pt) = register(&state);
     let cid = delivered(&state, &ct, &pt, &pd, &sha(CONTENT), false);
@@ -440,7 +443,7 @@ fn agreeing_judges_produce_one_ruling_and_release() {
         &json!({ "content": CONTENT }),
         &ct,
     );
-    assert_eq!(v["ruling"], "conforms");
+    assert_eq!(v["ruling"], "nonconforming");
     assert!(v["escalation"].is_null(), "unanimity needs no human");
     assert_eq!(v["opinions"].as_array().unwrap().len(), 2);
     assert_eq!(ja.calls().len(), 1);
@@ -459,7 +462,9 @@ fn agreeing_judges_produce_one_ruling_and_release() {
 fn disagreeing_judges_escalate_to_a_human_and_hold_the_money() {
     // This is the whole point of the panel: independent judges
     // disagreeing IS the signal that a human is needed.
-    let (state, _, _) = node_with_panel(Ruling::Conforms, Ruling::Nonconforming);
+    // The first judge must not pass the work: a leading `conforms` ends
+    // the panel by design, and there is then no disagreement to reach.
+    let (state, _, _) = node_with_panel(Ruling::Nonconforming, Ruling::Conforms);
     let (_c, ct) = register(&state);
     let (pd, pt) = register(&state);
     let cid = delivered(&state, &ct, &pt, &pd, &sha(CONTENT), false);

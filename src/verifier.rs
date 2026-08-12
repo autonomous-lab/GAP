@@ -357,23 +357,53 @@ fn poll_panel(
     judges: &[&dyn Verifier],
     reasons: &mut Vec<String>,
 ) -> (Ruling, Option<String>, Vec<Opinion>, Option<Escalation>) {
+    // The panel is SEQUENTIAL, and it stops as soon as a judge says the
+    // work conforms.
+    //
+    // The two rulings do not cost the same thing. `conforms` is
+    // advisory: it releases nothing by itself, and a buyer who disagrees
+    // can still refuse the delivery or dispute it. `nonconforming`
+    // withholds a provider's money and puts a permanent mark on its
+    // public record. So the second opinion belongs on the side that
+    // condemns - asking a second model to confirm a verdict nobody was
+    // harmed by is a call spent for nothing, and it was the source of
+    // most of the disagreements: two models rarely phrase "fine" the
+    // same way.
     let mut opinions: Vec<Opinion> = Vec::new();
+    let mut unavailable: Vec<String> = Vec::new();
     for judge in judges {
         match judge.judge(evidence) {
-            Ok((ruling, why)) => opinions.push(Opinion {
-                judge: judge.name(),
-                ruling,
-                reasons: why,
-            }),
-            Err(e) => opinions.push(Opinion {
-                judge: judge.name(),
-                ruling: Ruling::Inconclusive,
-                reasons: vec![format!("judge unavailable: {e}")],
-            }),
+            Ok((ruling, why)) => {
+                opinions.push(Opinion {
+                    judge: judge.name(),
+                    ruling,
+                    reasons: why,
+                });
+                if ruling == Ruling::Conforms {
+                    break;
+                }
+            }
+            // An absent judge is NOT a dissenting one. Counting a
+            // timeout as an opinion turned one network failure into a
+            // judge disagreement, escalated a conforming delivery to
+            // human review and stranded the money: the first judge had
+            // read the work and passed it.
+            Err(e) => {
+                unavailable.push(judge.name());
+                reasons.push(format!("[{}] judge unavailable: {e}", judge.name()));
+            }
         }
     }
     if opinions.is_empty() {
-        reasons.push("no judge was consulted".into());
+        reasons.push(if unavailable.is_empty() {
+            "no judge was consulted".into()
+        } else {
+            format!(
+                "no judge answered ({} unavailable): integrity verified, subjective criteria \
+                 not assessed",
+                unavailable.join(", ")
+            )
+        });
         return (Ruling::Inconclusive, None, opinions, None);
     }
     let model = Some(
@@ -390,6 +420,24 @@ fn poll_panel(
     }
     let first = opinions[0].ruling;
     if opinions.iter().all(|o| o.ruling == first) {
+        // One voice may clear work. One voice may not condemn it: if the
+        // judge that was meant to confirm never answered, the honest
+        // outcome is "undecided", not "rejected". A provider must not
+        // lose a contract to somebody else's timeout.
+        if first != Ruling::Conforms && opinions.len() == 1 && !unavailable.is_empty() {
+            reasons.push(format!(
+                "only {} could be reached and it did not pass the work; {} was unavailable, \
+                 so nothing confirms this - escalated rather than held against the provider",
+                opinions[0].judge,
+                unavailable.join(", ")
+            ));
+            return (
+                Ruling::Inconclusive,
+                model,
+                opinions,
+                Some(Escalation::JudgeDisagreement),
+            );
+        }
         return (first, model, opinions, None);
     }
     reasons.push(format!(
@@ -1210,6 +1258,14 @@ mod vision_tests {
         }
     }
 
+    /// The same fixture with the image stripped: a plain text delivery.
+    fn text_evidence() -> Evidence {
+        let mut e = image_evidence();
+        e.image_base64 = None;
+        e.image_media_type = None;
+        e
+    }
+
     fn image_evidence() -> Evidence {
         Evidence {
             contract_id: "urn:gap:ctr:img".into(),
@@ -1275,16 +1331,19 @@ mod vision_tests {
 
     #[test]
     fn an_all_seeing_panel_is_polled_normally() {
+        // Nothing is filtered out when every judge can see. Asserted
+        // with a ruling that does not end the panel early, since a
+        // leading `conforms` legitimately stops it.
         let node = AgentIdentity::generate();
-        let a = mock("vision-a", Ruling::Conforms, true);
-        let b = mock("vision-b", Ruling::Conforms, true);
+        let a = mock("vision-a", Ruling::Nonconforming, true);
+        let b = mock("vision-b", Ruling::Nonconforming, true);
         let verdict = verify_panel(
             &node,
             &image_evidence(),
             &[&a as &dyn Verifier, &b as &dyn Verifier],
             None,
         );
-        assert_eq!(verdict.ruling, Ruling::Conforms);
+        assert_eq!(verdict.ruling, Ruling::Nonconforming);
         assert_eq!(verdict.opinions.len(), 2, "both judges are independent");
         assert!(verdict.escalation.is_none());
     }
@@ -1293,8 +1352,10 @@ mod vision_tests {
     fn two_sighted_judges_that_disagree_still_escalate() {
         // Filtering blind judges must not weaken the disagreement rule.
         let node = AgentIdentity::generate();
-        let a = mock("vision-a", Ruling::Conforms, true);
-        let b = mock("vision-b", Ruling::Nonconforming, true);
+        // The first judge must not pass the work, or the panel stops
+        // there by design and there is no disagreement to reach.
+        let a = mock("vision-a", Ruling::Nonconforming, true);
+        let b = mock("vision-b", Ruling::Conforms, true);
         let blind = mock("blind", Ruling::Conforms, false);
         let verdict = verify_panel(
             &node,
@@ -1312,13 +1373,16 @@ mod vision_tests {
 
     #[test]
     fn a_text_deliverable_still_uses_every_judge() {
-        // The vision filter must only apply to images.
+        // The vision filter must only apply to images: on text, a judge
+        // that cannot see is still eligible. Checked with a first
+        // ruling that does NOT stop the panel, since a `conforms`
+        // legitimately ends it early.
         let node = AgentIdentity::generate();
         let mut e = image_evidence();
         e.image_base64 = None;
         e.image_media_type = None;
-        let blind = mock("blind", Ruling::Conforms, false);
-        let sighted = mock("sighted", Ruling::Conforms, true);
+        let blind = mock("blind", Ruling::Nonconforming, false);
+        let sighted = mock("sighted", Ruling::Nonconforming, true);
         let verdict = verify_panel(
             &node,
             &e,
@@ -1326,6 +1390,96 @@ mod vision_tests {
             None,
         );
         assert_eq!(verdict.opinions.len(), 2);
+    }
+
+    #[test]
+    fn one_judge_passing_the_work_ends_the_panel() {
+        // The two rulings do not cost the same. `conforms` releases
+        // nothing by itself - the buyer can still refuse or dispute - so
+        // a second opinion on it buys nothing and costs a call. Most of
+        // the disagreements came from here: two models rarely phrase
+        // "fine" the same way.
+        let node = AgentIdentity::generate();
+        let first = mock("first", Ruling::Conforms, false);
+        let second = mock("second", Ruling::Nonconforming, false);
+        let verdict = verify_panel(
+            &node,
+            &text_evidence(),
+            &[&first as &dyn Verifier, &second as &dyn Verifier],
+            None,
+        );
+        assert_eq!(verdict.ruling, Ruling::Conforms);
+        assert_eq!(verdict.opinions.len(), 1, "the second judge is not asked");
+        assert_eq!(verdict.opinions[0].judge, "first");
+        assert!(verdict.escalation.is_none());
+        assert!(second.seen.lock().unwrap().is_empty(), "never consulted");
+    }
+
+    #[test]
+    fn condemning_the_work_takes_a_second_opinion() {
+        // The other direction: a `nonconforming` withholds a provider's
+        // money and marks its public record, so it gets confirmed.
+        let node = AgentIdentity::generate();
+        let first = mock("first", Ruling::Nonconforming, false);
+        let second = mock("second", Ruling::Nonconforming, false);
+        let verdict = verify_panel(
+            &node,
+            &text_evidence(),
+            &[&first as &dyn Verifier, &second as &dyn Verifier],
+            None,
+        );
+        assert_eq!(verdict.ruling, Ruling::Nonconforming);
+        assert_eq!(verdict.opinions.len(), 2, "both were asked");
+        assert!(!second.seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_judge_that_never_answered_is_absent_not_dissenting() {
+        // What this cost live: gpt-5.6-luna timed out, its silence was
+        // filed as an `inconclusive` opinion, the panel called that a
+        // disagreement with the judge that had read the work and passed
+        // it, and a conforming delivery went to human review with the
+        // money stranded.
+        let node = AgentIdentity::generate();
+        let broken = mock("broken", Ruling::Conforms, false);
+        *broken.fail.lock().unwrap() = true;
+        let working = mock("working", Ruling::Conforms, false);
+        let verdict = verify_panel(
+            &node,
+            &text_evidence(),
+            &[&broken as &dyn Verifier, &working as &dyn Verifier],
+            None,
+        );
+        assert_eq!(verdict.ruling, Ruling::Conforms);
+        assert!(verdict.escalation.is_none(), "an outage is not a dispute");
+        assert_eq!(verdict.opinions.len(), 1);
+        assert!(
+            verdict.reasons.iter().any(|r| r.contains("unavailable")),
+            "the outage is still on the record: {:?}",
+            verdict.reasons
+        );
+    }
+
+    #[test]
+    fn one_judge_alone_cannot_condemn_when_the_other_is_down() {
+        // A provider must not lose a contract to somebody else's
+        // timeout. Nothing confirmed the rejection, so the verdict is
+        // undecided rather than against it.
+        let node = AgentIdentity::generate();
+        let harsh = mock("harsh", Ruling::Nonconforming, false);
+        let broken = mock("broken", Ruling::Conforms, false);
+        *broken.fail.lock().unwrap() = true;
+        let verdict = verify_panel(
+            &node,
+            &text_evidence(),
+            &[&harsh as &dyn Verifier, &broken as &dyn Verifier],
+            None,
+        );
+        assert_eq!(verdict.ruling, Ruling::Inconclusive);
+        assert!(matches!(
+            verdict.escalation,
+            Some(Escalation::JudgeDisagreement)
+        ));
     }
 
     #[test]
