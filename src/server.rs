@@ -1446,6 +1446,24 @@ the content inline"
             &currency,
         );
 
+        // The payout, on the spine. The two paths above record their
+        // own release — custodial as `pay.released`, relayer as
+        // `pay.released.onchain` — and this one, which is the path any
+        // contract without a custodial balance takes, recorded only
+        // `exe.accept`. So the default settlement moved money, returned
+        // an amount to the caller, and left the audit chain with no
+        // record that anyone was ever paid: acceptance was provable,
+        // payment was not.
+        self.record(
+            "pay.released",
+            json!({
+                "contract_id": contract_id,
+                // Same shape as the custodial path's receipt: a decimal
+                // string, so a subscriber parses one form, not two.
+                "amount": amount.to_string_decimal(),
+                "rail": "escrow",
+            }),
+        );
         self.record(
             "exe.accept",
             match &overridden {
@@ -3536,6 +3554,129 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         })
     }
 
+    /// How one spine event kind appears on the public feed: the phase
+    /// of the deal it belongs to, and the words a reader sees.
+    ///
+    /// This is an ALLOWLIST, and deliberately so. Spine payloads carry
+    /// fields a stranger wrote — `reason`, `note`, `plan`, `step` — and
+    /// a redaction pass that strips the ones we thought of today will
+    /// publish the next one somebody adds tomorrow. Nothing reaches the
+    /// feed unless it is named here, and no payload field is ever
+    /// copied through: `public_lifecycle_after` rebuilds every row from
+    /// the contract, whose price and capability are already public once
+    /// the deal settles.
+    ///
+    /// The phase names group events by colour on `/activity`; they are
+    /// part of the public API, so they are stable strings rather than
+    /// the internal kind.
+    fn public_phase(kind: &str) -> Option<(&'static str, &'static str)> {
+        Some(match kind {
+            // Negotiation.
+            "ctr.propose" => ("negotiation", "contract proposed"),
+            "ctr.counter" => ("negotiation", "terms countered"),
+            "ctr.accept" => ("negotiation", "terms accepted"),
+            "ctr.signed" => ("negotiation", "contract signed"),
+            "ctr.reject" => ("closed", "proposal rejected"),
+            "ctr.cancel" => ("closed", "contract cancelled"),
+            // Money in.
+            "pay.park" | "pay.parked" => ("escrow", "escrow funded"),
+            "pay.parked.onchain" => ("escrow", "escrow funded on-chain"),
+            "pay.cooling_off.pending" => ("escrow", "cooling-off started"),
+            "pay.cooling_off.elapsed" => ("escrow", "cooling-off elapsed"),
+            "pay.cooling_off.withdrawn" => ("closed", "consent withdrawn"),
+            // Work.
+            "exe.start" => ("execution", "work started"),
+            "exe.progress" => ("execution", "progress reported"),
+            "exe.deliver" | "exe.delivered" => ("execution", "deliverable handed over"),
+            // Judgement.
+            "exe.verify" => ("verdict", "deliverable verified"),
+            "exe.accept" => ("verdict", "accepted by the client"),
+            "exe.reject" => ("verdict", "rejected by the client"),
+            "ctr.remedy" => ("verdict", "rework granted"),
+            "ctr.dispute" | "pay.dispute" | "pay.disputed" => ("verdict", "disputed"),
+            "ctr.ruling" | "pay.ruled" => ("verdict", "ruling issued"),
+            // Money out.
+            "pay.released" => ("settled", "payment released"),
+            "pay.released.onchain" => ("settled", "payment released on-chain"),
+            "pay.refund" | "pay.refunded" => ("settled", "payment refunded"),
+            // The market itself.
+            "cap.announce" => ("market", "capability listed"),
+            "cap.deregister" => ("market", "capability withdrawn"),
+            _ => return None,
+        })
+    }
+
+    /// The deal lifecycle in public, pseudonymous form: every step from
+    /// proposal to payout, not just the settlements.
+    ///
+    /// Same cursor as the rest of the protocol — `after` is a spine
+    /// sequence — so the browser and an agent resume identically.
+    /// `scanned_to` is the last sequence LOOKED AT, not the last one
+    /// published: most spine kinds are internal, so a caller that
+    /// advanced its cursor only past published rows would re-read the
+    /// same unpublished tail forever.
+    pub fn public_lifecycle_after(&self, after: u64, limit: usize) -> Value {
+        let events = self
+            .storage
+            .events_after(after, limit as u64)
+            .unwrap_or_default();
+        let scanned_to = events.last().map(|e| e.seq).unwrap_or(after);
+        let rows: Vec<Value> = events
+            .iter()
+            .filter_map(|e| {
+                let (phase, label) = Self::public_phase(&e.kind)?;
+                // The contract id is the private handle that ties both
+                // parties together; the pseudonym of it is the public
+                // one, and it is the SAME value as `job_ref`, so a row
+                // on this feed and the settlement it becomes carry one
+                // reference. That is what lets the page group them.
+                let contract_id = e.payload["contract_id"].as_str();
+                let deal_ref = contract_id.map(pseudonym);
+                let contract = contract_id.and_then(|c| self.contracts.get(c));
+                Some(json!({
+                    "seq": e.seq,
+                    "at": e.at,
+                    "kind": e.kind,
+                    "phase": phase,
+                    "label": label,
+                    "deal_ref": deal_ref,
+                    // Whether /job/<deal_ref> resolves yet. A link to a
+                    // deal still in flight would 404, and a feed whose
+                    // rows mostly 404 reads as broken rather than live.
+                    "settled": deal_ref
+                        .as_deref()
+                        .map(|d| self.jobs_by_ref.contains_key(d))
+                        .unwrap_or(false),
+                    "capability_id": contract.map(|c| c.capability_id.clone()),
+                    "amount": contract.map(|c| {
+                        crate::amount::Amount::from_f64_rounding(c.terms.price.amount)
+                            .to_string_decimal()
+                    }),
+                    "currency": contract.map(|c| c.terms.price.currency.clone()),
+                }))
+            })
+            .collect();
+        json!({ "events": rows, "count": rows.len(), "scanned_to": scanned_to })
+    }
+
+    /// The last `limit` lifecycle rows, newest first, for the initial
+    /// server render of `/activity`.
+    ///
+    /// Reads a window off the tail of the spine rather than the whole
+    /// chain: this projection only ever shows the recent past, and the
+    /// chain only grows. The window is over-sized because most kinds
+    /// are not published — asking for exactly `limit` events would come
+    /// back nearly empty.
+    pub fn public_lifecycle(&self, limit: usize) -> Value {
+        let total = self.storage.event_count().unwrap_or(0);
+        let window = (limit as u64).saturating_mul(8).max(200);
+        let all = self.public_lifecycle_after(total.saturating_sub(window), window as usize);
+        let mut rows = all["events"].as_array().cloned().unwrap_or_default();
+        rows.reverse();
+        rows.truncate(limit);
+        json!({ "events": rows, "count": rows.len() })
+    }
+
     /// Recent public activity: settled jobs across all agents, already
     /// pseudonymous (RFC-0014 §5), newest first.
     pub fn public_activity_after(&self, after: u64, limit: usize) -> Value {
@@ -4472,8 +4613,9 @@ pub fn route_html(
         }
         "/activity" => {
             let recent = guard.public_activity(50);
+            let lifecycle = guard.public_lifecycle(60);
             let stats = guard.public_stats();
-            html(crate::ui::activity_page(&recent, &stats))
+            html(crate::ui::activity_page(&recent, &lifecycle, &stats))
         }
         "/how-it-works" => {
             let stats = guard.public_stats();
@@ -4678,6 +4820,21 @@ pub fn route_with_ip(
             match params.get("after").and_then(|v| v.parse::<u64>().ok()) {
                 Some(after) => Ok(guard.public_activity_after(after, limit)),
                 None => Ok(guard.public_activity(limit)),
+            }
+        }
+        // The whole deal lifecycle, not just what settled. Same cursor
+        // and same pseudonyms as /v1/activity, so the two feeds can be
+        // read side by side or merged on `deal_ref`.
+        ("GET", "/v1/activity/lifecycle") => {
+            let params = parse_url_params(raw_path);
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(60)
+                .min(500);
+            match params.get("after").and_then(|v| v.parse::<u64>().ok()) {
+                Some(after) => Ok(guard.public_lifecycle_after(after, limit.max(200))),
+                None => Ok(guard.public_lifecycle(limit)),
             }
         }
         ("GET", "/.well-known/gap-agent.json") => Ok(guard.agent_card()),

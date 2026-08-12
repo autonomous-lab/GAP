@@ -138,6 +138,21 @@ pub fn stamp(unix: u64) -> String {
     )
 }
 
+/// Time of day, for a feed where every row is from the last few hours.
+///
+/// The full date lives in each row's `title`, so nothing is lost - but
+/// a tape that repeats "2026-08-12" on forty consecutive lines spends
+/// its widest column on the one field that never changes.
+pub fn clock(unix: u64) -> String {
+    let secs = unix % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
 /// A span in seconds, at the precision a reader can actually use.
 ///
 /// Rounded on purpose. "2h 14m" answers what a buyer asks - was this
@@ -420,6 +435,40 @@ pre .s{color:var(--amber)}
 border:1px solid var(--line);border-bottom:0;border-radius:10px 10px 0 0;background:var(--bg-soft);
 padding:8px 14px;font-size:.76rem;color:var(--dim);letter-spacing:.06em;text-transform:uppercase}
 .codehead+pre{border-radius:0 0 10px 10px}
+
+/* ---------------------------------------------------------- tape
+   The live lifecycle feed on /activity. A list, not a table: rows
+   arrive one at a time and a table that reflows its column widths on
+   every arrival reads as a glitch rather than as activity. */
+.tape{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:var(--radius);
+background:var(--panel);max-height:520px;overflow-y:auto}
+.tape li{display:grid;gap:4px 12px;padding:10px 15px;border-bottom:1px solid var(--line);
+grid-template-columns:auto auto 1fr auto;align-items:baseline;font-size:.87rem}
+.tape li:last-child{border-bottom:0}
+.tape li:hover{background:rgba(16,28,48,.5)}
+.tape .t{color:var(--faint);font-size:.78rem;white-space:nowrap}
+/* Not scoped to .tape: the legend above it uses the same swatch, and a
+   legend whose dots are missing explains nothing. */
+.ph{display:inline-flex;align-items:center;gap:7px;font-weight:600;white-space:nowrap}
+.ph::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.tape .who{color:var(--dim);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tape .amt{white-space:nowrap;color:var(--lime)}
+.tape .fresh{animation:tapein .9s ease-out}
+@keyframes tapein{from{background:rgba(69,230,160,.16)}to{background:transparent}}
+/* One colour per phase, so the eye reads the shape of a deal without
+   reading the words: talk, money in, work, judgement, money out. */
+.p-negotiation{color:var(--cyan)}
+.p-escrow{color:var(--lime)}
+.p-execution{color:var(--amber)}
+.p-verdict{color:#c9a2ff}
+.p-settled{color:var(--green)}
+.p-closed{color:var(--red)}
+.p-market{color:var(--dim)}
+@media(max-width:640px){
+.tape li{grid-template-columns:auto 1fr;row-gap:2px}
+.tape .who,.tape .amt{grid-column:2}
+}
+@media(prefers-reduced-motion:reduce){.tape .fresh{animation:none}}
 
 /* ---------------------------------------------------------- misc */
 .live{display:inline-flex;align-items:center;gap:8px;color:var(--green);font-size:.82rem}

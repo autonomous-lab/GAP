@@ -133,7 +133,17 @@ fn stream_events(
     }
 }
 
-/// Stream public settlements as SSE (`/v1/activity/stream?after=<seq>`).
+/// Stream public activity as SSE (`/v1/activity/stream?after=<seq>`).
+///
+/// Two named event types share one connection:
+///   * `lifecycle` — every published step of a deal, from proposal to
+///     payout, keyed on the spine sequence;
+///   * `settlement` — the closing row, with the verdict and the money.
+///
+/// A named SSE event does NOT fire `onmessage`; a browser must call
+/// `addEventListener` for each name. That is a trap worth stating here
+/// because it is invisible from the server side: the node happily
+/// writes frames nobody is listening for.
 ///
 /// Unauthenticated on purpose: every field is pseudonymous. Resumable
 /// on the same cursor as the rest of the protocol, so a reconnecting
@@ -172,11 +182,39 @@ fn stream_activity(state: &Arc<Mutex<NodeState>>, request: tiny_http::Request, p
     }
     let _ = writer.flush();
 
+    // Two cursors over one connection. A settlement's sequence is the
+    // spine height at the moment the job was recorded, so the two live
+    // in the same numeric space but do not advance in lockstep: sharing
+    // one cursor would let a lifecycle event drag it past a settlement
+    // that had not been emitted yet. The client resumes from the LOWER
+    // of the two and drops what it has already drawn.
+    let mut spine_cursor = cursor;
+
     loop {
-        let batch = match state.lock() {
-            Ok(guard) => guard.public_activity_after(cursor, 100),
+        let (life, batch) = match state.lock() {
+            Ok(guard) => (
+                guard.public_lifecycle_after(spine_cursor, 200),
+                guard.public_activity_after(cursor, 100),
+            ),
             Err(_) => return,
         };
+
+        // Lifecycle first: these are the steps that lead up to a
+        // settlement, so emitting them after it would play the story
+        // backwards on a catch-up replay.
+        let events = life["events"].as_array().cloned().unwrap_or_default();
+        for ev in &events {
+            let seq = ev["seq"].as_u64().unwrap_or(spine_cursor);
+            let frame = format!("id: {seq}\nevent: lifecycle\ndata: {ev}\n\n");
+            if writer.write_all(frame.as_bytes()).is_err() {
+                return;
+            }
+        }
+        // Advance past everything LOOKED AT, not everything published:
+        // most spine kinds are internal, and a cursor that only moved
+        // past published rows would rescan the same tail every pass.
+        spine_cursor = life["scanned_to"].as_u64().unwrap_or(spine_cursor).max(spine_cursor);
+
         let jobs = batch["jobs"].as_array().cloned().unwrap_or_default();
         for job in &jobs {
             let seq = job["seq"].as_u64().unwrap_or(cursor);
@@ -186,7 +224,8 @@ fn stream_activity(state: &Arc<Mutex<NodeState>>, request: tiny_http::Request, p
             }
             cursor = seq.max(cursor);
         }
-        if !jobs.is_empty() && writer.flush().is_err() {
+        let idle = jobs.is_empty() && events.is_empty();
+        if !idle && writer.flush().is_err() {
             return;
         }
         if started.elapsed().as_secs() >= max_secs {
@@ -194,7 +233,7 @@ fn stream_activity(state: &Arc<Mutex<NodeState>>, request: tiny_http::Request, p
             let _ = writer.flush();
             return;
         }
-        if jobs.is_empty() {
+        if idle {
             if writer.write_all(b": keepalive\n\n").is_err() || writer.flush().is_err() {
                 return;
             }
