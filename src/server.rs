@@ -2352,7 +2352,15 @@ directly rather than reasoning about its metadata"
             judged_by: verdict.and_then(|v| v.model.clone()),
             on_time,
             at: now_unix(),
-            seq: self.storage.event_count().unwrap_or(0),
+            // The spine POSITION of this settlement, not how many
+            // events happen to exist. `/v1/activity` pages on this
+            // number and the browser resumes its stream from it, so a
+            // count that no longer matches the sequence hides every
+            // settlement made after it: the cursor sits above them
+            // forever. That is exactly what happened after the spine was
+            // renumbered - the node kept settling and the feed showed
+            // nothing new.
+            seq: self.storage.head_seq().unwrap_or(0),
         };
         let job_ref = record.job_ref.clone();
         self.jobs.entry(agent.to_string()).or_default().push(record);
@@ -3363,7 +3371,9 @@ characters, got {destination:?}"
             .collect();
         let mut attestation = crate::custody::ReserveAttestation {
             at: now_unix(),
-            spine_seq: self.storage.event_count().unwrap_or(0),
+            // A reserve attestation says "replay the chain up to HERE
+            // and recompute this". That has to be a real sequence.
+            spine_seq: self.storage.head_seq().unwrap_or(0),
             liabilities: liabilities.to_string_decimal(),
             holdings: holdings.to_string_decimal(),
             currency: self.custody.currency.clone(),

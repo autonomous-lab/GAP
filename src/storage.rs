@@ -233,6 +233,22 @@ pub trait Storage: Send {
     /// Total number of events persisted.
     fn event_count(&self) -> Result<u64>;
 
+    /// The highest sequence on the spine, or 0 when it is empty.
+    ///
+    /// NOT the same as [`Storage::event_count`], and the difference has
+    /// already cost this node once. A count is only a position while the
+    /// sequence is contiguous and starts at one; after a rebuild, a gap,
+    /// or a partial read it is neither. `append_event` learned that and
+    /// derives from the highest sequence - anything else that wants to
+    /// point AT the spine must do the same.
+    fn head_seq(&self) -> Result<u64> {
+        Ok(self
+            .events_after(0, u64::MAX)?
+            .last()
+            .map(|e| e.seq)
+            .unwrap_or(0))
+    }
+
     /// Upsert a contract's materialized state.
     fn upsert_contract(&mut self, record: &ContractRecord) -> Result<()>;
 

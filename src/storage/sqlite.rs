@@ -190,6 +190,14 @@ impl Storage for SqliteStorage {
         Ok(out)
     }
 
+    fn head_seq(&self) -> Result<u64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |r| r.get(0))
+            .map_err(|e| Error::Other(format!("sqlite head_seq failed: {e}")))?;
+        Ok(n as u64)
+    }
+
     fn event_count(&self) -> Result<u64> {
         let n: i64 = self
             .conn
@@ -658,6 +666,35 @@ fn row_to_deliverable(row: &rusqlite::Row) -> rusqlite::Result<DeliverableRecord
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The trap this pins, which cost the public node its settled feed:
+    /// a job's `seq` was taken from `event_count()`. A count is only a
+    /// position while the sequence is contiguous and starts at one.
+    /// After the spine was rebuilt the stored jobs carried sequences
+    /// ABOVE the new head, `/v1/activity` paged from the highest of
+    /// them, and every settlement made afterwards landed below that
+    /// cursor - so the node kept settling and the feed showed nothing
+    /// new, even after acceptance.
+    #[test]
+    fn head_seq_is_a_position_not_a_population() {
+        let mut s = SqliteStorage::open(":memory:").unwrap();
+        assert_eq!(s.head_seq().unwrap(), 0, "an empty spine has no head");
+        for _ in 0..3 {
+            s.append_event("ctr.propose", serde_json::json!({ "contract_id": "c" }))
+                .unwrap();
+        }
+        assert_eq!(s.event_count().unwrap(), 3);
+        assert_eq!(s.head_seq().unwrap(), 3, "contiguous: they agree");
+
+        // Now make them disagree, the way a rebuild does.
+        s.conn.execute("DELETE FROM events WHERE seq = 2", []).unwrap();
+        assert_eq!(s.event_count().unwrap(), 2, "one fewer row");
+        assert_eq!(
+            s.head_seq().unwrap(),
+            3,
+            "the head does not move because a row went away"
+        );
+    }
     use crate::storage::test_helpers::run_conformance_suite;
 
     #[test]

@@ -553,6 +553,14 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .collect())
     }
 
+    fn head_seq(&self) -> Result<u64> {
+        let events = self
+            .events
+            .lock()
+            .map_err(|_| Error::Other("events lock poisoned".into()))?;
+        Ok(events.iter().map(|e| e.seq).max().unwrap_or(0))
+    }
+
     fn event_count(&self) -> Result<u64> {
         let events = self
             .events
