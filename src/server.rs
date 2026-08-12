@@ -2716,6 +2716,15 @@ directly rather than reasoning about its metadata"
     /// drifted — it would pay the wrong party, or pay twice. A buyer
     /// this node does not custody has no token to borrow, so the
     /// contract is reported and left alone rather than force-settled.
+    ///
+    /// `exe.accept.auto` is written only once the acceptance has
+    /// actually landed. It used to be written first, on the argument
+    /// that the annotation should precede the acceptance it explains —
+    /// and then five deliveries whose escrow had not survived failed
+    /// inside `accept_delivery`, leaving the chain asserting an
+    /// auto-acceptance that never happened, immediately followed by the
+    /// cancellation. An audit chain may carry an out-of-order
+    /// annotation; it may not carry a false one.
     fn auto_accept_one(&mut self, contract_id: &str) -> Result<Value> {
         let client_did = self
             .contracts
@@ -2728,19 +2737,27 @@ directly rather than reasoning about its metadata"
             .get(&client_did)
             .cloned()
             .ok_or_else(|| Error::Other("buyer is not custodied on this node".into()))?;
-        // On the spine BEFORE the acceptance it triggers, so replaying
-        // the chain never shows a buyer accepting something it never
-        // saw. Whoever reads this back must be able to tell a decision
-        // from a timeout.
-        self.record(
-            "exe.accept.auto",
-            json!({
-                "contract_id": contract_id,
-                "by": self.node_did().to_string(),
-                "reason": "delivered and unanswered past the acceptance window",
-            }),
-        );
-        self.accept_delivery(&token, contract_id)
+        let settlement = self.accept_delivery(&token, contract_id)?;
+        // Accepted, or merely started down the cooling-off path? Only
+        // the first is an acceptance, and only it gets recorded — the
+        // window is re-entered by the next sweep, which would otherwise
+        // stamp a second annotation on every pass.
+        let landed = self
+            .contracts
+            .get(contract_id)
+            .map(|c| c.state == ContractState::Accepted)
+            .unwrap_or(false);
+        if landed {
+            self.record(
+                "exe.accept.auto",
+                json!({
+                    "contract_id": contract_id,
+                    "by": self.node_did().to_string(),
+                    "reason": "delivered and unanswered past the acceptance window",
+                }),
+            );
+        }
+        Ok(settlement)
     }
 
     /// Cancel one contract on the node's own authority, refunding any
@@ -3979,6 +3996,19 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                 let contract_id = e.payload["contract_id"].as_str();
                 let deal_ref = contract_id.map(pseudonym);
                 let contract = contract_id.and_then(|c| self.contracts.get(c));
+                // An auto-acceptance that never landed. 28 of these were
+                // written before the annotation was moved to after the
+                // acceptance it describes, and they cannot be removed —
+                // an audit chain does not get edited when it embarrasses
+                // its author. What CAN be fixed is the reading: a deal
+                // that ended cancelled was never auto-accepted, and
+                // saying so is more truthful than repeating the claim.
+                let (phase, label) = match (e.kind.as_str(), contract.map(|c| c.state)) {
+                    ("exe.accept.auto", Some(ContractState::Cancelled)) => {
+                        ("closed", "auto-acceptance failed, nothing to settle")
+                    }
+                    _ => (phase, label),
+                };
                 Some(json!({
                     "seq": e.seq,
                     "at": e.at,
@@ -6296,6 +6326,51 @@ mod tests {
             .collect();
         assert!(kinds.contains(&"exe.accept.auto".to_string()), "{kinds:?}");
         assert!(kinds.contains(&"pay.released".to_string()), "{kinds:?}");
+    }
+
+    #[test]
+    fn a_failed_auto_acceptance_writes_nothing_to_the_spine() {
+        // The bug this pins, which shipped and was visible on the public
+        // feed: the annotation was written BEFORE the acceptance it
+        // described. Five deliveries whose escrow had not survived then
+        // failed inside accept_delivery, and the chain was left
+        // asserting an auto-acceptance that never happened, immediately
+        // followed by the cancellation - two events, one of them false.
+        let arc = state();
+        arc.lock().unwrap().set_admin_token("adm");
+        let (id, _, _) = signed_contract(&arc);
+        {
+            let mut guard = arc.lock().unwrap();
+            let c = guard.contracts.get_mut(&id).unwrap();
+            c.state = ContractState::Delivered;
+            c.terms.deadline = 1;
+            // No escrow was ever parked: settlement cannot succeed.
+            guard.escrows.remove(&id);
+        }
+        let (status, out) = route(
+            &arc,
+            "POST",
+            "/v1/admin/expire",
+            br#"{"dry_run":false}"#,
+            Some("Bearer adm"),
+        );
+        assert_eq!(status, 200, "{out}");
+        assert_eq!(out["auto_accepted"], 0);
+        assert_eq!(out["cancelled"], 1, "closed as unsettleable: {out}");
+
+        let guard = arc.lock().unwrap();
+        let kinds: Vec<String> = guard
+            .storage
+            .events_after(0, 500)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert!(
+            !kinds.contains(&"exe.accept.auto".to_string()),
+            "an acceptance that failed must leave no trace claiming it happened: {kinds:?}"
+        );
+        assert!(kinds.contains(&"ctr.cancel".to_string()));
     }
 
     #[test]
