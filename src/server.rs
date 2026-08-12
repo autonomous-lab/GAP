@@ -970,6 +970,34 @@ Call POST /v1/contract/{id}/start before working - it refuses while unfunded"
         if deliverable_hash.trim().is_empty() {
             return Err(Error::Other("deliverable_hash required".into()));
         }
+        // Settle the digest's FORM here, at delivery, instead of ruling
+        // on it after the fact.
+        //
+        // Everything downstream already treats `<hex>` and
+        // `sha256:<hex>` as the same commitment - `digests_match` says
+        // so explicitly. Everything except the deterministic check,
+        // which demands the prefix and rules the delivery nonconforming
+        // without it. So a provider that sent a bare digest got a 200,
+        // and learned otherwise as a permanent nonconforming verdict on
+        // its public record. It happened on this node, to work nobody
+        // ever read: no judge was consulted, because the delivery never
+        // got past the check. The whole mistake was a missing prefix.
+        //
+        // Normalised, never refused. Refusing anything else here would
+        // change what this endpoint accepts for every caller at once,
+        // and the failure being fixed is narrow: a real digest missing
+        // its prefix. Whatever does not look like a bare sha256 is
+        // passed through untouched, exactly as before.
+        let normalised;
+        let deliverable_hash = {
+            let h = deliverable_hash.trim();
+            if h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()) {
+                normalised = format!("sha256:{h}");
+                normalised.as_str()
+            } else {
+                h
+            }
+        };
         // Keep the commitment: verification later checks what the client
         // actually received against this exact digest.
         contract.deliverable_hash = Some(deliverable_hash.to_string());
@@ -6442,6 +6470,61 @@ mod tests {
             Some(&format!("Bearer {provider_tok}")),
         );
         assert_eq!(status, 401, "a party must not be able to sweep the node");
+    }
+
+    #[test]
+    fn a_bare_digest_is_normalised_at_delivery_not_punished_at_verification() {
+        // What this cost on the public node: a provider delivered a
+        // market briefing with `f84a9db...` instead of `sha256:f84a9db...`,
+        // got a 200, and the deal settled nonconforming on a
+        // deterministic check. No judge ever saw the work. The verdict
+        // is on its public record for a missing prefix.
+        let arc = state();
+        let (id, client_tok, provider_tok) = signed_contract(&arc);
+        let body = json!({ "contract_id": id, "amount": "0.2" });
+        let (status, _) = route(
+            &arc,
+            "POST",
+            "/v1/escrow/park",
+            body.to_string().as_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
+        assert_eq!(status, 200);
+        let (status, _) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/start"),
+            b"{}",
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_eq!(status, 200);
+
+        let bare = crate::sha256_hex(b"work");
+        let body = json!({
+            "deliverable_hash": bare,
+            "artifact": { "media_type": "text/plain", "encoding": "utf8", "content": "work" }
+        });
+        let (status, out) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/deliver"),
+            body.to_string().as_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_eq!(status, 200, "a bare digest still delivers: {out}");
+        // Stored in the form the deterministic check demands, so the
+        // deal is judged on the work rather than on a prefix.
+        assert_eq!(
+            arc.lock()
+                .unwrap()
+                .contracts
+                .get(&id)
+                .unwrap()
+                .deliverable_hash
+                .as_deref(),
+            Some(format!("sha256:{bare}").as_str())
+        );
+
     }
 
     #[test]
