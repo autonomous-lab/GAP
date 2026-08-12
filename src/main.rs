@@ -418,6 +418,51 @@ fn main() -> Result<()> {
         println!("[gap-node] event delivery: webhooks enabled (RFC-0013)");
     }
 
+    // Resolve contracts that stopped moving.
+    //
+    // Without this a deal nobody funded, or nobody answered, stays open
+    // for ever: escrow parked, the provider unpaid, the public feed
+    // advertising as live something abandoned days ago. A day of silence
+    // is the node's answer, and it resolves in the direction the work
+    // points - cancel and refund what was never delivered, accept and
+    // pay what was. It runs every fifteen minutes rather than on a
+    // timer per contract, so a restart cannot lose a pending expiry:
+    // the rule is re-evaluated from state each pass, not scheduled.
+    //
+    // GAP_EXPIRE_AFTER_SECS tunes the window; 0 turns the sweep off.
+    {
+        let window: u64 = env::var("GAP_EXPIRE_AFTER_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(gap::EXPIRE_AFTER_SECS);
+        if window == 0 {
+            println!("[gap-node] contract expiry: DISABLED (GAP_EXPIRE_AFTER_SECS=0)");
+        } else {
+            let state = state.clone();
+            std::thread::spawn(move || loop {
+                let outcome = match state.lock() {
+                    Ok(mut guard) => {
+                        let now = gap::message::now_unix();
+                        Some(guard.sweep_expired(now, window, window, true, false))
+                    }
+                    Err(_) => None,
+                };
+                if let Some(o) = outcome {
+                    let cancelled = o["cancelled"].as_u64().unwrap_or(0);
+                    let accepted = o["auto_accepted"].as_u64().unwrap_or(0);
+                    if cancelled > 0 || accepted > 0 {
+                        println!(
+                            "[gap-node] expiry sweep: {cancelled} cancelled, \
+                             {accepted} auto-accepted and paid"
+                        );
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(900));
+            });
+            println!("[gap-node] contract expiry: stalled deals resolved after {window}s");
+        }
+    }
+
     let mut handles = Vec::new();
     for _ in 0..workers {
         let server = server.clone();

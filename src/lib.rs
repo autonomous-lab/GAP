@@ -76,6 +76,16 @@ pub const PROTOCOL: &str = "gap";
 /// The protocol version implemented by this crate.
 pub const VERSION: &str = "0.1.0";
 
+/// How long a contract may sit without moving before the node resolves
+/// it: a day.
+///
+/// Resolves, not deletes, and the direction depends on whether the work
+/// was handed over. Nothing delivered yet - cancelled, escrow refunded.
+/// Delivered and unanswered - accepted on the buyer's behalf and the
+/// provider paid, because the other choice lets a buyer take delivery,
+/// stay quiet for a day, and keep both the work and the money.
+pub const EXPIRE_AFTER_SECS: u64 = 86_400;
+
 /// Compute the SHA-256 digest of a message, hex-encoded.
 pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};

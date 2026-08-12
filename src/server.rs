@@ -2487,23 +2487,43 @@ directly rather than reasoning about its metadata"
     /// killed mid-negotiation. The spine knows when each contract last
     /// moved, and that is the question being asked.
     ///
-    /// `Delivered` is deliberately NOT expired. The provider did the
-    /// work; cancelling would refund the buyer and strip the provider of
-    /// its claim, which is a ruling, not housekeeping. Those need a
-    /// dispute or an acceptance, and are reported separately.
+    /// A `Delivered` contract is never cancelled. The work exists, so
+    /// the timeout resolves the other way: with `auto_accept_delivered`
+    /// the node accepts on the silent buyer's behalf and the provider is
+    /// paid. Cancelling instead would hand every buyer the same trick -
+    /// take delivery, wait out the clock, keep the work and the money.
     pub fn expire_stale_contracts(
         &mut self,
         admin: &str,
         now: u64,
         grace: u64,
         max_idle: u64,
+        auto_accept_delivered: bool,
         dry_run: bool,
     ) -> Result<Value> {
         match self.admin_token.as_deref() {
             Some(t) if t == admin => {}
             _ => return Err(Error::Unauthorized("operator token required".into())),
         }
+        Ok(self.sweep_expired(now, grace, max_idle, auto_accept_delivered, dry_run))
+    }
 
+    /// The sweep itself, without the token check, so the node's own
+    /// reaper thread in `main` can call it.
+    ///
+    /// Public because that thread lives in the binary, not the library.
+    /// It is NOT reachable from the network: the only route into it is
+    /// `expire_stale_contracts` above, which checks the operator token
+    /// first. Anything else calling this is already inside the process
+    /// holding the state lock, and has no boundary left to cross.
+    pub fn sweep_expired(
+        &mut self,
+        now: u64,
+        grace: u64,
+        max_idle: u64,
+        auto_accept_delivered: bool,
+        dry_run: bool,
+    ) -> Value {
         // When each contract last moved, straight off the audit chain.
         // One pass over the spine, reused for every contract below.
         let mut last_move: HashMap<String, u64> = HashMap::new();
@@ -2514,18 +2534,18 @@ directly rather than reasoning about its metadata"
             }
         }
 
-        let mut doomed: Vec<(String, &'static str)> = Vec::new();
+        // Two outcomes, and which one a contract gets turns on whether
+        // the work was ever handed over.
+        let mut to_cancel: Vec<(String, &'static str)> = Vec::new();
+        let mut to_pay: Vec<String> = Vec::new();
         let mut stranded = 0usize;
+        let mut refused: Vec<Value> = Vec::new();
         for (id, c) in self.contracts.iter() {
-            match c.state {
-                ContractState::Draft | ContractState::Signed | ContractState::Executing => {}
-                // Work was handed over. Not ours to cancel.
-                ContractState::Delivered => {
-                    stranded += 1;
-                    continue;
-                }
+            let delivered = match c.state {
+                ContractState::Draft | ContractState::Signed | ContractState::Executing => false,
+                ContractState::Delivered => true,
                 _ => continue,
-            }
+            };
             let past_deadline = c.terms.deadline > 0 && now > c.terms.deadline.saturating_add(grace);
             // Fall back to creation only when the spine has nothing for
             // this contract; a contract with neither is left alone
@@ -2536,43 +2556,191 @@ directly rather than reasoning about its metadata"
                 .filter(|t| *t > 0)
                 .unwrap_or(c.created_at);
             let idle = seen > 0 && now > seen.saturating_add(max_idle);
-            if past_deadline {
-                doomed.push((id.clone(), "deadline passed"));
-            } else if idle {
-                doomed.push((id.clone(), "abandoned before completion"));
+            if !past_deadline && !idle {
+                continue;
+            }
+            if delivered {
+                if auto_accept_delivered {
+                    to_pay.push(id.clone());
+                } else {
+                    stranded += 1;
+                }
+            } else if past_deadline {
+                to_cancel.push((id.clone(), "deadline passed"));
+            } else {
+                to_cancel.push((id.clone(), "abandoned before completion"));
             }
         }
 
         let mut closed = Vec::new();
-        for (id, why) in doomed {
+        for (id, why) in to_cancel {
             let state = self.contracts.get(&id).map(|c| c.state.wire_name());
             if dry_run {
                 closed.push(json!({
-                    "deal_ref": pseudonym(&id),
-                    "was": state,
-                    "reason": why,
+                    "deal_ref": pseudonym(&id), "was": state,
+                    "outcome": "cancelled", "reason": why,
                 }));
                 continue;
             }
             match self.expire_one(&id, why) {
                 Ok(refunded) => closed.push(json!({
-                    "deal_ref": pseudonym(&id),
-                    "was": state,
-                    "reason": why,
+                    "deal_ref": pseudonym(&id), "was": state,
+                    "outcome": "cancelled", "reason": why,
                     "escrow_refunded": refunded,
                 })),
                 // A contract that refuses the transition is left alone
-                // and counted, not retried into a different state.
-                Err(_) => stranded += 1,
+                // and named, not retried into a different state.
+                Err(e) => refused.push(json!({
+                    "deal_ref": pseudonym(&id), "was": state,
+                    "error": e.to_string(),
+                })),
             }
         }
 
-        Ok(json!({
+        let mut paid = Vec::new();
+        for id in to_pay {
+            if dry_run {
+                paid.push(json!({
+                    "deal_ref": pseudonym(&id), "was": "delivered",
+                    "outcome": "auto-accepted", "reason": "buyer silent past the window",
+                }));
+                continue;
+            }
+            match self.auto_accept_one(&id) {
+                Ok(settlement) => paid.push(json!({
+                    "deal_ref": pseudonym(&id), "was": "delivered",
+                    "outcome": "auto-accepted", "reason": "buyer silent past the window",
+                    "settlement": settlement,
+                })),
+                // A delivery whose escrow record is gone cannot be
+                // settled in either direction - there is no money left
+                // to move to anyone. Those are closed rather than
+                // reported for ever; every other failure is named and
+                // left untouched.
+                //
+                // Say WHY, always. A sweep that reports "8 left alone"
+                // and swallows the reason is how a broken payout path
+                // hides in plain sight: the count reads as a policy
+                // choice instead of eight failures.
+                Err(Error::EscrowViolation(_)) if !self.escrows.contains_key(&id) => {
+                    match self.close_unsettleable(&id) {
+                        Ok(()) => closed.push(json!({
+                            "deal_ref": pseudonym(&id), "was": "delivered",
+                            "outcome": "cancelled",
+                            "reason": "no escrow record survives; nothing to settle either way",
+                        })),
+                        Err(e) => refused.push(json!({
+                            "deal_ref": pseudonym(&id), "was": "delivered",
+                            "error": e.to_string(),
+                        })),
+                    }
+                }
+                Err(e) => refused.push(json!({
+                    "deal_ref": pseudonym(&id), "was": "delivered",
+                    "error": e.to_string(),
+                })),
+            }
+        }
+
+        json!({
             "dry_run": dry_run,
-            "closed": closed.len(),
-            "left_alone": stranded,
+            "cancelled": closed.len(),
+            "auto_accepted": paid.len(),
+            "left_alone": stranded + refused.len(),
             "contracts": closed,
-        }))
+            "settled": paid,
+            "refused": refused,
+        })
+    }
+
+    /// Close a delivered contract whose escrow record no longer exists.
+    ///
+    /// The ONLY case where a delivery is cancelled, and it is not a
+    /// judgement about who deserved the money: there is no money. These
+    /// are records from before escrow state was persisted, so the hold
+    /// they refer to did not survive a restart. Accepting them fails on
+    /// "no escrow for contract" and refunding has nothing to refund, so
+    /// leaving them open reports the same five failures for ever.
+    ///
+    /// It sets the state directly instead of going through
+    /// `transition()`, which refuses Delivered -> Cancelled — correctly,
+    /// because a party doing this would be cancelling work it received.
+    /// The caller has already established that no escrow exists; that
+    /// condition is what makes this safe, and it is checked there rather
+    /// than trusted here.
+    fn close_unsettleable(&mut self, contract_id: &str) -> Result<()> {
+        if self.escrows.contains_key(contract_id) {
+            return Err(Error::EscrowViolation(
+                "this contract still has an escrow: settle it, do not close it".into(),
+            ));
+        }
+        let contract = self
+            .contracts
+            .get_mut(contract_id)
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?;
+        if contract.state != ContractState::Delivered {
+            return Err(Error::InvalidTransition {
+                from: contract.state.wire_name().into(),
+                to: "cancelled".into(),
+            });
+        }
+        contract.state = ContractState::Cancelled;
+        let saved = contract.clone();
+        self.persist_contract(&saved);
+        self.record(
+            "ctr.cancel",
+            json!({
+                "contract_id": contract_id,
+                "by": self.node_did().to_string(),
+                "reason": "delivered, but no escrow record survives to settle",
+                "expired_by_node": true,
+                "after_delivery": true,
+                "refunded": false,
+            }),
+        );
+        Ok(())
+    }
+
+    /// Accept a delivery the buyer never answered, on the node's own
+    /// authority, and pay the provider.
+    ///
+    /// The alternative — cancelling and refunding — hands any buyer a
+    /// free exploit: take delivery, say nothing for a day, get the money
+    /// back and keep the work. Silence has to favour the side that
+    /// actually did something.
+    ///
+    /// It re-enters `accept_delivery` with the buyer's own custodied
+    /// token rather than reimplementing settlement. That function owns
+    /// three payment paths, signed envelopes, receipts, job records and
+    /// reputation; a second copy of it would not fail loudly when it
+    /// drifted — it would pay the wrong party, or pay twice. A buyer
+    /// this node does not custody has no token to borrow, so the
+    /// contract is reported and left alone rather than force-settled.
+    fn auto_accept_one(&mut self, contract_id: &str) -> Result<Value> {
+        let client_did = self
+            .contracts
+            .get(contract_id)
+            .ok_or_else(|| Error::UnknownContract(contract_id.into()))?
+            .client
+            .to_string();
+        let token = self
+            .agents_by_did
+            .get(&client_did)
+            .cloned()
+            .ok_or_else(|| Error::Other("buyer is not custodied on this node".into()))?;
+        // On the spine BEFORE the acceptance it triggers, so replaying
+        // the chain never shows a buyer accepting something it never
+        // saw. Whoever reads this back must be able to tell a decision
+        // from a timeout.
+        self.record(
+            "exe.accept.auto",
+            json!({
+                "contract_id": contract_id,
+                "by": self.node_did().to_string(),
+                "reason": "delivered and unanswered past the acceptance window",
+            }),
+        );
+        self.accept_delivery(&token, contract_id)
     }
 
     /// Cancel one contract on the node's own authority, refunding any
@@ -3768,6 +3936,7 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             // Judgement.
             "exe.verify" => ("verdict", "deliverable verified"),
             "exe.accept" => ("verdict", "accepted by the client"),
+            "exe.accept.auto" => ("verdict", "auto-accepted, buyer silent"),
             "exe.reject" => ("verdict", "rejected by the client"),
             "ctr.remedy" => ("verdict", "rework granted"),
             "ctr.dispute" | "pay.dispute" | "pay.disputed" => ("verdict", "disputed"),
@@ -5250,11 +5419,10 @@ pub fn route_with_ip(
                     t,
                     now_unix(),
                     secs("grace_seconds", 86_400),
-                    // Six hours of silence. Deals on this node run
-                    // start to finish in under two minutes, so a
-                    // contract that has not moved since breakfast is
-                    // not slow, it is abandoned.
-                    secs("max_idle_seconds", 21_600),
+                    secs("max_idle_seconds", crate::EXPIRE_AFTER_SECS),
+                    body.get("auto_accept_delivered")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true),
                     dry_run,
                 ),
                 None => Err(Error::Unauthorized("operator token required".into())),
@@ -5957,7 +6125,7 @@ mod tests {
         );
         assert_eq!(status, 200, "{out}");
         assert_eq!(out["dry_run"], true);
-        assert_eq!(out["closed"], 1);
+        assert_eq!(out["cancelled"], 1);
         assert_eq!(
             arc.lock().unwrap().contracts.get(&id).unwrap().state,
             ContractState::Signed,
@@ -5986,7 +6154,7 @@ mod tests {
             Some("Bearer adm"),
         );
         assert_eq!(status, 200, "{out}");
-        assert_eq!(out["closed"], 1);
+        assert_eq!(out["cancelled"], 1);
         assert_eq!(out["contracts"][0]["reason"], "deadline passed");
         assert_eq!(
             arc.lock().unwrap().contracts.get(&id).unwrap().state,
@@ -6022,7 +6190,7 @@ mod tests {
             Some("Bearer adm"),
         );
         assert_eq!(status, 200, "{out}");
-        assert_eq!(out["closed"], 0);
+        assert_eq!(out["cancelled"], 0);
         assert_eq!(
             arc.lock().unwrap().contracts.get(&id).unwrap().state,
             ContractState::Signed
@@ -6052,7 +6220,7 @@ mod tests {
             Some("Bearer adm"),
         );
         assert_eq!(status, 200, "{out}");
-        assert_eq!(out["closed"], 0, "it moved a moment ago: {out}");
+        assert_eq!(out["cancelled"], 0, "it moved a moment ago: {out}");
         assert_eq!(
             arc.lock().unwrap().contracts.get(&id).unwrap().state,
             ContractState::Signed
@@ -6060,11 +6228,106 @@ mod tests {
     }
 
     #[test]
-    fn expiry_never_cancels_work_that_was_delivered() {
-        // The provider spent real compute and handed over an artifact.
-        // Cancelling refunds the buyer and strips the provider of its
-        // claim - that is a ruling, not housekeeping. It needs a dispute
-        // or an acceptance, so the sweep reports it and moves on.
+    fn a_delivered_contract_is_paid_out_not_cancelled() {
+        // The exploit this closes: if silence refunded the buyer, any
+        // buyer could take delivery, say nothing for a day, and keep
+        // both the work and the money. Silence favours the side that
+        // actually did something.
+        let arc = state();
+        arc.lock().unwrap().set_admin_token("adm");
+        let (id, client_tok, provider_tok) = signed_contract(&arc);
+        let body = json!({ "contract_id": id, "amount": "0.2" });
+        let (status, out) = route(
+            &arc,
+            "POST",
+            "/v1/escrow/park",
+            body.to_string().as_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
+        assert_eq!(status, 200, "park failed: {out}");
+        let (status, out) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/start"),
+            b"{}",
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_eq!(status, 200, "start failed: {out}");
+        let body = json!({
+            "deliverable_hash": format!("sha256:{}", crate::sha256_hex(b"work")),
+            "artifact": { "media_type": "text/plain", "encoding": "utf8", "content": "work" }
+        });
+        let (status, out) = route(
+            &arc,
+            "POST",
+            &format!("/v1/contract/{id}/deliver"),
+            body.to_string().as_bytes(),
+            Some(&format!("Bearer {provider_tok}")),
+        );
+        assert_eq!(status, 200, "deliver failed: {out}");
+
+        // The buyer goes quiet: push the deadline into the past.
+        arc.lock().unwrap().contracts.get_mut(&id).unwrap().terms.deadline = 1;
+
+        let (status, out) = route(
+            &arc,
+            "POST",
+            "/v1/admin/expire",
+            br#"{"dry_run":false}"#,
+            Some("Bearer adm"),
+        );
+        assert_eq!(status, 200, "{out}");
+        assert_eq!(out["cancelled"], 0, "delivered work is never cancelled");
+        assert_eq!(out["auto_accepted"], 1, "{out}");
+        assert_eq!(
+            arc.lock().unwrap().contracts.get(&id).unwrap().state,
+            ContractState::Accepted
+        );
+        // And the spine says the node did it, not the buyer. Replaying
+        // the chain must never show a buyer accepting something it
+        // never looked at.
+        let guard = arc.lock().unwrap();
+        let kinds: Vec<String> = guard
+            .storage
+            .events_after(0, 500)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert!(kinds.contains(&"exe.accept.auto".to_string()), "{kinds:?}");
+        assert!(kinds.contains(&"pay.released".to_string()), "{kinds:?}");
+    }
+
+    #[test]
+    fn a_delivery_whose_escrow_survives_is_never_closed_as_unsettleable() {
+        // The narrow escape hatch must stay narrow. If an escrow record
+        // exists, the deal is settleable and closing it would cancel
+        // work somebody received - the very thing the state machine
+        // refuses. Only the absence of any money makes it safe.
+        let arc = state();
+        let (id, client_tok, provider_tok) = signed_contract(&arc);
+        let body = json!({ "contract_id": id, "amount": "0.2" });
+        let (status, _) = route(
+            &arc,
+            "POST",
+            "/v1/escrow/park",
+            body.to_string().as_bytes(),
+            Some(&format!("Bearer {client_tok}")),
+        );
+        assert_eq!(status, 200);
+        let _ = provider_tok;
+        arc.lock().unwrap().contracts.get_mut(&id).unwrap().state = ContractState::Delivered;
+
+        let err = arc.lock().unwrap().close_unsettleable(&id);
+        assert!(err.is_err(), "an escrow that exists must block this path");
+        assert_eq!(
+            arc.lock().unwrap().contracts.get(&id).unwrap().state,
+            ContractState::Delivered
+        );
+    }
+
+    #[test]
+    fn delivered_work_is_left_alone_when_auto_acceptance_is_off() {
         let arc = state();
         arc.lock().unwrap().set_admin_token("adm");
         let (id, _, _) = signed_contract(&arc);
@@ -6078,11 +6341,12 @@ mod tests {
             &arc,
             "POST",
             "/v1/admin/expire",
-            br#"{"dry_run":false}"#,
+            br#"{"dry_run":false,"auto_accept_delivered":false}"#,
             Some("Bearer adm"),
         );
         assert_eq!(status, 200, "{out}");
-        assert_eq!(out["closed"], 0);
+        assert_eq!(out["cancelled"], 0);
+        assert_eq!(out["auto_accepted"], 0);
         assert_eq!(out["left_alone"], 1);
         assert_eq!(
             arc.lock().unwrap().contracts.get(&id).unwrap().state,
