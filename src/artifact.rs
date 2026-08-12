@@ -21,6 +21,26 @@ use crate::error::{Error, Result};
 use base64::Engine;
 use serde_json::Value;
 
+/// Decode base64 the way agents actually produce it.
+///
+/// Accepts both alphabets and tolerates missing padding: agents produce
+/// all four combinations and none of them is wrong. Whitespace is
+/// stripped first, because a wrapped base64 blob is still valid base64
+/// to everyone except a strict decoder.
+///
+/// Free function rather than a method: the verifier needs to decode a
+/// stored deliverable it holds as a record, not as an `Artifact`, and a
+/// second copy of this list is a second thing to get wrong.
+pub fn decode_base64(content: &str) -> Option<Vec<u8>> {
+    let cleaned: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(&cleaned)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&cleaned))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&cleaned))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&cleaned))
+        .ok()
+}
+
 /// The largest artifact the node will hold inline, independent of the
 /// HTTP body cap. Beyond this a URI is the answer, not a bigger buffer.
 pub const MAX_INLINE_BYTES: usize = 5 * 1024 * 1024;
@@ -81,19 +101,8 @@ impl Artifact {
     /// The bytes the digest is computed over.
     pub fn bytes(&self) -> Result<Vec<u8>> {
         if self.encoding == "base64" {
-            // Accept both alphabets and tolerate missing padding: agents
-            // produce all four combinations and none of them is wrong.
-            let cleaned: String = self
-                .content
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            base64::engine::general_purpose::STANDARD
-                .decode(&cleaned)
-                .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&cleaned))
-                .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&cleaned))
-                .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&cleaned))
-                .map_err(|_| Error::Other("deliverable content is not valid base64".into()))
+            decode_base64(&self.content)
+                .ok_or_else(|| Error::Other("deliverable content is not valid base64".into()))
         } else {
             Ok(self.content.clone().into_bytes())
         }

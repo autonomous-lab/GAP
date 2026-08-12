@@ -101,6 +101,47 @@ impl DisputeStats {
     }
 }
 
+/// The deliverable as a judge should read it, or `None` when it is not
+/// something a judge can read at all.
+///
+/// The question is whether the artifact is READABLE, which the media
+/// type answers - not how it travelled, which the encoding answers.
+/// Keying this on the encoding alone sent markdown and JSON to the
+/// judges as a sentence describing their own size, and the judges said
+/// so, repeatedly: "the metadata identifies the artifact as
+/// text/markdown, but does not provide its contents", "without the
+/// artifact contents it cannot be determined". The only honest answer
+/// with nothing to read is `inconclusive`, which releases no money - so
+/// a provider that base64'd a perfectly good document could not be paid
+/// for it. Six of the eight inconclusive verdicts on the public node
+/// were this, and none of them were about the work.
+///
+/// Binary still gets described rather than pasted, and an image is
+/// attached separately as an image.
+fn judge_readable_text(d: &crate::storage::DeliverableRecord) -> Option<String> {
+    if d.encoding != "base64" {
+        return None; // already text; the caller passes it through as-is
+    }
+    let base = d.media_type.split(';').next().unwrap_or("").trim();
+    let readable = matches!(
+        base,
+        "" | "application/json"
+            | "application/xml"
+            | "application/yaml"
+            | "application/x-yaml"
+            | "application/javascript"
+            | "application/sql"
+    ) || base.starts_with("text/")
+        || base.ends_with("+json")
+        || base.ends_with("+xml");
+    if !readable {
+        return None;
+    }
+    crate::artifact::decode_base64(&d.content)
+        .and_then(|b| String::from_utf8(b).ok())
+        .filter(|s| !s.trim().is_empty())
+}
+
 fn pseudonym(input: &str) -> String {
     crate::sha256_hex(input.as_bytes())[..16].to_string()
 }
@@ -2068,7 +2109,10 @@ the content inline"
                     // read by one, so it is described rather than
                     // pasted - a judge shown a megabyte of base64 will
                     // hallucinate an opinion about it.
-                    if d.encoding == "base64" {
+                    let decoded = judge_readable_text(d);
+                    if let Some(text) = decoded {
+                        (Some(text), "node")
+                    } else if d.encoding == "base64" {
                         let looks_like_image = d.media_type.starts_with("image/");
                         (
                             Some(format!(
@@ -6525,6 +6569,70 @@ mod tests {
             Some(format!("sha256:{bare}").as_str())
         );
 
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn held(media_type: &str, encoding: &str, content: &str) -> crate::storage::DeliverableRecord {
+        crate::storage::DeliverableRecord {
+            contract_id: "c".into(),
+            digest: "sha256:x".into(),
+            encoding: encoding.into(),
+            media_type: media_type.into(),
+            content: content.into(),
+            uri: String::new(),
+            delivered_at: 0,
+        }
+    }
+
+    #[test]
+    fn a_base64_document_reaches_the_judge_as_text() {
+        // Six of the eight inconclusive verdicts on the public node were
+        // this: markdown and JSON delivered base64-encoded were handed
+        // to the judges as a sentence describing their own size, and the
+        // judges answered - correctly - that they could not verify
+        // anything. `inconclusive` releases no money, so a good delivery
+        // could not be paid for. What matters is whether the artifact is
+        // readable, which the media type says; not how it travelled,
+        // which the encoding says.
+        let doc = "# Brief\n\nTrois secteurs, un classement.";
+        let encoded = b64(doc.as_bytes());
+        for media in [
+            "text/markdown",
+            "text/plain; charset=utf-8",
+            "application/json",
+            "application/ld+json",
+            "",
+        ] {
+            assert_eq!(
+                judge_readable_text(&held(media, "base64", &encoded)).as_deref(),
+                Some(doc),
+                "a {media} artifact must reach the judge as text"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_is_still_described_rather_than_pasted_at_a_judge() {
+        // A judge shown a megabyte of base64 hallucinates an opinion
+        // about it. Images take the separate path that attaches them as
+        // images.
+        let encoded = b64(&[0u8, 159, 146, 150]);
+        for media in ["image/png", "application/pdf", "application/octet-stream"] {
+            assert!(
+                judge_readable_text(&held(media, "base64", &encoded)).is_none(),
+                "{media} must not be pasted at a judge"
+            );
+        }
+        // Undecodable, or empty once decoded, falls back to the
+        // description rather than handing a judge an empty document.
+        assert!(judge_readable_text(&held("text/plain", "base64", "!!not base64!!")).is_none());
+        assert!(judge_readable_text(&held("text/plain", "base64", "")).is_none());
+        // Text that never was base64 is passed through by the caller.
+        assert!(judge_readable_text(&held("text/plain", "utf8", "hello")).is_none());
     }
 
     #[test]
