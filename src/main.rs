@@ -510,7 +510,20 @@ retrieves from that URL must hash to it.",
                 continue;
             }
 
-            let method = request.method().as_str().to_string();
+            // HEAD is GET without the body (RFC 9110 section 9.3.2).
+            //
+            // The node answered 400 to every HEAD, on every path,
+            // including /health. Uptime monitors send HEAD by default,
+            // so did link checkers and preview bots - which meant every
+            // automated check reported the site DOWN while a browser
+            // loaded it perfectly. Reproduced straight against the node,
+            // with Cloudflare out of the picture.
+            let head_only = request.method().as_str() == "HEAD";
+            let method = if head_only {
+                "GET".to_string()
+            } else {
+                request.method().as_str().to_string()
+            };
             let path = request.url().to_string();
             let auth = request
                 .headers()
@@ -526,12 +539,27 @@ retrieves from that URL must hash to it.",
             // the projection is already pseudonymous, so it needs no
             // credentials — and a live feed nobody can watch without a
             // token would not be a public directory.
+            // A stream is the one thing HEAD must not open: it would
+            // hold a worker on a connection whose caller wants headers
+            // and nothing else. It still gets a truthful answer - the
+            // status and content type a GET would produce - rather than
+            // the 400 that made every checker call this endpoint dead.
             if path.starts_with("/v1/activity/stream") {
-                stream_activity(&state, request, &path);
+                if head_only {
+                    let mut response = Response::from_string(String::new()).with_status_code(200);
+                    response.add_header(
+                        Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                            .unwrap(),
+                    );
+                    let _ = request.respond(response);
+                } else {
+                    stream_activity(&state, request, &path);
+                }
                 continue;
             }
 
             let wants_sse = path.starts_with("/v1/events")
+                && !head_only
                 && request.headers().iter().any(|h| {
                     h.field.equiv("Accept") && h.value.as_str().contains("text/event-stream")
                 });
@@ -546,7 +574,8 @@ retrieves from that URL must hash to it.",
             if method == "GET" {
                 let clean = path.split('?').next().unwrap_or(&path);
                 if let Some((ctype, bytes)) = gap::server::static_asset(clean) {
-                    let mut response = Response::from_data(bytes).with_status_code(200);
+                    let body: &[u8] = if head_only { &[] } else { bytes };
+                    let mut response = Response::from_data(body).with_status_code(200);
                     response.add_header(
                         Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap(),
                     );
@@ -566,6 +595,7 @@ retrieves from that URL must hash to it.",
             if let Some((status, ctype, body)) =
                 gap::server::route_html(&state, &method, &path, auth.as_deref())
             {
+                let body = if head_only { String::new() } else { body };
                 let mut response = Response::from_string(body).with_status_code(status);
                 response.add_header(
                     Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap(),
@@ -583,7 +613,11 @@ retrieves from that URL must hash to it.",
                 auth.as_deref(),
                 client_ip.as_deref(),
             );
-            let json_str = json_body.to_string();
+            let json_str = if head_only {
+                String::new()
+            } else {
+                json_body.to_string()
+            };
 
             let mut response = Response::from_string(json_str).with_status_code(status);
             response.add_header(
