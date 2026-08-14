@@ -37,6 +37,7 @@ GAP_DEMO_STATE        where tokens persist    default /state/agents.json
 """
 
 import hashlib
+import http.client
 import json
 import os
 import queue
@@ -216,22 +217,52 @@ def cap_id(agent_slug, service):
     return "cap:{}{}:{}".format(ns, agent_slug, service)
 
 
+_local = threading.local()
+
+
+def _conn():
+    """One kept-alive connection per thread.
+
+    urllib opens a fresh TCP connection per call. That is invisible at
+    thirty requests a minute and the whole story at three hundred a
+    second: the client spends its time in handshakes and TIME_WAIT
+    rather than in the node, and the load test measures the load
+    generator. Keep-alive, one socket per worker, reconnecting only when
+    the server closes it.
+    """
+    c = getattr(_local, "conn", None)
+    if c is None:
+        parts = urllib.parse.urlsplit(NODE)
+        cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+        c = cls(parts.hostname, parts.port, timeout=20)
+        _local.conn = c
+    return c
+
+
 def call(method, path, body=None, token=None):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(NODE + path, data=data, method=method)
-    req.add_header("content-type", "application/json")
+    headers = {"content-type": "application/json", "connection": "keep-alive"}
     if token:
-        req.add_header("authorization", "Bearer " + token)
-    try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            return json.loads(r.read().decode() or "{}")
-    except urllib.error.HTTPError as e:
+        headers["authorization"] = "Bearer " + token
+    for attempt in (1, 2):
         try:
-            return {"error": json.loads(e.read().decode())}
-        except Exception:
-            return {"error": {"code": e.code}}
-    except Exception as e:  # network, timeout
-        return {"error": {"message": str(e)}}
+            c = _conn()
+            c.request(method, path, body=data, headers=headers)
+            r = c.getresponse()
+            raw = r.read().decode()
+            if r.status >= 400:
+                try:
+                    return {"error": json.loads(raw)}
+                except Exception:
+                    return {"error": {"code": r.status}}
+            return json.loads(raw or "{}")
+        except Exception as e:
+            # A pooled socket the server has closed fails once; drop it
+            # and try again before reporting anything.
+            _local.conn = None
+            if attempt == 2:
+                return {"error": {"message": str(e)}}
+    return {"error": {"message": "unreachable"}}
 
 
 class Envelope:
@@ -516,13 +547,18 @@ def main():
 
     # Several deals in flight at once, so the feed interleaves phases
     # instead of marching one contract through at a time.
-    for _ in range(8):
+    # Enough workers that the pacer, not the thread count, sets the
+    # rate: a deal is eight sequential calls, so sustaining N actions a
+    # second needs roughly N/4 deals in flight.
+    workers = max(8, min(256, int(HIGH_PER_MIN / 30)))
+    print("[demo] {} workers".format(workers), flush=True)
+    for _ in range(workers):
         threading.Thread(target=worker, daemon=True).start()
 
     started = time.monotonic()
     last_report = started
     while True:
-        if work.qsize() < 8:
+        if work.qsize() < workers:
             work.put(1)
         time.sleep(0.2)
         now = time.monotonic()

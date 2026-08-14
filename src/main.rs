@@ -243,12 +243,22 @@ fn stream_activity(state: &Arc<Mutex<NodeState>>, request: tiny_http::Request, p
             let _ = writer.flush();
             return;
         }
-        if idle {
-            if writer.write_all(b": keepalive\n\n").is_err() || writer.flush().is_err() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(900));
+        if idle && (writer.write_all(b": keepalive\n\n").is_err() || writer.flush().is_err()) {
+            return;
         }
+        // Pace EVERY pass, not just the quiet ones.
+        //
+        // This used to sleep only when there was nothing to send, which
+        // meant that under real traffic the loop never slept at all: it
+        // took the global state lock, rebuilt both projections, wrote,
+        // and immediately went round again. One busy stream was enough
+        // to hold the lock almost continuously, and every other request
+        // queued behind it - a load test found /health taking ELEVEN
+        // SECONDS on a node using three percent of one core.
+        //
+        // A quarter second between passes is invisible on a feed and
+        // bounds how often any stream can take the lock.
+        std::thread::sleep(std::time::Duration::from_millis(if idle { 900 } else { 250 }));
     }
 }
 

@@ -33,6 +33,27 @@ services:
       GAP_DB_INIT: "${GAP_DB_INIT:-1}"
       # Absolute URLs in sitemap.xml - set this to your public origin.
       GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
+      # Workers are I/O bound: each one blocks on a ClickHouse write for
+      # the spine, so more threads than cores is the right shape. The
+      # default of four was a hard ceiling of roughly twenty writes a
+      # second once the spine started waiting for its batch.
+      GAP_WORKERS: "${GAP_WORKERS:-24}"
+      # Rate limiting is a SECURITY control, not a tuning knob: the
+      # defaults (120 per token, 600 per IP, per minute) are what stops
+      # one caller from monopolising the node. They are raised here only
+      # because the load generator hits from a single container IP, and
+      # a load test that measures the rate limiter measures nothing.
+      GAP_RATE_TOKEN_CAP: "${GAP_RATE_TOKEN_CAP:-120}"
+      GAP_RATE_IP_CAP: "${GAP_RATE_IP_CAP:-600}"
+      # Storage write policy. Measured on this box: an insert that waits
+      # for its async batch costs 60 ms, one that does not costs 1 ms -
+      # and the node holds its global state lock across either, so the
+      # wait sets the whole node's write ceiling. The spine waits anyway,
+      # because a lost batch there leaves a hole in the audit chain that
+      # cannot be repaired; see src/storage/clickhouse.rs.
+      GAP_CLICKHOUSE_ASYNC_INSERT: "${GAP_CLICKHOUSE_ASYNC_INSERT:-0}"
+      GAP_CLICKHOUSE_INSERT_WAIT: "${GAP_CLICKHOUSE_INSERT_WAIT:-0}"
+      GAP_CLICKHOUSE_INSERT_WINDOW_MS: "${GAP_CLICKHOUSE_INSERT_WINDOW_MS:-}"
       # Recent ClickHouse images generate a random password for the
       # default user when none is set, so the node must authenticate.
       GAP_CLICKHOUSE_USER: "${CLICKHOUSE_USER:-default}"

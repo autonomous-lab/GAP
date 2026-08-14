@@ -1987,8 +1987,18 @@ the content inline"
         // Fan the event out to subscribers (RFC-0013). This only
         // enqueues — network I/O happens in `drain_outbox`, outside the
         // state lock, so delivery can never stall the protocol.
-        if let Ok(seq) = self.storage.append_event(kind, payload.clone()) {
-            self.enqueue_event(seq, kind, payload);
+        match self.storage.append_event(kind, payload.clone()) {
+            Ok(seq) => self.enqueue_event(seq, kind, payload),
+            // SAY SO. This used to be `if let Ok(..)`, and a failed
+            // append was indistinguishable from a successful one: the
+            // event still sat in the in-memory mirror, every page kept
+            // answering, and the audit chain silently stopped growing on
+            // disk. It went unnoticed for an hour because nothing said
+            // anything. An event that did not persist is the one failure
+            // this node must never be quiet about.
+            Err(e) => eprintln!(
+                "gap-node: SPINE WRITE FAILED for {kind}: {e} — the event is in memory but                  NOT persisted; it will be missing after a restart"
+            ),
         }
     }
 
@@ -4176,38 +4186,57 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             .jobs
             .iter()
             .flat_map(|(agent, records)| {
-                records.iter().filter(|r| r.seq > after).map(move |r| {
-                    json!({
-                        "seq": r.seq,
-                        "job_ref": r.job_ref,
-                        "agent_ref": pseudonym(agent),
-                        "capability_id": r.capability_id,
-                        "outcome": r.outcome,
-                        "verdict": r.verdict,
-                        "judged_by": r.judged_by,
-                        "remedied": r.remedied,
-                        "on_time": r.on_time,
-                        "at": r.at,
-                        // How long the deal actually took, end to end.
-                        // Derived from the contract rather than stored
-                        // on the job record, so it is right for jobs
-                        // settled before this existed - and absent,
-                        // rather than zero, when the contract is gone.
-                        "amount": self.job_amount(&r.job_ref).map(|(a, _)| a),
-                        "currency": self.job_amount(&r.job_ref).map(|(_, c)| c),
-                        "duration_seconds": self
-                            .jobs_by_ref
-                            .get(&r.job_ref)
-                            .and_then(|cid| self.contracts.get(cid))
-                            .filter(|c| c.created_at > 0 && r.at >= c.created_at)
-                            .map(|c| r.at - c.created_at),
-                    })
-                })
+                records
+                    .iter()
+                    .filter(|r| r.seq > after)
+                    .map(move |r| (agent.as_str(), r))
             })
+            .map(|(agent, r)| self.public_job_row_for(agent, r))
             .collect();
         all.sort_by_key(|v| v["seq"].as_u64().unwrap_or(0));
         all.truncate(limit);
         json!({ "jobs": all, "count": all.len() })
+    }
+
+    /// One settled job in the public, pseudonymous shape the feed uses.
+    fn public_job_row(&self, r: &JobRecord) -> Value {
+        // The owning agent is only needed for its pseudonym, and a job
+        // record already carries its counterparty; look the owner up
+        // rather than threading it through every caller.
+        let agent = self
+            .jobs
+            .iter()
+            .find(|(_, records)| records.iter().any(|x| x.job_ref == r.job_ref))
+            .map(|(a, _)| a.as_str())
+            .unwrap_or("");
+        self.public_job_row_for(agent, r)
+    }
+
+    fn public_job_row_for(&self, agent: &str, r: &JobRecord) -> Value {
+        let amount = self.job_amount(&r.job_ref);
+        json!({
+            "seq": r.seq,
+            "job_ref": r.job_ref,
+            "agent_ref": pseudonym(agent),
+            "capability_id": r.capability_id,
+            "outcome": r.outcome,
+            "verdict": r.verdict,
+            "judged_by": r.judged_by,
+            "remedied": r.remedied,
+            "on_time": r.on_time,
+            "at": r.at,
+            // A job whose contract is gone cannot be priced or timed. A
+            // dash, not a zero: a marketplace that reports zero for work
+            // it cannot price is understating its own volume.
+            "amount": amount.as_ref().map(|(a, _)| a.clone()),
+            "currency": amount.as_ref().map(|(_, c)| c.clone()),
+            "duration_seconds": self
+                .jobs_by_ref
+                .get(&r.job_ref)
+                .and_then(|cid| self.contracts.get(cid))
+                .filter(|c| c.created_at > 0 && r.at >= c.created_at)
+                .map(|c| r.at - c.created_at),
+        })
     }
 
     /// One settled job in public, pseudonymous form: the full verdict —
@@ -4995,10 +5024,21 @@ checks that list against the router."
     /// the cursor form — one shape, so the page and the live stream can
     /// never disagree about what a settlement looks like.
     pub fn public_activity(&self, limit: usize) -> Value {
-        let all = self.public_activity_after(0, usize::MAX);
-        let mut jobs = all["jobs"].as_array().cloned().unwrap_or_default();
-        jobs.reverse();
-        jobs.truncate(limit);
+        // Pick the rows FIRST, render them second.
+        //
+        // This used to build the public JSON for every settled job on
+        // the node - two contract lookups apiece - sort the lot, and
+        // throw away all but the last fifty. At four thousand jobs that
+        // is four thousand allocations per page load and per API call,
+        // under the global state lock. Choosing by sequence first makes
+        // it fifty.
+        let mut recent: Vec<&JobRecord> = self.jobs.values().flatten().collect();
+        recent.sort_by_key(|r| std::cmp::Reverse(r.seq));
+        recent.truncate(limit);
+        let jobs: Vec<Value> = recent
+            .into_iter()
+            .map(|r| self.public_job_row(r))
+            .collect();
         json!({ "jobs": jobs, "count": jobs.len() })
     }
 

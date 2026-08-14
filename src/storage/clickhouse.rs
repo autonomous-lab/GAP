@@ -142,7 +142,27 @@ fn insert_settings(query: &str) -> String {
         .get(..6)
         .map(|s| s.eq_ignore_ascii_case("INSERT"))
         .unwrap_or(false);
-    if !is_insert || !env_flag("GAP_CLICKHOUSE_ASYNC_INSERT", true) {
+    // OFF by default, and this is not a tuning preference.
+    //
+    // ClickHouse cannot combine async_insert with a PARAMETERISED query:
+    // deferring the insert loses the `{name:Type}` bindings and the
+    // flush fails with `Code: 456 ... Substitution 'seq' is not set:
+    // While executing WaitForAsyncInsert`. Every write this node makes
+    // is parameterised, because that is the injection-safe path (audit
+    // finding C-02), so async_insert breaks all of them.
+    //
+    // It was enabled here to stop one part being written per row, and
+    // it did - by writing no rows at all. The node kept its events in
+    // memory, `record` swallowed the error, and the audit chain stopped
+    // persisting while every page still answered. The part problem is
+    // solved instead by old_parts_lifetime in
+    // deploy/clickhouse/merge-tree.xml, which took the disk from 5.9 GB
+    // to under 500 MB without touching correctness.
+    //
+    // Turning this on again requires sending the values inline rather
+    // than as bindings, which is the trade this codebase already
+    // refused once.
+    if !is_insert || !env_flag("GAP_CLICKHOUSE_ASYNC_INSERT", false) {
         return String::new();
     }
     // The audit spine is the one thing here that cannot be rebuilt.
@@ -996,36 +1016,37 @@ mod insert_settings_tests {
     use super::*;
 
     #[test]
-    fn only_inserts_are_batched() {
-        // A SELECT carrying async_insert settings is at best noise and
-        // at worst a rejected query.
+    fn async_insert_is_off_because_it_cannot_carry_bindings() {
+        // Not a preference. ClickHouse loses a parameterised query's
+        // `{name:Type}` bindings when it defers the insert, and the
+        // flush fails with:
+        //
+        //   Code: 456 ... Substitution `seq` is not set:
+        //   While executing WaitForAsyncInsert
+        //
+        // Every write this node makes is parameterised, so async_insert
+        // breaks all of them. It was enabled to stop one part being
+        // written per row and it did - by writing no rows at all, while
+        // `record` swallowed the error and every page kept answering.
+        assert!(
+            insert_settings("INSERT INTO gap_events (seq) VALUES ({seq:UInt64})").is_empty(),
+            "a parameterised insert must not be handed to async_insert"
+        );
         assert!(insert_settings("SELECT 1").is_empty());
-        assert!(insert_settings("  select seq from gap_events").is_empty());
-        assert!(insert_settings("ALTER TABLE x DELETE WHERE 1").is_empty());
-        let ins = insert_settings("INSERT INTO gap_events (seq) VALUES (1)");
-        assert!(ins.contains("async_insert=1"), "{ins}");
-        // Case and leading whitespace are how these are actually written
-        // in this file.
-        assert!(insert_settings("  insert into gap_state VALUES").contains("async_insert=1"));
     }
 
     #[test]
-    fn the_spine_waits_and_the_projections_do_not() {
-        // Learned by losing seventeen consecutive events to a ClickHouse
-        // restart: with the wait off, a dropped buffer leaves a HOLE,
-        // not a truncation, because the node keeps writing past it. The
-        // link after the gap points at a hash that no longer exists and
-        // the chain breaks there for good.
-        let spine = insert_settings("INSERT INTO gap_events (seq, kind) VALUES");
-        assert!(spine.contains("wait_for_async_insert=1"), "{spine}");
-        assert!(spine.contains("async_insert_busy_timeout_ms=200"), "{spine}");
-
-        // Projections are upserts: a lost row is corrected by the next
-        // write of the same key, so they buy the throughput instead.
-        for t in ["gap_contracts", "gap_escrows", "gap_state"] {
-            let p = insert_settings(&format!("INSERT INTO {t} VALUES"));
-            assert!(p.contains("wait_for_async_insert=0"), "{t}: {p}");
-        }
+    fn it_can_still_be_turned_on_deliberately() {
+        // Left reachable for a future path that sends values inline
+        // rather than as bindings, which is the trade this codebase
+        // refused once already.
+        std::env::set_var("GAP_CLICKHOUSE_ASYNC_INSERT", "1");
+        let on = insert_settings("INSERT INTO gap_events VALUES");
+        std::env::remove_var("GAP_CLICKHOUSE_ASYNC_INSERT");
+        assert!(on.contains("async_insert=1"), "{on}");
+        // And the spine still waits when it is: a dropped batch there
+        // leaves a hole in the chain that cannot be repaired.
+        assert!(on.contains("wait_for_async_insert=1"), "{on}");
     }
 }
 
