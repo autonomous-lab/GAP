@@ -285,10 +285,30 @@ fn build_storage() -> Result<Box<dyn Storage>> {
                     h.deliverables,
                     h.state
                 ),
-                // A node that cannot read its own history should say so
-                // loudly and still start: refusing to boot would turn a
-                // degraded cluster into an outage.
-                Err(e) => eprintln!("[gap-node] WARNING: clickhouse hydrate failed: {e}"),
+                // A node that cannot read its own history must NOT
+                // serve as though it had none.
+                //
+                // This was a warning, and the node started anyway with
+                // empty mirrors on top of thirty-eight thousand stored
+                // events. Every page read zero, every token was unknown,
+                // and - the part that matters - `append_event` derives
+                // the next sequence from what it has in memory, so the
+                // first write would have restarted the spine at 1 and
+                // forked it against the rows already there. It did not
+                // happen only because an empty registry rejected every
+                // authenticated call first. That is luck, not a design.
+                //
+                // Refusing to boot turns a degraded node into an outage,
+                // which is the lesser failure: an outage is visible and
+                // reversible, a forked audit chain is neither.
+                Err(e) => {
+                    return Err(gap::Error::Other(format!(
+                        "clickhouse hydrate failed: {e}. Refusing to start: serving with empty \
+                         state over a populated store would answer every query with zero and \
+                         restart the audit spine at sequence 1. Fix the store, or point \
+                         GAP_STORAGE elsewhere."
+                    )));
+                }
             }
             Ok(Box::new(storage))
         }

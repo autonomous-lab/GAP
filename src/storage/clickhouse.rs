@@ -57,6 +57,7 @@ pub trait HttpTransport: Send {
         // Default: append params as query-string bindings after
         // encoding the query itself.
         let mut url = format!("{}/?query={}", self.base_url(), urlencode(query));
+        url.push_str(&insert_settings(query));
         for p in params {
             url.push_str(&format!(
                 "&param_{}={}",
@@ -102,6 +103,72 @@ pub trait HttpTransport: Send {
 /// the ones that happen to look like JSON today.
 fn escape_param(value: &str) -> String {
     value.replace('\\', "\\\\")
+}
+
+
+/// Settings appended to INSERT statements, and only to those.
+///
+/// ClickHouse makes one PART per insert, and this node inserts one row
+/// at a time. Under load that was about 1,400 parts a minute across four
+/// tables: the merges kept up, the disk did not, and eight minutes of
+/// merged-away parts reached 5.5 GB over 8 MiB of live data.
+///
+/// `async_insert` fixes that at the source - the server collects
+/// concurrent inserts and writes ONE part per batch. Measured here: 469
+/// parts a minute down to 2.
+///
+/// What it costs turns on one flag, and the answer is NOT the same for
+/// every table.
+///
+/// The spine waits. `wait_for_async_insert=1` on `gap_events` means the
+/// call returns only once the batch is durable. This was learned the
+/// expensive way: with the flag off, a ClickHouse restart dropped the
+/// buffered batch and seventeen consecutive events - 26993 to 27009 -
+/// vanished while the node kept writing past them. The comment that
+/// used to sit here reasoned that a crash TRUNCATES, and that a prefix
+/// of a hash chain still verifies. That is true only if nothing is
+/// written afterwards. What actually happens is a HOLE, the link at
+/// 27010 points at a hash that no longer exists, and the chain breaks
+/// there permanently. An audit chain cannot be reconstructed by
+/// retrying, so it is the one table that pays the latency.
+///
+/// Everything else does not. Contracts, escrows and state are
+/// PROJECTIONS written as upserts: a lost row is overwritten by the next
+/// write of the same key, and a rebuild reconstructs them. Losing one
+/// costs a stale field for a moment, not evidence.
+fn insert_settings(query: &str) -> String {
+    let trimmed = query.trim_start();
+    let is_insert = trimmed
+        .get(..6)
+        .map(|s| s.eq_ignore_ascii_case("INSERT"))
+        .unwrap_or(false);
+    if !is_insert || !env_flag("GAP_CLICKHOUSE_ASYNC_INSERT", true) {
+        return String::new();
+    }
+    // The audit spine is the one thing here that cannot be rebuilt.
+    let is_spine = trimmed.to_ascii_lowercase().contains("gap_events");
+    let wait = if is_spine || env_flag("GAP_CLICKHOUSE_INSERT_WAIT", false) {
+        1
+    } else {
+        0
+    };
+    // A shorter window on the waiting path: the caller is blocked for
+    // it, so it is latency rather than buffering.
+    let default_ms = if wait == 1 { 200 } else { 1000 };
+    let busy_ms = std::env::var("GAP_CLICKHOUSE_INSERT_WINDOW_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default_ms);
+    format!(
+        "&async_insert=1&wait_for_async_insert={wait}&async_insert_busy_timeout_ms={busy_ms}"
+    )
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => !matches!(v.trim(), "0" | "false" | "no" | ""),
+        Err(_) => default,
+    }
 }
 
 /// A real transport using `ureq`.
@@ -357,13 +424,36 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
     pub fn hydrate(&self) -> Result<HydrateSummary> {
         let mut summary = HydrateSummary::default();
 
-        for rec in self.select::<EventRecord>(
-            "SELECT seq, kind, at, payload, prev_hash, hash FROM gap_events",
-        )? {
-            self.events
-                .lock()
-                .map_err(|_| Error::Other("events lock poisoned".into()))?
-                .push(rec);
+        // Read the spine in pages, ordered by sequence.
+        //
+        // It used to be one SELECT for the whole chain, which worked
+        // until the chain outgrew the HTTP client's response cap and
+        // then failed with "the response body is larger than request
+        // limit" - at thirty-eight thousand events, on a node whose
+        // spine only ever grows. Any fixed ceiling is a date, not a
+        // limit. Paging has none.
+        const PAGE: u64 = 5_000;
+        let mut after = 0u64;
+        loop {
+            let page = self.select::<EventRecord>(&format!(
+                "SELECT seq, kind, at, payload, prev_hash, hash FROM gap_events \
+                 WHERE seq > {after} ORDER BY seq LIMIT {PAGE}"
+            ))?;
+            let last = page.last().map(|e| e.seq);
+            let n = page.len();
+            {
+                let mut events = self
+                    .events
+                    .lock()
+                    .map_err(|_| Error::Other("events lock poisoned".into()))?;
+                events.extend(page);
+            }
+            match last {
+                // Guard against a page that does not advance the cursor:
+                // a stall here would spin for ever holding the boot.
+                Some(seq) if n as u64 == PAGE && seq > after => after = seq,
+                _ => break,
+            }
         }
         {
             // Sorted by seq so `events_after` (which filters a Vec in
@@ -856,6 +946,44 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .lock()
             .map_err(|_| Error::Other("deliverables lock poisoned".into()))?;
         Ok(deliverables.values().cloned().collect())
+    }
+}
+
+#[cfg(test)]
+mod insert_settings_tests {
+    use super::*;
+
+    #[test]
+    fn only_inserts_are_batched() {
+        // A SELECT carrying async_insert settings is at best noise and
+        // at worst a rejected query.
+        assert!(insert_settings("SELECT 1").is_empty());
+        assert!(insert_settings("  select seq from gap_events").is_empty());
+        assert!(insert_settings("ALTER TABLE x DELETE WHERE 1").is_empty());
+        let ins = insert_settings("INSERT INTO gap_events (seq) VALUES (1)");
+        assert!(ins.contains("async_insert=1"), "{ins}");
+        // Case and leading whitespace are how these are actually written
+        // in this file.
+        assert!(insert_settings("  insert into gap_state VALUES").contains("async_insert=1"));
+    }
+
+    #[test]
+    fn the_spine_waits_and_the_projections_do_not() {
+        // Learned by losing seventeen consecutive events to a ClickHouse
+        // restart: with the wait off, a dropped buffer leaves a HOLE,
+        // not a truncation, because the node keeps writing past it. The
+        // link after the gap points at a hash that no longer exists and
+        // the chain breaks there for good.
+        let spine = insert_settings("INSERT INTO gap_events (seq, kind) VALUES");
+        assert!(spine.contains("wait_for_async_insert=1"), "{spine}");
+        assert!(spine.contains("async_insert_busy_timeout_ms=200"), "{spine}");
+
+        // Projections are upserts: a lost row is corrected by the next
+        // write of the same key, so they buy the throughput instead.
+        for t in ["gap_contracts", "gap_escrows", "gap_state"] {
+            let p = insert_settings(&format!("INSERT INTO {t} VALUES"));
+            assert!(p.contains("wait_for_async_insert=0"), "{t}: {p}");
+        }
     }
 }
 
