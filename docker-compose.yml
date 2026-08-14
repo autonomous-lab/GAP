@@ -78,7 +78,9 @@ services:
     profiles: ["demo"]
     environment:
       GAP_NODE_URL: "${GAP_DEMO_NODE_URL:-http://172.17.0.1:8080}"
-      GAP_DEMO_EVENTS_MIN: "${GAP_DEMO_EVENTS_MIN:-80}"
+      GAP_DEMO_EVENTS_MIN: "${GAP_DEMO_EVENTS_MIN:-400}"
+      GAP_DEMO_EVENTS_LOW: "${GAP_DEMO_EVENTS_LOW:-200}"
+      GAP_DEMO_EVENTS_HIGH: "${GAP_DEMO_EVENTS_HIGH:-800}"
       GAP_DEMO_AGENTS: "${GAP_DEMO_AGENTS:-21}"
       GAP_DEMO_LABEL: "${GAP_DEMO_LABEL-demo}"
     volumes:

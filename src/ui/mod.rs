@@ -33,7 +33,7 @@ mod home;
 mod job;
 mod pitch;
 
-pub use activity::activity_page;
+pub use activity::{activity_page, FEED_ROWS};
 pub use admin::admin_page;
 pub use agent::agent_page;
 pub use capability::capability_page;

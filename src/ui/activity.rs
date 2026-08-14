@@ -15,6 +15,15 @@
 use super::{clock, esc, num, stamp, took, Meta};
 use serde_json::Value;
 
+/// How many rows either feed keeps on screen.
+///
+/// The tape was capped at 300 and the settlements table at nothing at
+/// all, which was survivable at a deal a minute and is not at several
+/// hundred events a minute: the table gained a row per settlement, for
+/// ever, until the tab died. A live feed is a window, not a log - the
+/// log is the audit spine, and it is one request away.
+pub const FEED_ROWS: usize = 50;
+
 /// The phases, in the order a deal walks them, for the legend.
 const PHASES: [(&str, &str); 7] = [
     ("negotiation", "negotiating"),
@@ -325,7 +334,7 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
   // settlement and a lifecycle event share a numbering but not a pace,
   // so resuming from the higher would skip whatever the other feed had
   // not reached. Replays are cheap; a hole is not.
-  var drawn = {{}};
+  var drawn = new Map();
   var resume = function () {{
     var c = [];
     if (lastJob) c.push(lastJob);
@@ -334,8 +343,12 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
     return c.length ? Math.min.apply(null, c) : 0;
   }};
   var seen = function (key) {{
-    if (drawn[key]) return true;
-    drawn[key] = 1;
+    if (drawn.has(key)) return true;
+    drawn.set(key, 1);
+    // Bounded, and insertion-ordered, so the oldest goes first. It only
+    // ever needs to cover a reconnect replay, which the cursor already
+    // bounds - keeping every key seen all day is a slow leak.
+    if (drawn.size > {cap} * 20) drawn.delete(drawn.keys().next().value);
     return false;
   }};
   var placeholder = feed ? feed.querySelector('td[colspan]') : null;
@@ -365,8 +378,7 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
       '<span class="who">' + deal + cap + '</span>' +
       '<span class="amt">' + amt + '</span>';
     tape.insertBefore(li, tape.firstChild);
-    // A page left open for a day should not grow without bound.
-    while (tape.children.length > 300) tape.removeChild(tape.lastChild);
+    while (tape.children.length > {cap}) tape.removeChild(tape.lastChild);
   }}
 
   function onSettlement(j) {{
@@ -414,6 +426,8 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
     tr.style.background = 'rgba(69,230,160,.14)';
     var body = feed.tBodies[0];
     body.insertBefore(tr, body.children[1] || null);
+    // children[0] is the header row, which lives inside tbody here.
+    while (body.children.length > {cap} + 1) body.removeChild(body.lastChild);
     setTimeout(function () {{ tr.style.background = ''; }}, 1400);
   }}
 
@@ -482,6 +496,7 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
             "st-events"
         ),
         init = init,
+        cap = FEED_ROWS,
         legend = legend,
         tape = tape,
         tseq = tape_seq,
@@ -615,6 +630,30 @@ mod tests {
             !html.contains("es.onmessage"),
             "onmessage never fires for a named event"
         );
+    }
+
+    #[test]
+    fn both_feeds_are_bounded_so_a_page_left_open_survives() {
+        // The tape was capped at 300 and the settlements table at
+        // nothing at all. Survivable at a deal a minute; at several
+        // hundred events a minute the table gained a row per
+        // settlement, for ever, until the tab died. So did the dedup
+        // index, which held every key it had ever seen.
+        let html = activity_page(&json!({ "jobs": [] }), &no_life(), &json!({}));
+        assert!(
+            html.contains(&format!("tape.children.length > {FEED_ROWS}")),
+            "the tape must be trimmed"
+        );
+        assert!(
+            html.contains(&format!("body.children.length > {FEED_ROWS} + 1")),
+            "the settlements table must be trimmed too, header row aside"
+        );
+        assert!(
+            html.contains(&format!("drawn.size > {FEED_ROWS} * 20")),
+            "the dedup index must be bounded"
+        );
+        // A Map, because the bound needs insertion order to evict by.
+        assert!(html.contains("new Map()"));
     }
 
     #[test]

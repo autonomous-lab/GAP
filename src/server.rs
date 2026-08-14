@@ -5084,8 +5084,13 @@ pub fn route_html(
             html(crate::ui::directory(&dir))
         }
         "/activity" => {
-            let recent = guard.public_activity(50);
-            let lifecycle = guard.public_lifecycle(60);
+            // One number for both, and the same one the page enforces
+            // client-side: a server render of 60 that the browser
+            // immediately trims to 50 is 10 rows of wasted bytes on
+            // every page load.
+            let rows = crate::ui::FEED_ROWS;
+            let recent = guard.public_activity(rows);
+            let lifecycle = guard.public_lifecycle(rows);
             let stats = guard.public_stats();
             html(crate::ui::activity_page(&recent, &lifecycle, &stats))
         }
