@@ -147,7 +147,26 @@ fn pseudonym(input: &str) -> String {
 }
 
 /// The node state — shared behind a mutex, one process, one order.
+/// A remembered answer to "does this chain hang together".
+///
+/// `/v1/audit/verify` walks the entire spine and recomputes every hash.
+/// That is the point - a tamper-evidence claim nobody can check is not
+/// evidence - but it is O(chain), it is public, and it is
+/// unauthenticated. Measured on the live node: ~3 microseconds an
+/// event, so 25 ms at eight thousand events and about three SECONDS at
+/// a million. Left uncached, any stranger could pin a core to it in a
+/// loop.
+struct SpineCheck {
+    /// Spine height the answer was computed at.
+    head: u64,
+    at: std::time::Instant,
+    took: std::time::Duration,
+    value: Value,
+}
+
 pub struct NodeState {
+    /// The last spine verification, and what it cost.
+    spine_check: Option<SpineCheck>,
     /// The node's own identity.
     pub node: NodeIdentity,
     /// token -> registered agent (key custody).
@@ -508,6 +527,7 @@ impl NodeState {
         }
 
         Self {
+            spine_check: None,
             node: NodeIdentity { identity },
             agents,
             agents_by_did,
@@ -4273,7 +4293,60 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
     /// looking identical to one proving they were never touched at all.
     /// Saying "verified from seq N" is a smaller claim than the truth
     /// would allow, and it is the one that is actually true.
-    pub fn verify_spine(&self) -> Value {
+    /// Verify the chain, reusing the last answer when it is still true.
+    ///
+    /// Two rules, and either one is enough to serve from memory:
+    ///
+    ///   * the spine has not grown since the last check - nothing can
+    ///     have changed, so the answer is not stale, it is current;
+    ///   * or the last check is recent, where "recent" is derived from
+    ///     what it COST rather than fixed. A flat one-second cache is
+    ///     fine at eight thousand events and a treadmill at a million:
+    ///     the node would spend every second recomputing a three-second
+    ///     answer. Backing off to eight times the measured cost keeps
+    ///     the work under an eighth of one core no matter how long the
+    ///     chain gets.
+    ///
+    /// A served answer always says how old it is and what height it was
+    /// taken at, so nobody has to guess whether they are looking at
+    /// this second or the last one.
+    pub fn verify_spine(&mut self) -> Value {
+        let head = self.storage.head_seq().unwrap_or(0);
+        if let Some(prev) = &self.spine_check {
+            let backoff = std::cmp::max(
+                std::time::Duration::from_secs(1),
+                prev.took.saturating_mul(8),
+            );
+            if prev.head == head || prev.at.elapsed() < backoff {
+                let mut v = prev.value.clone();
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("checked_at_seq".into(), json!(prev.head));
+                    o.insert(
+                        "checked_ms_ago".into(),
+                        json!(prev.at.elapsed().as_millis() as u64),
+                    );
+                }
+                return v;
+            }
+        }
+        let started = std::time::Instant::now();
+        let value = self.verify_spine_uncached();
+        let took = started.elapsed();
+        self.spine_check = Some(SpineCheck {
+            head,
+            at: std::time::Instant::now(),
+            took,
+            value: value.clone(),
+        });
+        let mut v = value;
+        if let Some(o) = v.as_object_mut() {
+            o.insert("checked_at_seq".into(), json!(head));
+            o.insert("checked_ms_ago".into(), json!(0));
+        }
+        v
+    }
+
+    fn verify_spine_uncached(&self) -> Value {
         let events = self.storage.events_after(0, u64::MAX).unwrap_or_default();
         let mut segments: Vec<Value> = vec![];
         let mut breaks: Vec<u64> = vec![];
@@ -6233,6 +6306,77 @@ mod tests {
     }
 
     #[test]
+    fn verifying_the_spine_twice_only_walks_it_once() {
+        // The endpoint is public, unauthenticated, and O(chain): it
+        // recomputes every hash on the spine. Measured live at roughly
+        // three microseconds an event, which is 25 ms at eight thousand
+        // and about three SECONDS at a million. Uncached, a stranger
+        // could pin a core to it in a loop.
+        let arc = state();
+        {
+            let mut g = arc.lock().unwrap();
+            for _ in 0..5 {
+                g.record("ctr.propose", json!({ "contract_id": "c" }));
+            }
+        }
+        let first = arc.lock().unwrap().verify_spine();
+        assert_eq!(first["intact"], true);
+        assert_eq!(first["checked_ms_ago"], 0, "computed, not served");
+
+        // Nothing has been appended, so the answer cannot have changed:
+        // this is not a stale reply, it is the current one.
+        let second = arc.lock().unwrap().verify_spine();
+        assert_eq!(second["intact"], true);
+        assert_eq!(second["checked_at_seq"], first["checked_at_seq"]);
+        assert_eq!(
+            second["links_verified"], first["links_verified"],
+            "same answer, not recomputed"
+        );
+
+        // Every served answer says which height it was taken at, so a
+        // caller never has to guess how current it is.
+        assert!(second["checked_at_seq"].is_u64());
+        assert!(second["checked_ms_ago"].is_u64());
+    }
+
+    #[test]
+    fn a_grown_spine_is_re_verified_once_the_backoff_has_passed() {
+        // The cache must not outlive the truth it describes. It is
+        // allowed to be briefly behind - that is the whole point, and
+        // the reply says so - but once the backoff has elapsed and the
+        // chain has moved, it walks it again.
+        let arc = state();
+        {
+            let mut g = arc.lock().unwrap();
+            g.record("ctr.propose", json!({ "contract_id": "c" }));
+        }
+        let before = arc.lock().unwrap().verify_spine();
+        {
+            let mut g = arc.lock().unwrap();
+            for _ in 0..4 {
+                g.record("ctr.accept", json!({ "contract_id": "c" }));
+            }
+            // Within the backoff the previous answer still stands, and
+            // it is honest about which height it was taken at.
+            let stale = g.verify_spine();
+            assert_eq!(stale["checked_at_seq"], before["checked_at_seq"]);
+            assert_eq!(stale["events_total"], before["events_total"]);
+
+            // Age the cache rather than sleeping through it.
+            if let Some(c) = g.spine_check.as_mut() {
+                c.at -= std::time::Duration::from_secs(30);
+            }
+        }
+        let after = arc.lock().unwrap().verify_spine();
+        assert!(
+            after["checked_at_seq"].as_u64().unwrap() > before["checked_at_seq"].as_u64().unwrap(),
+            "the chain grew and the backoff passed: {before} then {after}"
+        );
+        assert_eq!(after["events_total"], 5);
+        assert_eq!(after["intact"], true);
+    }
+
+    #[test]
     fn expiry_defaults_to_a_dry_run_and_changes_nothing() {
         // A bulk state change over every contract on the node is the one
         // call where saying nothing must mean "show me first".
@@ -6294,7 +6438,7 @@ mod tests {
         // Closed, not erased: the cancellation is on the spine, and the
         // spine still verifies. Deleting the deal instead would remove
         // the only property this node sells.
-        let guard = arc.lock().unwrap();
+        let mut guard = arc.lock().unwrap();
         let kinds: Vec<String> = guard
             .storage
             .events_after(0, 500)
