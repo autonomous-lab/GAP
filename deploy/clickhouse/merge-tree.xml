@@ -1,0 +1,33 @@
+<!--
+  MergeTree part retention
+
+  ClickHouse makes one PART per INSERT, and this node inserts one row at
+  a time. Measured on the live node under load: about 1,400 parts a
+  minute across four tables. The merges keep up; what does not is the
+  DISK, because a part that has been merged away is kept for
+  `old_parts_lifetime` before deletion - eight minutes by default.
+
+  At steady state that retains roughly rate x lifetime parts, and their
+  bytes are dominated by merge OUTPUT, which is rewritten as the tables
+  grow. The result measured here: 6.8 MiB of live data sitting under 5.5
+  GB of dead parts, growing 245 MB a minute. Eighty free gigabytes would
+  have lasted about five hours.
+
+  The retention window exists so a replica can still fetch a part that
+  was merged away mid-transfer, and so a restart can roll back to a
+  known part set. This deployment is a single node with no replicas, so
+  thirty seconds is enough to cover an in-flight read while cutting the
+  retained volume sixteenfold.
+
+  This does not fix the cause, which is one insert per row. It removes
+  the consequence, which was going to fill the disk before anyone could
+  fix the cause.
+-->
+<clickhouse>
+    <merge_tree>
+        <old_parts_lifetime>30</old_parts_lifetime>
+        <!-- Sweep more often than the default second-granularity walk,
+             since there are thousands of candidates rather than a few. -->
+        <merge_tree_clear_old_parts_interval_seconds>5</merge_tree_clear_old_parts_interval_seconds>
+    </merge_tree>
+</clickhouse>

@@ -55,6 +55,7 @@ services:
     volumes:
       # System logs are disabled/kept tiny - they grow forever otherwise.
       - ./deploy/clickhouse/system-logs.xml:/etc/clickhouse-server/config.d/system-logs.xml:ro
+      - ./deploy/clickhouse/merge-tree.xml:/etc/clickhouse-server/config.d/merge-tree.xml:ro
       - ./data/clickhouse:/var/lib/clickhouse
     ulimits:
       nofile:
