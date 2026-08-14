@@ -168,10 +168,28 @@ pub fn activity_page(recent: &Value, lifecycle: &Value, stats: &Value) -> String
         stats["conform_rate"].as_f64(),
         stats["jobs"].as_u64().unwrap_or(0),
     ) {
-        (Some(r), _) => super::stat(&format!("{:.0}%", r * 100.0), "conforming", "ok"),
-        (None, 0) => super::stat("--", "conforming", "faint"),
-        (None, n) => super::stat(&format!("0/{n}"), "conforming", "faint"),
+        (Some(r), _) => {
+            super::stat_live(&format!("{:.0}%", r * 100.0), "conforming", "ok", "st-rate")
+        }
+        (None, 0) => super::stat_live("--", "conforming", "faint", "st-rate"),
+        (None, n) => super::stat_live(&format!("0/{n}"), "conforming", "faint", "st-rate"),
     };
+
+    // The counters the page needs to keep the tiles true as frames
+    // arrive. Rendering only the FORMATTED values would force the
+    // browser to reverse a rounded percentage back into two integers,
+    // and a stat bar that drifts is worse than one that is frozen.
+    let init = esc(
+        &serde_json::json!({
+            "jobs": stats["jobs"].as_u64().unwrap_or(0),
+            "judged": stats["judged"].as_u64().unwrap_or(0),
+            "conforming": stats["conforming"].as_u64().unwrap_or(0),
+            "remedied": stats["remedied"].as_u64().unwrap_or(0),
+            "events": stats["events"].as_u64().unwrap_or(0),
+            "volume": stats["volume"]["by_currency"],
+        })
+        .to_string(),
+    );
 
     let body = format!(
         r#"<div class="hero" style="padding:56px 0 6px"><div class="wrap">
@@ -180,7 +198,7 @@ pub fn activity_page(recent: &Value, lifecycle: &Value, stats: &Value) -> String
 propose, counter, sign, fund escrow, work, deliver and get judged in public. Entries are
 pseudonymous: you can audit what was delivered and how it was judged without learning who traded
 with whom.</p>
-<div class="stats" style="margin-top:6px">
+<div class="stats" style="margin-top:6px" id="statbar" data-init="{init}">
   {s_jobs}{s_vol}{s_rate}{s_remedied}{s_events}
 </div>
 </div></div>
@@ -248,6 +266,59 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
     if (s < 86400) return Math.floor(s / 3600) + 'h ' + pad(Math.floor((s % 3600) / 60)) + 'm';
     return Math.floor(s / 86400) + 'd ' + Math.floor((s % 86400) / 3600) + 'h';
   }};
+  // The stat bar, kept true as frames arrive.
+  //
+  // It used to be rendered once and never touched, so on a page where
+  // everything else moved it sat still - which reads as a broken
+  // counter, not a static one. Counters come from the server exactly
+  // (data-init), and every settlement adds to them here rather than
+  // being recomputed from a rounded percentage.
+  var bar = document.getElementById('statbar');
+  var st = null;
+  try {{ st = bar ? JSON.parse(bar.dataset.init) : null; }} catch (e) {{ st = null; }}
+  var money = {{}};
+  if (st && st.volume) {{
+    // Micro-units, so repeated addition of 0.05 never drifts.
+    for (var c in st.volume) money[c] = Math.round(parseFloat(st.volume[c]) * 1e6);
+  }}
+  var groups = function (n) {{
+    return String(n).replace(/\B(?=(\d{{3}})+(?!\d))/g, ',');
+  }};
+  // Mirrors ui::trim_zeros exactly, including its floor of two
+  // decimals: money with one decimal reads as a count, not an amount.
+  // Getting this subtly wrong was visible - the tile reformatted "6.00"
+  // to "6" on the first repaint, with no new data behind it.
+  var trimZeros = function (s) {{
+    var dot = s.indexOf('.');
+    if (dot < 0) return s;
+    var whole = s.slice(0, dot);
+    var frac = s.slice(dot + 1).replace(/0+$/, '');
+    while (frac.length < 2) frac += '0';
+    return whole + '.' + frac;
+  }};
+  var setText = function (id, text) {{
+    var el = document.getElementById(id);
+    if (el && el.textContent !== text) el.textContent = text;
+  }};
+  function paintStats() {{
+    if (!st) return;
+    setText('st-jobs', groups(st.jobs));
+    setText('st-rework', groups(st.remedied));
+    setText('st-events', groups(st.events));
+    // Same rule as the server: no rate at all rather than a 100% that
+    // is really a division by a very small number.
+    setText('st-rate', st.judged > 0
+      ? Math.round((st.conforming / st.judged) * 100) + '%'
+      : (st.jobs > 0 ? '0/' + st.jobs : '--'));
+    var parts = [];
+    for (var c in money) parts.push(trimZeros((money[c] / 1e6).toFixed(6)) + ' ' + c);
+    parts.sort();
+    var extra = Math.max(parts.length - 2, 0);
+    parts = parts.slice(0, 2);
+    var vol = parts.join(' + ') + (extra > 0 ? ' +' + extra : '');
+    setText('st-vol', vol || '--');
+  }}
+
   var lastJob = feed ? Number(feed.dataset.seq || 0) : 0;
   var lastLife = tape ? Number(tape.dataset.seq || 0) : 0;
   // One connection, two cursors. Resume from the LOWER of the two: a
@@ -271,8 +342,10 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
   var tapeEmpty = tape ? tape.querySelector('.p-market') : null;
 
   function onLifecycle(j) {{
-    if (!tape || seen('l' + j.seq)) return;
+    if (seen('l' + j.seq)) return;
     lastLife = Math.max(lastLife, j.seq || 0);
+    if (st && j.spine) {{ st.events = Math.max(st.events, j.spine); paintStats(); }}
+    if (!tape) return;
     if (tapeEmpty) {{ tapeEmpty.parentNode.remove(); tapeEmpty = null; }}
     var deal = j.deal_ref
       ? (j.settled
@@ -297,8 +370,19 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
   }}
 
   function onSettlement(j) {{
-    if (!feed || seen('s' + j.seq)) return;
+    if (seen('s' + j.seq)) return;
     lastJob = Math.max(lastJob, j.seq || 0);
+    if (st) {{
+      st.jobs += 1;
+      if (j.verdict) {{ st.judged += 1; }}
+      if (j.verdict === 'conforms') {{ st.conforming += 1; }}
+      if (j.remedied) {{ st.remedied += 1; }}
+      if (j.amount && j.currency) {{
+        money[j.currency] = (money[j.currency] || 0) + Math.round(parseFloat(j.amount) * 1e6);
+      }}
+      paintStats();
+    }}
+    if (!feed) return;
     if (placeholder) {{ placeholder.parentNode.remove(); placeholder = null; }}
     var cls = j.verdict === 'conforms' ? 'ok' : (j.verdict === 'nonconforming' ? 'bad' : 'muted');
     var attempt = j.remedied
@@ -358,30 +442,46 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
   else {{ window.addEventListener('load', function () {{ setTimeout(connect, 900); }}); }}
 }})();
 </script>"#,
-        s_jobs = super::stat(
+        s_jobs = super::stat_live(
             &num(stats["jobs"].as_u64().unwrap_or(0)),
             "jobs settled",
-            ""
+            "",
+            "st-jobs"
         ),
+        // The id sits on the INNER span, not the tile: repainting with
+        // textContent would otherwise drop the wrapper and the amount
+        // would visibly change size the first time a deal settles.
         s_vol = match super::volume_str(&stats["volume"]) {
-            Some(v) => super::stat(
-                &format!(r#"<span style="font-size:1.05rem">{}</span>"#, esc(&v)),
+            Some(v) => super::stat_live(
+                &format!(
+                    r#"<span id="st-vol" style="font-size:1.05rem">{}</span>"#,
+                    esc(&v)
+                ),
                 "settled volume",
                 "lime",
+                "st-vol-tile",
             ),
-            None => super::stat("--", "settled volume", "faint"),
+            None => super::stat_live(
+                r#"<span id="st-vol">--</span>"#,
+                "settled volume",
+                "faint",
+                "st-vol-tile",
+            ),
         },
         s_rate = rate,
-        s_remedied = super::stat(
+        s_remedied = super::stat_live(
             &num(stats["remedied"].as_u64().unwrap_or(0)),
             "needed rework",
-            ""
+            "",
+            "st-rework"
         ),
-        s_events = super::stat(
+        s_events = super::stat_live(
             &num(stats["events"].as_u64().unwrap_or(0)),
             "audit spine events",
-            ""
+            "",
+            "st-events"
         ),
+        init = init,
         legend = legend,
         tape = tape,
         tseq = tape_seq,
@@ -515,6 +615,35 @@ mod tests {
             !html.contains("es.onmessage"),
             "onmessage never fires for a named event"
         );
+    }
+
+    #[test]
+    fn the_stat_bar_can_be_updated_without_a_reload() {
+        // What this pins: the tiles were rendered once and never given
+        // an id, so on a page where the tape and the table both stream,
+        // "jobs settled" sat still. A frozen counter next to a moving
+        // feed does not read as static, it reads as broken.
+        let html = activity_page(
+            &json!({ "jobs": [] }),
+            &no_life(),
+            &json!({
+                "jobs": 136, "judged": 120, "conforming": 98, "remedied": 2,
+                "events": 1407, "volume": { "by_currency": { "EUR": "1.870000" } }
+            }),
+        );
+        for id in ["st-jobs", "st-vol", "st-rate", "st-rework", "st-events"] {
+            assert!(html.contains(&format!(r#"id="{id}""#)), "no handle on {id}");
+        }
+        // The EXACT counters travel with the page. Handing the browser
+        // only the rendered "82%" would force it to reverse a rounded
+        // percentage back into two integers, and that drifts.
+        assert!(html.contains(r#"id="statbar""#));
+        assert!(html.contains("&quot;judged&quot;:120"), "{}", &html[..0]);
+        assert!(html.contains("&quot;conforming&quot;:98"));
+        assert!(html.contains("&quot;events&quot;:1407"));
+        // And the stream feeds them.
+        assert!(html.contains("paintStats()"));
+        assert!(html.contains("st.jobs += 1"));
     }
 
     #[test]

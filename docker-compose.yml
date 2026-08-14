@@ -79,7 +79,7 @@ services:
     environment:
       GAP_NODE_URL: "${GAP_DEMO_NODE_URL:-http://172.17.0.1:8080}"
       GAP_DEMO_EVENTS_MIN: "${GAP_DEMO_EVENTS_MIN:-30}"
-      GAP_DEMO_AGENTS: "${GAP_DEMO_AGENTS:-8}"
+      GAP_DEMO_AGENTS: "${GAP_DEMO_AGENTS:-11}"
       GAP_DEMO_LABEL: "${GAP_DEMO_LABEL-demo}"
     volumes:
       - ./data/gap-demo:/state

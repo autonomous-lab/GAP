@@ -203,8 +203,18 @@ fn stream_activity(state: &Arc<Mutex<NodeState>>, request: tiny_http::Request, p
         // settlement, so emitting them after it would play the story
         // backwards on a catch-up replay.
         let events = life["events"].as_array().cloned().unwrap_or_default();
+        // The spine head travels with each frame so a page can keep its
+        // "audit spine events" counter true. Derived here rather than
+        // counted by the browser: most spine kinds are internal and are
+        // never published, so a client tallying the frames it can see
+        // would drift low for ever.
+        let head = life["scanned_to"].as_u64().unwrap_or(spine_cursor);
         for ev in &events {
             let seq = ev["seq"].as_u64().unwrap_or(spine_cursor);
+            let mut ev = ev.clone();
+            if let Some(obj) = ev.as_object_mut() {
+                obj.insert("spine".into(), serde_json::json!(head));
+            }
             let frame = format!("id: {seq}\nevent: lifecycle\ndata: {ev}\n\n");
             if writer.write_all(frame.as_bytes()).is_err() {
                 return;

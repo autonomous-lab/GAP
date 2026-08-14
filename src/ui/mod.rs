@@ -1008,6 +1008,22 @@ pub(crate) fn section_aside(
 }
 
 /// One statistic in the stat bar.
+/// A stat tile whose value the page can rewrite in place.
+///
+/// The plain `stat` renders a number that is only ever right at the
+/// moment the HTML was produced. On a page that streams, that is a
+/// number which visibly stops while everything around it moves - which
+/// reads as a broken counter rather than as a static one.
+pub(crate) fn stat_live(value: &str, key: &str, class: &str, id: &str) -> String {
+    format!(
+        r#"<div class="stat"><div class="v {c}" id="{i}">{v}</div><div class="k">{k}</div></div>"#,
+        c = class,
+        i = esc(id),
+        v = value,
+        k = esc(key)
+    )
+}
+
 pub(crate) fn stat(value: &str, key: &str, class: &str) -> String {
     format!(
         r#"<div class="stat"><div class="v {c}">{v}</div><div class="k">{k}</div></div>"#,

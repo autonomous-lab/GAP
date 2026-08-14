@@ -29,7 +29,7 @@ Configuration (all optional)
 ----------------------------
 GAP_NODE_URL          node base URL           default http://172.17.0.1:8080
 GAP_DEMO_EVENTS_MIN   target spine events/min default 30
-GAP_DEMO_AGENTS       firms from the catalogue default 8 (max 8)
+GAP_DEMO_AGENTS       firms from the catalogue default 11 (max 11)
 GAP_DEMO_LABEL        marker on names/caps    default "demo"
 GAP_DEMO_STATE        where tokens persist    default /state/agents.json
 """
@@ -47,7 +47,7 @@ import urllib.request
 
 NODE = os.environ.get("GAP_NODE_URL", "http://172.17.0.1:8080").rstrip("/")
 TARGET_PER_MIN = float(os.environ.get("GAP_DEMO_EVENTS_MIN", "30"))
-POOL = int(os.environ.get("GAP_DEMO_AGENTS", "8"))
+POOL = int(os.environ.get("GAP_DEMO_AGENTS", "11"))
 LABEL = os.environ.get("GAP_DEMO_LABEL", "demo")
 STATE = os.environ.get("GAP_DEMO_STATE", "/state/agents.json")
 
@@ -103,6 +103,27 @@ CATALOGUE = [
         ("diagram-from-text", "Diagram from a description", "A clean architecture diagram from a written description", "0.04", "EUR"),
         ("social-pack", "Social pack from an article", "Five posts from one article, per-platform length, no hashtag padding", "0.03", "EUR"),
         ("alt-text", "Alt text for images", "Accurate alt text for a set of images, ready for a screen reader", "0.01", "EUR"),
+    ]),
+    ("Beacon SEO", "beacon-seo", [
+        ("technical-seo-audit", "Technical SEO audit", "Crawl a site and rank what is actually costing you rankings, worst first", "0.06", "EUR"),
+        ("keyword-gap", "Keyword gap analysis", "Queries your competitors rank for and you do not, with volume and difficulty", "0.05", "USDC"),
+        ("schema-markup", "Structured data markup", "Valid JSON-LD for a page, tested against the rich-result rules", "0.03", "EUR"),
+        ("core-web-vitals", "Core Web Vitals report", "Field and lab metrics for a URL, with the three changes that move them most", "0.04", "EUR"),
+        ("internal-linking", "Internal linking plan", "Where to link from, to what, and why, for one target page", "0.03", "EUR"),
+    ]),
+    ("Ironwood Security", "ironwood-security", [
+        ("dependency-audit", "Dependency vulnerability audit", "Known CVEs in a lockfile, ranked by whether the vulnerable path is reachable", "0.06", "USDC"),
+        ("secrets-scan", "Secrets scan", "Find committed credentials in a repository, with the commit that introduced each", "0.05", "USDC"),
+        ("attack-surface-review", "Attack surface review", "External exposure of a domain YOU OWN: open services, stale subdomains, leaked hosts", "0.08", "USDC"),
+        ("security-headers", "Security header check", "Grade a site's headers and give the exact configuration that fixes each gap", "0.02", "EUR"),
+        ("threat-model", "Threat model from a design", "Turn an architecture description into ranked threats and the control for each", "0.07", "USDC"),
+    ]),
+    ("Trawler Collect", "trawler-collect", [
+        ("product-extract", "Product page extraction", "Title, price, availability and specs from a product URL, as clean JSON", "0.02", "EUR"),
+        ("price-watch", "Price monitoring", "Track a set of URLs and report every price change with a timestamp", "0.03", "EUR"),
+        ("listing-crawl", "Listing page crawl", "Paginate a listing and return every item as a structured feed", "0.05", "EUR"),
+        ("sitemap-inventory", "Sitemap inventory", "Every indexable URL of a site, with status code and last-modified", "0.03", "USDC"),
+        ("contact-discovery", "Public contact discovery", "Published contact routes for a company, from its own site and registries", "0.04", "USDC"),
     ]),
     ("Bridge Ops", "bridge-ops", [
         ("criteria-draft", "Acceptance-criteria drafting", "Turn a loose brief into machine-checkable acceptance criteria", "0.03", "USDC"),
