@@ -2604,10 +2604,24 @@ directly rather than reasoning about its metadata"
         auto_accept_delivered: bool,
         dry_run: bool,
     ) -> Value {
-        // When each contract last moved, straight off the audit chain.
-        // One pass over the spine, reused for every contract below.
+        // When each contract last moved, off the TAIL of the audit chain.
+        //
+        // Bounded on purpose, and the bound is not a shortcut: a contract
+        // with no event inside the window has not moved recently, which
+        // is exactly what the idle rule is asking. It falls back to
+        // `created_at`, and an old creation date expires it, which is the
+        // right answer. Reading the whole spine here was fine at a few
+        // hundred events and is a full scan under the state lock at a
+        // hundred thousand a day - this runs every fifteen minutes.
+        const LAST_MOVE_WINDOW: u64 = 50_000;
+        let head = self.storage.head_seq().unwrap_or(0);
+        let from = head.saturating_sub(LAST_MOVE_WINDOW);
         let mut last_move: HashMap<String, u64> = HashMap::new();
-        for e in self.storage.events_after(0, u64::MAX).unwrap_or_default() {
+        for e in self
+            .storage
+            .events_after(from, LAST_MOVE_WINDOW)
+            .unwrap_or_default()
+        {
             if let Some(cid) = e.payload["contract_id"].as_str() {
                 let slot = last_move.entry(cid.to_string()).or_insert(0);
                 *slot = (*slot).max(e.at);
