@@ -1,0 +1,383 @@
+"""Demo traffic generator: keeps a GAP node visibly alive.
+
+Why this exists
+---------------
+A protocol whose whole argument is a public, auditable feed is worthless
+when the feed is empty. This drives a steady, paced stream of real
+protocol traffic against a node so the activity page shows movement and
+the numbers move - for a demo, a launch, or a load check.
+
+What it does NOT do
+-------------------
+It never calls POST /v1/contract/{id}/verify, so no LLM judge is ever
+consulted and the whole thing costs zero model tokens. Settlement still
+runs its deterministic tier (digest integrity, deadline), which is the
+authoritative layer anyway.
+
+Honesty
+-------
+Every event it writes is a REAL protocol event on a real audit chain,
+and it is permanent. There is no such thing as a rehearsal contract:
+once settled it counts in the public totals for ever. So the agents it
+creates are labelled, and their capabilities live under a namespace that
+says what they are. Set GAP_DEMO_LABEL="" to remove the marking - but
+then the public directory no longer distinguishes generated traffic from
+traffic somebody paid for, which is a claim about your own node that you
+have to be willing to defend.
+
+Configuration (all optional)
+----------------------------
+GAP_NODE_URL          node base URL           default http://172.17.0.1:8080
+GAP_DEMO_EVENTS_MIN   target spine events/min default 30
+GAP_DEMO_AGENTS       firms from the catalogue default 8 (max 8)
+GAP_DEMO_LABEL        marker on names/caps    default "demo"
+GAP_DEMO_STATE        where tokens persist    default /state/agents.json
+"""
+
+import hashlib
+import json
+import os
+import queue
+import random
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+
+NODE = os.environ.get("GAP_NODE_URL", "http://172.17.0.1:8080").rstrip("/")
+TARGET_PER_MIN = float(os.environ.get("GAP_DEMO_EVENTS_MIN", "30"))
+POOL = int(os.environ.get("GAP_DEMO_AGENTS", "8"))
+LABEL = os.environ.get("GAP_DEMO_LABEL", "demo")
+STATE = os.environ.get("GAP_DEMO_STATE", "/state/agents.json")
+
+# The catalogue.
+#
+# The question these answer is not "what could an AI do" - it is what one
+# AGENT genuinely pays another agent for: something it cannot do itself,
+# cannot be trusted to check alone, or should not hold. Verification,
+# regulated screening, extraction from formats, and work whose value is
+# that a SECOND party attests to it. Everything is priced in cents,
+# because that is the transaction size this protocol exists for.
+#
+# Each firm has a speciality, so the public directory reads like a market
+# rather than six generalists with identical menus.
+CATALOGUE = [
+    ("Veritas Check", "veritas-check", [
+        ("fact-check-claim", "Claim verification", "Verify one factual claim against primary sources, and return the sources", "0.04", "EUR"),
+        ("source-trace", "Source tracing", "Trace a quoted figure back to the publication it came from", "0.03", "EUR"),
+        ("second-opinion", "Second-opinion review", "Independent review of another agent's deliverable against its acceptance criteria", "0.05", "USDC"),
+        ("url-liveness", "Link integrity check", "Confirm a URL resolves, is not parked, and matches its stated purpose", "0.01", "EUR"),
+    ]),
+    ("Ledger Screen", "ledger-screen", [
+        ("sanctions-screen", "Sanctions screening", "Screen a name or entity against consolidated sanctions lists", "0.05", "USDC"),
+        ("pii-sweep", "PII sweep", "Flag personal data in a document before it leaves your boundary", "0.03", "EUR"),
+        ("policy-conformance", "Policy conformance check", "Check a text against a supplied policy and cite the breaching lines", "0.04", "EUR"),
+        ("retention-review", "Data retention review", "Assess a described data flow for retention and lawful-basis gaps", "0.06", "EUR"),
+    ]),
+    ("Orchard Data", "orchard-data", [
+        ("invoice-extract", "Invoice extraction", "Pull line items, totals, tax and dates from an invoice into JSON", "0.03", "EUR"),
+        ("table-from-pdf", "Table recovery from PDF", "Recover a table from a PDF as clean CSV, with a confidence score per column", "0.03", "EUR"),
+        ("company-enrich", "Company enrichment", "From a domain, return legal name, registry id, country and trading status", "0.04", "USDC"),
+        ("address-normalise", "Address normalisation", "Validate and normalise a postal address to the local standard", "0.01", "EUR"),
+    ]),
+    ("Meridian Language", "meridian-language", [
+        ("translate-technical", "Technical translation", "Translate technical text with your glossary honoured verbatim", "0.03", "EUR"),
+        ("ui-localise", "UI localisation", "Localise UI strings within a character budget per key", "0.04", "EUR"),
+        ("tone-neutralise", "Tone neutralisation", "Rewrite a message to remove the heat while keeping every fact", "0.02", "EUR"),
+        ("reading-level", "Reading-level rewrite", "Rewrite to a target reading level without dropping a single claim", "0.02", "EUR"),
+    ]),
+    ("Fathom Research", "fathom-research", [
+        ("market-briefing", "Market briefing", "Briefing on one named market, every figure sourced and dated", "0.05", "USDC"),
+        ("transcript-decisions", "Decisions from a transcript", "Turn a meeting transcript into decisions, owners and deadlines", "0.03", "EUR"),
+        ("competitor-delta", "Competitor change report", "What changed on a competitor's public pages since a given date", "0.04", "USDC"),
+        ("literature-scan", "Literature scan", "The ten most-cited recent papers on a topic, one line of findings each", "0.05", "EUR"),
+    ]),
+    ("Pike and Co", "pike-and-co", [
+        ("regex-from-spec", "Regex from examples", "A regex that matches your examples and rejects your counter-examples, with tests", "0.02", "USDC"),
+        ("sql-from-question", "SQL from a question", "A tested SQL query against the schema you supply", "0.03", "USDC"),
+        ("spec-to-tests", "Spec to test cases", "Turn a written spec into executable test cases", "0.05", "USDC"),
+        ("schema-validate", "Schema validation", "Validate a payload against a JSON Schema and explain every failure", "0.01", "EUR"),
+    ]),
+    ("Halden Studio", "halden-studio", [
+        ("diagram-from-text", "Diagram from a description", "A clean architecture diagram from a written description", "0.04", "EUR"),
+        ("social-pack", "Social pack from an article", "Five posts from one article, per-platform length, no hashtag padding", "0.03", "EUR"),
+        ("alt-text", "Alt text for images", "Accurate alt text for a set of images, ready for a screen reader", "0.01", "EUR"),
+    ]),
+    ("Bridge Ops", "bridge-ops", [
+        ("criteria-draft", "Acceptance-criteria drafting", "Turn a loose brief into machine-checkable acceptance criteria", "0.03", "USDC"),
+        ("cost-estimate", "Task cost estimate", "Estimate what a task should cost before you commission it", "0.01", "USDC"),
+        ("supplier-report", "Supplier reputation report", "Reputation report on a provider agent, built from its public job history", "0.02", "USDC"),
+        ("change-watch", "Change watch", "Watch a URL and report the first material change", "0.02", "EUR"),
+    ]),
+]
+
+
+def marked(text):
+    """Append the demo marker, when one is configured."""
+    return "{} ({})".format(text, LABEL) if LABEL else text
+
+
+def cap_id(agent_slug, service):
+    """`cap:demo:veritas-check:fact-check-claim`, or without the marker."""
+    ns = "{}:".format(LABEL) if LABEL else ""
+    return "cap:{}{}:{}".format(ns, agent_slug, service)
+
+
+def call(method, path, body=None, token=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(NODE + path, data=data, method=method)
+    req.add_header("content-type", "application/json")
+    if token:
+        req.add_header("authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return {"error": json.loads(e.read().decode())}
+        except Exception:
+            return {"error": {"code": e.code}}
+    except Exception as e:  # network, timeout
+        return {"error": {"message": str(e)}}
+
+
+class Pacer:
+    """Space actions evenly instead of firing them in bursts.
+
+    A dashboard fed by bursts looks scripted; the point is to look busy,
+    which is a matter of rhythm rather than volume.
+    """
+
+    # Measured on a scratch node: 31 actions produced 41 spine events,
+    # because accept-delivery alone writes pay.released, exe.accept and
+    # a reputation update. The target is expressed in EVENTS because
+    # that is what the dashboard counts, so the action rate is derived.
+    EVENTS_PER_ACTION = 1.32
+
+    def __init__(self, per_minute):
+        self.gap = 60.0 / max(per_minute / self.EVENTS_PER_ACTION, 0.1)
+        self.next_at = time.monotonic()
+        self.lock = threading.Lock()
+
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            if self.next_at < now:
+                self.next_at = now
+            delay = self.next_at - now
+            # A little jitter, for the same reason.
+            self.next_at += self.gap * random.uniform(0.75, 1.25)
+        if delay > 0:
+            time.sleep(delay)
+
+
+def load_agents():
+    """Registered once, reused for ever, and topped up in place.
+
+    Agents cannot be un-announced from a public directory in any way
+    that removes what they already did, so re-registering the whole pool
+    on every start would leave a permanent trail of duplicate firms. Only
+    the ones missing from the saved state are created.
+    """
+    saved = []
+    if os.path.exists(STATE):
+        try:
+            with open(STATE) as f:
+                saved = json.load(f)
+        except Exception as e:
+            print("[demo] state unreadable ({}), starting a fresh pool".format(e), flush=True)
+            saved = []
+    have = {a.get("firm") or a.get("name") for a in saved}
+
+    agents = list(saved)
+    for firm, slug, services in CATALOGUE[:POOL]:
+        if firm in have:
+            continue
+        ident = call("POST", "/v1/identity", {"name": marked(firm)})
+        if "token" not in ident:
+            print("[demo] identity refused for {}: {}".format(firm, ident), flush=True)
+            continue
+        caps = [{
+            "id": cap_id(slug, service),
+            # Required by the node: Capability::name has no serde
+            # default, so omitting it empties the whole list and the
+            # announce is refused with "capabilities required".
+            "name": title,
+            "description": desc,
+            "price": {"amount": amount, "currency": currency, "model": "fixed"},
+            "autonomy": ["execute-notify"],
+        } for service, title, desc, amount, currency in services]
+        ann = call("POST", "/v1/announce", {
+            "name": marked(firm),
+            "description": "{}. Generated traffic on this node.".format(
+                services[0][2]) if LABEL else firm,
+            "capabilities": caps,
+        }, ident["token"])
+        if "error" in ann:
+            print("[demo] announce refused for {}: {}".format(firm, ann["error"]), flush=True)
+            continue
+        agents.append({
+            "did": ident["did"], "token": ident["token"],
+            "firm": firm, "name": firm, "capabilities": caps,
+        })
+        print("[demo] registered {}".format(firm), flush=True)
+
+    if agents != saved:
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        with open(STATE, "w") as f:
+            json.dump(agents, f)
+    print("[demo] pool of {} firms, {} capabilities".format(
+        len(agents), sum(len(a["capabilities"]) for a in agents)), flush=True)
+    return agents[:POOL]
+
+
+def run_deal(agents, pacer, stats):
+    """One deal, start to finish, on one of several paths."""
+    client, provider = random.sample(agents, 2)
+    cap = random.choice(provider["capabilities"])
+    amount = cap["price"]["amount"]
+    deadline = int(time.time()) + random.randint(1800, 7200)
+
+    pacer.wait()
+    out = call("POST", "/v1/contract/propose", {
+        "provider": provider["did"],
+        "capability_id": cap["id"],
+        "terms": {
+            "input": {"brief": cap["description"]},
+            "deliverable": {"type": "text"},
+            "acceptance_criteria": [],
+            "deadline": deadline,
+            "price": dict(cap["price"]),
+            "autonomy": "execute-notify",
+        },
+        "escrow": True,
+    }, client["token"])
+    cid = out.get("contract_id")
+    if not cid:
+        stats["failed"] += 1
+        return
+    stats["propose"] += 1
+
+    roll = random.random()
+
+    # The provider declines outright. A market where nobody ever says no
+    # is not a market.
+    if roll < 0.06:
+        pacer.wait()
+        call("POST", "/v1/contract/{}/reject".format(cid),
+             {"reason": "capacity"}, provider["token"])
+        stats["rejected"] += 1
+        return
+
+    pacer.wait()
+    call("POST", "/v1/contract/{}/accept".format(cid), {}, provider["token"])
+    stats["accepted"] += 1
+
+    # Signed, then the buyer thinks better of it before funding.
+    if roll < 0.11:
+        pacer.wait()
+        call("POST", "/v1/contract/{}/cancel".format(cid),
+             {"reason": "no longer needed"}, client["token"])
+        stats["cancelled"] += 1
+        return
+
+    pacer.wait()
+    parked = call("POST", "/v1/escrow/park",
+                  {"contract_id": cid, "amount": amount}, client["token"])
+    if "error" in parked:
+        stats["failed"] += 1
+        return
+    stats["parked"] += 1
+
+    pacer.wait()
+    call("POST", "/v1/contract/{}/start".format(cid),
+         {"plan": "retrieve, draft, check"}, provider["token"])
+    stats["started"] += 1
+
+    if random.random() < 0.5:
+        pacer.wait()
+        call("POST", "/v1/contract/{}/progress".format(cid),
+             {"step": 1, "note": "draft ready, checking sources"}, provider["token"])
+        stats["progress"] += 1
+
+    content = "Result for {} at {}.".format(cap["id"], int(time.time()))
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    pacer.wait()
+    delivered = call("POST", "/v1/contract/{}/deliver".format(cid), {
+        "deliverable_hash": "sha256:" + digest,
+        "artifact": {"media_type": "text/plain", "encoding": "utf8", "content": content},
+    }, provider["token"])
+    if "error" in delivered:
+        stats["failed"] += 1
+        return
+    stats["delivered"] += 1
+
+    # Some buyers go quiet. The node's own expiry sweep resolves those
+    # after a day by accepting on their behalf and paying the provider,
+    # which is worth showing rather than hiding.
+    if random.random() < 0.07:
+        stats["left_hanging"] += 1
+        return
+
+    pacer.wait()
+    settled = call("POST", "/v1/contract/{}/accept-delivery".format(cid), {}, client["token"])
+    if "error" in settled:
+        stats["failed"] += 1
+        return
+    stats["settled"] += 1
+
+
+def main():
+    print("[demo] node={} target={} events/min pool={} label={!r}".format(
+        NODE, TARGET_PER_MIN, POOL, LABEL), flush=True)
+    health = call("GET", "/health")
+    if health.get("status") != "ok":
+        print("[demo] node not healthy: {}".format(health), flush=True)
+        sys.exit(1)
+
+    agents = load_agents()
+    if len(agents) < 2:
+        print("[demo] need at least two agents, got {}".format(len(agents)), flush=True)
+        sys.exit(1)
+
+    pacer = Pacer(TARGET_PER_MIN)
+    stats = {k: 0 for k in (
+        "propose", "accepted", "rejected", "cancelled", "parked", "started",
+        "progress", "delivered", "settled", "left_hanging", "failed")}
+    work = queue.Queue()
+
+    def worker():
+        while True:
+            work.get()
+            try:
+                run_deal(agents, pacer, stats)
+            except Exception as e:
+                stats["failed"] += 1
+                print("[demo] deal failed: {}".format(e), flush=True)
+            finally:
+                work.task_done()
+
+    # Several deals in flight at once, so the feed interleaves phases
+    # instead of marching one contract through at a time.
+    for _ in range(4):
+        threading.Thread(target=worker, daemon=True).start()
+
+    started = time.monotonic()
+    last_report = started
+    while True:
+        if work.qsize() < 8:
+            work.put(1)
+        time.sleep(0.2)
+        now = time.monotonic()
+        if now - last_report >= 60:
+            mins = (now - started) / 60.0
+            total = sum(v for k, v in stats.items() if k != "failed")
+            print("[demo] {:.0f} min | {} actions ({:.1f}/min) | {}".format(
+                mins, total, total / max(mins, 0.01),
+                " ".join("{}={}".format(k, v) for k, v in stats.items() if v)), flush=True)
+            last_report = now
+
+
+if __name__ == "__main__":
+    main()

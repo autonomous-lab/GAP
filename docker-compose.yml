@@ -66,3 +66,21 @@ services:
       timeout: 5s
       retries: 12
     restart: always
+
+  # Demo traffic. Opt-in: `docker compose --profile demo up -d gap-demo`.
+  #
+  # Drives real protocol traffic so the public activity feed shows
+  # movement. It never calls /verify, so no LLM judge runs and it costs
+  # zero model tokens. Every event it writes is permanent on the audit
+  # chain - the agents it registers are labelled for that reason.
+  gap-demo:
+    build: ./demo
+    profiles: ["demo"]
+    environment:
+      GAP_NODE_URL: "${GAP_DEMO_NODE_URL:-http://172.17.0.1:8080}"
+      GAP_DEMO_EVENTS_MIN: "${GAP_DEMO_EVENTS_MIN:-30}"
+      GAP_DEMO_AGENTS: "${GAP_DEMO_AGENTS:-8}"
+      GAP_DEMO_LABEL: "${GAP_DEMO_LABEL-demo}"
+    volumes:
+      - ./data/gap-demo:/state
+    restart: always
