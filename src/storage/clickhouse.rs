@@ -466,9 +466,10 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             summary.events = events.len();
         }
 
-        for rec in self.select::<ContractRecord>(
+        for rec in self.select_paged::<ContractRecord>(
             "SELECT contract_id, client, provider, capability_id, state, contract_json, \
              updated_at FROM gap_contracts FINAL",
+            "contract_id",
         )? {
             self.contracts
                 .lock()
@@ -477,8 +478,9 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             summary.contracts += 1;
         }
 
-        for rec in self.select::<AnnouncementRecord>(
+        for rec in self.select_paged::<AnnouncementRecord>(
             "SELECT agent_did, announcement_json, expires_at FROM gap_announcements FINAL",
+            "agent_did",
         )? {
             // An empty body is a tombstone from `delete_announcement`.
             // Loading it would put a withdrawn agent back in the
@@ -493,8 +495,9 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             summary.announcements += 1;
         }
 
-        for rec in self.select::<IdentityRecord>(
+        for rec in self.select_paged::<IdentityRecord>(
             "SELECT token, did, seed_hex, created_at FROM gap_identities FINAL",
+            "did",
         )? {
             self.identities
                 .lock()
@@ -503,8 +506,9 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             summary.identities += 1;
         }
 
-        for rec in self.select::<EscrowRecord>(
+        for rec in self.select_paged::<EscrowRecord>(
             "SELECT contract_id, state, held, currency, updated_at FROM gap_escrows FINAL",
+            "contract_id",
         )? {
             self.escrows
                 .lock()
@@ -513,9 +517,10 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             summary.escrows += 1;
         }
 
-        for rec in self.select::<DeliverableRecord>(
+        for rec in self.select_paged::<DeliverableRecord>(
             "SELECT contract_id, digest, encoding, media_type, content, uri, delivered_at \
              FROM gap_deliverables FINAL",
+            "contract_id",
         )? {
             self.deliverables
                 .lock()
@@ -525,7 +530,10 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
         }
 
         for rec in
-            self.select::<StateRecord>("SELECT scope, key, value, updated_at FROM gap_state FINAL")?
+            self.select_paged::<StateRecord>(
+                "SELECT scope, key, value, updated_at FROM gap_state FINAL",
+                "scope, key",
+            )?
         {
             // A tombstone: deleted entries are written back with an
             // empty value rather than mutated away, because a
@@ -548,6 +556,40 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
     ///
     /// A single unparseable row is skipped rather than failing the whole
     /// load: one malformed record must not stop a node from booting.
+    /// Read a whole table in pages.
+    ///
+    /// One SELECT for a whole table works until the table outgrows the
+    /// HTTP client's response cap, and then it fails at boot - which is
+    /// how a node came up with empty mirrors over 38,773 stored events.
+    /// Any fixed ceiling is a date, not a limit.
+    ///
+    /// Ordered offset paging rather than a keyset: these are projections
+    /// read once at startup, the ordering column is the primary key, and
+    /// a keyset walk would need the key value bound back into the query
+    /// for six differently-typed tables. The spine does use a keyset, on
+    /// `seq`, because it is the one table where a skipped row is not
+    /// recoverable.
+    fn select_paged<R: serde::de::DeserializeOwned>(
+        &self,
+        query: &str,
+        order_by: &str,
+    ) -> Result<Vec<R>> {
+        const PAGE: usize = 2_000;
+        let mut out: Vec<R> = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let page: Vec<R> = self.select(&format!(
+                "{query} ORDER BY {order_by} LIMIT {PAGE} OFFSET {offset}"
+            ))?;
+            let n = page.len();
+            out.extend(page);
+            if n < PAGE {
+                return Ok(out);
+            }
+            offset += PAGE;
+        }
+    }
+
     fn select<R: serde::de::DeserializeOwned>(&self, query: &str) -> Result<Vec<R>> {
         let q = format!(
             "{query} FORMAT JSONEachRow SETTINGS output_format_json_quote_64bit_integers=0"
