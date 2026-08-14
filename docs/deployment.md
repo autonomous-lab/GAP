@@ -5,6 +5,28 @@
 **Author:** Celene Jimari
 **Date:** 2026-08-08
 
+## 0. One rule about deploying
+
+**Never run `docker compose` by hand on a host whose pipeline is
+deploying.** A push triggers an automatic rebuild, and that rebuild
+recreates the compose network. A manual `up`, `restart` or
+`--force-recreate` at the same moment replaces the network under it, and
+the pipeline fails attaching a container to an ID that no longer exists:
+
+```
+Container gap-node-01-gap-node-1  Starting
+Error response from daemon: failed to set up container networking:
+network 79dd7389bbd0... not found
+```
+
+Nothing is wrong with the build when that happens. The container simply
+disappears, which reads exactly like a crash and is not one.
+
+The workflow this repository uses - edit locally, `scp` to the host,
+test there, then commit and push - is safe for the first three steps.
+The fourth hands the host to the pipeline. After a push, wait for it
+rather than deploying alongside it.
+
 ## 1. The hybrid storage model
 
 GAP's truth lives in **signed artifacts**, not in storage. The storage
