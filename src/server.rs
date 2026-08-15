@@ -2643,7 +2643,13 @@ directly rather than reasoning about its metadata"
         // right answer. Reading the whole spine here was fine at a few
         // hundred events and is a full scan under the state lock at a
         // hundred thousand a day - this runs every fifteen minutes.
-        const LAST_MOVE_WINDOW: u64 = 50_000;
+        // Aligned with the in-memory spine window, so this reads from
+        // the mirror instead of pulling fifty thousand rows out of
+        // ClickHouse every fifteen minutes while holding the lock. The
+        // bound stays correct for the same reason as before: a contract
+        // with no event in the window has not moved recently, falls
+        // back to `created_at`, and an old creation date expires it.
+        const LAST_MOVE_WINDOW: u64 = crate::storage::clickhouse::SPINE_WINDOW as u64;
         let head = self.storage.head_seq().unwrap_or(0);
         let from = head.saturating_sub(LAST_MOVE_WINDOW);
         let mut last_move: HashMap<String, u64> = HashMap::new();
@@ -4376,7 +4382,26 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
     }
 
     fn verify_spine_uncached(&self) -> Value {
-        let events = self.storage.events_after(0, u64::MAX).unwrap_or_default();
+        // Paged, not slurped.
+        //
+        // `events_after(0, u64::MAX)` asked the store for the entire
+        // chain in one answer, which was free while the whole chain sat
+        // in memory and is a way to run the node out of it now that
+        // only a window does. Walking in pages holds one page at a
+        // time, whatever the chain has grown to.
+        const PAGE: u64 = 5_000;
+        let mut events: Vec<crate::storage::EventRecord> = Vec::new();
+        let mut cursor = 0u64;
+        loop {
+            let page = self.storage.events_after(cursor, PAGE).unwrap_or_default();
+            let last = page.last().map(|e| e.seq);
+            let n = page.len() as u64;
+            events.extend(page);
+            match last {
+                Some(seq) if n == PAGE && seq > cursor => cursor = seq,
+                _ => break,
+            }
+        }
         let mut segments: Vec<Value> = vec![];
         let mut breaks: Vec<u64> = vec![];
         let mut seg_from: Option<u64> = None;

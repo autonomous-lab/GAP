@@ -391,9 +391,56 @@ pub struct ClickHouseStorage<T: HttpTransport + Send> {
     deliverables: Mutex<HashMap<String, DeliverableRecord>>,
     /// (scope, key) -> record, the mirror behind `list_state`.
     node_state: Mutex<HashMap<(String, String), StateRecord>>,
-    events: Mutex<Vec<EventRecord>>,
+    events: Mutex<Spine>,
     /// The atomicity gate for escrow-style operations.
     pub sequencer: Sequencer<()>,
+}
+
+/// How many recent events stay in memory.
+///
+/// Measured on the live node at roughly 2.7 KB an event, so this is
+/// about 27 MB and it does not move. Everything older is answered from
+/// ClickHouse, which is where it has always been.
+pub const SPINE_WINDOW: usize = 10_000;
+
+/// The hot end of the audit chain, and the three facts about the whole
+/// of it that must not require holding the whole of it.
+///
+/// The mirror used to be a `Vec` containing every event ever written,
+/// because three things read it: the next sequence number came from its
+/// maximum, the total came from its length, and the previous hash came
+/// from its last element. All three are O(1) facts that were being paid
+/// for in O(chain) memory - measured at 1 GB after 400,000 events, on a
+/// box with 5.7 GB free and no mechanism that ever gave any of it back.
+/// A node that dies of its own history after four days is not a node
+/// with a memory leak, it is a node with a deadline.
+#[derive(Default)]
+struct Spine {
+    /// The most recent events, capped at `SPINE_WINDOW`.
+    recent: std::collections::VecDeque<EventRecord>,
+    /// Highest sequence written. NOT derived from `recent`.
+    head: u64,
+    /// How many events exist, in ClickHouse, not in memory.
+    total: u64,
+    /// The hash the next event links to.
+    tip: String,
+}
+
+impl Spine {
+    /// The oldest sequence this mirror can answer for, or 0 when empty.
+    fn oldest(&self) -> u64 {
+        self.recent.front().map(|e| e.seq).unwrap_or(0)
+    }
+
+    fn push(&mut self, rec: EventRecord) {
+        self.head = self.head.max(rec.seq);
+        self.total += 1;
+        self.tip = rec.hash.clone();
+        self.recent.push_back(rec);
+        while self.recent.len() > SPINE_WINDOW {
+            self.recent.pop_front();
+        }
+    }
 }
 
 impl<T: HttpTransport> ClickHouseStorage<T> {
@@ -406,7 +453,7 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             escrows: Mutex::new(HashMap::new()),
             deliverables: Mutex::new(HashMap::new()),
             node_state: Mutex::new(HashMap::new()),
-            events: Mutex::new(vec![]),
+            events: Mutex::new(Spine::default()),
             sequencer: Sequencer::new(()),
         }
     }
@@ -444,46 +491,43 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
     pub fn hydrate(&self) -> Result<HydrateSummary> {
         let mut summary = HydrateSummary::default();
 
-        // Read the spine in pages, ordered by sequence.
+        // Load only the TAIL of the spine.
         //
-        // It used to be one SELECT for the whole chain, which worked
-        // until the chain outgrew the HTTP client's response cap and
-        // then failed with "the response body is larger than request
-        // limit" - at thirty-eight thousand events, on a node whose
-        // spine only ever grows. Any fixed ceiling is a date, not a
-        // limit. Paging has none.
-        const PAGE: u64 = 5_000;
-        let mut after = 0u64;
-        loop {
-            let page = self.select::<EventRecord>(&format!(
-                "SELECT seq, kind, at, payload, prev_hash, hash FROM gap_events \
-                 WHERE seq > {after} ORDER BY seq LIMIT {PAGE}"
-            ))?;
-            let last = page.last().map(|e| e.seq);
-            let n = page.len();
-            {
-                let mut events = self
-                    .events
-                    .lock()
-                    .map_err(|_| Error::Other("events lock poisoned".into()))?;
-                events.extend(page);
-            }
-            match last {
-                // Guard against a page that does not advance the cursor:
-                // a stall here would spin for ever holding the boot.
-                Some(seq) if n as u64 == PAGE && seq > after => after = seq,
-                _ => break,
-            }
+        // This used to read every event ever written into memory, which
+        // is where the gigabyte went. The three facts the node actually
+        // needs about the whole chain - its head, its length, its tip
+        // hash - are one cheap aggregate away, and the rest of the
+        // chain is answered from ClickHouse when somebody asks for it.
+        #[derive(serde::Deserialize)]
+        struct SpineHead {
+            head: u64,
+            total: u64,
         }
+        let agg: Vec<SpineHead> = self.select(
+            "SELECT ifNull(max(seq), 0) AS head, count() AS total FROM gap_events",
+        )?;
+        let (head, total) = agg
+            .first()
+            .map(|a| (a.head, a.total))
+            .unwrap_or((0, 0));
+        let tail: Vec<EventRecord> = self.select(&format!(
+            "SELECT seq, kind, at, payload, prev_hash, hash FROM gap_events \
+             ORDER BY seq DESC LIMIT {SPINE_WINDOW}"
+        ))?;
         {
-            // Sorted by seq so `events_after` (which filters a Vec in
-            // order) and the next sequence number are both correct.
-            let mut events = self
+            let mut spine = self
                 .events
                 .lock()
                 .map_err(|_| Error::Other("events lock poisoned".into()))?;
-            events.sort_by_key(|e| e.seq);
-            summary.events = events.len();
+            spine.head = head;
+            spine.total = total;
+            spine.recent = tail.into_iter().rev().collect();
+            spine.tip = spine
+                .recent
+                .back()
+                .map(|e| e.hash.clone())
+                .unwrap_or_default();
+            summary.events = total as usize;
         }
 
         for rec in self.select_paged::<ContractRecord>(
@@ -643,40 +687,36 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
     fn append_event(&mut self, kind: &str, payload: serde_json::Value) -> Result<u64> {
         validate_event(kind, &payload)?;
         let payload = crate::storage::canonical_payload(payload);
-        let mut events = self
+        let mut spine = self
             .events
             .lock()
             .map_err(|_| Error::Other("events lock poisoned".into()))?;
         // 1-based: seq 0 is reserved so that a cursor of `after=0`
-        // means "everything" (RFC-0013 §3.2 rule 14).
+        // means "everything" (RFC-0013 section 3.2 rule 14).
         //
-        // Derived from the highest sequence present, not from the row
-        // count: after a hydrate those can differ (a deduplicating
-        // engine, a gap, a partial read), and `len + 1` would then
-        // re-issue a sequence that already exists - silently forking the
-        // audit spine and hiding events from every cursor-based reader.
-        let seq = events.iter().map(|e| e.seq).max().unwrap_or(0) + 1;
+        // Taken from the tracked head, not from the maximum of what is
+        // in memory. Those were the same number only while the mirror
+        // held the whole chain; now that it holds a window, deriving it
+        // from the window would re-issue sequences the moment the
+        // window rolled - silently forking the audit spine, which is
+        // the failure this comment has warned about since the row-count
+        // version of the same mistake.
+        let seq = spine.head + 1;
         let at = crate::message::now_unix();
-        // Link to the highest-sequence event, not to the last pushed:
-        // after a hydrate the vector is sorted, but nothing in the type
-        // guarantees it, and chaining to the wrong predecessor produces
-        // a chain that verifies against nothing.
-        let prev = events
-            .iter()
-            .max_by_key(|e| e.seq)
-            .map(|e| e.hash.clone())
-            .unwrap_or_default();
+        // Link to the tip, tracked for the same reason.
+        let prev = spine.tip.clone();
         let hash = crate::storage::event_hash(seq, kind, at, &payload, &prev);
-        events.push(EventRecord {
+        spine.push(EventRecord {
             seq,
-            kind: kind.into(),
+            kind: kind.to_string(),
             at,
             payload: payload.clone(),
             prev_hash: prev.clone(),
             hash: hash.clone(),
         });
-        // Fire-and-forget insert with BOUND parameters — never string
-        // interpolation (audit fix C-02: SQL injection).
+        drop(spine);
+        // Insert with BOUND parameters - never string interpolation
+        // (audit fix C-02: SQL injection).
         let q = "INSERT INTO gap_events (seq, kind, at, payload, prev_hash, hash) \
                  VALUES ({seq:UInt64}, {kind:String}, {at:UInt64}, {payload:String}, \
                  {prev_hash:String}, {hash:String})";
@@ -693,32 +733,49 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
     }
 
     fn events_after(&self, seq: u64, limit: u64) -> Result<Vec<EventRecord>> {
-        let events = self
-            .events
-            .lock()
-            .map_err(|_| Error::Other("events lock poisoned".into()))?;
-        Ok(events
-            .iter()
-            .filter(|e| e.seq > seq)
-            .take(limit as usize)
-            .cloned()
-            .collect())
+        {
+            let spine = self
+                .events
+                .lock()
+                .map_err(|_| Error::Other("events lock poisoned".into()))?;
+            // Served from memory when the cursor is inside the window,
+            // which is the case for every live reader: the feed, the
+            // stream, the expiry sweep. Only an audit walking from the
+            // beginning falls through.
+            if spine.recent.is_empty() || seq + 1 >= spine.oldest() {
+                return Ok(spine
+                    .recent
+                    .iter()
+                    .filter(|e| e.seq > seq)
+                    .take(limit as usize)
+                    .cloned()
+                    .collect());
+            }
+        }
+        // Older than the window: ask the store. Bounded by `limit`, so
+        // a caller paging through the chain never materialises more
+        // than one page of it.
+        self.select(&format!(
+            "SELECT seq, kind, at, payload, prev_hash, hash FROM gap_events \
+             WHERE seq > {seq} ORDER BY seq LIMIT {limit}"
+        ))
     }
 
     fn head_seq(&self) -> Result<u64> {
-        let events = self
+        Ok(self
             .events
             .lock()
-            .map_err(|_| Error::Other("events lock poisoned".into()))?;
-        Ok(events.iter().map(|e| e.seq).max().unwrap_or(0))
+            .map_err(|_| Error::Other("events lock poisoned".into()))?
+            .head)
     }
 
     fn event_count(&self) -> Result<u64> {
-        let events = self
+        // The whole chain's length, which is no longer the mirror's.
+        Ok(self
             .events
             .lock()
-            .map_err(|_| Error::Other("events lock poisoned".into()))?;
-        Ok(events.len() as u64)
+            .map_err(|_| Error::Other("events lock poisoned".into()))?
+            .total)
     }
 
     fn upsert_contract(&mut self, record: &ContractRecord) -> Result<()> {
@@ -1094,6 +1151,25 @@ mod tests {
 
     impl HttpTransport for ReplayTransport {
         fn post(&self, query: &str) -> Result<String> {
+            // The spine head is read as an AGGREGATE, not as rows, so a
+            // replay that answers every gap_events query with rows
+            // would hand `count()` a list of events. Answer it the way
+            // the store does: derive head and total from the canned
+            // rows.
+            if query.contains("max(seq)") && query.contains("gap_events") {
+                let rows = self.rows.get("gap_events").cloned().unwrap_or_default();
+                let seqs: Vec<u64> = rows
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                    .filter_map(|v| v["seq"].as_u64())
+                    .collect();
+                return Ok(format!(
+                    "{{\"head\":{},\"total\":{}}}\n",
+                    seqs.iter().copied().max().unwrap_or(0),
+                    seqs.len()
+                ));
+            }
             for (table, body) in &self.rows {
                 if query.contains(table) {
                     return Ok(body.clone());
@@ -1149,6 +1225,64 @@ mod tests {
         // place and would otherwise silently skip the tail.
         let after = storage.events_after(0, 10).unwrap();
         assert_eq!(after.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn the_mirror_is_bounded_and_the_chain_facts_are_not_derived_from_it() {
+        // The bug this pins cost a gigabyte: the mirror held every event
+        // ever written, because the next sequence came from its maximum,
+        // the total from its length and the previous hash from its last
+        // element. All three are O(1) facts that were being paid for in
+        // O(chain) memory, on a box that would have run out in four
+        // days with no mechanism to give any of it back.
+        let mut storage = ClickHouseStorage::new(MockTransport::default());
+        let n = SPINE_WINDOW + 500;
+        for _ in 0..n {
+            storage
+                .append_event("ctr.propose", serde_json::json!({ "contract_id": "c" }))
+                .unwrap();
+        }
+        let spine = storage.events.lock().unwrap();
+        assert_eq!(spine.recent.len(), SPINE_WINDOW, "the window must not grow");
+        assert_eq!(spine.head, n as u64, "the head is tracked, not scanned");
+        assert_eq!(spine.total, n as u64, "so is the total");
+        assert!(spine.oldest() > 1, "the oldest events have been let go");
+        drop(spine);
+
+        // And the sequence keeps going past the window rolling, which
+        // is the failure that would silently fork the chain.
+        assert_eq!(
+            storage
+                .append_event("ctr.accept", serde_json::json!({ "contract_id": "c" }))
+                .unwrap(),
+            n as u64 + 1
+        );
+        assert_eq!(storage.head_seq().unwrap(), n as u64 + 1);
+        assert_eq!(storage.event_count().unwrap(), n as u64 + 1);
+    }
+
+    #[test]
+    fn a_cursor_inside_the_window_is_served_without_touching_the_store() {
+        let mut storage = ClickHouseStorage::new(MockTransport::default());
+        for _ in 0..50 {
+            storage
+                .append_event("ctr.propose", serde_json::json!({ "contract_id": "c" }))
+                .unwrap();
+        }
+        let got = storage.events_after(47, 10).unwrap();
+        assert_eq!(got.len(), 3, "48, 49, 50");
+        assert_eq!(got[0].seq, 48);
+        // Nothing was asked of the store: the mock records every query
+        // it is given, and none of them reads events back.
+        assert!(
+            !storage
+                .transport
+                .queries
+                .borrow()
+                .iter()
+                .any(|q| q.contains("SELECT") && q.contains("gap_events")),
+            "a live cursor must not hit the store"
+        );
     }
 
     #[test]
