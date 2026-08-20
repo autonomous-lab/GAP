@@ -41,6 +41,20 @@ impl ContractState {
         }
     }
 
+    /// True when nothing more will happen to this contract by itself.
+    ///
+    /// Used to decide what the node has to keep in memory. `Disputed`
+    /// and `Ruled` are deliberately NOT terminal: a ruling can still be
+    /// acted on, and they are rare enough that keeping them resident
+    /// costs nothing. The three listed here are the mass - every deal
+    /// that completes, is called off, or is refused ends in one of them.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            ContractState::Accepted | ContractState::Cancelled | ContractState::Rejected
+        )
+    }
+
     pub fn parse(s: &str) -> Result<Self> {
         Ok(match s {
             "draft" => ContractState::Draft,

@@ -164,6 +164,108 @@ struct SpineCheck {
     value: Value,
 }
 
+/// How many finished contracts stay in memory behind the live ones.
+///
+/// Read traffic is overwhelmingly recent - the activity feed, a job page
+/// opened seconds after it settled - so a small window absorbs nearly
+/// every lookup and anything older is one ClickHouse read away.
+pub const TERMINAL_WINDOW: usize = 5_000;
+
+/// The materialised contract set, bounded.
+///
+/// Keeping every contract ever signed in one `HashMap` costs about a
+/// kilobyte a deal, for ever: on 2026-08-20 this node held 357,099 of
+/// them, 2.5 GiB resident with the whole machine's swap consumed, and it
+/// was still climbing by a gigabyte a day. Bounding the spine in August
+/// fixed the same disease in a different organ and left this one alone.
+///
+/// A contract still in flight has to be resident - it is read and
+/// written at every step - but that set is bounded by real activity, not
+/// by history. A finished one is a record, and records live in storage,
+/// which is what storage is for.
+#[derive(Default)]
+struct Contracts {
+    /// Every contract that can still move. Always resident.
+    live: HashMap<String, Contract>,
+    /// The most recently finished ones, as a read cache.
+    recent: HashMap<String, Contract>,
+    /// Eviction order for `recent`.
+    order: std::collections::VecDeque<String>,
+    /// Contracts ever seen. `live.len() + recent.len()` is a cache
+    /// size, not a count, and reporting it as one would silently shrink
+    /// the node's own history the day eviction starts.
+    total: u64,
+}
+
+impl Contracts {
+    fn get(&self, id: &str) -> Option<&Contract> {
+        self.live.get(id).or_else(|| self.recent.get(id))
+    }
+
+    fn get_mut(&mut self, id: &str) -> Option<&mut Contract> {
+        if self.live.contains_key(id) {
+            return self.live.get_mut(id);
+        }
+        self.recent.get_mut(id)
+    }
+
+    fn contains_key(&self, id: &str) -> bool {
+        self.live.contains_key(id) || self.recent.contains_key(id)
+    }
+
+    /// Contracts that can still change, which is the only set the
+    /// expiry sweep has ever cared about - it skips every other state.
+    fn live(&self) -> impl Iterator<Item = (&String, &Contract)> {
+        self.live.iter()
+    }
+
+    fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// Number of contracts held in memory, for the operator view.
+    fn resident(&self) -> usize {
+        self.live.len() + self.recent.len()
+    }
+
+    /// Insert or replace, returning the ids pushed out of the window.
+    ///
+    /// The caller needs to know: an escrow outlives nothing useful once
+    /// its contract is gone, but dropping escrows on their own state
+    /// would break three predicates that read "absent from the map" as
+    /// "no escrow was ever created" - including the one that decides
+    /// whether it is safe to start work. Tying the two evictions
+    /// together keeps that equivalence true for every contract that can
+    /// still move, which is the only case those predicates are asked
+    /// about, and so costs no lookup on the hot path.
+    fn insert(&mut self, contract: Contract) -> Vec<String> {
+        let mut evicted = Vec::new();
+        let id = contract.contract_id.clone();
+        if !self.contains_key(&id) {
+            self.total += 1;
+        }
+        if contract.state.is_terminal() {
+            // Crossing into a terminal state is what moves a contract
+            // out of the working set; doing it here means no call site
+            // has to remember to.
+            self.live.remove(&id);
+            if self.recent.insert(id.clone(), contract).is_none() {
+                self.order.push_back(id);
+            }
+            while self.order.len() > TERMINAL_WINDOW {
+                if let Some(old) = self.order.pop_front() {
+                    self.recent.remove(&old);
+                    evicted.push(old);
+                }
+            }
+        } else {
+            self.recent.remove(&id);
+            self.live.insert(id, contract);
+        }
+        evicted
+    }
+}
+
 pub struct NodeState {
     /// The last spine verification, and what it cost.
     spine_check: Option<SpineCheck>,
@@ -178,8 +280,8 @@ pub struct NodeState {
     agents_by_did: HashMap<String, String>,
     /// The discovery registry.
     pub registry: Registry,
-    /// contract_id -> contract (materialized state).
-    contracts: HashMap<String, Contract>,
+    /// contract_id -> contract (materialized state), bounded.
+    contracts: Contracts,
     /// contract_id -> escrow instance.
     escrows: HashMap<String, Escrow>,
     /// workflow_id -> workflow manifest and engine state.
@@ -234,6 +336,17 @@ pub struct NodeState {
     /// contract_id -> the signed verdict produced for it.
     verdicts: HashMap<String, crate::verifier::Verdict>,
     /// Per-agent job history, the raw material of reputation (RFC-0014 §5).
+    ///
+    /// Deliberately NOT bounded, unlike contracts, escrows and verdicts.
+    /// Measured at 357,099 contracts: a `JobRecord` is about 250 bytes,
+    /// so this map was roughly 90 MB of a 4.3 GB process - two percent.
+    /// Capping it would buy that two percent and cost the job pages:
+    /// `public_job` finds a record by scanning for its `job_ref`, and
+    /// the persisted form is keyed per agent, so there is no cheap way
+    /// to read one back by reference. Worth revisiting the day the
+    /// stored shape is per job rather than per agent - which is also
+    /// what would fix the separate bug where an agent's whole job list
+    /// travels in the URL and stops persisting once it outgrows it.
     jobs: HashMap<String, Vec<JobRecord>>,
     /// Per-agent dispute record (RFC-0015).
     disputes: HashMap<String, DisputeStats>,
@@ -357,13 +470,26 @@ impl NodeState {
             }
         }
 
-        let mut contracts = HashMap::new();
-        for rec in storage.list_contracts().unwrap_or_default() {
+        // Ordered oldest-first so that the newest finished contracts are
+        // the ones that survive the window: inserting in storage order
+        // would keep whichever 5,000 the backend happened to return
+        // last, which is not the same thing and is invisible when it is
+        // wrong.
+        let mut records = storage.list_contracts().unwrap_or_default();
+        records.sort_by_key(|r| r.updated_at);
+        let mut contracts = Contracts::default();
+        // Every contract id ever seen, resident or not. The job index
+        // below is keyed on a pseudonym of this and has to cover the
+        // whole history: a link that resolves only while the contract
+        // happens to be cached is a page that 404s on a schedule.
+        let mut all_ids: Vec<String> = Vec::with_capacity(records.len());
+        for rec in records {
             if let Ok(mut contract) = serde_json::from_str::<Contract>(&rec.contract_json) {
                 if let Ok(state) = ContractState::parse(&rec.state) {
                     contract.state = state;
                 }
-                contracts.insert(contract.contract_id.clone(), contract);
+                all_ids.push(contract.contract_id.clone());
+                contracts.insert(contract);
             }
         }
 
@@ -441,8 +567,8 @@ impl NodeState {
         //
         // Verdicts stay in as a second source so that a job whose
         // contract has gone missing from storage still resolves.
-        let mut by_pseudonym: HashMap<String, String> = contracts
-            .keys()
+        let mut by_pseudonym: HashMap<String, String> = all_ids
+            .iter()
             .map(|cid| (pseudonym(cid), cid.clone()))
             .collect();
         for cid in verdicts.keys() {
@@ -952,7 +1078,7 @@ impl NodeState {
             Contract::propose(&client.identity, provider, capability_id, terms, use_escrow);
         let id = contract.contract_id.clone();
         self.persist_contract(&contract);
-        self.contracts.insert(id.clone(), contract);
+        self.set_contract(contract);
         self.record("ctr.propose", json!({ "contract_id": id }));
         Ok(id)
     }
@@ -983,7 +1109,7 @@ impl NodeState {
                 c.verify_signed()?;
                 c.transition(ContractState::Signed)?;
             }
-            self.contracts.insert(contract_id.into(), c);
+            self.set_contract(c);
             if let Some(saved) = self.contracts.get(contract_id).cloned() {
                 self.persist_contract(&saved);
             }
@@ -991,7 +1117,7 @@ impl NodeState {
             return Ok(());
         }
         let signed = contract.accept_by_provider(&provider.identity)?;
-        self.contracts.insert(contract_id.into(), signed);
+        self.set_contract(signed);
         if let Some(saved) = self.contracts.get(contract_id).cloned() {
             self.persist_contract(&saved);
         }
@@ -1743,7 +1869,7 @@ the content inline"
         let receipt = escrow.refund(&instruction)?;
         let mut contract = contract;
         contract.transition(ContractState::Cancelled)?;
-        self.contracts.insert(contract_id.into(), contract.clone());
+        self.set_contract(contract.clone());
         self.persist_contract(&contract);
         self.persist_escrow(
             contract_id,
@@ -1809,7 +1935,7 @@ the content inline"
         let escrow_held = escrow.held();
         let mut contract = contract;
         contract.transition(ContractState::Disputed)?;
-        self.contracts.insert(contract_id.into(), contract.clone());
+        self.set_contract(contract.clone());
         self.persist_contract(&contract);
         self.persist_escrow(contract_id, escrow_state, escrow_held, &receipt.currency);
         self.save_dispute(&contract.client.to_string());
@@ -1966,11 +2092,26 @@ the content inline"
     /// Export the caller's portable node-held data.
     pub fn identity_export(&mut self, token: &str) -> Result<Value> {
         let did = self.agent_by_token(token)?.identity.did().to_string();
-        let contracts: Vec<_> = self
-            .contracts
-            .values()
-            .filter(|c| c.client.to_string() == did || c.provider.to_string() == did)
-            .cloned()
+        // Read from storage, not from memory: finished contracts are
+        // evicted from the in-memory set, and an export that scanned it
+        // would hand the agent a silently truncated copy of its own
+        // history - the worst possible failure for a call whose entire
+        // purpose is portability.
+        let contracts: Vec<Contract> = self
+            .storage
+            .contracts_for_agent(&did)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| {
+                serde_json::from_str::<Contract>(&r.contract_json)
+                    .ok()
+                    .map(|mut c| {
+                        if let Ok(state) = ContractState::parse(&r.state) {
+                            c.state = state;
+                        }
+                        c
+                    })
+            })
             .collect();
         let events = self.storage.events_after(0, 1000).unwrap_or_default();
         self.record("node.identity.export", json!({ "did": did }));
@@ -2051,10 +2192,18 @@ the content inline"
     fn event_in_scope(&self, agent: &crate::identity::Did, payload: &Value) -> bool {
         let did = agent.to_string();
         if let Some(cid) = payload.get("contract_id").and_then(|v| v.as_str()) {
-            return match self.contracts.get(cid) {
-                Some(c) => c.client.to_string() == did || c.provider.to_string() == did,
-                // Unknown contract: fail closed rather than leak.
-                None => false,
+            if let Some(c) = self.contracts.get(cid) {
+                return c.client.to_string() == did || c.provider.to_string() == did;
+            }
+            // Not resident is not the same as unknown. Failing closed
+            // here is right for a contract nobody has ever heard of and
+            // wrong for one that merely settled last week: the agent
+            // would quietly stop seeing its own older events. The
+            // parties are columns, so this costs a point read and no
+            // JSON parsing.
+            return match self.storage.get_contract(cid) {
+                Ok(Some(rec)) => rec.client == did || rec.provider == did,
+                _ => false,
             };
         }
         if let Some(other) = payload.get("agent_did").and_then(|v| v.as_str()) {
@@ -2670,13 +2819,14 @@ directly rather than reasoning about its metadata"
         let mut to_pay: Vec<String> = Vec::new();
         let mut stranded = 0usize;
         let mut refused: Vec<Value> = Vec::new();
-        for (id, c) in self.contracts.iter() {
+        for (id, c) in self.contracts.live() {
             let delivered = match c.state {
                 ContractState::Draft | ContractState::Signed | ContractState::Executing => false,
                 ContractState::Delivered => true,
                 _ => continue,
             };
-            let past_deadline = c.terms.deadline > 0 && now > c.terms.deadline.saturating_add(grace);
+            let past_deadline =
+                c.terms.deadline > 0 && now > c.terms.deadline.saturating_add(grace);
             // Fall back to creation only when the spine has nothing for
             // this contract; a contract with neither is left alone
             // rather than expired on no evidence at all.
@@ -4239,7 +4389,7 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             "duration_seconds": self
                 .jobs_by_ref
                 .get(&r.job_ref)
-                .and_then(|cid| self.contracts.get(cid))
+                .and_then(|cid| self.contract_for_read(cid))
                 .filter(|c| c.created_at > 0 && r.at >= c.created_at)
                 .map(|c| r.at - c.created_at),
         })
@@ -4249,6 +4399,60 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
     /// checks, reasons and each judge's opinion — with the contract id
     /// and both parties stripped. This is what makes a score auditable
     /// rather than merely asserted.
+    /// Store a contract, and drop what its arrival pushed out.
+    ///
+    /// The single door into the contract set: every write goes through
+    /// here so that eviction stays paired with the escrow map. Doing it
+    /// at five call sites would work until someone adds a sixth.
+    fn set_contract(&mut self, contract: Contract) {
+        for gone in self.contracts.insert(contract) {
+            // Its contract is out of the window, so nothing left in this
+            // process will ask whether it is funded. The row stays in
+            // storage; this is a cache, not a ledger.
+            self.escrows.remove(&gone);
+            // A verdict is read on the job page, which now reads the
+            // contract from storage too, so the pair stays consistent:
+            // both come back together or neither does. Persisted under
+            // the "verdicts" scope, and the job page falls back to it.
+            self.verdicts.remove(&gone);
+        }
+    }
+
+    /// The verdict for a job page, resident or not.
+    ///
+    /// Same contract as `contract_for_read`, and it has to be: a page
+    /// that showed the deal but lost the verdict the day it fell out of
+    /// the cache would be worse than one that 404s, because it would
+    /// look complete.
+    fn verdict_for_read(&self, id: &str) -> Option<std::borrow::Cow<'_, crate::verifier::Verdict>> {
+        if let Some(v) = self.verdicts.get(id) {
+            return Some(std::borrow::Cow::Borrowed(v));
+        }
+        let rec = self.storage.get_state("verdicts", id).ok().flatten()?;
+        serde_json::from_str(&rec.value)
+            .ok()
+            .map(std::borrow::Cow::Owned)
+    }
+
+    /// A contract for a read-only path, resident or not.
+    ///
+    /// The in-memory set holds what is in flight plus a window of what
+    /// just finished; everything older is in storage. Public pages must
+    /// not care which - this node's whole claim is that a settled deal
+    /// stays inspectable for ever, and "for ever" cannot mean "until it
+    /// falls out of a cache". Borrows on a hit, reads on a miss.
+    fn contract_for_read(&self, id: &str) -> Option<std::borrow::Cow<'_, Contract>> {
+        if let Some(c) = self.contracts.get(id) {
+            return Some(std::borrow::Cow::Borrowed(c));
+        }
+        let rec = self.storage.get_contract(id).ok().flatten()?;
+        let mut c: Contract = serde_json::from_str(&rec.contract_json).ok()?;
+        if let Ok(state) = ContractState::parse(&rec.state) {
+            c.state = state;
+        }
+        Some(std::borrow::Cow::Owned(c))
+    }
+
     pub fn public_job(&self, job_ref: &str) -> Result<Value> {
         let contract_id = self
             .jobs_by_ref
@@ -4260,8 +4464,8 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             .flatten()
             .find(|r| r.job_ref == job_ref)
             .ok_or_else(|| Error::Other("unknown job reference".into()))?;
-        let contract = self.contracts.get(contract_id);
-        let verdict = self.verdicts.get(contract_id);
+        let contract = self.contract_for_read(contract_id);
+        let verdict = self.verdict_for_read(contract_id);
         Ok(json!({
             "job_ref": job_ref,
             "capability_id": record.capability_id,
@@ -4271,17 +4475,19 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             // page said "on time" without ever saying on time for what,
             // or how long anyone waited.
             "amount": contract
+                .as_ref()
                 .map(|c| crate::amount::Amount::from_f64_rounding(c.terms.price.amount).to_string_decimal()),
-            "currency": contract.map(|c| c.terms.price.currency.clone()),
+            "currency": contract.as_ref().map(|c| c.terms.price.currency.clone()),
             "duration_seconds": contract
+                .as_ref()
                 .filter(|c| c.created_at > 0 && record.at >= c.created_at)
                 .map(|c| record.at - c.created_at),
-            "started_at": contract.map(|c| c.created_at),
+            "started_at": contract.as_ref().map(|c| c.created_at),
             "remedied": record.remedied,
             "at": record.at,
             // The criteria are public: they are what the verdict judged.
-            "acceptance_criteria": contract.map(|c| c.terms.acceptance_criteria.clone()),
-            "verdict": verdict.map(|v| json!({
+            "acceptance_criteria": contract.as_ref().map(|c| c.terms.acceptance_criteria.clone()),
+            "verdict": verdict.as_ref().map(|v| json!({
                 "ruling": v.ruling.as_str(),
                 "reasons": v.reasons,
                 "checks": v.checks,
@@ -4307,7 +4513,7 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
     /// 0.00 for work it cannot price is understating its own volume.
     fn job_amount(&self, job_ref: &str) -> Option<(String, String)> {
         let cid = self.jobs_by_ref.get(job_ref)?;
-        let c = self.contracts.get(cid)?;
+        let c = self.contract_for_read(cid)?;
         Some((
             crate::amount::Amount::from_f64_rounding(c.terms.price.amount).to_string_decimal(),
             c.terms.price.currency.clone(),
@@ -4900,7 +5106,12 @@ checks that list against the router."
             "agents": anns.len(),
             "capabilities": capabilities,
             "cheapest": cheapest.map(|p| json!({ "amount": p.amount, "currency": p.currency })),
-            "contracts": self.contracts.len(),
+            "contracts": self.contracts.total(),
+            // Cache occupancy, not history. Published so that the day
+            // eviction starts biting there is a number to look at
+            // instead of a guess: if this sits at its ceiling while
+            // reads are slow, the window is too small.
+            "contracts_resident": self.contracts.resident(),
             "jobs": total,
             "judged": judged,
             "conforming": conforming,
@@ -5060,10 +5271,7 @@ checks that list against the router."
         let mut recent: Vec<&JobRecord> = self.jobs.values().flatten().collect();
         recent.sort_by_key(|r| std::cmp::Reverse(r.seq));
         recent.truncate(limit);
-        let jobs: Vec<Value> = recent
-            .into_iter()
-            .map(|r| self.public_job_row(r))
-            .collect();
+        let jobs: Vec<Value> = recent.into_iter().map(|r| self.public_job_row(r)).collect();
         json!({ "jobs": jobs, "count": jobs.len() })
     }
 
@@ -6456,13 +6664,7 @@ mod tests {
             .terms
             .deadline = 1;
 
-        let (status, out) = route(
-            &arc,
-            "POST",
-            "/v1/admin/expire",
-            b"{}",
-            Some("Bearer adm"),
-        );
+        let (status, out) = route(&arc, "POST", "/v1/admin/expire", b"{}", Some("Bearer adm"));
         assert_eq!(status, 200, "{out}");
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["cancelled"], 1);
@@ -6607,7 +6809,13 @@ mod tests {
         assert_eq!(status, 200, "deliver failed: {out}");
 
         // The buyer goes quiet: push the deadline into the past.
-        arc.lock().unwrap().contracts.get_mut(&id).unwrap().terms.deadline = 1;
+        arc.lock()
+            .unwrap()
+            .contracts
+            .get_mut(&id)
+            .unwrap()
+            .terms
+            .deadline = 1;
 
         let (status, out) = route(
             &arc,
@@ -6806,7 +7014,6 @@ mod tests {
                 .as_deref(),
             Some(format!("sha256:{bare}").as_str())
         );
-
     }
 
     fn b64(bytes: &[u8]) -> String {
@@ -7418,6 +7625,87 @@ mod tests {
         let results = v["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["capabilities"][0]["name"], "analysis");
+    }
+
+    /// Eviction must bound memory WITHOUT changing what the node says.
+    ///
+    /// The three things this asserts are the three ways the previous
+    /// attempt at this would have gone wrong silently: a count that
+    /// shrinks to the cache size, a contract still in flight thrown out
+    /// because it was old, and a settled deal that stops being readable
+    /// once it leaves the window.
+    #[test]
+    fn finished_contracts_are_evicted_but_stay_readable() {
+        let arc = state();
+        let mut guard = arc.lock().unwrap();
+
+        let client = crate::identity::AgentIdentity::generate();
+        let provider = crate::identity::AgentIdentity::generate();
+        let terms = Terms {
+            input: json!({}),
+            deliverable: json!({}),
+            acceptance_criteria: vec!["ok".into()],
+            deadline: now_unix() + 3600,
+            price: Price {
+                amount: 1.0,
+                currency: "USDC".into(),
+                model: "fixed".into(),
+                cap: Some(5.0),
+            },
+            autonomy: "propose".into(),
+            confidentiality: None,
+            human_review_above: None,
+            cooling_off_seconds: None,
+        };
+        let template =
+            Contract::propose(&client, provider.did().clone(), "cap:evict", terms, false);
+
+        // One contract that is still moving, inserted first so that
+        // every later insert is a chance to evict it by mistake.
+        let live_id = "live-one".to_string();
+        let mut live = template.clone();
+        live.contract_id = live_id.clone();
+        live.state = ContractState::Executing;
+        guard.set_contract(live);
+
+        let overflow = TERMINAL_WINDOW + 50;
+        let mut first_id = String::new();
+        for i in 0..overflow {
+            let mut c = template.clone();
+            c.contract_id = format!("done-{i}");
+            c.state = ContractState::Accepted;
+            if i == 0 {
+                first_id = c.contract_id.clone();
+            }
+            guard.persist_contract(&c);
+            guard.set_contract(c);
+        }
+
+        // The count is history, not occupancy.
+        assert_eq!(guard.contracts.total(), overflow as u64 + 1);
+        assert!(
+            guard.contracts.resident() <= TERMINAL_WINDOW + 1,
+            "resident set unbounded: {}",
+            guard.contracts.resident()
+        );
+
+        // In flight survives regardless of age.
+        assert!(
+            guard.contracts.get(&live_id).is_some(),
+            "a contract still in flight was evicted"
+        );
+
+        // The oldest finished one is out of memory...
+        assert!(
+            guard.contracts.get(&first_id).is_none(),
+            "nothing was evicted; the window is not doing anything"
+        );
+        // ...and still readable, which is the whole promise.
+        let recovered = guard
+            .contract_for_read(&first_id)
+            .expect("evicted contract must still be readable from storage");
+        assert_eq!(recovered.contract_id, first_id);
+        assert_eq!(recovered.state, ContractState::Accepted);
     }
 
     #[test]

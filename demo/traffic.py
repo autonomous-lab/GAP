@@ -55,6 +55,16 @@ HIGH_PER_MIN = float(os.environ.get("GAP_DEMO_EVENTS_HIGH", "250"))
 POOL = int(os.environ.get("GAP_DEMO_AGENTS", "21"))
 LABEL = os.environ.get("GAP_DEMO_LABEL", "demo")
 STATE = os.environ.get("GAP_DEMO_STATE", "/state/agents.json")
+# An announcement is a lease, not a registration. The node expires it
+# after ttl_seconds and the directory then reports zero agents while
+# every other part of the demo keeps working, because deals are struck
+# against known DIDs and never go through discovery. That is exactly how
+# https://gap.geta.team/agents sat empty for four days in August 2026:
+# the pool was announced once at startup and never renewed. Renew well
+# inside the lease so a missed cycle is survivable.
+ANNOUNCE_TTL = int(os.environ.get("GAP_DEMO_ANNOUNCE_TTL", "86400"))
+RENEW_EVERY = max(60, int(os.environ.get(
+    "GAP_DEMO_ANNOUNCE_RENEW", str(max(60, ANNOUNCE_TTL // 4)))))
 
 # The catalogue.
 #
@@ -358,6 +368,82 @@ class Pacer:
             time.sleep(delay)
 
 
+def firm_of(agent):
+    """Name of a pooled agent, whichever generation wrote it.
+
+    Entries saved by earlier versions carry "name" and no "firm";
+    load_agents has always accepted both, and anything reading the saved
+    pool has to do the same or it breaks on state it did not write.
+    """
+    return agent.get("firm") or agent.get("name") or agent.get("did", "?")
+
+
+def announce(agent):
+    """Publish (or republish) one agent's capabilities to the directory.
+
+    Re-announcing is the node's own upsert path - the registry is keyed
+    on the DID and the newest announcement wins - so calling this on a
+    live agent renews its lease instead of duplicating it.
+    """
+    firm = firm_of(agent)
+    caps = agent.get("capabilities") or []
+    if not caps:
+        return {"error": "no capabilities in saved state"}
+    return call("POST", "/v1/announce", {
+        "name": marked(firm),
+        "description": "{}. Generated traffic on this node.".format(
+            caps[0]["description"]) if LABEL else firm,
+        "capabilities": caps,
+        "ttl_seconds": ANNOUNCE_TTL,
+    }, agent["token"])
+
+
+def keep_announced(agents):
+    """Renew every lease before it expires, for as long as we run.
+
+    Renewing the whole pool costs one request per firm per cycle, which
+    is nothing next to the deal traffic, and it is the only thing
+    standing between the directory and a silent slow fade to zero.
+    """
+    def renew(first_pass):
+        # A renewal that fails quietly is a directory that empties in
+        # twenty-four hours with nothing in the log to explain it, so
+        # every refusal is named and one is retried on the spot: the
+        # pool is announced in a burst and the node's per-IP limiter
+        # answers some of them with 429.
+        failed = []
+        for agent in agents:
+            for attempt in (0, 1):
+                try:
+                    res = announce(agent)
+                    why = res.get("error") if isinstance(res, dict) else None
+                except Exception as e:
+                    why = str(e)
+                if why is None:
+                    break
+                if attempt == 0:
+                    time.sleep(1.5)
+            if why is not None:
+                failed.append((firm_of(agent), why))
+        if failed or first_pass:
+            print("[demo] announcements renewed: {}/{} ok, next in {}s".format(
+                len(agents) - len(failed), len(agents), RENEW_EVERY), flush=True)
+        for firm, why in failed:
+            print("[demo] announce failed for {}: {}".format(firm, why), flush=True)
+
+    # The saved pool is announced too: a restart after an expiry would
+    # otherwise leave every existing firm invisible for ever, since the
+    # registration path only ever runs for firms it has never seen.
+    renew(True)
+
+    def loop():
+        while True:
+            time.sleep(RENEW_EVERY)
+            renew(False)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def load_agents():
     """Registered once, reused for ever, and topped up in place.
 
@@ -394,19 +480,15 @@ def load_agents():
             "price": {"amount": amount, "currency": currency, "model": "fixed"},
             "autonomy": ["execute-notify"],
         } for service, title, desc, amount, currency in services]
-        ann = call("POST", "/v1/announce", {
-            "name": marked(firm),
-            "description": "{}. Generated traffic on this node.".format(
-                services[0][2]) if LABEL else firm,
-            "capabilities": caps,
-        }, ident["token"])
+        entry = {
+            "did": ident["did"], "token": ident["token"],
+            "firm": firm, "name": firm, "capabilities": caps,
+        }
+        ann = announce(entry)
         if "error" in ann:
             print("[demo] announce refused for {}: {}".format(firm, ann["error"]), flush=True)
             continue
-        agents.append({
-            "did": ident["did"], "token": ident["token"],
-            "firm": firm, "name": firm, "capabilities": caps,
-        })
+        agents.append(entry)
         print("[demo] registered {}".format(firm), flush=True)
 
     if agents != saved:
@@ -526,6 +608,7 @@ def main():
     if len(agents) < 2:
         print("[demo] need at least two agents, got {}".format(len(agents)), flush=True)
         sys.exit(1)
+    keep_announced(agents)
 
     envelope = Envelope(TARGET_PER_MIN, LOW_PER_MIN, HIGH_PER_MIN)
     pacer = Pacer(envelope)

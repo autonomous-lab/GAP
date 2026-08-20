@@ -258,6 +258,21 @@ pub trait Storage: Send {
     /// List contracts in a given state.
     fn contracts_in_state(&self, state: &str) -> Result<Vec<ContractRecord>>;
 
+    /// Every contract an agent is a party to, either side.
+    ///
+    /// Exists because the node no longer keeps all contracts in memory:
+    /// a data export that scanned the in-memory map would quietly hand
+    /// an agent a truncated copy of its own history and call it
+    /// portable. The default is a filtered full read; backends that can
+    /// push the predicate down should override it, and ClickHouse does.
+    fn contracts_for_agent(&self, did: &str) -> Result<Vec<ContractRecord>> {
+        Ok(self
+            .list_contracts()?
+            .into_iter()
+            .filter(|r| r.client == did || r.provider == did)
+            .collect())
+    }
+
     /// List all materialized contracts.
     fn list_contracts(&self) -> Result<Vec<ContractRecord>>;
 
@@ -313,6 +328,17 @@ pub trait Storage: Send {
 
     /// Every entry in one projection, for restoring it at startup.
     fn list_state(&self, scope: &str) -> Result<Vec<StateRecord>>;
+
+    /// One state record, by scope and key.
+    ///
+    /// The node caches only recent verdicts now, so the job page needs a
+    /// way to ask for an old one by name. The default reads the scope
+    /// and filters, which is correct everywhere and cheap only on small
+    /// scopes; `(scope, key)` is the primary key of the ClickHouse
+    /// table, so that backend answers it as a point read.
+    fn get_state(&self, scope: &str, key: &str) -> Result<Option<StateRecord>> {
+        Ok(self.list_state(scope)?.into_iter().find(|r| r.key == key))
+    }
 
     /// Forget one entry. Used when a veto is lifted, a subscription is
     /// deleted or an escalation is closed - state that outlives its

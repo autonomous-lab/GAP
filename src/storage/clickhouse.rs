@@ -105,7 +105,6 @@ fn escape_param(value: &str) -> String {
     value.replace('\\', "\\\\")
 }
 
-
 /// Settings appended to INSERT statements, and only to those.
 ///
 /// ClickHouse makes one PART per insert, and this node inserts one row
@@ -179,9 +178,7 @@ fn insert_settings(query: &str) -> String {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(default_ms);
-    format!(
-        "&async_insert=1&wait_for_async_insert={wait}&async_insert_busy_timeout_ms={busy_ms}"
-    )
+    format!("&async_insert=1&wait_for_async_insert={wait}&async_insert_busy_timeout_ms={busy_ms}")
 }
 
 fn env_flag(name: &str, default: bool) -> bool {
@@ -503,13 +500,9 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             head: u64,
             total: u64,
         }
-        let agg: Vec<SpineHead> = self.select(
-            "SELECT ifNull(max(seq), 0) AS head, count() AS total FROM gap_events",
-        )?;
-        let (head, total) = agg
-            .first()
-            .map(|a| (a.head, a.total))
-            .unwrap_or((0, 0));
+        let agg: Vec<SpineHead> =
+            self.select("SELECT ifNull(max(seq), 0) AS head, count() AS total FROM gap_events")?;
+        let (head, total) = agg.first().map(|a| (a.head, a.total)).unwrap_or((0, 0));
         let tail: Vec<EventRecord> = self.select(&format!(
             "SELECT seq, kind, at, payload, prev_hash, hash FROM gap_events \
              ORDER BY seq DESC LIMIT {SPINE_WINDOW}"
@@ -593,12 +586,10 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             summary.deliverables += 1;
         }
 
-        for rec in
-            self.select_paged::<StateRecord>(
-                "SELECT scope, key, value, updated_at FROM gap_state FINAL",
-                "scope, key",
-            )?
-        {
+        for rec in self.select_paged::<StateRecord>(
+            "SELECT scope, key, value, updated_at FROM gap_state FINAL",
+            "scope, key",
+        )? {
             // A tombstone: deleted entries are written back with an
             // empty value rather than mutated away, because a
             // ReplacingMergeTree collapses on the sort key and a delete
@@ -645,6 +636,43 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             let page: Vec<R> = self.select(&format!(
                 "{query} ORDER BY {order_by} LIMIT {PAGE} OFFSET {offset}"
             ))?;
+            let n = page.len();
+            out.extend(page);
+            if n < PAGE {
+                return Ok(out);
+            }
+            offset += PAGE;
+        }
+    }
+
+    /// `select_paged`, with bound parameters.
+    ///
+    /// Separate from `select_paged` rather than folded into it because
+    /// the parameter-free form is used by hydrate on fixed SQL, and a
+    /// single function taking an always-empty slice invites the next
+    /// person to interpolate "just this once". Audit finding C-02 says
+    /// values go through `{name:Type}`; this is how a WHERE clause on
+    /// caller-supplied input obeys that.
+    fn select_paged_params<R: serde::de::DeserializeOwned>(
+        &self,
+        query: &str,
+        order_by: &str,
+        params: &[QueryParam],
+    ) -> Result<Vec<R>> {
+        const PAGE: usize = 2_000;
+        let mut out: Vec<R> = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let q = format!(
+                "{query} ORDER BY {order_by} LIMIT {PAGE} OFFSET {offset} \
+                 FORMAT JSONEachRow SETTINGS output_format_json_quote_64bit_integers=0"
+            );
+            let body = self.transport.post_params(&q, params)?;
+            let page: Vec<R> = body
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .filter_map(|l| serde_json::from_str::<R>(l).ok())
+                .collect();
             let n = page.len();
             out.extend(page);
             if n < PAGE {
@@ -807,6 +835,20 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .lock()
             .map_err(|_| Error::Other("contracts lock poisoned".into()))?;
         Ok(contracts.get(contract_id).cloned())
+    }
+
+    fn contracts_for_agent(&self, did: &str) -> Result<Vec<ContractRecord>> {
+        // Pushed down rather than filtered in the node: an agent's own
+        // history is unbounded, and reading every contract on the node
+        // to answer a question about one party is how an authenticated
+        // endpoint becomes a denial-of-service lever.
+        self.select_paged_params::<ContractRecord>(
+            "SELECT contract_id, client, provider, capability_id, state, contract_json, \
+             updated_at FROM gap_contracts FINAL \
+             WHERE client = {did:String} OR provider = {did:String}",
+            "contract_id",
+            &[QueryParam::new("did", did)],
+        )
     }
 
     fn contracts_in_state(&self, state: &str) -> Result<Vec<ContractRecord>> {
@@ -1024,6 +1066,21 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
         ];
         self.transport.post_params(q, &params)?;
         Ok(())
+    }
+
+    fn get_state(&self, scope: &str, key: &str) -> Result<Option<StateRecord>> {
+        // `(scope, key)` is this table's ORDER BY, so this is a point
+        // read rather than the scope scan the default would do - and the
+        // verdicts scope alone holds hundreds of thousands of rows.
+        Ok(self
+            .select_paged_params::<StateRecord>(
+                "SELECT scope, key, value, updated_at FROM gap_state FINAL \
+                 WHERE scope = {scope:String} AND key = {key:String}",
+                "key",
+                &[QueryParam::new("scope", scope), QueryParam::new("key", key)],
+            )?
+            .into_iter()
+            .next())
     }
 
     fn list_state(&self, scope: &str) -> Result<Vec<StateRecord>> {
