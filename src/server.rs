@@ -142,6 +142,16 @@ fn judge_readable_text(d: &crate::storage::DeliverableRecord) -> Option<String> 
         .filter(|s| !s.trim().is_empty())
 }
 
+/// Storage key for one agent's record of one job.
+///
+/// `<agent did>/<job ref>`. A DID never contains a slash and a job ref
+/// is hex, so the split is unambiguous in both directions - which
+/// matters because hydrate has to recognise the legacy shape (key = the
+/// DID alone, value = the whole list) and migrate it.
+fn job_key(agent: &str, job_ref: &str) -> String {
+    format!("{agent}/{job_ref}")
+}
+
 fn pseudonym(input: &str) -> String {
     crate::sha256_hex(input.as_bytes())[..16].to_string()
 }
@@ -532,7 +542,37 @@ impl NodeState {
         }
 
         let verdicts: HashMap<String, crate::verifier::Verdict> = load(&*storage, "verdicts");
-        let jobs: HashMap<String, Vec<JobRecord>> = load(&*storage, "jobs");
+        // Jobs are read in both shapes: one row per job (current), and
+        // one row per agent holding the whole list (legacy). Reading
+        // only the new shape would silently drop every job recorded
+        // before this change, including the 21,290 rebuilt from
+        // contracts on 2026-08-20 - so the old rows are loaded, then
+        // rewritten one per job and tombstoned, once.
+        let mut jobs: HashMap<String, Vec<JobRecord>> = HashMap::new();
+        let mut legacy_agents: Vec<String> = Vec::new();
+        for rec in storage.list_state("jobs").unwrap_or_default() {
+            match rec.key.split_once('/') {
+                Some((agent, _job_ref)) => match serde_json::from_str::<JobRecord>(&rec.value) {
+                    Ok(v) => jobs.entry(agent.to_string()).or_default().push(v),
+                    Err(e) => eprintln!("gap-node: skipping jobs/{}: {e}", rec.key),
+                },
+                None => match serde_json::from_str::<Vec<JobRecord>>(&rec.value) {
+                    Ok(list) => {
+                        jobs.entry(rec.key.clone()).or_default().extend(list);
+                        legacy_agents.push(rec.key.clone());
+                    }
+                    Err(e) => eprintln!("gap-node: skipping jobs/{}: {e}", rec.key),
+                },
+            }
+        }
+        // A job can arrive from both shapes during the migration boot;
+        // the job ref is unique per agent, so dedupe on it and keep the
+        // history in the order it happened.
+        for list in jobs.values_mut() {
+            list.sort_by_key(|r| r.at);
+            let mut seen = std::collections::HashSet::new();
+            list.retain(|r| seen.insert(r.job_ref.clone()));
+        }
         let disputes: HashMap<String, DisputeStats> = load(&*storage, "disputes");
         let bindings: HashMap<String, crate::principal::PrincipalBinding> =
             load(&*storage, "bindings");
@@ -652,7 +692,7 @@ impl NodeState {
             }
         }
 
-        Self {
+        let mut state = Self {
             spine_check: None,
             node: NodeIdentity { identity },
             agents,
@@ -695,7 +735,49 @@ impl NodeState {
             balance_holds,
             credited_deposits,
             deposit_chain: None,
+        };
+
+        // One-time migration of the legacy jobs rows, done here rather
+        // than lazily: a node that keeps reading the old shape keeps
+        // paying for it, and a migration that never runs to completion
+        // is a second shape to support for ever. Failures are reported
+        // and the legacy row is left in place, so a partial run is
+        // simply retried on the next boot.
+        if !legacy_agents.is_empty() {
+            let now = now_unix();
+            let mut rows: Vec<crate::storage::StateRecord> = Vec::new();
+            for agent in &legacy_agents {
+                for r in state.jobs.get(agent).cloned().unwrap_or_default() {
+                    rows.push(crate::storage::StateRecord {
+                        scope: "jobs".into(),
+                        key: job_key(agent, &r.job_ref),
+                        value: serde_json::to_string(&r).unwrap_or_default(),
+                        updated_at: now,
+                    });
+                }
+            }
+            match state.storage.upsert_state_many(&rows) {
+                Ok(()) => {
+                    // Only once every record is out do the lists go: the
+                    // tombstone is what makes this irreversible, so it
+                    // waits for a write that actually succeeded.
+                    for agent in &legacy_agents {
+                        if let Err(e) = state.storage.delete_state("jobs", agent) {
+                            eprintln!("gap-node: jobs migration: cannot drop legacy {agent}: {e}");
+                        }
+                    }
+                    eprintln!(
+                        "[gap-node] jobs migration: {} agent list(s) split into {} row(s)",
+                        legacy_agents.len(),
+                        rows.len()
+                    );
+                }
+                // Left exactly as it was, to be retried on the next boot.
+                Err(e) => eprintln!("gap-node: jobs migration failed, legacy rows kept: {e}"),
+            }
         }
+
+        state
     }
 
     /// Configure the node-arbitration admin token.
@@ -2542,11 +2624,18 @@ directly rather than reasoning about its metadata"
             seq: self.storage.head_seq().unwrap_or(0),
         };
         let job_ref = record.job_ref.clone();
+        // One row per job, not one row per agent.
+        //
+        // Storing an agent's whole history under its DID meant rewriting
+        // every job it had ever done each time it did another: the value
+        // grew past the URL limit and the projection stopped persisting
+        // on 2026-08-14, and even once the write moved to the request
+        // body it was an 8 MB serialise on the settlement path, inside
+        // the global lock. Both are the same mistake - a write whose
+        // cost grows with history - and both go away when the key is the
+        // job rather than the agent.
+        self.save_state("jobs", &job_key(&agent.to_string(), &job_ref), &record);
         self.jobs.entry(agent.to_string()).or_default().push(record);
-        let agent_key = agent.to_string();
-        if let Some(list) = self.jobs.get(&agent_key).cloned() {
-            self.save_state("jobs", &agent_key, &list);
-        }
         // job_ref -> contract, so a pseudonymous reference can be
         // resolved to its verdict without ever publishing the id.
         self.jobs_by_ref.insert(job_ref, contract_id.to_string());
@@ -7706,6 +7795,74 @@ mod tests {
             .expect("evicted contract must still be readable from storage");
         assert_eq!(recovered.contract_id, first_id);
         assert_eq!(recovered.state, ContractState::Accepted);
+    }
+
+    /// The legacy jobs shape must survive the change that replaces it.
+    ///
+    /// The migration is irreversible - it tombstones the old row - so
+    /// the failure it has to be pinned against is silent data loss: a
+    /// hydrate that only understood the new shape would drop every job
+    /// recorded before it, including the 21,290 rebuilt from contracts
+    /// on 2026-08-20, and say nothing.
+    #[test]
+    fn legacy_job_lists_are_migrated_not_dropped() {
+        let mut storage = SqliteStorage::open(":memory:").unwrap();
+        let agent = "did:gap:legacy";
+        let list = vec![
+            JobRecord {
+                job_ref: "aaaa1111".into(),
+                capability_id: "cap:one".into(),
+                counterparty_ref: "cccc".into(),
+                outcome: "accepted".into(),
+                remedied: false,
+                verdict: Some("conforms".into()),
+                judged_by: None,
+                on_time: true,
+                at: 100,
+                seq: 0,
+            },
+            JobRecord {
+                job_ref: "bbbb2222".into(),
+                capability_id: "cap:two".into(),
+                counterparty_ref: "cccc".into(),
+                outcome: "accepted".into(),
+                remedied: false,
+                verdict: None,
+                judged_by: None,
+                on_time: true,
+                at: 200,
+                seq: 0,
+            },
+        ];
+        storage
+            .upsert_state(&crate::storage::StateRecord {
+                scope: "jobs".into(),
+                key: agent.into(),
+                value: serde_json::to_string(&list).unwrap(),
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let state = NodeState::new(Box::new(storage));
+
+        // Loaded, in order, nothing lost.
+        let loaded = state.jobs.get(agent).expect("legacy agent history dropped");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].job_ref, "aaaa1111");
+        assert_eq!(loaded[1].job_ref, "bbbb2222");
+
+        // Rewritten one row per job...
+        let rows = state.storage.list_state("jobs").unwrap();
+        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert!(keys.contains(&"did:gap:legacy/aaaa1111"), "{keys:?}");
+        assert!(keys.contains(&"did:gap:legacy/bbbb2222"), "{keys:?}");
+
+        // ...and the list row is gone, or the next boot loads both
+        // shapes for ever.
+        assert!(
+            !keys.contains(&agent),
+            "legacy row still present after migration: {keys:?}"
+        );
     }
 
     #[test]

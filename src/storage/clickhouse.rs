@@ -1109,6 +1109,35 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
         Ok(())
     }
 
+    fn upsert_state_many(&mut self, records: &[StateRecord]) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        // One request for the lot. JSONEachRow is line-delimited, so a
+        // batch is just more lines - the same code path as a single
+        // write, which is the point: a migration that used a different
+        // write path from the one it migrates to would be testing
+        // something other than what runs afterwards.
+        let body: String = records
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "scope": r.scope,
+                    "key": r.key,
+                    "value": r.value,
+                    "updated_at": r.updated_at,
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.transport.post_body(
+            "INSERT INTO gap_state (scope, key, value, updated_at) FORMAT JSONEachRow",
+            &format!("{body}\n"),
+        )?;
+        Ok(())
+    }
+
     fn get_state(&self, scope: &str, key: &str) -> Result<Option<StateRecord>> {
         // `(scope, key)` is this table's ORDER BY, so this is a point
         // read rather than the scope scan the default would do - and the

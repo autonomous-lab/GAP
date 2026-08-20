@@ -326,6 +326,21 @@ pub trait Storage: Send {
     /// Store one entry of a materialized projection.
     fn upsert_state(&mut self, record: &StateRecord) -> Result<()>;
 
+    /// Write many state records at once.
+    ///
+    /// Exists for migrations. Splitting an agent's job list into one row
+    /// per job means writing tens of thousands of rows before the node
+    /// starts listening, and one round trip each is a boot slow enough
+    /// for the healthcheck to kill the container - which would restart
+    /// the migration from the beginning, for ever. The default loops,
+    /// which is right for a backend where a write is a local call.
+    fn upsert_state_many(&mut self, records: &[StateRecord]) -> Result<()> {
+        for r in records {
+            self.upsert_state(r)?;
+        }
+        Ok(())
+    }
+
     /// Every entry in one projection, for restoring it at startup.
     fn list_state(&self, scope: &str) -> Result<Vec<StateRecord>>;
 
