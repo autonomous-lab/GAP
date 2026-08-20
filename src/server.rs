@@ -66,6 +66,64 @@ pub struct JobRecord {
     /// public feed the same resumable cursor the protocol already uses.
     #[serde(default)]
     pub seq: u64,
+    /// What the job was worth, as a decimal string, and in what.
+    ///
+    /// Denormalised on purpose. Volume used to be summed by looking up
+    /// every job's contract on every page load - fine at four thousand
+    /// jobs, and 621,462 contract lookups under the global lock once the
+    /// full history was restored, most of them reaching ClickHouse.
+    /// A settled job's price never changes, so carrying it here costs a
+    /// few bytes and removes the reason to ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+}
+
+/// Running totals over every job, so that publishing them costs nothing.
+///
+/// Kept up to date on the write path and computed once at hydrate. The
+/// alternative - recomputing from the jobs map per request - is what
+/// made /activity take 2.75 seconds.
+#[derive(Default, Clone)]
+struct JobStats {
+    total: u64,
+    judged: u64,
+    conforming: u64,
+    on_time: u64,
+    remedied: u64,
+    /// currency -> minor units settled
+    volume: std::collections::BTreeMap<String, u128>,
+    /// Jobs with no price recorded. Counted rather than treated as
+    /// zero: understating volume is still misreporting it.
+    unpriced: u64,
+}
+
+impl JobStats {
+    fn add(&mut self, r: &JobRecord) {
+        self.total += 1;
+        if r.verdict.is_some() {
+            self.judged += 1;
+        }
+        if r.verdict.as_deref() == Some("conforms") {
+            self.conforming += 1;
+        }
+        if r.on_time {
+            self.on_time += 1;
+        }
+        if r.remedied {
+            self.remedied += 1;
+        }
+        match (&r.amount, &r.currency) {
+            (Some(a), Some(c)) => {
+                let minor = crate::amount::Amount::parse(a)
+                    .map(|v| v.minor_units())
+                    .unwrap_or(0);
+                *self.volume.entry(c.clone()).or_insert(0) += minor;
+            }
+            _ => self.unpriced += 1,
+        }
+    }
 }
 
 /// An agent's dispute record (RFC-0015 §3.3).
@@ -180,6 +238,12 @@ struct SpineCheck {
 /// opened seconds after it settled - so a small window absorbs nearly
 /// every lookup and anything older is one ClickHouse read away.
 pub const TERMINAL_WINDOW: usize = 5_000;
+
+/// How many recent jobs stay ready for the public feed.
+///
+/// Comfortably above the fifty a page asks for, so that a request never
+/// has to reach past it.
+pub const RECENT_JOBS: usize = 200;
 
 /// The materialised contract set, bounded.
 ///
@@ -345,6 +409,14 @@ pub struct NodeState {
     verifier: Option<Box<dyn crate::verifier::Verifier>>,
     /// contract_id -> the signed verdict produced for it.
     verdicts: HashMap<String, crate::verifier::Verdict>,
+    /// Running totals over `jobs`, so that publishing them is a read.
+    job_stats: JobStats,
+    /// The most recent jobs, newest last, bounded.
+    ///
+    /// The public feed wants the last fifty. It used to get them by
+    /// collecting every job on the node into a Vec and sorting it -
+    /// 621,462 pointers and a sort, per request, under the global lock.
+    recent_jobs: std::collections::VecDeque<JobRecord>,
     /// Per-agent job history, the raw material of reputation (RFC-0014 §5).
     ///
     /// Deliberately NOT bounded, unlike contracts, escrows and verdicts.
@@ -573,6 +645,24 @@ impl NodeState {
             let mut seen = std::collections::HashSet::new();
             list.retain(|r| seen.insert(r.job_ref.clone()));
         }
+        // One pass, at boot, over records that carry their own price -
+        // no contract lookups, which is the whole point.
+        let mut job_stats = JobStats::default();
+        for r in jobs.values().flatten() {
+            job_stats.add(r);
+        }
+        // The feed window, chosen once here rather than rebuilt per
+        // request. Sorting by sequence is what the feed pages on.
+        // References first, clone only the window. Cloning every record
+        // to keep two hundred of them would allocate 621,462 times at
+        // boot for a two-hundred-element result - the same "collect
+        // everything, throw away nearly all of it" shape this change
+        // exists to remove from the page path.
+        let mut newest: Vec<&JobRecord> = jobs.values().flatten().collect();
+        newest.sort_by_key(|r| r.seq);
+        let window = newest.len().saturating_sub(RECENT_JOBS);
+        let recent_jobs: std::collections::VecDeque<JobRecord> =
+            newest[window..].iter().map(|r| (*r).clone()).collect();
         let disputes: HashMap<String, DisputeStats> = load(&*storage, "disputes");
         let bindings: HashMap<String, crate::principal::PrincipalBinding> =
             load(&*storage, "bindings");
@@ -720,6 +810,8 @@ impl NodeState {
             verifier_b: crate::verifier::OpenRouterVerifier::second_from_env()
                 .map(|v| Box::new(v) as Box<dyn crate::verifier::Verifier>),
             verdicts,
+            job_stats,
+            recent_jobs,
             jobs,
             disputes,
             jobs_by_ref,
@@ -2597,11 +2689,16 @@ directly rather than reasoning about its metadata"
         outcome: &str,
         on_time: bool,
     ) {
-        let remedied = self
-            .contracts
-            .get(contract_id)
-            .map(|c| c.remedies_used > 0)
-            .unwrap_or(false);
+        // One contract lookup, here, at settlement - not one per job on
+        // every page load. Both facts come from the same read.
+        let contract = self.contracts.get(contract_id);
+        let remedied = contract.map(|c| c.remedies_used > 0).unwrap_or(false);
+        let price = contract.map(|c| {
+            (
+                crate::amount::Amount::from_f64_rounding(c.terms.price.amount).to_string_decimal(),
+                c.terms.price.currency.clone(),
+            )
+        });
         let verdict = self.verdicts.get(contract_id);
         let record = JobRecord {
             job_ref: pseudonym(contract_id),
@@ -2622,6 +2719,8 @@ directly rather than reasoning about its metadata"
             // renumbered - the node kept settling and the feed showed
             // nothing new.
             seq: self.storage.head_seq().unwrap_or(0),
+            amount: price.as_ref().map(|(a, _)| a.clone()),
+            currency: price.as_ref().map(|(_, c)| c.clone()),
         };
         let job_ref = record.job_ref.clone();
         // One row per job, not one row per agent.
@@ -2635,6 +2734,11 @@ directly rather than reasoning about its metadata"
         // cost grows with history - and both go away when the key is the
         // job rather than the agent.
         self.save_state("jobs", &job_key(&agent.to_string(), &job_ref), &record);
+        self.job_stats.add(&record);
+        self.recent_jobs.push_back(record.clone());
+        while self.recent_jobs.len() > RECENT_JOBS {
+            self.recent_jobs.pop_front();
+        }
         self.jobs.entry(agent.to_string()).or_default().push(record);
         // job_ref -> contract, so a pseudonymous reference can be
         // resolved to its verdict without ever publishing the id.
@@ -4523,6 +4627,42 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             .map(std::borrow::Cow::Owned)
     }
 
+    /// One agent's record of one job, resident or not.
+    ///
+    /// Looks in memory first, then asks storage by key. Scanning every
+    /// job to find one by its public reference was affordable while the
+    /// node held four thousand of them and is not at 621,462.
+    fn job_record_for(&self, contract_id: &str, job_ref: &str) -> Option<JobRecord> {
+        if let Some(r) = self
+            .recent_jobs
+            .iter()
+            .find(|r| r.job_ref == job_ref)
+            .cloned()
+        {
+            return Some(r);
+        }
+        let parties: Vec<String> = match self.contract_for_read(contract_id) {
+            Some(c) => vec![c.client.to_string(), c.provider.to_string()],
+            None => Vec::new(),
+        };
+        for did in parties {
+            if let Some(r) = self
+                .jobs
+                .get(&did)
+                .and_then(|l| l.iter().find(|r| r.job_ref == job_ref))
+                .cloned()
+            {
+                return Some(r);
+            }
+            if let Ok(Some(rec)) = self.storage.get_state("jobs", &job_key(&did, job_ref)) {
+                if let Ok(r) = serde_json::from_str::<JobRecord>(&rec.value) {
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+
     /// A contract for a read-only path, resident or not.
     ///
     /// The in-memory set holds what is in flight plus a window of what
@@ -4547,12 +4687,14 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             .jobs_by_ref
             .get(job_ref)
             .ok_or_else(|| Error::Other("unknown job reference".into()))?;
+        // Addressed, not searched. The key is <did>/<job ref>, and the
+        // parties come from the contract the reference already resolves
+        // to - so this is at most three point reads instead of a walk
+        // over every job on the node.
         let record = self
-            .jobs
-            .values()
-            .flatten()
-            .find(|r| r.job_ref == job_ref)
+            .job_record_for(contract_id, job_ref)
             .ok_or_else(|| Error::Other("unknown job reference".into()))?;
+        let record = &record;
         let contract = self.contract_for_read(contract_id);
         let verdict = self.verdict_for_read(contract_id);
         Ok(json!({
@@ -5139,15 +5281,11 @@ checks that list against the router."
             .filter_map(|c| c.price.as_ref())
             .min_by(|a, b| a.amount.partial_cmp(&b.amount).unwrap_or(Ordering::Equal));
 
-        let records: Vec<&JobRecord> = self.jobs.values().flatten().collect();
-        let total = records.len() as u64;
-        let judged = records.iter().filter(|r| r.verdict.is_some()).count() as u64;
-        let conforming = records
-            .iter()
-            .filter(|r| r.verdict.as_deref() == Some("conforms"))
-            .count() as u64;
-        let on_time = records.iter().filter(|r| r.on_time).count() as u64;
-        let remedied = records.iter().filter(|r| r.remedied).count() as u64;
+        // Read, not recomputed. These used to be five passes over every
+        // job the node had ever recorded, per request.
+        let st = &self.job_stats;
+        let (total, judged, conforming, on_time, remedied) =
+            (st.total, st.judged, st.conforming, st.on_time, st.remedied);
 
         let judges: Vec<String> = [
             self.verifier.as_ref().map(|v| v.name()),
@@ -5166,19 +5304,11 @@ checks that list against the router."
         // `unpriced` rather than as zero: understating volume is still
         // misreporting it, and saying how many could not be priced is
         // the only honest way to publish the rest.
-        let mut by_currency: std::collections::BTreeMap<String, u128> = Default::default();
-        let mut unpriced = 0u64;
-        for r in self.jobs.values().flatten() {
-            match self.job_amount(&r.job_ref) {
-                Some((amount, currency)) => {
-                    let minor = crate::amount::Amount::parse(&amount)
-                        .map(|a| a.minor_units())
-                        .unwrap_or(0);
-                    *by_currency.entry(currency).or_insert(0) += minor;
-                }
-                None => unpriced += 1,
-            }
-        }
+        // Summed as jobs settle. This was a contract lookup per job per
+        // page load: 621,462 of them once the full history was restored,
+        // most reaching ClickHouse, all under the global lock.
+        let by_currency = self.job_stats.volume.clone();
+        let unpriced = self.job_stats.unpriced;
         let volume = json!({
             "by_currency": by_currency
                 .into_iter()
@@ -5357,7 +5487,7 @@ checks that list against the router."
         // is four thousand allocations per page load and per API call,
         // under the global state lock. Choosing by sequence first makes
         // it fifty.
-        let mut recent: Vec<&JobRecord> = self.jobs.values().flatten().collect();
+        let mut recent: Vec<&JobRecord> = self.recent_jobs.iter().collect();
         recent.sort_by_key(|r| std::cmp::Reverse(r.seq));
         recent.truncate(limit);
         let jobs: Vec<Value> = recent.into_iter().map(|r| self.public_job_row(r)).collect();
@@ -7820,6 +7950,8 @@ mod tests {
                 on_time: true,
                 at: 100,
                 seq: 0,
+                amount: Some("1.500000".into()),
+                currency: Some("USDC".into()),
             },
             JobRecord {
                 job_ref: "bbbb2222".into(),
@@ -7832,6 +7964,8 @@ mod tests {
                 on_time: true,
                 at: 200,
                 seq: 0,
+                amount: None,
+                currency: None,
             },
         ];
         storage
