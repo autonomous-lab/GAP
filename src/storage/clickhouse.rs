@@ -379,15 +379,18 @@ pub struct HydrateSummary {
 /// ClickHouse-backed storage.
 pub struct ClickHouseStorage<T: HttpTransport + Send> {
     transport: T,
-    /// In-memory mirror of state (ClickHouse does not serve point
-    /// reads in real time; the sequencer keeps the hot state).
-    contracts: Mutex<HashMap<String, ContractRecord>>,
+    /// The two mirrors that survive, and why only these two.
+    ///
+    /// Both are bounded by the number of agents on the node rather than
+    /// by its history - 67 identities and 30 announcements when the
+    /// other four mirrors had grown to hundreds of thousands of rows -
+    /// and both sit on hot paths: a token is resolved on every
+    /// authenticated request, and discovery is read far more often than
+    /// it is written. Contracts, escrows, deliverables and state are
+    /// unbounded in exactly the way these are not, so they are read from
+    /// the tables, which are ordered on the keys those reads use.
     announcements: Mutex<HashMap<String, AnnouncementRecord>>,
     identities: Mutex<HashMap<String, IdentityRecord>>,
-    escrows: Mutex<HashMap<String, EscrowRecord>>,
-    deliverables: Mutex<HashMap<String, DeliverableRecord>>,
-    /// (scope, key) -> record, the mirror behind `list_state`.
-    node_state: Mutex<HashMap<(String, String), StateRecord>>,
     events: Mutex<Spine>,
     /// The atomicity gate for escrow-style operations.
     pub sequencer: Sequencer<()>,
@@ -444,12 +447,8 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
     pub fn new(transport: T) -> Self {
         Self {
             transport,
-            contracts: Mutex::new(HashMap::new()),
             announcements: Mutex::new(HashMap::new()),
             identities: Mutex::new(HashMap::new()),
-            escrows: Mutex::new(HashMap::new()),
-            deliverables: Mutex::new(HashMap::new()),
-            node_state: Mutex::new(HashMap::new()),
             events: Mutex::new(Spine::default()),
             sequencer: Sequencer::new(()),
         }
@@ -523,17 +522,18 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             summary.events = total as usize;
         }
 
-        for rec in self.select_paged::<ContractRecord>(
-            "SELECT contract_id, client, provider, capability_id, state, contract_json, \
-             updated_at FROM gap_contracts FINAL",
-            "contract_id",
-        )? {
-            self.contracts
-                .lock()
-                .map_err(|_| Error::Other("contracts lock poisoned".into()))?
-                .insert(rec.contract_id.clone(), rec);
-            summary.contracts += 1;
-        }
+        // Counted, not loaded.
+        //
+        // This used to read every contract, escrow, deliverable and
+        // state row into a mirror that then served every point read from
+        // memory. On 2026-08-20 that was a second full copy of 357,099
+        // contracts and 317,987 escrows - about half of a 4.3 GB
+        // process, on top of the copy the node itself keeps. The tables
+        // are ReplacingMergeTree ordered on exactly the keys these reads
+        // use, so a point read is a point read; what the mirror really
+        // bought was a promise that memory would always be bigger than
+        // the history, which is not a promise anyone can keep.
+        summary.contracts = self.count_rows("gap_contracts")?;
 
         for rec in self.select_paged::<AnnouncementRecord>(
             "SELECT agent_did, announcement_json, expires_at FROM gap_announcements FINAL",
@@ -563,46 +563,11 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             summary.identities += 1;
         }
 
-        for rec in self.select_paged::<EscrowRecord>(
-            "SELECT contract_id, state, held, currency, updated_at FROM gap_escrows FINAL",
-            "contract_id",
-        )? {
-            self.escrows
-                .lock()
-                .map_err(|_| Error::Other("escrows lock poisoned".into()))?
-                .insert(rec.contract_id.clone(), rec);
-            summary.escrows += 1;
-        }
+        summary.escrows = self.count_rows("gap_escrows")?;
 
-        for rec in self.select_paged::<DeliverableRecord>(
-            "SELECT contract_id, digest, encoding, media_type, content, uri, delivered_at \
-             FROM gap_deliverables FINAL",
-            "contract_id",
-        )? {
-            self.deliverables
-                .lock()
-                .map_err(|_| Error::Other("deliverables lock poisoned".into()))?
-                .insert(rec.contract_id.clone(), rec);
-            summary.deliverables += 1;
-        }
+        summary.deliverables = self.count_rows("gap_deliverables")?;
 
-        for rec in self.select_paged::<StateRecord>(
-            "SELECT scope, key, value, updated_at FROM gap_state FINAL",
-            "scope, key",
-        )? {
-            // A tombstone: deleted entries are written back with an
-            // empty value rather than mutated away, because a
-            // ReplacingMergeTree collapses on the sort key and a delete
-            // mutation is asynchronous.
-            if rec.value.is_empty() {
-                continue;
-            }
-            self.node_state
-                .lock()
-                .map_err(|_| Error::Other("state lock poisoned".into()))?
-                .insert((rec.scope.clone(), rec.key.clone()), rec);
-            summary.state += 1;
-        }
+        summary.state = self.count_rows("gap_state")?;
 
         Ok(summary)
     }
@@ -680,6 +645,24 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             }
             offset += PAGE;
         }
+    }
+
+    /// How many live rows a projection table holds.
+    ///
+    /// FINAL so that a ReplacingMergeTree reports what a reader would
+    /// see rather than how many parts have yet to merge. Used at boot
+    /// for the hydrate summary, which needs a number and never needed
+    /// the rows.
+    fn count_rows(&self, table: &str) -> Result<usize> {
+        #[derive(serde::Deserialize)]
+        struct Count {
+            n: u64,
+        }
+        Ok(self
+            .select::<Count>(&format!("SELECT count() AS n FROM {table} FINAL"))?
+            .first()
+            .map(|c| c.n as usize)
+            .unwrap_or(0))
     }
 
     fn select<R: serde::de::DeserializeOwned>(&self, query: &str) -> Result<Vec<R>> {
@@ -807,12 +790,9 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
     }
 
     fn upsert_contract(&mut self, record: &ContractRecord) -> Result<()> {
-        let mut contracts = self
-            .contracts
-            .lock()
-            .map_err(|_| Error::Other("contracts lock poisoned".into()))?;
-        contracts.insert(record.contract_id.clone(), record.clone());
-        // Async mirror write with BOUND parameters (audit fix C-02).
+        // Written straight through. There is no mirror to keep in step
+        // any more, which also removes the window where the two could
+        // disagree about what the node had stored.
         let q = "INSERT INTO gap_contracts (contract_id, client, provider, capability_id, state, contract_json, updated_at) \
                  VALUES ({contract_id:String}, {client:String}, {provider:String}, \
                          {capability_id:String}, {state:String}, {contract_json:String}, {updated_at:UInt64})";
@@ -830,11 +810,18 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
     }
 
     fn get_contract(&self, contract_id: &str) -> Result<Option<ContractRecord>> {
-        let contracts = self
-            .contracts
-            .lock()
-            .map_err(|_| Error::Other("contracts lock poisoned".into()))?;
-        Ok(contracts.get(contract_id).cloned())
+        // `contract_id` is this table's ORDER BY, so this is a point
+        // read. It used to be a HashMap lookup, which was instant and
+        // cost a permanent copy of every contract ever signed.
+        Ok(self
+            .select_paged_params::<ContractRecord>(
+                "SELECT contract_id, client, provider, capability_id, state, contract_json, updated_at FROM gap_contracts FINAL \
+                 WHERE contract_id = {contract_id:String}",
+                "contract_id",
+                &[QueryParam::new("contract_id", contract_id)],
+            )?
+            .into_iter()
+            .next())
     }
 
     fn contracts_for_agent(&self, did: &str) -> Result<Vec<ContractRecord>> {
@@ -852,23 +839,40 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
     }
 
     fn contracts_in_state(&self, state: &str) -> Result<Vec<ContractRecord>> {
-        let contracts = self
-            .contracts
-            .lock()
-            .map_err(|_| Error::Other("contracts lock poisoned".into()))?;
-        Ok(contracts
-            .values()
-            .filter(|c| c.state == state)
-            .cloned()
-            .collect())
+        self.select_paged_params::<ContractRecord>(
+            "SELECT contract_id, client, provider, capability_id, state, contract_json, updated_at FROM gap_contracts FINAL WHERE state = {state:String}",
+            "contract_id",
+            &[QueryParam::new("state", state)],
+        )
     }
 
     fn list_contracts(&self) -> Result<Vec<ContractRecord>> {
-        let contracts = self
-            .contracts
-            .lock()
-            .map_err(|_| Error::Other("contracts lock poisoned".into()))?;
-        Ok(contracts.values().cloned().collect())
+        self.select_paged::<ContractRecord>(
+            "SELECT contract_id, client, provider, capability_id, state, contract_json, updated_at FROM gap_contracts FINAL",
+            "contract_id",
+        )
+    }
+
+    fn recent_contracts(&self, limit: usize) -> Result<Vec<ContractRecord>> {
+        // Ordered and capped by the server, so the node never holds more
+        // than it asked for. The default would have read the whole table
+        // and thrown away all but `limit` of it.
+        self.select::<ContractRecord>(&format!(
+            "SELECT {} FROM gap_contracts FINAL ORDER BY updated_at DESC LIMIT {limit}",
+            "contract_id, client, provider, capability_id, state, contract_json, updated_at"
+        ))
+    }
+
+    fn contract_ids(&self) -> Result<Vec<String>> {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            contract_id: String,
+        }
+        Ok(self
+            .select_paged::<Row>("SELECT contract_id FROM gap_contracts FINAL", "contract_id")?
+            .into_iter()
+            .map(|r| r.contract_id)
+            .collect())
     }
 
     fn upsert_announcement(&mut self, record: &AnnouncementRecord) -> Result<()> {
@@ -986,11 +990,6 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
     }
 
     fn upsert_escrow(&mut self, record: &EscrowRecord) -> Result<()> {
-        let mut escrows = self
-            .escrows
-            .lock()
-            .map_err(|_| Error::Other("escrows lock poisoned".into()))?;
-        escrows.insert(record.contract_id.clone(), record.clone());
         let q = "INSERT INTO gap_escrows (contract_id, state, held, currency, updated_at) \
                  VALUES ({contract_id:String}, {state:String}, {held:String}, {currency:String}, {updated_at:UInt64})";
         let params = [
@@ -1005,27 +1004,25 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
     }
 
     fn get_escrow(&self, contract_id: &str) -> Result<Option<EscrowRecord>> {
-        let escrows = self
-            .escrows
-            .lock()
-            .map_err(|_| Error::Other("escrows lock poisoned".into()))?;
-        Ok(escrows.get(contract_id).cloned())
+        Ok(self
+            .select_paged_params::<EscrowRecord>(
+                "SELECT contract_id, state, held, currency, updated_at FROM gap_escrows FINAL \
+                 WHERE contract_id = {contract_id:String}",
+                "contract_id",
+                &[QueryParam::new("contract_id", contract_id)],
+            )?
+            .into_iter()
+            .next())
     }
 
     fn list_escrows(&self) -> Result<Vec<EscrowRecord>> {
-        let escrows = self
-            .escrows
-            .lock()
-            .map_err(|_| Error::Other("escrows lock poisoned".into()))?;
-        Ok(escrows.values().cloned().collect())
+        self.select_paged::<EscrowRecord>(
+            "SELECT contract_id, state, held, currency, updated_at FROM gap_escrows FINAL",
+            "contract_id",
+        )
     }
 
     fn upsert_deliverable(&mut self, record: &DeliverableRecord) -> Result<()> {
-        let mut deliverables = self
-            .deliverables
-            .lock()
-            .map_err(|_| Error::Other("deliverables lock poisoned".into()))?;
-        deliverables.insert(record.contract_id.clone(), record.clone());
         let q = "INSERT INTO gap_deliverables \
                  (contract_id, digest, encoding, media_type, content, uri, delivered_at) \
                  VALUES ({contract_id:String}, {digest:String}, {encoding:String}, \
@@ -1044,18 +1041,21 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
     }
 
     fn get_deliverable(&self, contract_id: &str) -> Result<Option<DeliverableRecord>> {
-        let deliverables = self
-            .deliverables
-            .lock()
-            .map_err(|_| Error::Other("deliverables lock poisoned".into()))?;
-        Ok(deliverables.get(contract_id).cloned())
+        // Worth the read even more than the others: a deliverable row
+        // carries the artifact itself, so mirroring this table meant
+        // holding every file the node has ever escrowed, for ever.
+        Ok(self
+            .select_paged_params::<DeliverableRecord>(
+                "SELECT contract_id, digest, encoding, media_type, content, uri, delivered_at FROM gap_deliverables FINAL \
+                 WHERE contract_id = {contract_id:String}",
+                "contract_id",
+                &[QueryParam::new("contract_id", contract_id)],
+            )?
+            .into_iter()
+            .next())
     }
 
     fn upsert_state(&mut self, record: &StateRecord) -> Result<()> {
-        self.node_state
-            .lock()
-            .map_err(|_| Error::Other("state lock poisoned".into()))?
-            .insert((record.scope.clone(), record.key.clone()), record.clone());
         let q = "INSERT INTO gap_state (scope, key, value, updated_at) \
                  VALUES ({scope:String}, {key:String}, {value:String}, {updated_at:UInt64})";
         let params = [
@@ -1084,22 +1084,23 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
     }
 
     fn list_state(&self, scope: &str) -> Result<Vec<StateRecord>> {
-        let state = self
-            .node_state
-            .lock()
-            .map_err(|_| Error::Other("state lock poisoned".into()))?;
-        Ok(state
-            .values()
-            .filter(|r| r.scope == scope)
-            .cloned()
+        Ok(self
+            .select_paged_params::<StateRecord>(
+                "SELECT scope, key, value, updated_at FROM gap_state FINAL \
+                 WHERE scope = {scope:String}",
+                "key",
+                &[QueryParam::new("scope", scope)],
+            )?
+            .into_iter()
+            // Tombstones: a delete is written back as an empty value,
+            // because a ReplacingMergeTree collapses on the sort key and
+            // a delete mutation is asynchronous. The mirror skipped
+            // these on the way in; the query has to skip them here.
+            .filter(|r: &StateRecord| !r.value.is_empty())
             .collect())
     }
 
     fn delete_state(&mut self, scope: &str, key: &str) -> Result<()> {
-        self.node_state
-            .lock()
-            .map_err(|_| Error::Other("state lock poisoned".into()))?
-            .remove(&(scope.to_string(), key.to_string()));
         // Write a tombstone rather than issuing a mutation:
         // ReplacingMergeTree collapses on (scope, key) and keeps the
         // highest updated_at, so an empty value at "now" wins and the
@@ -1117,11 +1118,11 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
     }
 
     fn list_deliverables(&self) -> Result<Vec<DeliverableRecord>> {
-        let deliverables = self
-            .deliverables
-            .lock()
-            .map_err(|_| Error::Other("deliverables lock poisoned".into()))?;
-        Ok(deliverables.values().cloned().collect())
+        self.select_paged::<DeliverableRecord>(
+            "SELECT contract_id, digest, encoding, media_type, content, uri, delivered_at \
+             FROM gap_deliverables FINAL",
+            "contract_id",
+        )
     }
 }
 
@@ -1169,6 +1170,179 @@ mod tests {
     use super::*;
     use crate::storage::test_helpers::run_conformance_suite;
     use std::cell::RefCell;
+
+    /// A transport that stores what it is told and answers what it is
+    /// asked, well enough to round-trip this backend's own SQL.
+    ///
+    /// Needed because the backend stopped keeping an in-memory mirror:
+    /// the conformance suite used to round-trip through that map, so it
+    /// was really testing the map rather than the SQL. This emulates
+    /// only what the backend emits - INSERT with bound parameters in
+    /// column order, and SELECT with zero or more equality predicates -
+    /// and deliberately nothing else.
+    ///
+    /// What it does NOT emulate, so nobody reads more into a pass than
+    /// is there: ORDER BY, LIMIT/OFFSET paging, aggregates other than
+    /// the spine head, or FINAL beyond last-write-wins on the key
+    /// columns the backend happens to use.
+    #[derive(Default)]
+    pub struct TableMock {
+        /// table -> rows, each a column->value map in insertion order.
+        rows: RefCell<HashMap<String, Vec<HashMap<String, String>>>>,
+    }
+
+    impl TableMock {
+        /// `INSERT INTO t (a, b) VALUES ({a:String}, {b:UInt64})`
+        fn columns_of_insert(query: &str) -> Option<(String, Vec<String>)> {
+            let rest = query.trim().strip_prefix("INSERT INTO ")?;
+            let (table, rest) = rest.split_once(" (")?;
+            let (cols, _) = rest.split_once(')')?;
+            Some((
+                table.trim().to_string(),
+                cols.split(',').map(|c| c.trim().to_string()).collect(),
+            ))
+        }
+
+        /// The table a SELECT reads, and the columns it asks for.
+        fn columns_of_select(query: &str) -> Option<(String, Vec<String>)> {
+            let after_select = query.split_once("SELECT ")?.1;
+            let (cols, rest) = after_select.split_once(" FROM ")?;
+            let table = rest.split_whitespace().next()?.to_string();
+            Some((
+                table,
+                cols.split(',').map(|c| c.trim().to_string()).collect(),
+            ))
+        }
+
+        /// Which bound parameters appear in a WHERE clause, so that an
+        /// INSERT's parameters are not mistaken for filters.
+        fn filters(query: &str, params: &[QueryParam]) -> Vec<(String, String)> {
+            let Some(where_clause) = query.split_once(" WHERE ") else {
+                return Vec::new();
+            };
+            params
+                .iter()
+                .filter(|p| where_clause.1.contains(&format!("{{{}:", p.name)))
+                .map(|p| (p.name.to_string(), p.value.clone()))
+                .collect()
+        }
+
+        /// The column a WHERE predicate compares, for `col = {name:T}`.
+        fn column_for(where_clause: &str, param: &str) -> Option<String> {
+            let needle = format!("{{{param}:");
+            let idx = where_clause.find(&needle)?;
+            let lhs = where_clause[..idx].trim_end();
+            let lhs = lhs.strip_suffix('=')?.trim_end();
+            lhs.rsplit([' ', '(']).next().map(|c| c.to_string())
+        }
+    }
+
+    impl HttpTransport for TableMock {
+        fn post(&self, query: &str) -> Result<String> {
+            self.post_params(query, &[])
+        }
+
+        fn base_url(&self) -> String {
+            "http://tablemock".into()
+        }
+
+        fn post_url(&self, _url: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn post_params(&self, query: &str, params: &[QueryParam]) -> Result<String> {
+            let trimmed = query.trim();
+            if trimmed.starts_with("INSERT INTO") {
+                let Some((table, cols)) = Self::columns_of_insert(trimmed) else {
+                    return Ok(String::new());
+                };
+                // Values are bound in column order; a literal in the
+                // VALUES list (the state tombstone writes '') has no
+                // parameter, so pair by position over the params given.
+                let mut row = HashMap::new();
+                for (i, col) in cols.iter().enumerate() {
+                    let v = params.get(i).map(|p| p.value.clone()).unwrap_or_default();
+                    row.insert(col.clone(), v);
+                }
+                // Tombstones and rewrites: last write wins on the
+                // columns this backend orders by, which for every table
+                // here is the leading column (plus `key` for state).
+                let mut store = self.rows.borrow_mut();
+                let table_rows = store.entry(table.clone()).or_default();
+                let key_cols: Vec<&str> = if table == "gap_state" {
+                    vec!["scope", "key"]
+                } else {
+                    vec![cols[0].as_str()]
+                };
+                table_rows.retain(|r| !key_cols.iter().all(|k| r.get(*k) == row.get(*k)));
+                table_rows.push(row);
+                return Ok(String::new());
+            }
+            if !trimmed.contains("SELECT") {
+                return Ok(String::new());
+            }
+            // The spine head aggregate, answered from the stored rows.
+            if trimmed.contains("count()") && trimmed.contains("max(seq)") {
+                let store = self.rows.borrow();
+                let evs = store.get("gap_events").cloned().unwrap_or_default();
+                let head = evs
+                    .iter()
+                    .filter_map(|r| r.get("seq").and_then(|s| s.parse::<u64>().ok()))
+                    .max()
+                    .unwrap_or(0);
+                return Ok(format!("{{\"head\":{head},\"total\":{}}}\n", evs.len()));
+            }
+            if trimmed.contains("count() AS n") {
+                let Some((table, _)) = Self::columns_of_select(trimmed) else {
+                    return Ok(String::new());
+                };
+                let store = self.rows.borrow();
+                let n = store.get(&table).map(|r| r.len()).unwrap_or(0);
+                return Ok(format!("{{\"n\":{n}}}\n"));
+            }
+            let Some((table, cols)) = Self::columns_of_select(trimmed) else {
+                return Ok(String::new());
+            };
+            let filters = Self::filters(trimmed, params);
+            let where_clause = trimmed.split_once(" WHERE ").map(|w| w.1).unwrap_or("");
+            let store = self.rows.borrow();
+            let mut out = String::new();
+            for row in store.get(&table).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let matches = filters.iter().all(|(param, value)| {
+                    match Self::column_for(where_clause, param) {
+                        Some(col) => row.get(&col).map(|v| v == value).unwrap_or(false),
+                        None => true,
+                    }
+                });
+                if !matches {
+                    continue;
+                }
+                // Emit only the requested columns, so a SELECT that asks
+                // for a column the INSERT never wrote shows up as a
+                // missing field rather than passing silently.
+                let fields: Vec<String> = cols
+                    .iter()
+                    .map(|c| {
+                        let v = row.get(c).cloned().unwrap_or_default();
+                        match v.parse::<u64>() {
+                            Ok(n) if is_numeric_column(c) => format!("\"{c}\":{n}"),
+                            _ => format!("\"{c}\":{}", serde_json::Value::String(v)),
+                        }
+                    })
+                    .collect();
+                out.push_str(&format!("{{{}}}\n", fields.join(",")));
+            }
+            Ok(out)
+        }
+    }
+
+    /// Columns this backend stores as integers.
+    fn is_numeric_column(col: &str) -> bool {
+        matches!(
+            col,
+            "seq" | "at" | "updated_at" | "created_at" | "expires_at" | "delivered_at"
+        )
+    }
 
     /// A mock transport recording queries and bound parameters.
     #[derive(Default)]
@@ -1392,7 +1566,7 @@ mod tests {
 
     #[test]
     fn clickhouse_passes_conformance_suite() {
-        let mut storage = ClickHouseStorage::new(MockTransport::default());
+        let mut storage = ClickHouseStorage::new(TableMock::default());
         run_conformance_suite(&mut storage);
     }
 
