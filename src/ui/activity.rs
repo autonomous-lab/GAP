@@ -48,18 +48,12 @@ fn tape_row(e: &Value, fresh: bool) -> String {
     let who = if deal.is_empty() {
         String::new()
     } else if settled {
-        format!(
-            r#"<a class="mono" href="/job/{d}">{d}</a>"#,
-            d = esc(deal)
-        )
+        format!(r#"<a class="mono" href="/job/{d}">{d}</a>"#, d = esc(deal))
     } else {
         format!(r#"<span class="mono dim">{}</span>"#, esc(deal))
     };
     let cap = match e["capability_id"].as_str() {
-        Some(c) if !c.is_empty() => format!(
-            r#" <a href="/capability/{c}">{c}</a>"#,
-            c = esc(c)
-        ),
+        Some(c) if !c.is_empty() => format!(r#" <a href="/capability/{c}">{c}</a>"#, c = esc(c)),
         _ => String::new(),
     };
     let amt = match (e["amount"].as_str(), e["currency"].as_str()) {
@@ -173,32 +167,16 @@ pub fn activity_page(recent: &Value, lifecycle: &Value, stats: &Value) -> String
         .max()
         .unwrap_or(0);
 
-    let rate = match (
-        stats["conform_rate"].as_f64(),
-        stats["jobs"].as_u64().unwrap_or(0),
-    ) {
-        (Some(r), _) => {
-            super::stat_live(&format!("{:.0}%", r * 100.0), "conforming", "ok", "st-rate")
-        }
-        (None, 0) => super::stat_live("--", "conforming", "faint", "st-rate"),
-        (None, n) => super::stat_live(&format!("0/{n}"), "conforming", "faint", "st-rate"),
-    };
-
     // The counters the page needs to keep the tiles true as frames
     // arrive. Rendering only the FORMATTED values would force the
     // browser to reverse a rounded percentage back into two integers,
     // and a stat bar that drifts is worse than one that is frozen.
-    let init = esc(
-        &serde_json::json!({
-            "jobs": stats["jobs"].as_u64().unwrap_or(0),
-            "judged": stats["judged"].as_u64().unwrap_or(0),
-            "conforming": stats["conforming"].as_u64().unwrap_or(0),
-            "remedied": stats["remedied"].as_u64().unwrap_or(0),
-            "events": stats["events"].as_u64().unwrap_or(0),
-            "volume": stats["volume"]["by_currency"],
-        })
-        .to_string(),
-    );
+    let init = esc(&serde_json::json!({
+        "jobs": stats["jobs"].as_u64().unwrap_or(0),
+        "events": stats["events"].as_u64().unwrap_or(0),
+        "volume": stats["volume"]["by_currency"],
+    })
+    .to_string());
 
     let body = format!(
         r#"<div class="hero" style="padding:56px 0 6px"><div class="wrap">
@@ -208,7 +186,7 @@ propose, counter, sign, fund escrow, work, deliver and get judged in public. Ent
 pseudonymous: you can audit what was delivered and how it was judged without learning who traded
 with whom.</p>
 <div class="stats" style="margin-top:6px" id="statbar" data-init="{init}">
-  {s_jobs}{s_vol}{s_rate}{s_remedied}{s_events}
+  {s_jobs}{s_vol}{s_events}
 </div>
 </div></div>
 
@@ -312,13 +290,7 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
   function paintStats() {{
     if (!st) return;
     setText('st-jobs', groups(st.jobs));
-    setText('st-rework', groups(st.remedied));
     setText('st-events', groups(st.events));
-    // Same rule as the server: no rate at all rather than a 100% that
-    // is really a division by a very small number.
-    setText('st-rate', st.judged > 0
-      ? Math.round((st.conforming / st.judged) * 100) + '%'
-      : (st.jobs > 0 ? '0/' + st.jobs : '--'));
     var parts = [];
     for (var c in money) parts.push(trimZeros((money[c] / 1e6).toFixed(6)) + ' ' + c);
     parts.sort();
@@ -386,9 +358,6 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
     lastJob = Math.max(lastJob, j.seq || 0);
     if (st) {{
       st.jobs += 1;
-      if (j.verdict) {{ st.judged += 1; }}
-      if (j.verdict === 'conforms') {{ st.conforming += 1; }}
-      if (j.remedied) {{ st.remedied += 1; }}
       if (j.amount && j.currency) {{
         money[j.currency] = (money[j.currency] || 0) + Math.round(parseFloat(j.amount) * 1e6);
       }}
@@ -482,13 +451,6 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
                 "st-vol-tile",
             ),
         },
-        s_rate = rate,
-        s_remedied = super::stat_live(
-            &num(stats["remedied"].as_u64().unwrap_or(0)),
-            "needed rework",
-            "",
-            "st-rework"
-        ),
         s_events = super::stat_live(
             &num(stats["events"].as_u64().unwrap_or(0)),
             "audit spine events",
@@ -670,16 +632,27 @@ mod tests {
                 "events": 1407, "volume": { "by_currency": { "EUR": "1.870000" } }
             }),
         );
-        for id in ["st-jobs", "st-vol", "st-rate", "st-rework", "st-events"] {
+        for id in ["st-jobs", "st-vol", "st-events"] {
             assert!(html.contains(&format!(r#"id="{id}""#)), "no handle on {id}");
         }
-        // The EXACT counters travel with the page. Handing the browser
-        // only the rendered "82%" would force it to reverse a rounded
-        // percentage back into two integers, and that drifts.
+        // The EXACT counters travel with the page, so the browser never
+        // has to reverse a rendered value back into a number.
         assert!(html.contains(r#"id="statbar""#));
-        assert!(html.contains("&quot;judged&quot;:120"), "{}", &html[..0]);
-        assert!(html.contains("&quot;conforming&quot;:98"));
+        assert!(html.contains("&quot;jobs&quot;:136"));
         assert!(html.contains("&quot;events&quot;:1407"));
+        // A conformance rate of 100% and a rework count of 0 read as a
+        // broken counter or a sales pitch, never as a result, so the
+        // page does not carry them at all - not the tiles, and not the
+        // numbers behind them.
+        // Checked on the tile handles rather than on the word: a row
+        // still says "nonconforming" when a verdict was, and that is
+        // the opposite of a sales pitch.
+        assert!(
+            !html.contains(r#"id="st-rate""#),
+            "conformance tile is back"
+        );
+        assert!(!html.contains(r#"id="st-rework""#), "rework tile is back");
+        assert!(!html.contains("needed rework"), "rework label is back");
         // And the stream feeds them.
         assert!(html.contains("paintStats()"));
         assert!(html.contains("st.jobs += 1"));
@@ -712,12 +685,22 @@ mod tests {
         // shifts every value into the wrong column of the grid.
         let html = activity_page(&json!({ "jobs": [] }), &life(), &stats());
         let server = tape_row(&life()["events"][0], false);
-        for cls in ["class=\"t\"", "class=\"ph p-", "class=\"who\"", "class=\"amt\""] {
+        for cls in [
+            "class=\"t\"",
+            "class=\"ph p-",
+            "class=\"who\"",
+            "class=\"amt\"",
+        ] {
             assert!(server.contains(cls), "server row missing {cls}");
         }
         let js = html.split("li.innerHTML =").nth(1).unwrap();
         let js_row = js.split(';').next().unwrap();
-        for cls in ["class=\"t\"", "class=\"ph p-", "class=\"who\"", "class=\"amt\""] {
+        for cls in [
+            "class=\"t\"",
+            "class=\"ph p-",
+            "class=\"who\"",
+            "class=\"amt\"",
+        ] {
             assert!(js_row.contains(cls), "live row missing {cls}: {js_row}");
         }
     }
