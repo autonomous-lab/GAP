@@ -68,6 +68,21 @@ pub trait HttpTransport: Send {
         self.post_url(&url)
     }
 
+    /// POST a query whose DATA travels in the request body.
+    ///
+    /// The `param_<name>=` mechanism puts every value in the URL, and a
+    /// URL has a length limit that nothing in this codebase respected.
+    /// An agent's job history is stored as one row per agent, so the
+    /// value grew with every job it completed: at roughly 32 KB the
+    /// writes started failing with `uri too long`, and the jobs
+    /// projection stopped persisting on 2026-08-14 while the node kept
+    /// serving a public settled-jobs count that was 78 times too small.
+    ///
+    /// Values sent this way have no size limit worth naming, and they
+    /// are not escaped by ClickHouse's parameter parser either, so the
+    /// backslash-doubling that `escape_param` exists for does not apply.
+    fn post_body(&self, query: &str, body: &str) -> Result<String>;
+
     /// The base URL (used by the default `post_params`).
     fn base_url(&self) -> String;
 
@@ -252,6 +267,22 @@ impl HttpTransport for UreqTransport {
         }
         let mut resp = req
             .send_empty()
+            .map_err(|e| Error::Other(format!("clickhouse request failed: {e}")))?;
+        resp.body_mut()
+            .read_to_string()
+            .map_err(|e| Error::Other(format!("clickhouse response failed: {e}")))
+    }
+
+    fn post_body(&self, query: &str, body: &str) -> Result<String> {
+        let url = format!("{}/?query={}", self.base_url, urlencode(query));
+        let mut req = ureq::post(&url);
+        if let (Some(user), Some(password)) = (&self.user, &self.password) {
+            req = req
+                .header("X-ClickHouse-User", user)
+                .header("X-ClickHouse-Key", password);
+        }
+        let mut resp = req
+            .send(body)
             .map_err(|e| Error::Other(format!("clickhouse request failed: {e}")))?;
         resp.body_mut()
             .read_to_string()
@@ -1056,15 +1087,25 @@ impl<T: HttpTransport> Storage for ClickHouseStorage<T> {
             .lock()
             .map_err(|_| Error::Other("state lock poisoned".into()))?
             .insert((record.scope.clone(), record.key.clone()), record.clone());
-        let q = "INSERT INTO gap_state (scope, key, value, updated_at) \
-                 VALUES ({scope:String}, {key:String}, {value:String}, {updated_at:UInt64})";
-        let params = [
-            QueryParam::new("scope", &record.scope),
-            QueryParam::new("key", &record.key),
-            QueryParam::new("value", &record.value),
-            QueryParam::new("updated_at", record.updated_at.to_string()),
-        ];
-        self.transport.post_params(q, &params)?;
+        // Body, not URL. This row holds an agent's entire job history,
+        // which is unbounded by construction; sending it as a parameter
+        // meant the write failed silently once the agent had worked
+        // enough to be worth having a history at all.
+        //
+        // JSONEachRow is the exchange format here rather than VALUES so
+        // that quoting is serde's problem and not a hand-rolled
+        // escaper's - the same class of bug that already lost a verdict
+        // to a stray backslash.
+        let row = serde_json::json!({
+            "scope": record.scope,
+            "key": record.key,
+            "value": record.value,
+            "updated_at": record.updated_at,
+        });
+        self.transport.post_body(
+            "INSERT INTO gap_state (scope, key, value, updated_at) FORMAT JSONEachRow",
+            &format!("{row}\n"),
+        )?;
         Ok(())
     }
 
@@ -1198,6 +1239,11 @@ mod tests {
                 .push((query.to_string(), params.to_vec()));
             Ok(String::new())
         }
+
+        fn post_body(&self, query: &str, body: &str) -> Result<String> {
+            self.queries.borrow_mut().push(format!("{query} :: {body}"));
+            Ok(String::new())
+        }
     }
 
     /// A transport that answers SELECTs with canned JSONEachRow lines,
@@ -1240,6 +1286,50 @@ mod tests {
         fn post_url(&self, _url: &str) -> Result<String> {
             Ok(String::new())
         }
+        fn post_body(&self, _query: &str, _body: &str) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    /// A state value must not travel in the URL, whatever its size.
+    ///
+    /// Pins the bug that stopped the jobs projection on 2026-08-14: an
+    /// agent's job history is one row that grows with every job, it
+    /// crossed roughly 32 KB, and every write after that failed with
+    /// `uri too long` while the node went on publishing a settled count
+    /// derived from the stale snapshot - 3,985 against 310,696 contracts
+    /// actually accepted.
+    #[test]
+    fn a_large_state_value_goes_in_the_body_not_the_url() {
+        let mut storage = ClickHouseStorage::new(MockTransport::default());
+        let big = "x".repeat(64 * 1024);
+        storage
+            .upsert_state(&StateRecord {
+                scope: "jobs".into(),
+                key: "did:gap:big".into(),
+                value: big.clone(),
+                updated_at: 42,
+            })
+            .unwrap();
+
+        // Nothing about this write may have gone through the parameter
+        // path, which is the one that builds a URL.
+        let params = storage.transport.param_queries.borrow();
+        assert!(
+            !params.iter().any(|(q, _)| q.contains("gap_state")),
+            "state was written through the URL parameter path"
+        );
+        let queries = storage.transport.queries.borrow();
+        let sent = queries
+            .iter()
+            .find(|q| q.contains("gap_state"))
+            .expect("state was not written at all");
+        assert!(
+            sent.contains("FORMAT JSONEachRow"),
+            "expected a body insert, got: {}",
+            &sent[..sent.len().min(120)]
+        );
+        assert!(sent.contains(&big), "the value did not reach the body");
     }
 
     #[test]
