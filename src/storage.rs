@@ -274,37 +274,7 @@ pub trait Storage: Send {
     }
 
     /// List all materialized contracts.
-    ///
-    /// Materialises the whole table. Fine for a small node and for
-    /// tests; a caller that only wants the working set should ask for
-    /// it with [`Storage::contracts_in_state`] or
-    /// [`Storage::recent_contracts`] instead, because "read everything
-    /// and keep a little" turns a bounded cache into an unbounded boot.
     fn list_contracts(&self) -> Result<Vec<ContractRecord>>;
-
-    /// The most recently updated contracts, newest first.
-    ///
-    /// What fills the read cache at startup without dragging the whole
-    /// history through memory to do it.
-    fn recent_contracts(&self, limit: usize) -> Result<Vec<ContractRecord>> {
-        let mut all = self.list_contracts()?;
-        all.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
-        all.truncate(limit);
-        Ok(all)
-    }
-
-    /// Every contract id, and nothing else.
-    ///
-    /// The public job index is keyed on a pseudonym of the id and has to
-    /// cover the entire history, so this one read cannot be bounded -
-    /// but it can be narrow. Ids only, not the signed bodies.
-    fn contract_ids(&self) -> Result<Vec<String>> {
-        Ok(self
-            .list_contracts()?
-            .into_iter()
-            .map(|r| r.contract_id)
-            .collect())
-    }
 
     /// Upsert an announcement.
     fn upsert_announcement(&mut self, record: &AnnouncementRecord) -> Result<()>;

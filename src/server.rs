@@ -475,51 +475,23 @@ impl NodeState {
         // would keep whichever 5,000 the backend happened to return
         // last, which is not the same thing and is invisible when it is
         // wrong.
-        // Ask for the working set, not for the history.
-        //
-        // Reading every contract in order to keep a few thousand would
-        // make the boot peak as large as the leak this bounding exists
-        // to remove - and a node that dies while starting is worse than
-        // one that grows slowly. So: everything that can still move,
-        // plus a window of the most recent finished ones.
-        let mut records: Vec<crate::storage::ContractRecord> = Vec::new();
-        for state in [
-            ContractState::Draft,
-            ContractState::Signed,
-            ContractState::Executing,
-            ContractState::Delivered,
-            ContractState::Disputed,
-            ContractState::Ruled,
-        ] {
-            records.extend(
-                storage
-                    .contracts_in_state(state.wire_name())
-                    .unwrap_or_default(),
-            );
-        }
-        records.extend(
-            storage
-                .recent_contracts(TERMINAL_WINDOW)
-                .unwrap_or_default(),
-        );
-        // Oldest first, so the newest survive the window rather than
-        // whichever the backend happened to return last.
+        let mut records = storage.list_contracts().unwrap_or_default();
         records.sort_by_key(|r| r.updated_at);
         let mut contracts = Contracts::default();
+        // Every contract id ever seen, resident or not. The job index
+        // below is keyed on a pseudonym of this and has to cover the
+        // whole history: a link that resolves only while the contract
+        // happens to be cached is a page that 404s on a schedule.
+        let mut all_ids: Vec<String> = Vec::with_capacity(records.len());
         for rec in records {
             if let Ok(mut contract) = serde_json::from_str::<Contract>(&rec.contract_json) {
                 if let Ok(state) = ContractState::parse(&rec.state) {
                     contract.state = state;
                 }
+                all_ids.push(contract.contract_id.clone());
                 contracts.insert(contract);
             }
         }
-        // Every contract id ever seen, resident or not. The job index
-        // below is keyed on a pseudonym of this and has to cover the
-        // whole history: a link that resolves only while the contract
-        // happens to be cached is a page that 404s on a schedule. Ids
-        // only - the signed bodies are what made this expensive.
-        let all_ids: Vec<String> = storage.contract_ids().unwrap_or_default();
 
         let mut escrows = HashMap::new();
         for rec in storage.list_escrows().unwrap_or_default() {
