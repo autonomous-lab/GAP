@@ -38,6 +38,7 @@ pub mod deposit;
 pub mod discovery;
 pub mod error;
 pub mod execution;
+pub mod gateway;
 pub mod governance;
 pub mod identity;
 pub mod irreversibility;

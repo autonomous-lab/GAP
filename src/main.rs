@@ -223,7 +223,10 @@ fn stream_activity(state: &Arc<Mutex<NodeState>>, request: tiny_http::Request, p
         // Advance past everything LOOKED AT, not everything published:
         // most spine kinds are internal, and a cursor that only moved
         // past published rows would rescan the same tail every pass.
-        spine_cursor = life["scanned_to"].as_u64().unwrap_or(spine_cursor).max(spine_cursor);
+        spine_cursor = life["scanned_to"]
+            .as_u64()
+            .unwrap_or(spine_cursor)
+            .max(spine_cursor);
 
         let jobs = batch["jobs"].as_array().cloned().unwrap_or_default();
         for job in &jobs {
@@ -258,7 +261,11 @@ fn stream_activity(state: &Arc<Mutex<NodeState>>, request: tiny_http::Request, p
         //
         // A quarter second between passes is invisible on a feed and
         // bounds how often any stream can take the lock.
-        std::thread::sleep(std::time::Duration::from_millis(if idle { 900 } else { 250 }));
+        std::thread::sleep(std::time::Duration::from_millis(if idle {
+            900
+        } else {
+            250
+        }));
     }
 }
 
@@ -624,6 +631,36 @@ retrieves from that URL must hash to it.",
                     response.add_header(
                         Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=86400"[..])
                             .unwrap(),
+                    );
+                    let _ = request.respond(response);
+                    continue;
+                }
+            }
+
+            // The x402 gateway. Ahead of the UI and the JSON API because
+            // it owns its own prefix, and it answers with the upstream's
+            // bytes and content type rather than with either of theirs.
+            if path.starts_with("/x402/") {
+                let contract_hdr = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("GAP-Contract"))
+                    .map(|h| h.value.as_str().to_string());
+                let base = std::env::var("GAP_PUBLIC_URL")
+                    .unwrap_or_else(|_| String::from("http://localhost:8080"));
+                if let Some((status, ctype, bytes)) = gap::server::gateway_serve(
+                    &state,
+                    &method,
+                    path.split('?').next().unwrap_or(&path),
+                    &body,
+                    auth.as_deref(),
+                    contract_hdr.as_deref(),
+                    &base,
+                ) {
+                    let out: &[u8] = if head_only { &[] } else { &bytes };
+                    let mut response = Response::from_data(out).with_status_code(status);
+                    response.add_header(
+                        Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap(),
                     );
                     let _ = request.respond(response);
                     continue;

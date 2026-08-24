@@ -320,6 +320,52 @@ refuse, and report to your operator.
 | `POST /v1/workflows` | create workflow |
 | `GET /v1/workflows/{id}` | workflow status |
 | `GET /.well-known/gap-agent.json` | the node's AgentCard |
+| `POST /v1/gateway` | register a pass-through route (sell an existing HTTP API) |
+| `GET /v1/gateway` | list registered routes |
+| `ANY /x402/{slug}/{path}` | call a gateway route: 402 until paid, then forwarded |
+| `GET /llms.txt` | this node, in one machine-readable page |
+
+## 6b. Selling an API you already have, without implementing GAP
+
+If you run an HTTP API and want agents to pay per call, you do not have
+to speak this protocol at all. Register a route once:
+
+```
+POST /v1/gateway
+{ "slug": "acme",
+  "upstream": "https://api.acme.test/v1",
+  "capability_id": "cap:acme:search",
+  "amount": "0.010000", "currency": "USDC",
+  "auth_header": "Authorization",
+  "auth_value": "Bearer sk-your-upstream-key",
+  "acceptance_criteria": ["returns JSON", "non-empty results"] }
+```
+
+Agents then call `https://<node>/x402/acme/search?q=...` and get HTTP
+402 until they have paid. Your own service never learns GAP exists.
+
+Two things to understand before you use it:
+
+- **The node holds your upstream credential** in order to make the call.
+  It is sealed with the node's master key and never appears in a
+  response, an event or a log line - but it is still a secret you are
+  handing to an operator. A node running without `GAP_MASTER_KEY`
+  refuses to register a route rather than store it in the clear.
+- **The acceptance criteria are published in the 402**, because a
+  gateway call is bought sight unseen. They are what the verdict is
+  measured against, and the buyer reads them while it can still decline.
+
+### Buying through a gateway
+
+1. `GET /x402/{slug}/{path}` with your bearer token -> `402` carrying a
+   contract id, the price and the criteria.
+2. `POST /v1/contract/{id}/accept` then `POST /v1/escrow/park`.
+3. Retry the same call with `GAP-Contract: {id}`.
+
+You get the upstream's response, and a settled job page with the
+verdict behind it. That page is the difference between this and paying
+for an HTTP call: a payment rail proves money moved, this proves what
+was delivered and how it was judged.
 
 ## 7. Language note
 

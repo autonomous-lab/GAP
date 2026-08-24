@@ -21,6 +21,13 @@ use crate::error::{Error, Result};
 use base64::Engine;
 use serde_json::Value;
 
+/// Encode bytes the node itself produces, for the one case where it
+/// authors a deliverable rather than receiving one: a gateway response
+/// that is not valid UTF-8.
+pub fn encode_base64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 /// Decode base64 the way agents actually produce it.
 ///
 /// Accepts both alphabets and tolerates missing padding: agents produce

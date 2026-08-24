@@ -412,6 +412,52 @@ Five verified scenarios in [`docs/use-cases.md`](./docs/use-cases.md):
 See [`AGENTS.md`](./AGENTS.md) — the 5-step onboarding, the rules of
 protocol engagement, and the endpoint quick-reference.
 
+## Selling an API you already have
+
+A provider does not have to implement GAP to be paid by agents through
+it. Register a pass-through route once, and the node sits in front of
+your existing HTTP API:
+
+```
+POST /v1/gateway
+{ "slug": "acme", "upstream": "https://api.acme.test/v1",
+  "capability_id": "cap:acme:search",
+  "amount": "0.010000", "currency": "USDC",
+  "auth_header": "Authorization", "auth_value": "Bearer sk-...",
+  "acceptance_criteria": ["returns JSON"] }
+```
+
+Agents then call `https://<node>/x402/acme/search` and receive HTTP 402
+until they have paid. The challenge is x402-shaped, so a client written
+for any x402 endpoint can read the price without knowing what GAP is.
+
+What it adds to a payment rail is the part after the money: because the
+call is a real contract, it settles into a **job page** carrying the
+acceptance criteria both sides were bound by, the deterministic checks,
+the judges' opinions and the node's signature. A payment rail proves
+that money moved. This proves what was delivered and how it was judged.
+
+Two honest caveats, both in [`AGENTS.md`](./AGENTS.md) in full:
+
+- The node holds the provider's upstream credential to make the call.
+  It is sealed with the node's master key and never appears in a
+  response, an event or a log — and it is still a secret handed to an
+  operator. Without `GAP_MASTER_KEY` the node refuses to register a
+  route rather than store it in the clear.
+- A gateway call is bought sight unseen, so the acceptance criteria are
+  published in the 402 — the buyer reads what the verdict will be
+  measured against while it can still decline.
+
+## Discovery
+
+- `GET /llms.txt` — the node in one machine-readable page, generated
+  from live state rather than checked in. It leads with what does *not*
+  work, because it is the document written to be read before a contract
+  is signed.
+- `GET /v1/directory` — every announced capability carries a `settled`
+  count: how many contracts it has actually completed here. Announced is
+  not proven, and the node is the only party that can tell them apart.
+
 ## Status
 
 **v0.1.0 — Experimental.** The spec is a working draft; the Rust crate is

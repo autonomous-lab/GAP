@@ -423,6 +423,8 @@ pub struct NodeState {
     verifier: Option<Box<dyn crate::verifier::Verifier>>,
     /// contract_id -> the signed verdict produced for it.
     verdicts: HashMap<String, crate::verifier::Verdict>,
+    /// Registered pass-through routes, by slug (see `crate::gateway`).
+    gateways: HashMap<String, crate::gateway::GatewayRoute>,
     /// Running totals over `jobs`, so that publishing them is a read.
     job_stats: JobStats,
     /// The most recent jobs, newest last, bounded.
@@ -627,6 +629,7 @@ impl NodeState {
             out
         }
 
+        let gateways: HashMap<String, crate::gateway::GatewayRoute> = load(&*storage, "gateways");
         let verdicts: HashMap<String, crate::verifier::Verdict> = load(&*storage, "verdicts");
         // Jobs are read in both shapes: one row per job (current), and
         // one row per agent holding the whole list (legacy). Reading
@@ -824,6 +827,7 @@ impl NodeState {
             verifier_b: crate::verifier::OpenRouterVerifier::second_from_env()
                 .map(|v| Box::new(v) as Box<dyn crate::verifier::Verifier>),
             verdicts,
+            gateways,
             job_stats,
             recent_jobs,
             jobs,
@@ -4710,6 +4714,217 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         None
     }
 
+    /// Register (or update) a pass-through route.
+    ///
+    /// Refuses outright when the node has no master key. The route
+    /// carries someone else's API credential, and a node that cannot
+    /// seal it has no business holding it - a plaintext secret store
+    /// that works is worse than a feature that does not.
+    pub fn gateway_register(&mut self, token: &str, body: &Value) -> Result<Value> {
+        let owner = self.agent_by_token(token)?.identity.did().to_string();
+        let vault = self
+            .vault
+            .as_ref()
+            .ok_or_else(|| Error::Other(
+                "gateway needs GAP_MASTER_KEY: this node will not store an upstream credential in the clear".into(),
+            ))?;
+        let slug = body["slug"].as_str().unwrap_or("").to_string();
+        if !crate::gateway::valid_slug(&slug) {
+            return Err(Error::Other(
+                "slug must be lowercase letters, digits or '-' (max 64)".into(),
+            ));
+        }
+        let upstream = body["upstream"].as_str().unwrap_or("").to_string();
+        if !upstream.starts_with("https://") {
+            return Err(Error::Other("upstream must be https".into()));
+        }
+        if let Some(existing) = self.gateways.get(&slug) {
+            if existing.owner != owner {
+                return Err(Error::Unauthorized("slug belongs to another agent".into()));
+            }
+        }
+        let secret = body["auth_value"].as_str().unwrap_or("");
+        let route = crate::gateway::GatewayRoute {
+            slug: slug.clone(),
+            owner,
+            upstream,
+            capability_id: body["capability_id"].as_str().unwrap_or("").to_string(),
+            amount: body["amount"].as_str().unwrap_or("0.010000").to_string(),
+            currency: body["currency"].as_str().unwrap_or("USDC").to_string(),
+            auth_header: body["auth_header"]
+                .as_str()
+                .unwrap_or("Authorization")
+                .to_string(),
+            auth_value_sealed: if secret.is_empty() {
+                String::new()
+            } else {
+                vault.seal(secret)
+            },
+            acceptance_criteria: body["acceptance_criteria"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        let public = route.public();
+        self.save_state("gateways", &slug, &route);
+        self.gateways.insert(slug.clone(), route);
+        // The event carries the PUBLIC shape. An audit spine is the last
+        // place a credential should end up, because it is the one store
+        // designed never to forget.
+        self.record("gw.registered", public.clone());
+        Ok(public)
+    }
+
+    /// Every registered route, in public shape.
+    pub fn gateway_list(&self) -> Value {
+        let routes: Vec<Value> = self.gateways.values().map(|r| r.public()).collect();
+        json!({ "routes": routes, "count": routes.len() })
+    }
+
+    /// What the gateway should do with an incoming call.
+    ///
+    /// Returns either a challenge to answer with, or everything needed
+    /// to make the upstream call - deliberately including the secret,
+    /// so the caller can DROP THE LOCK before going out to the network.
+    /// An upstream service taking two seconds while this node's global
+    /// mutex is held is how a slow partner becomes an outage here.
+    pub fn gateway_begin(
+        &mut self,
+        slug: &str,
+        tail: &str,
+        resource: &str,
+        client_token: Option<&str>,
+        contract_id: Option<&str>,
+    ) -> Result<crate::gateway::GatewayStep> {
+        let route = self
+            .gateways
+            .get(slug)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("no gateway route '{slug}'")))?;
+        let node_did = self.node_did().to_string();
+
+        // Already paid? Verify it, then hand back the call to make.
+        if let (Some(cid), Some(tok)) = (contract_id, client_token) {
+            let client_did = self.agent_by_token(tok)?.identity.did().to_string();
+            let c = self
+                .contracts
+                .get(cid)
+                .ok_or_else(|| Error::UnknownContract(cid.into()))?;
+            if c.client.to_string() != client_did {
+                return Err(Error::Unauthorized(
+                    "contract belongs to another agent".into(),
+                ));
+            }
+            if c.capability_id != route.capability_id {
+                return Err(Error::Other("contract is for another capability".into()));
+            }
+            if !self.escrow_is_funded(cid) {
+                return Err(Error::EscrowViolation(
+                    "escrow is not funded: park it before retrying".into(),
+                ));
+            }
+            let secret = match (&self.vault, route.auth_value_sealed.is_empty()) {
+                (_, true) => String::new(),
+                (Some(v), false) => v.open(&route.auth_value_sealed)?,
+                (None, false) => {
+                    return Err(Error::Other("cannot open the upstream credential".into()))
+                }
+            };
+            let provider_token = self
+                .agents_by_did
+                .get(&route.owner)
+                .cloned()
+                .ok_or_else(|| Error::Other("gateway owner is not node-custodied".into()))?;
+            return Ok(crate::gateway::GatewayStep::Forward {
+                url: crate::gateway::upstream_url(&route, tail)?,
+                auth_header: route.auth_header.clone(),
+                auth_value: secret,
+                contract_id: cid.to_string(),
+                provider_token,
+                client_token: tok.to_string(),
+            });
+        }
+
+        // Not paid. An anonymous caller cannot have a contract drafted
+        // for it - there is no party to name - so it is told what it
+        // needs first rather than handed a dead contract id.
+        let Some(tok) = client_token else {
+            return Ok(crate::gateway::GatewayStep::Challenge(
+                route.challenge(resource, "", &node_did),
+            ));
+        };
+        let terms = crate::contract::Terms {
+            input: json!({ "resource": resource }),
+            deliverable: json!({ "media_type": "application/json" }),
+            acceptance_criteria: route.acceptance_criteria.clone(),
+            deadline: now_unix() + 900,
+            price: crate::contract::Price {
+                amount: route.amount.parse::<f64>().unwrap_or(0.0),
+                currency: route.currency.clone(),
+                model: "fixed".into(),
+                cap: None,
+            },
+            autonomy: "execute-notify".into(),
+            confidentiality: None,
+            human_review_above: None,
+            cooling_off_seconds: None,
+        };
+        let cid = self.propose_contract(tok, &route.owner, &route.capability_id, terms, true)?;
+        let provider_token = self
+            .agents_by_did
+            .get(&route.owner)
+            .cloned()
+            .ok_or_else(|| Error::Other("gateway owner is not node-custodied".into()))?;
+        // The provider side is accepted for it: a gateway sells at a
+        // published price and has nothing to negotiate. The BUYER still
+        // accepts and funds explicitly, because that is the moment it
+        // agrees to the criteria it can read in this response.
+        self.accept_contract(&provider_token, &cid)?;
+        Ok(crate::gateway::GatewayStep::Challenge(
+            route.challenge(resource, &cid, &node_did),
+        ))
+    }
+
+    /// Record what the upstream returned, and settle.
+    ///
+    /// Runs the ordinary contract path - start, deliver, accept - so a
+    /// gateway call lands on the same public record as any other deal,
+    /// with the same verdict machinery behind it.
+    pub fn gateway_complete(
+        &mut self,
+        contract_id: &str,
+        provider_token: &str,
+        client_token: &str,
+        media_type: &str,
+        payload: &[u8],
+    ) -> Result<Value> {
+        let _ = self.start_execution(provider_token, contract_id, &json!({ "via": "gateway" }));
+        // Text upstreams (JSON, almost always) travel as text so the
+        // judge can read them. The base64 branch is what made six
+        // verdicts "inconclusive" once, and a gateway response is
+        // exactly the case that must not repeat it.
+        let text = std::str::from_utf8(payload).ok();
+        let artifact = match text {
+            Some(t) => crate::artifact::Artifact {
+                content: t.to_string(),
+                encoding: "utf8".into(),
+                media_type: media_type.to_string(),
+            },
+            None => crate::artifact::Artifact {
+                content: crate::artifact::encode_base64(payload),
+                encoding: "base64".into(),
+                media_type: media_type.to_string(),
+            },
+        };
+        let digest = artifact.digest()?;
+        self.deliver(provider_token, contract_id, &digest, None, Some(artifact))?;
+        self.accept_delivery(client_token, contract_id)
+    }
+
     /// A contract for a read-only path, resident or not.
     ///
     /// The in-memory set holds what is in flight plus a window of what
@@ -5857,6 +6072,136 @@ fn amount_from(body: &Value) -> Result<Amount> {
 }
 
 /// Route with client IP for rate limiting (audit H-03).
+/// Serve `/x402/{slug}/{tail}` - the gateway.
+///
+/// Deliberately outside `route()`: the upstream call must happen with
+/// the node lock RELEASED, and a function that takes a guard cannot
+/// promise that. The shape here - lock, decide, unlock, network, lock,
+/// settle - is the whole point, and it is why `gateway_begin` hands
+/// back the opened credential instead of making the call itself.
+pub fn gateway_serve(
+    state: &Arc<Mutex<NodeState>>,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    auth: Option<&str>,
+    contract_hdr: Option<&str>,
+    base: &str,
+) -> Option<(u16, String, Vec<u8>)> {
+    let rest = path.strip_prefix("/x402/")?;
+    let (slug, tail) = match rest.split_once('/') {
+        Some((s, t)) => (s, t),
+        None => (rest, ""),
+    };
+    let resource = format!("{base}{path}");
+    let token = auth.and_then(|a| a.strip_prefix("Bearer "));
+
+    let step = {
+        let mut guard = state.lock().ok()?;
+        match guard.gateway_begin(slug, tail, &resource, token, contract_hdr) {
+            Ok(step) => step,
+            Err(e) => {
+                let (code, payload) = crate::server::error_response(&e);
+                return Some((
+                    code,
+                    "application/json".into(),
+                    payload.to_string().into_bytes(),
+                ));
+            }
+        }
+    };
+
+    let (url, auth_header, auth_value, contract_id, provider_token, client_token) = match step {
+        crate::gateway::GatewayStep::Challenge(v) => {
+            return Some((402, "application/json".into(), v.to_string().into_bytes()))
+        }
+        crate::gateway::GatewayStep::Forward {
+            url,
+            auth_header,
+            auth_value,
+            contract_id,
+            provider_token,
+            client_token,
+        } => (
+            url,
+            auth_header,
+            auth_value,
+            contract_id,
+            provider_token,
+            client_token,
+        ),
+    };
+
+    // ---- lock released, network from here ----
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .build()
+        .new_agent();
+    // Built per branch rather than shared: ureq types a request with a
+    // body differently from one without, and forcing them into one
+    // variable would mean sending a body on GET to satisfy the compiler.
+    let sent = if method == "GET" {
+        let mut req = agent.get(&url);
+        if !auth_value.is_empty() {
+            req = req.header(&auth_header, &auth_value);
+        }
+        req.call()
+    } else {
+        let mut req = agent.post(&url).header("Content-Type", "application/json");
+        if !auth_value.is_empty() {
+            req = req.header(&auth_header, &auth_value);
+        }
+        req.send(body.to_vec())
+    };
+    let (status, media, payload) = match sent {
+        Ok(mut r) => {
+            let status = r.status().as_u16();
+            let media = r
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let bytes = r.body_mut().read_to_vec().unwrap_or_default();
+            (status, media, bytes)
+        }
+        // The upstream failed, so nothing was delivered and nothing is
+        // owed. The contract is left funded and unfulfilled rather than
+        // settled - the buyer can retry, and the expiry sweep refunds it
+        // if nobody does. Settling here would pay for a call that never
+        // returned.
+        Err(e) => {
+            return Some((
+                502,
+                "application/json".into(),
+                json!({ "error": { "code": "upstream_failed", "message": e.to_string(),
+                        "contract_id": contract_id, "note": "escrow still parked; retry or let it expire" } })
+                .to_string()
+                .into_bytes(),
+            ))
+        }
+    };
+
+    // ---- back under the lock, only to record ----
+    let receipt = {
+        let mut guard = state.lock().ok()?;
+        guard.gateway_complete(
+            &contract_id,
+            &provider_token,
+            &client_token,
+            media.split(';').next().unwrap_or(&media),
+            &payload,
+        )
+    };
+    let job_ref = receipt
+        .as_ref()
+        .ok()
+        .and_then(|v| v["job_ref"].as_str().map(str::to_string))
+        .unwrap_or_else(|| crate::server::pseudonym(&contract_id));
+    let _ = receipt;
+    Some((status, media, payload)).map(|(s, m, p)| (s, format!("{m}; gap-job={job_ref}"), p))
+}
+
 pub fn route_with_ip(
     state: &Arc<Mutex<NodeState>>,
     method: &str,
@@ -5908,6 +6253,11 @@ pub fn route_with_ip(
         ("GET", "/health") => Ok(json!({ "status": "ok", "node": guard.node_did() })),
         // ---- public directory data (consumed by the web UI) ----
         ("GET", "/v1/directory") => Ok(guard.public_directory()),
+        ("POST", "/v1/gateway") => match auth.and_then(|a| a.strip_prefix("Bearer ")) {
+            Some(t) => guard.gateway_register(t, &body),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
+        ("GET", "/v1/gateway") => Ok(guard.gateway_list()),
         ("GET", p) if p.starts_with("/v1/job/") => {
             let job_ref = percent_decode(p.trim_start_matches("/v1/job/"));
             guard.public_job(&job_ref)
@@ -6594,30 +6944,38 @@ with your agent id. Either way the node credits it after enough confirmations.",
 
     match response {
         Ok(v) => (200, v),
-        Err(e) => {
-            let code = match e {
-                Error::BadSignature => "bad_signature",
-                Error::Unauthorized(_) => "unauthorized",
-                Error::AutonomyViolation(_) => "budget_exceeded",
-                Error::UnknownContract(_) => "contract_not_found",
-                Error::InvalidTransition { .. } => "invalid_transition",
-                Error::EscrowViolation(_) => "escrow_violation",
-                _ => "invalid_request",
-            };
-            // Status classes, not a blanket 400: clients (and the
-            // OpenAPI contract) distinguish "you are not allowed" from
-            // "your request was malformed" from "it does not exist".
-            let status = match e {
-                Error::Unauthorized(_) => 401,
-                Error::UnknownContract(_) => 404,
-                _ => 400,
-            };
-            (
-                status,
-                json!({ "error": { "code": code, "message": e.to_string() } }),
-            )
-        }
+        Err(e) => error_response(&e),
     }
+}
+
+/// One error, one status, one code - wherever it is answered from.
+///
+/// Extracted when the gateway became a second place that answers
+/// errors. Two copies of this table would drift, and the drift would
+/// show up as the same failure returning 400 on one path and 401 on
+/// another, which is worse than either being wrong consistently.
+pub fn error_response(e: &Error) -> (u16, Value) {
+    let code = match e {
+        Error::BadSignature => "bad_signature",
+        Error::Unauthorized(_) => "unauthorized",
+        Error::AutonomyViolation(_) => "budget_exceeded",
+        Error::UnknownContract(_) => "contract_not_found",
+        Error::InvalidTransition { .. } => "invalid_transition",
+        Error::EscrowViolation(_) => "escrow_violation",
+        _ => "invalid_request",
+    };
+    // Status classes, not a blanket 400: clients (and the OpenAPI
+    // contract) distinguish "you are not allowed" from "your request was
+    // malformed" from "it does not exist".
+    let status = match e {
+        Error::Unauthorized(_) => 401,
+        Error::UnknownContract(_) => 404,
+        _ => 400,
+    };
+    (
+        status,
+        json!({ "error": { "code": code, "message": e.to_string() } }),
+    )
 }
 
 /// Parse a discovery query from JSON body or URL query string.
@@ -8099,6 +8457,108 @@ mod tests {
         assert!(txt.contains("before the work"), "escrow ordering rule gone");
         assert!(txt.contains("sha256:"), "digest format rule gone");
         assert!(txt.contains("LEASE"), "announcement TTL rule gone");
+    }
+
+    /// The gateway must refuse before it forwards, not after.
+    ///
+    /// Everything expensive happens on the far side of these checks: a
+    /// call to someone else's paid API, made with a credential this
+    /// node holds on their behalf. A gateway that forwards first and
+    /// reconciles later is a way to spend a provider's quota for free.
+    #[test]
+    fn the_gateway_will_not_forward_until_it_has_been_paid() {
+        let arc = state();
+        let (provider_did, provider_tok) = arc.lock().unwrap().create_identity();
+        let (_, client_tok) = arc.lock().unwrap().create_identity();
+
+        // No master key on this node, so registering must be refused
+        // outright rather than storing the credential in the clear.
+        let body = json!({
+            "slug": "acme", "upstream": "https://api.acme.test/v1",
+            "capability_id": "cap:acme:search", "amount": "0.010000",
+            "currency": "USDC", "auth_value": "sk-secret",
+            "acceptance_criteria": ["returns JSON"]
+        });
+        let refused = arc.lock().unwrap().gateway_register(&provider_tok, &body);
+        assert!(
+            refused.is_err(),
+            "a node with no master key accepted someone else's API key"
+        );
+
+        // With a vault, the route registers - and the credential must
+        // not appear in what comes back.
+        arc.lock().unwrap().vault = Some(crate::vault::Vault::new(&[7u8; 32]));
+        let public = arc
+            .lock()
+            .unwrap()
+            .gateway_register(&provider_tok, &body)
+            .expect("registration failed with a vault present");
+        let rendered = public.to_string();
+        assert!(!rendered.contains("sk-secret"), "{rendered}");
+        assert!(rendered.contains(&provider_did));
+
+        // An anonymous caller gets a challenge and no contract: there is
+        // no party to draft one for.
+        let step = arc
+            .lock()
+            .unwrap()
+            .gateway_begin(
+                "acme",
+                "search",
+                "https://node/x402/acme/search",
+                None,
+                None,
+            )
+            .unwrap();
+        match step {
+            crate::gateway::GatewayStep::Challenge(v) => {
+                assert_eq!(v["x402Version"], 1);
+                assert_eq!(v["gap"]["contract_id"], "");
+                // The criteria are readable BEFORE paying.
+                assert_eq!(v["gap"]["acceptance_criteria"][0], "returns JSON");
+            }
+            _ => panic!("an unpaid, unidentified call was allowed through"),
+        }
+
+        // An identified caller gets a drafted contract, still a 402.
+        let step = arc
+            .lock()
+            .unwrap()
+            .gateway_begin(
+                "acme",
+                "search",
+                "https://node/x402/acme/search",
+                Some(&client_tok),
+                None,
+            )
+            .unwrap();
+        let cid = match step {
+            crate::gateway::GatewayStep::Challenge(v) => {
+                let cid = v["gap"]["contract_id"].as_str().unwrap_or("").to_string();
+                assert!(!cid.is_empty(), "no contract was drafted for a known agent");
+                cid
+            }
+            _ => panic!("an unfunded call was forwarded"),
+        };
+
+        // And presenting that contract UNFUNDED is still refused - this
+        // is the check that stands between a stranger and the
+        // provider's paid quota.
+        let err = arc
+            .lock()
+            .unwrap()
+            .gateway_begin(
+                "acme",
+                "search",
+                "https://node/x402/acme/search",
+                Some(&client_tok),
+                Some(&cid),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::EscrowViolation(_)),
+            "unfunded contract was accepted: {err:?}"
+        );
     }
 
     #[test]
