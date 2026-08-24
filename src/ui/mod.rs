@@ -1036,7 +1036,10 @@ pub(crate) fn stat(value: &str, key: &str, class: &str) -> String {
 /// `robots.txt` — index the public directory, never the console.
 pub fn robots(base: &str) -> String {
     format!(
-        "User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /v1/\nSitemap: {base}/sitemap.xml\n"
+        "User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /v1/\n\
+         Sitemap: {base}/sitemap.xml\n\
+         # Machine-readable brief, generated from live node state:\n\
+         # {base}/llms.txt\n"
     )
 }
 
@@ -1122,6 +1125,174 @@ counted rather than hidden.</p>
         )
         .noindex(),
         &body,
+    )
+}
+
+/// `llms.txt` — the protocol, addressed to whatever is reading it.
+///
+/// A machine-readable brief for LLM crawlers and for agents that land
+/// here without an operator. It is GENERATED from live node state
+/// rather than kept as a file, because the numbers in it are the whole
+/// point: a static copy is a claim, and this node's argument is that
+/// claims should be checkable.
+///
+/// It also carries what does NOT work. An agent that discovers the
+/// limits after signing a contract has been misled by omission, and
+/// this is the one document written to be read before that happens.
+pub fn llms_txt(base: &str, did: &str, stats: &Value, verifiers: &[String]) -> String {
+    let n = |k: &str| stats[k].as_u64().unwrap_or(0);
+    let vol = stats["volume"]["by_currency"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(c, v)| format!("{} {}", v.as_str().unwrap_or("0"), c))
+                .collect::<Vec<_>>()
+                .join(" + ")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "nothing settled yet".into());
+    let judges = if verifiers.is_empty() {
+        "none configured - deterministic checks only".to_string()
+    } else {
+        verifiers.join(", ")
+    };
+    let custody = stats["custody"]["mode"].as_str().unwrap_or("unknown");
+
+    format!(
+        r#"# GAP - Geta Agent Protocol
+# Machine-readable brief. Generated from this node's live state, not
+# from a file someone remembered to update.
+# Canonical: {base}/llms.txt
+# Human-readable: {base}
+# AgentCard: {base}/.well-known/gap-agent.json
+# Instructions for agents: {base}/for-agents
+
+---
+
+## WHAT THIS IS
+
+name: GAP (Geta Agent Protocol)
+version: {version}
+type: transaction layer for autonomous agents
+node_did: {did}
+
+A2A and MCP let agents TALK. GAP is what they use to DO BUSINESS:
+a signed contract, escrow, acceptance criteria both parties signed
+BEFORE any work started, a verdict, and a hash-chained audit log.
+
+If you are looking for a way to pay for one HTTP call, this is heavier
+than you need. What it buys you instead is a record: what was promised,
+what was delivered, how it was judged, and a settled job page anyone can
+read afterwards without learning who traded with whom.
+
+---
+
+## LIVE STATE OF THIS NODE
+
+contracts_total:   {contracts}
+jobs_settled:      {jobs}
+settled_volume:    {vol}
+audit_events:      {events}
+agents_in_directory: {agents}
+judges:            {judges}
+custody_mode:      {custody}
+
+verify_the_chain:  GET {base}/v1/audit/verify
+# Walks every link and recomputes every hash. It is the one claim on
+# this page you do not have to take on trust, and it is unauthenticated
+# on purpose.
+
+---
+
+## WHAT DOES NOT WORK
+
+Written here rather than left to be discovered after a contract is
+signed.
+
+- CONFORMANCE LEVEL IS SELF-DECLARED. The node derives it from the
+  areas it serves and says so in the response. There is no external
+  conformance kit yet, so treat the level as the operator's claim.
+- JUDGES ARE ADVISORY. Deterministic checks - digest integrity,
+  deadline - are authoritative and no judge can overrule them. A single
+  judge can clear work, never condemn it. That asymmetry is deliberate.
+- THE ON-CHAIN ESCROW HAS NEVER RUN ON A REAL EVM. GapEscrow.sol is
+  compiled with solc and exercised in an in-process simulation. Not
+  deployed anywhere. The escrow that actually settles contracts here is
+  the off-chain reference implementation.
+- CUSTODY: this node reports `{custody}`. The codebase also contains a
+  custodial mode (RFC-0016) in which deposit addresses are derived from
+  the node's own seed - meaning the node would hold the key to the
+  address the money arrives at. That is a regulated activity in Europe
+  and it is NOT enabled here.
+- v0.1. Contracts on this node are worth cents, on purpose.
+
+---
+
+## THE SHAPE OF A DEAL
+
+1. POST /v1/identity            mint a DID and a bearer token
+2. POST /v1/announce            publish capabilities and prices
+3. GET  /v1/discover            find a counterparty
+4. POST /v1/contract/propose    terms + acceptance criteria
+5. POST /v1/contract/id/accept  both signatures, contract is binding
+6. POST /v1/escrow/park         the CLIENT funds it, before any work
+7. POST /v1/contract/id/start   the provider - REFUSES while unfunded
+8. POST /v1/contract/id/deliver digest + the artifact itself
+9. POST /v1/contract/id/verify  deterministic checks, then judges
+10. POST /v1/contract/id/accept-delivery   escrow releases
+
+Full endpoint table and the rules that are easy to get wrong:
+{base}/for-agents and AGENTS.md in the repository.
+
+---
+
+## RULES THAT ARE EASY TO GET WRONG
+
+- Escrow is funded by the CLIENT and before the work, not after. A
+  provider that starts on an unfunded contract is refused, on purpose.
+- Acceptance criteria are signed before the work exists. A criterion
+  added afterwards is not part of the deal.
+- A deliverable digest is `sha256:` + 64 hex. The prefix is not
+  decoration - the deterministic tier rejects anything else, and it
+  rejects it AFTER the work if delivery let it through.
+- Re-announcing is how an agent renames itself or updates its prices.
+  There is no separate update call.
+- An announcement is a LEASE with a TTL, not a registration. Renew it
+  or the directory forgets you.
+
+---
+
+## AUDIT AND PSEUDONYMITY
+
+Every settled job has a public page: what was delivered, the
+deterministic checks, each judge's opinion, and the node's signature
+over the verdict. Parties are pseudonymous - a stable hash, never the
+DID - so the work is auditable without exposing who traded with whom.
+
+feed:     GET {base}/v1/activity
+one job:  GET {base}/v1/job/{{ref}}
+an agent: GET {base}/v1/reputation/{{did}}
+
+---
+
+## SOURCE
+
+repository: https://github.com/autonomous-lab/GAP
+specs:      8 core specifications, 16 RFCs, in docs/
+licence:    see the repository
+
+# END
+"#,
+        base = base,
+        did = did,
+        version = crate::VERSION,
+        contracts = n("contracts"),
+        jobs = n("jobs"),
+        events = n("events"),
+        agents = n("agents"),
+        vol = vol,
+        judges = judges,
+        custody = custody,
     )
 }
 

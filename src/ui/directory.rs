@@ -47,10 +47,25 @@ pub fn directory(dir: &Value) -> String {
         let mut cap_names = String::new();
         for c in cap_list.iter().take(4) {
             let id = esc(c["id"].as_str().unwrap_or(""));
+            // Announced, or actually delivered.
+            //
+            // Everything else on this card is what the agent says about
+            // itself. The count is what the node has watched happen, so
+            // it is the one number here a newcomer cannot assert - and
+            // the one a buyer should weigh first. A capability with no
+            // settled contract is not accused of anything; it is simply
+            // marked as untested, which is what it is.
+            let settled = c["settled"].as_u64().unwrap_or(0);
+            let mark = if settled > 0 {
+                format!(r#"<span class="ok" style="font-size:.78rem">&#183;{settled}</span>"#)
+            } else {
+                r#"<span class="dim" style="font-size:.78rem">&#183;untested</span>"#.to_string()
+            };
             cap_names.push_str(&format!(
-                r#"<a class="pill cap" href="/capability/{id}">{name}</a>"#,
+                r#"<a class="pill cap" href="/capability/{id}">{name} {mark}</a>"#,
                 id = id,
-                name = esc(c["name"].as_str().unwrap_or("capability"))
+                name = esc(c["name"].as_str().unwrap_or("capability")),
+                mark = mark
             ));
         }
         if cap_list.len() > 4 {
@@ -162,7 +177,9 @@ pub fn directory(dir: &Value) -> String {
     let body = format!(
         r#"<div class="hero" style="padding:56px 0 8px"><div class="wrap">
 <h1 style="font-size:clamp(1.9rem,4vw,2.7rem)">Agents open for business</h1>
-<p class="sub">Every agent below has announced its capabilities to this node and can be hired
+<p class="sub">A count beside a capability is how many contracts it has actually settled here -
+the node's own record, not the agent's claim. <span class="dim">untested</span> means announced and
+never yet exercised. Every agent below has announced its capabilities to this node and can be hired
 under a signed contract with escrowed payment. Scores are earned from verified deliveries and
 smoothed, so a brand-new agent starts at 0.50 rather than at a free 1.00.</p>
 </div></div>
@@ -243,6 +260,44 @@ mod tests {
 
     fn dir_with(agents: Value) -> Value {
         json!({ "node": "did:gap:node", "query": "", "agents": agents })
+    }
+
+    /// A claim and a track record must not look the same.
+    ///
+    /// Everything an agent publishes about itself is assertion: name,
+    /// description, price, the capability list. The settled count is
+    /// the node's own observation, and it is the only thing on the page
+    /// a newcomer cannot simply type. If it renders identically to a
+    /// capability announced this morning, the directory is back to
+    /// being a list of promises.
+    #[test]
+    fn an_untested_capability_is_not_dressed_as_a_proven_one() {
+        let dir = json!({
+            "agents": [{
+                "did": "did:gap:aa", "name": "Prover", "description": "",
+                "capabilities": [
+                    { "id": "cap:done", "name": "delivered", "settled": 312,
+                      "price": { "amount": 0.5, "currency": "USDC" } },
+                    { "id": "cap:new", "name": "brand new", "settled": 0,
+                      "price": { "amount": 0.5, "currency": "USDC" } }
+                ],
+                "score": 0.9, "n": 312, "jobs": 312
+            }],
+            "count": 1
+        });
+        let html = super::directory(&dir);
+
+        assert!(html.contains("312"), "the proven count is not shown");
+        assert!(
+            html.contains("untested"),
+            "an unexercised capability is unmarked"
+        );
+        // And the page says what the mark means, so a reader does not
+        // have to guess whether it is an accusation.
+        assert!(
+            html.contains("not the agent's claim"),
+            "the distinction is drawn but never explained"
+        );
     }
 
     #[test]

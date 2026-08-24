@@ -97,6 +97,16 @@ struct JobStats {
     /// Jobs with no price recorded. Counted rather than treated as
     /// zero: understating volume is still misreporting it.
     unpriced: u64,
+    /// capability id -> how many contracts it has actually settled.
+    ///
+    /// The directory is otherwise a list of claims: an agent announces
+    /// what it can do and a price, and nothing distinguishes a
+    /// capability that has delivered three hundred times from one
+    /// announced this morning and never exercised. This node is the
+    /// only party that can tell them apart, because it holds the
+    /// history - so it should say. Bounded by the number of distinct
+    /// capabilities, not by traffic.
+    by_capability: std::collections::BTreeMap<String, u64>,
 }
 
 impl JobStats {
@@ -114,6 +124,10 @@ impl JobStats {
         if r.remedied {
             self.remedied += 1;
         }
+        *self
+            .by_capability
+            .entry(r.capability_id.clone())
+            .or_insert(0) += 1;
         match (&r.amount, &r.currency) {
             (Some(a), Some(c)) => {
                 let minor = crate::amount::Amount::parse(a)
@@ -2401,6 +2415,11 @@ the content inline"
         self.verifier.as_ref().map(|v| v.name())
     }
 
+    /// The second judge, when one is configured (RFC-0015).
+    pub fn verifier_b_name(&self) -> Option<String> {
+        self.verifier_b.as_ref().map(|v| v.name())
+    }
+
     /// The admin token, for UI gating.
     pub fn admin_token_ref(&self) -> Option<&str> {
         self.admin_token.as_deref()
@@ -4311,11 +4330,39 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                     .map(|ag| ag.identity.reputation().clone())
                     .unwrap_or_default();
                 let jobs = self.jobs.get(&did).map(|j| j.len()).unwrap_or(0);
+                // Announced is not proven.
+                //
+                // Every other field here is the agent's own claim about
+                // itself. This one is the node's: how many contracts
+                // each capability has actually settled, from the job
+                // history. A buyer can then tell a capability with three
+                // hundred deliveries behind it from one announced this
+                // morning - which is the only thing in a directory that
+                // a newcomer cannot simply assert.
+                let capabilities: Vec<Value> = a
+                    .capabilities
+                    .iter()
+                    .map(|c| {
+                        let mut v = serde_json::to_value(c).unwrap_or(json!({}));
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert(
+                                "settled".into(),
+                                json!(self
+                                    .job_stats
+                                    .by_capability
+                                    .get(&c.id)
+                                    .copied()
+                                    .unwrap_or(0)),
+                            );
+                        }
+                        v
+                    })
+                    .collect();
                 json!({
                     "did": did,
                     "name": a.name,
                     "description": a.description,
-                    "capabilities": a.capabilities,
+                    "capabilities": capabilities,
                     "languages": a.languages,
                     "regions": a.regions,
                     "reachability": a.reachability,
@@ -5678,6 +5725,19 @@ pub fn route_html(
             html(crate::ui::docs_page(&did, v.as_deref()))
         }
         "/robots.txt" => Some((200, "text/plain; charset=utf-8", crate::ui::robots(&base))),
+        "/llms.txt" => {
+            let stats = guard.public_stats();
+            let did = guard.node_did().to_string();
+            let judges: Vec<String> = [guard.verifier_name(), guard.verifier_b_name()]
+                .into_iter()
+                .flatten()
+                .collect();
+            Some((
+                200,
+                "text/plain; charset=utf-8",
+                crate::ui::llms_txt(&base, &did, &stats, &judges),
+            ))
+        }
         "/sitemap.xml" => {
             let dir = guard.public_directory();
             // Jobs are listed too: each settled verdict is a page worth
@@ -7997,6 +8057,48 @@ mod tests {
             !keys.contains(&agent),
             "legacy row still present after migration: {keys:?}"
         );
+    }
+
+    /// llms.txt must carry the limits, not just the pitch.
+    ///
+    /// This is the one document written to be read BEFORE a contract is
+    /// signed, by something that has no operator to ask. A version of it
+    /// that lists the endpoints and omits what does not work would be
+    /// misleading by omission, and the omission would be invisible -
+    /// nothing errors, the file just quietly sells.
+    #[test]
+    fn llms_txt_publishes_the_limits_and_the_live_numbers() {
+        let arc = state();
+        let guard = arc.lock().unwrap();
+        let stats = guard.public_stats();
+        let txt = crate::ui::llms_txt(
+            "https://example.test",
+            &guard.node_did().to_string(),
+            &stats,
+            &[],
+        );
+
+        // The limits, each one a thing an agent would otherwise find out
+        // the expensive way.
+        for must in [
+            "WHAT DOES NOT WORK",
+            "SELF-DECLARED",
+            "ADVISORY",
+            "NEVER RUN ON A REAL EVM",
+            "regulated activity",
+        ] {
+            assert!(txt.contains(must), "llms.txt lost its limits: {must}");
+        }
+
+        // Generated from live state, so it cannot go stale in the way a
+        // checked-in file does.
+        assert!(txt.contains(&guard.node_did().to_string()));
+        assert!(txt.contains("/v1/audit/verify"), "no way to check it");
+
+        // The rules that are easy to get wrong and expensive to learn.
+        assert!(txt.contains("before the work"), "escrow ordering rule gone");
+        assert!(txt.contains("sha256:"), "digest format rule gone");
+        assert!(txt.contains("LEASE"), "announcement TTL rule gone");
     }
 
     #[test]
