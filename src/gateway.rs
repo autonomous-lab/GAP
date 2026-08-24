@@ -144,6 +144,64 @@ pub fn host_of(url: &str) -> String {
         .to_string()
 }
 
+/// Refuse an upstream that points back inside the infrastructure.
+///
+/// A gateway makes the NODE fetch a URL that somebody else chose. Left
+/// unchecked that is a request-forgery primitive: an authenticated
+/// provider could register `https://169.254.169.254/...` and have the
+/// node read its own cloud credentials, or reach an admin service that
+/// is only protected by being unroutable from outside.
+///
+/// This is a hostname check, and hostname checks are a first line, not
+/// a wall - a name that resolves to a private address today, or that
+/// re-resolves between this check and the request, gets through. Saying
+/// so here rather than implying the problem is solved: closing it
+/// properly means resolving the host and validating every address
+/// before connecting, which needs a resolver this node does not
+/// currently own.
+pub fn upstream_is_public(url: &str) -> bool {
+    // Brackets FIRST, then the port. Splitting on ':' before stripping
+    // them turns `[fd00::1]` into `[fd00`, which parses as no address at
+    // all and is therefore treated as a public name - the exact inverse
+    // of what this function is for.
+    let raw = host_of(url);
+    let host = if let Some(inner) = raw.strip_prefix('[') {
+        inner.split(']').next().unwrap_or("").to_ascii_lowercase()
+    } else {
+        raw.split(':').next().unwrap_or("").to_ascii_lowercase()
+    };
+    if host.is_empty() {
+        return false;
+    }
+    // Names that mean "here".
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".internal") {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                !(v4.is_private()
+                    || v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_broadcast()
+                    || v4.is_documentation()
+                    || v4.is_unspecified()
+                    // 100.64.0.0/10, carrier-grade NAT: routable-looking
+                    // and reachable inside many hosting networks.
+                    || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])))
+            }
+            std::net::IpAddr::V6(v6) => {
+                !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    // fc00::/7 unique-local and fe80::/10 link-local.
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80)
+            }
+        };
+    }
+    true
+}
+
 /// Reject a slug that would let a route escape its own namespace.
 ///
 /// `..`, a slash or an encoded slash in a slug would make
@@ -260,6 +318,33 @@ mod tests {
         // in its query string, so only the host is published.
         assert_eq!(host_of(&r.upstream), "api.acme.test");
         assert!(!public.contains("/v1"), "the upstream path is published");
+    }
+
+    /// The node must not be usable as a probe into its own network.
+    ///
+    /// Registering a route is authenticated, which lowers the odds but
+    /// not the consequence: minting an identity on this node costs one
+    /// unauthenticated request.
+    #[test]
+    fn an_upstream_cannot_point_back_inside_the_infrastructure() {
+        assert!(upstream_is_public("https://api.acme.test/v1"));
+        assert!(upstream_is_public("https://gap.geta.team/demo/loto"));
+
+        // The one that matters most: cloud metadata.
+        assert!(!upstream_is_public(
+            "https://169.254.169.254/latest/meta-data/"
+        ));
+        assert!(!upstream_is_public("https://metadata.google.internal/"));
+
+        assert!(!upstream_is_public("https://localhost:8080/x"));
+        assert!(!upstream_is_public("https://127.0.0.1/x"));
+        assert!(!upstream_is_public("https://10.0.0.5/x"));
+        assert!(!upstream_is_public("https://172.17.0.1:8080/x"));
+        assert!(!upstream_is_public("https://192.168.1.1/x"));
+        assert!(!upstream_is_public("https://100.100.0.1/x"));
+        assert!(!upstream_is_public("https://[::1]/x"));
+        assert!(!upstream_is_public("https://[fd00::1]/x"));
+        assert!(!upstream_is_public(""));
     }
 
     /// A slug is a namespace, and a namespace that can be escaped is

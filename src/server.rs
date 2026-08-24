@@ -4738,6 +4738,11 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         if !upstream.starts_with("https://") {
             return Err(Error::Other("upstream must be https".into()));
         }
+        if !crate::gateway::upstream_is_public(&upstream) {
+            return Err(Error::Other(
+                "upstream must be a public host: this node will not fetch its own network on an agent's behalf".into(),
+            ));
+        }
         if let Some(existing) = self.gateways.get(&slug) {
             if existing.owner != owner {
                 return Err(Error::Unauthorized("slug belongs to another agent".into()));
@@ -5938,6 +5943,36 @@ pub fn route_html(
             let did = guard.node_did().to_string();
             let v = guard.verifier_name();
             html(crate::ui::docs_page(&did, v.as_deref()))
+        }
+        // A deliberately trivial upstream, so the gateway can be
+        // exercised end to end against something whose correct answer
+        // is knowable: five percent WIN, ninety-five percent LOST.
+        //
+        // It lives in the node rather than in a service beside it
+        // because the point is to test the PATH - 402, contract, escrow,
+        // forward, settle - and a second deployment would only add ways
+        // for the test to fail that have nothing to do with the code
+        // under test. Registered as a gateway upstream it makes the node
+        // call itself over its own public URL, which is a more honest
+        // rehearsal than a loopback shortcut.
+        //
+        // Free, unauthenticated, and it changes nothing: it is a coin
+        // toss with a timestamp.
+        "/demo/loto" => {
+            use rand::RngCore;
+            let roll = rand::rngs::OsRng.next_u32() % 100;
+            let win = roll < 5;
+            Some((
+                200,
+                "application/json",
+                json!({
+                    "result": if win { "WIN" } else { "LOST" },
+                    "roll": roll,
+                    "odds": "5 in 100",
+                    "at": now_unix(),
+                })
+                .to_string(),
+            ))
         }
         "/robots.txt" => Some((200, "text/plain; charset=utf-8", crate::ui::robots(&base))),
         "/llms.txt" => {
