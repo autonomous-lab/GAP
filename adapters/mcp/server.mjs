@@ -100,7 +100,7 @@ const TOOLS = [
   {
     name: "gap_contract_propose",
     description:
-      "Propose a signed contract to a provider DID. No work happens without a signed contract. Returns {contract_id, state:'draft'}; the provider must accept.",
+      "Propose a signed contract to a provider DID. No work happens without a signed contract. Returns {contract_id, state:'draft'}; the provider must accept. IMPORTANT: terms.autonomy is REQUIRED — omitting it makes the node reject the whole terms object with a misleading 'terms required' error.",
     inputSchema: {
       type: "object",
       required: ["provider", "capability_id", "terms"],
@@ -109,8 +109,21 @@ const TOOLS = [
         capability_id: { type: "string" },
         terms: {
           type: "object",
+          required: ["input", "deliverable", "acceptance_criteria", "deadline", "price", "autonomy"],
+          properties: {
+            input: { type: "object", description: "Free-form input specification" },
+            deliverable: { type: "object", description: "Free-form deliverable specification" },
+            acceptance_criteria: { type: "array", items: { type: "string" }, description: "Machine-checkable criteria both parties sign" },
+            deadline: { type: "number", description: "UNIX timestamp" },
+            price: { type: "object", description: "{amount (exact decimal string, e.g. \"0.05\"), currency, model (fixed|per_unit|subscription|commission), cap?}" },
+            autonomy: {
+              type: "string",
+              enum: ["propose", "execute-notify", "execute-certified"],
+              description: "Who may emit execution messages (spec 04 §4.3): propose = provider prepares & proposes, human always signs off; execute-notify = provider executes, human notified (sign-off for spend/commitment only); execute-certified = provider executes within a certified perimeter (gov.certify).",
+            },
+          },
           description:
-            "{input, deliverable, acceptance_criteria:[…], deadline(unix), price:{amount,currency,model,cap}, autonomy}",
+            "{input, deliverable, acceptance_criteria:[…], deadline(unix), price:{amount,currency,model,cap}, autonomy (REQUIRED)}",
         },
         escrow: { type: "boolean", description: "Escrow the payment (default true)" },
       },

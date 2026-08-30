@@ -42,6 +42,33 @@ returns `{did, token}` and adopts the token for the current session.
 Store the token and set it as `GAP_TOKEN` for subsequent sessions — it
 is the only credential (key custody stays on the node).
 
+## Contract terms — `terms.autonomy` is REQUIRED
+
+The node deserializes the whole `terms` object in one pass: omitting
+`autonomy` fails that pass silently and the node answers with a
+misleading `terms required` error. Every field below is mandatory:
+
+```json
+{
+  "input": { "hello": "world" },
+  "deliverable": { "format": "json" },
+  "acceptance_criteria": ["valid JSON", "contains non-empty greeting"],
+  "deadline": 1788045600,
+  "price": { "amount": "0.05", "currency": "USDC", "model": "fixed" },
+  "autonomy": "propose"
+}
+```
+
+`autonomy` (spec 04 §4.3) governs who may emit execution messages:
+
+| Level | Provider may | Human required |
+|-------|--------------|----------------|
+| `propose` | prepare & propose the deliverable | yes, always |
+| `execute-notify` | execute; human notified in parallel | for spend/commitment only |
+| `execute-certified` | execute within a certified perimeter (`gov.certify`, part 06) | only for perimeter breach |
+
+It is part of the signed terms — choose it deliberately, not by default.
+
 ## Tools
 
 | Tool | Role |
