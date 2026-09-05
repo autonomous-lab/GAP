@@ -2498,6 +2498,8 @@ the content inline"
         token: &str,
         project_id: &str,
         channels: &[String],
+        permissions: &[String],
+        subject: Option<&str>,
     ) -> Result<Value> {
         self.cloud_owned_project(token, project_id)?;
         if channels.len() > 25
@@ -2511,6 +2513,23 @@ the content inline"
         {
             return Err(Error::Other("invalid realtime channel scope".into()));
         }
+        if permissions.is_empty()
+            || permissions.len() > 2
+            || permissions
+                .iter()
+                .any(|permission| !matches!(permission.as_str(), "subscribe" | "publish"))
+        {
+            return Err(Error::Other("invalid realtime permissions".into()));
+        }
+        if subject.is_some_and(|value| {
+            value.is_empty()
+                || value.len() > 128
+                || !value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':' | b'.' | b'@')
+                })
+        }) {
+            return Err(Error::Other("invalid realtime subject".into()));
+        }
         let secret = self
             .realtime_secret
             .as_deref()
@@ -2522,6 +2541,8 @@ the content inline"
         let claims = json!({
             "project_id": project_id,
             "channels": channels,
+            "permissions": permissions,
+            "subject": subject,
             "exp": expires_at,
             "jti": hex::encode(nonce)
         });
@@ -2535,7 +2556,7 @@ the content inline"
         let signed = format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes()));
         self.record(
             "cloud.realtime.token.issued",
-            json!({ "project_id": project_id, "expires_at": expires_at, "channel_count": channels.len() }),
+            json!({ "project_id": project_id, "expires_at": expires_at, "channel_count": channels.len(), "permissions": permissions }),
         );
         Ok(json!({ "token": signed, "expires_at": expires_at }))
     }
@@ -6670,12 +6691,22 @@ pub fn route_with_ip(
                     .collect::<Vec<_>>()),
                 _ => Err(Error::Other("channels must be an array of strings".into())),
             };
-            match (token, channels) {
-                (Some(t), Ok(channels)) => {
-                    guard.cloud_issue_realtime_token(t, project_id, &channels)
+            let permissions = match body.get("permissions") {
+                None => Ok(vec!["subscribe".to_string(), "publish".to_string()]),
+                Some(Value::Array(values)) if values.iter().all(Value::is_string) => Ok(values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()),
+                _ => Err(Error::Other("permissions must be an array of strings".into())),
+            };
+            let subject = body.get("subject").and_then(Value::as_str);
+            match (token, channels, permissions) {
+                (Some(t), Ok(channels), Ok(permissions)) => {
+                    guard.cloud_issue_realtime_token(t, project_id, &channels, &permissions, subject)
                 }
-                (_, Err(error)) => Err(error),
-                (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
+                (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+                (None, _, _) => Err(Error::Unauthorized("missing bearer token".into())),
             }
         },
         (m, p) if matches!(m, "PUT" | "GET") && cloud_route(p, "kv").is_some() => {
@@ -8773,7 +8804,11 @@ mod tests {
 
         arc.lock().unwrap().set_realtime_secret("test-realtime-secret");
         let token_path = format!("/v1/cloud/projects/{project_id}/realtime/tokens");
-        let token_request = json!({ "channels": ["contract:demo"] });
+        let token_request = json!({
+            "channels": ["contract:demo"],
+            "permissions": ["subscribe"],
+            "subject": "visitor:42"
+        });
         let (status, realtime) = route(
             &arc,
             "POST",

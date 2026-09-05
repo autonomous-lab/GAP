@@ -6,6 +6,8 @@ const secret = process.env.REALTIME_SECRET || "test-secret";
 const claims = Buffer.from(JSON.stringify({
   project_id: "prj_test",
   channels: ["contract:demo"],
+  permissions: ["subscribe", "publish"],
+  subject: "test-client",
   exp: Math.floor(Date.now() / 1000) + 60,
   jti: "test"
 })).toString("base64url");
@@ -31,3 +33,30 @@ assert(received.some(message => message.type === "authenticated"));
 assert(received.some(message => message.type === "subscribed"));
 assert(received.some(message => message.type === "message" && message.payload.answer === 42));
 socket.terminate();
+
+const readOnlyClaims = Buffer.from(JSON.stringify({
+  project_id: "prj_test",
+  channels: ["contract:demo"],
+  permissions: ["subscribe"],
+  subject: "read-only-client",
+  exp: Math.floor(Date.now() / 1000) + 60,
+  jti: "read-only-test"
+})).toString("base64url");
+const readOnlyToken = `${readOnlyClaims}.${crypto.createHmac("sha256", secret).update(readOnlyClaims).digest("hex")}`;
+const readOnly = new WebSocket(process.env.REALTIME_URL || "ws://127.0.0.1:8091/v1/realtime");
+const readOnlyReceived = [];
+readOnly.on("message", data => readOnlyReceived.push(JSON.parse(data.toString())));
+await new Promise((resolve, reject) => {
+  readOnly.once("open", resolve);
+  readOnly.once("error", reject);
+});
+readOnly.send(JSON.stringify({ action: "authenticate", token: readOnlyToken }));
+readOnly.send(JSON.stringify({ action: "subscribe", channel: "contract:demo" }));
+await new Promise(resolve => setTimeout(resolve, 50));
+readOnly.send(JSON.stringify({ action: "publish", channel: "contract:demo", payload: "denied" }));
+await new Promise(resolve => setTimeout(resolve, 50));
+assert(readOnlyReceived.some(message => message.type === "authenticated" &&
+  message.subject === "read-only-client"));
+assert(readOnlyReceived.some(message => message.type === "error" &&
+  message.error === "publish not allowed"));
+readOnly.terminate();

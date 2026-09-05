@@ -312,12 +312,18 @@ PRAGMAs, client-managed transactions, temporary schemas and virtual tables,
 interrupts expensive statements, caps returned data, and limits each project
 database to 100 MiB.
 
-Realtime token creation accepts `{ "channels": ["contract:abc"] }` and returns
-a signed token valid for 60 minutes. An empty channel list permits any channel
-inside the project; an explicit list restricts the token to those names. Connect
-to `wss://gap.geta.team/v1/realtime`, then send `authenticate`, `subscribe`,
+Realtime token creation accepts `{ "channels": ["contract:abc"], "permissions":
+["subscribe", "publish"], "subject": "agent:42" }` and returns a signed token
+valid for 60 minutes. Permissions default to both actions for compatibility.
+An empty channel list permits any channel inside the project; an explicit list
+restricts the token to those names. `subject` is an optional, audit-friendly
+client identity and is never trusted as authentication by itself. Connect to
+`wss://gap.geta.team/v1/realtime`, then send `authenticate`, `subscribe`,
 `publish` and `unsubscribe` actions as JSON. Persisted messages can be replayed
-with the subscription's `after` sequence cursor.
+with the subscription's `after` sequence cursor. Static sites should use the
+dependency-free browser client in `sdk/realtime.js`; a server-side token handler
+is provided alongside it so the permanent project bearer never reaches the
+browser.
 
 ## 7. Audit & compliance
 

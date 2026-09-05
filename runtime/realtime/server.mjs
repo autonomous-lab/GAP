@@ -43,6 +43,13 @@ function parseToken(token) {
     throw new Error("expired token");
   }
   claims.channels = Array.isArray(claims.channels) ? claims.channels : [];
+  claims.permissions = Array.isArray(claims.permissions)
+    ? claims.permissions
+    : ["subscribe", "publish"];
+  if (claims.permissions.length === 0 ||
+      claims.permissions.some(permission => !["subscribe", "publish"].includes(permission))) {
+    throw new Error("invalid permissions");
+  }
   return claims;
 }
 
@@ -116,18 +123,22 @@ websocket.on("connection", socket => {
           authenticated: true,
           projectId: claims.project_id,
           allowedChannels: claims.channels,
+          permissions: claims.permissions,
+          subject: typeof claims.subject === "string" ? claims.subject : null,
           expiresAt: claims.exp,
           connectionId: claims.jti
         });
         clients.set(socket, state);
         clearTimeout(timer);
-        return send(socket, { type: "authenticated", project_id: state.projectId, expires_at: state.expiresAt });
+        return send(socket, { type: "authenticated", project_id: state.projectId,
+          subject: state.subject, permissions: state.permissions, expires_at: state.expiresAt });
       }
       if (state.expiresAt <= now()) return socket.close(4401, "token expired");
       if (!bucket(state.connectionRate, "messages", CONNECTION_RATE) ||
           !bucket(projectRates, state.projectId, PROJECT_RATE)) throw new Error("message rate exceeded");
       if (!allowed(state, message.channel)) throw new Error("channel not allowed");
       if (message.action === "subscribe") {
+        if (!state.permissions.includes("subscribe")) throw new Error("subscribe not allowed");
         const active = projectChannels(state.projectId);
         if (!active.has(message.channel) && active.size >= MAX_CHANNELS) throw new Error("channel quota exceeded");
         state.channels.add(message.channel);
@@ -139,9 +150,11 @@ websocket.on("connection", socket => {
         for (const item of history) send(socket, { type: "message", channel: message.channel,
           seq: item.seq, payload: JSON.parse(item.body), created_at: item.created_at, replay: true });
       } else if (message.action === "unsubscribe") {
+        if (!state.permissions.includes("subscribe")) throw new Error("subscribe not allowed");
         state.channels.delete(message.channel);
         send(socket, { type: "unsubscribed", channel: message.channel });
       } else if (message.action === "publish") {
+        if (!state.permissions.includes("publish")) throw new Error("publish not allowed");
         if (!state.channels.has(message.channel)) throw new Error("subscribe before publishing");
         const body = JSON.stringify(message.payload ?? null);
         const bytes = Buffer.byteLength(body);
