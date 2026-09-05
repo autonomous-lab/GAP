@@ -7,6 +7,7 @@ const port = Number(process.env.SANDBOX_PORT || "8090");
 const token = process.env.SANDBOX_TOKEN || "";
 const maxBody = Number(process.env.SANDBOX_MAX_BODY_BYTES || "600000");
 const timeoutMs = Number(process.env.SANDBOX_TIMEOUT_MS || "1000");
+const capabilityTimeoutMs = Number(process.env.SANDBOX_CAPABILITY_TIMEOUT_MS || "35000");
 const capabilityUrl = process.env.CAPABILITY_URL || "http://gap-node:8080/internal/functions/capability";
 const maxCapabilities = Number(process.env.SANDBOX_MAX_CAPABILITIES || "32");
 const workerPath = fileURLToPath(new URL("./worker.mjs", import.meta.url));
@@ -56,7 +57,7 @@ async function callCapability(projectId, request) {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ project_id: projectId, request }),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: AbortSignal.timeout(capabilityTimeoutMs),
   });
   const body = await response.json();
   if (!response.ok) throw new Error(body?.error?.message || body?.error || "capability failed");

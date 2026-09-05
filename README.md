@@ -164,7 +164,7 @@ infrastructure without operating another server:
 | SQLite database | parameterized queries, 100 MiB database |
 | JavaScript functions | 1 MiB per version, 100 MiB source total; isolated container |
 | Function HTTP | scoped 60-minute tokens, path/method/query forwarding, CORS |
-| HTTP egress | exact-host allowlist, HTTPS GET/POST, anti-SSRF, 1 MiB response |
+| HTTP egress | exact-host allowlist, HTTPS GET/POST, anti-SSRF, 30 s timeout, 3 MiB response |
 | Schedules | `*/N * * * *` interval cron, 1–1440 minutes |
 | Realtime | 25 connections, 25 channels, 64 KiB messages, 24-hour retention, 25 MiB persisted |
 

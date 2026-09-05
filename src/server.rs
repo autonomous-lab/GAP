@@ -8068,7 +8068,7 @@ fn execute_function_http(store: &crate::cloud::ProjectStore, args: &Value) -> Re
         )));
     }
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .timeout_global(Some(crate::cloud::FUNCTION_HTTP_TIMEOUT))
         .max_redirects(0)
         .build()
         .new_agent();
@@ -8129,8 +8129,8 @@ fn execute_function_http(store: &crate::cloud::ProjectStore, args: &Value) -> Re
         .body_mut()
         .read_to_vec()
         .map_err(|e| Error::Other(format!("HTTP response failed: {e}")))?;
-    if bytes.len() > 1024 * 1024 {
-        return Err(Error::Other("HTTP response exceeds 1 MiB".into()));
+    if bytes.len() > crate::cloud::MAX_FUNCTION_HTTP_RESPONSE_BYTES {
+        return Err(Error::Other("HTTP response exceeds 3 MiB".into()));
     }
     Ok(
         json!({ "status": status, "content_type": content_type, "body": String::from_utf8_lossy(&bytes) }),

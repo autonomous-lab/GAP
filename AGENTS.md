@@ -389,8 +389,8 @@ async (request, gap) => {
 }
 ```
 
-Outbound HTTP is brokered by GAP, limited to HTTPS `GET`/`POST`, a 5-second
-timeout, 1 MiB responses and the headers `Accept`, `Content-Type`, `Cookie` and
+Outbound HTTP is brokered by GAP, limited to HTTPS `GET`/`POST`, a 30-second
+timeout, 3 MiB responses and the headers `Accept`, `Content-Type`, `Cookie` and
 `User-Agent`. Configure exact hosts first; redirects, private/link-local
 addresses and unlisted hosts are refused:
 

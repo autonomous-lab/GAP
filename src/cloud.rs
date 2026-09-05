@@ -28,6 +28,8 @@ pub const MAX_DATABASE_COLUMNS: usize = 50;
 pub const MAX_DATABASE_CELL_BYTES: usize = 1024 * 1024;
 pub const MAX_DATABASE_RESULT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_DATABASE_TIME: Duration = Duration::from_millis(250);
+pub const FUNCTION_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+pub const MAX_FUNCTION_HTTP_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatabaseResult {

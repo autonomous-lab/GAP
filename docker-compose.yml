@@ -78,6 +78,7 @@ services:
     environment:
       SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
       SANDBOX_TIMEOUT_MS: "${GAP_FUNCTION_TIMEOUT_MS:-1000}"
+      SANDBOX_CAPABILITY_TIMEOUT_MS: "${GAP_FUNCTION_CAPABILITY_TIMEOUT_MS:-35000}"
       CAPABILITY_URL: "http://gap-node:8080/internal/functions/capability"
     read_only: true
     tmpfs:
