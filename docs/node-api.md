@@ -297,9 +297,10 @@ runs only in the separately constrained sandbox container and the node releases
 its global state lock before waiting for the result.
 
 The free-tier storage guardrails are enforced transactionally: 64 KiB per KV
-value and 10 MiB total KV data per project; 10 MiB per object and 100 MiB total
-object data per project; 512 KiB per function version. Replacing an existing
-key is charged on the resulting size, not counted twice.
+value and 25 MiB total KV data per project; 1 MiB per object and 100 MiB total
+object data per project; 1 MiB per function version and 100 MiB total function
+source per project. Replacing an existing key is charged on the resulting size,
+not counted twice.
 
 Database calls accept `{ "sql": "...", "params": [...] }`. Parameters are
 positional SQLite values; blobs use `{ "blob_base64": "..." }`. Query results

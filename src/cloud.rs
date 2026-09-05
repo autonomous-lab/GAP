@@ -15,10 +15,11 @@ use std::time::{Duration, Instant};
 
 pub const MAX_KEY_BYTES: usize = 512;
 pub const MAX_KV_BYTES: usize = 64 * 1024;
-pub const MAX_OBJECT_BYTES: usize = 10 * 1024 * 1024;
-pub const MAX_FUNCTION_BYTES: usize = 512 * 1024;
-pub const MAX_PROJECT_KV_BYTES: u64 = 10 * 1024 * 1024;
+pub const MAX_OBJECT_BYTES: usize = 1024 * 1024;
+pub const MAX_FUNCTION_BYTES: usize = 1024 * 1024;
+pub const MAX_PROJECT_KV_BYTES: u64 = 25 * 1024 * 1024;
 pub const MAX_PROJECT_OBJECT_BYTES: u64 = 100 * 1024 * 1024;
+pub const MAX_PROJECT_FUNCTION_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_PROJECT_DATABASE_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_DATABASE_SQL_BYTES: usize = 32 * 1024;
 pub const MAX_DATABASE_PARAMS: usize = 100;
@@ -326,6 +327,13 @@ impl ProjectStore {
         enforce_size("function", source.len(), MAX_FUNCTION_BYTES)?;
         let digest = format!("sha256:{}", crate::sha256_hex(source));
         let tx = self.control.transaction().map_err(db_error)?;
+        enforce_additive_quota(
+            &tx,
+            "function_versions",
+            "length(source)",
+            source.len() as u64,
+            MAX_PROJECT_FUNCTION_BYTES,
+        )?;
         let version: i64 = tx
             .query_row(
                 "SELECT COALESCE(MAX(version),0)+1 FROM function_versions WHERE name=?1",
@@ -561,6 +569,25 @@ fn enforce_project_quota(
     Ok(())
 }
 
+fn enforce_additive_quota(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    size_expression: &str,
+    incoming_bytes: u64,
+    limit: u64,
+) -> Result<()> {
+    // Identifiers are fixed call-site constants, never request data.
+    let sql = format!("SELECT COALESCE(SUM({size_expression}),0) FROM {table}");
+    let used: i64 = tx.query_row(&sql, [], |row| row.get(0)).map_err(db_error)?;
+    let projected = (used.max(0) as u64).saturating_add(incoming_bytes);
+    if projected > limit {
+        return Err(Error::Other(format!(
+            "project {table} quota exceeded: {projected} bytes would exceed {limit}"
+        )));
+    }
+    Ok(())
+}
+
 fn parse_ruling(value: &str) -> ReleaseRuling {
     match value {
         "approved" => ReleaseRuling::Approved,
@@ -730,6 +757,9 @@ mod tests {
         assert!(s
             .deploy_function("x", "wasm", &vec![0; MAX_FUNCTION_BYTES + 1], 1)
             .is_err());
+        s.deploy_function("x", "javascript", b"a", 1).unwrap();
+        let tx = s.control.transaction().unwrap();
+        assert!(enforce_additive_quota(&tx, "function_versions", "length(source)", 1, 1).is_err());
     }
 
     #[test]
