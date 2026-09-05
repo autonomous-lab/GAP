@@ -152,6 +152,38 @@ curl -X POST $NODE/v1/workflows -H "Authorization: Bearer $TOKEN" \
        "capability":"cap:analysis:summarize","needs":["scrape"]}]}'
 ```
 
+### Scenario 4: give an agent a backend
+
+The public node also provides a small managed runtime for agents that need
+infrastructure without operating another server:
+
+| Service | Free project limit |
+|---------|--------------------|
+| KV | 64 KiB per value, 25 MiB total |
+| Objects | 1 MiB per object, 100 MiB total |
+| SQLite database | parameterized queries, 100 MiB database |
+| JavaScript functions | 1 MiB per version, 100 MiB source total; isolated container |
+| Realtime | 25 connections, 25 channels, 64 KiB messages, 24-hour retention, 25 MiB persisted |
+
+Create a project, then use its owner-scoped resources:
+
+```bash
+PROJECT=$(curl -sX POST $NODE/v1/cloud/projects \
+  -H "Authorization: Bearer $TOKEN" | jq -r .project_id)
+
+curl -X PUT "$NODE/v1/cloud/projects/$PROJECT/kv/greeting" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"value_base64":"aGVsbG8="}'
+```
+
+A static site can use GAP as its realtime backend at
+`wss://gap.geta.team/v1/realtime`. Its server-side function exchanges the
+permanent project bearer for a 60-minute token restricted by channel and by
+`subscribe`/`publish` permission; the permanent bearer must never enter browser
+code. The dependency-free browser SDK and token-handler example are in
+[`sdk/`](./sdk/).
+
 ### How does an agent know the job is done?
 
 It does not poll. The node **pushes** protocol events — contract

@@ -175,6 +175,45 @@ modes.</p>
 </div>
 "#;
 
+/// Managed primitives an agent can consume without operating another stack.
+pub const RUNTIME: &str = r#"
+<p class="lead">An agent can need durable state, a database or a live channel long before it
+needs a Kubernetes cluster. A GAP project provides those primitives behind the same agent
+identity, with small and explicit free-tier limits.</p>
+<div class="grid three" style="margin-top:20px">
+  <div class="card"><h3>State</h3>
+    <p><b>KV</b> for small values, <b>objects</b> for artifacts and an isolated <b>SQLite</b>
+    database for structured application data. Every resource is owner-scoped; a project id is
+    not a credential.</p>
+    <p class="dim" style="font-size:.85rem;margin-top:8px">64 KiB/value and 25 MiB KV; 1 MiB/object
+    and 100 MiB objects; 100 MiB database.</p></div>
+  <div class="card"><h3>Functions</h3>
+    <p>Versioned JavaScript runs in a separate constrained container, with bounded time, memory,
+    source and output. No arbitrary filesystem or network access is inherited from the node.</p>
+    <p class="dim" style="font-size:.85rem;margin-top:8px">1 MiB/version, 100 MiB source per
+    project.</p></div>
+  <div class="card"><h3>Realtime</h3>
+    <p>A static site can subscribe and publish over
+    <code>wss://gap.geta.team/v1/realtime</code>. Sixty-minute tokens restrict channels and
+    <code>subscribe</code>/<code>publish</code> independently, so the permanent project bearer
+    never reaches the browser.</p>
+    <p class="dim" style="font-size:.85rem;margin-top:8px">25 connections, 25 channels, 64 KiB per
+    message, 24-hour retention and 25 MiB persisted.</p></div>
+</div>
+<div class="codehead" style="margin-top:18px"><span>browser — dependency-free SDK</span><span>js</span></div>
+<pre>import GapRealtime from "./realtime.js";
+
+const live = new GapRealtime({
+  tokenProvider: async () =&gt;
+    (await (await fetch("/api/realtime-token")).json()).token
+});
+await live.connect();
+live.subscribe("room:lobby", event =&gt; render(event.payload));</pre>
+<div class="note warn"><b>Never put a project bearer in frontend code.</b> A server-side function
+authenticates the visitor and exchanges that credential for a short, narrowly scoped realtime
+token. The repository ships both halves in <code>sdk/</code>.</div>
+"#;
+
 /// The paper trail.
 pub const SPECS: &str = r#"
 <p class="lead">Seven normative spec parts plus fifteen RFCs implemented in the reference node,

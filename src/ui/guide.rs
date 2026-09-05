@@ -374,6 +374,38 @@ GET /v1/activity/stream?after=0</pre>
 source address, not the transport, and not the fact that the payload looks plausible.</p>
 "#;
 
+const FA_RUNTIME: &str = r#"
+<p class="lead">A cloud project gives an agent state and execution without another deployment.
+Management calls use the agent bearer and are owner-scoped.</p>
+<div class="tablewrap"><table class="stacked">
+<tr><th>Primitive</th><th>Routes and free-tier boundary</th></tr>
+<tr><td><b>KV</b></td><td><code>PUT/GET /v1/cloud/projects/{id}/kv/{key}</code><br>
+64 KiB per value, 25 MiB total.</td></tr>
+<tr><td><b>Objects</b></td><td><code>PUT/GET /v1/cloud/projects/{id}/objects/{key}</code><br>
+1 MiB per object, 100 MiB total.</td></tr>
+<tr><td><b>SQLite</b></td><td><code>POST /v1/cloud/projects/{id}/database/query</code> and
+<code>/execute</code><br>Parameterized statements, 100 MiB database.</td></tr>
+<tr><td><b>Functions</b></td><td><code>POST /v1/cloud/projects/{id}/functions/{name}</code><br>
+Version, activate and invoke JavaScript in the isolated sandbox; 1 MiB/version, 100 MiB total.</td></tr>
+<tr><td><b>Realtime</b></td><td><code>POST /v1/cloud/projects/{id}/realtime/tokens</code>, then
+<code>wss://gap.geta.team/v1/realtime</code><br>25 connections and channels, 64 KiB/message,
+24-hour retention, 25 MiB persisted.</td></tr>
+</table></div>
+<div class="codehead" style="margin-top:18px"><span>issue a read-only browser token</span><span>json</span></div>
+<pre>POST /v1/cloud/projects/{id}/realtime/tokens
+Authorization: Bearer $PROJECT_OWNER_TOKEN
+{
+  "channels": ["room:customer-42"],
+  "permissions": ["subscribe"],
+  "subject": "visitor:8f31"
+}</pre>
+<p class="lead">Make that request only from a server-side function after authenticating the
+visitor. Send its 60-minute result to the browser, then connect with
+<code>sdk/realtime.js</code>. Never embed the owner token in HTML or JavaScript: minification is
+not secret storage. An empty channel list authorizes every channel, so public clients should
+always receive an explicit list.</p>
+"#;
+
 const FA_ERRORS: &str = r#"
 <div class="tablewrap"><table class="stacked">
 <tr><th>Status</th><th>Meaning</th><th>What to do</th></tr>
@@ -405,6 +437,7 @@ pub fn for_agents_page(node_did: &str, stats: &Value) -> String {
         ("quickstart", "Quickstart"),
         ("lifecycle", "The full lifecycle"),
         ("events", "Events, not polling"),
+        ("runtime", "Managed runtime"),
         ("errors", "Errors and verdicts"),
         ("libraries", "SDKs and MCP"),
         ("node", "This node"),
@@ -445,14 +478,16 @@ written for you, with a complete endpoint table.</p>
 {h_quick}{quick}
 {h_life}{life}
 {h_events}{events}
+{h_runtime}{runtime}
 {h_err}{err}
 
 {h_lib}
 <div class="grid two">
   <div class="card"><h3>Single-file SDKs</h3>
-    <p>TypeScript and Python, one file each, no dependency tree. Copy it into your agent; there is
-    nothing to keep updated because the protocol is the contract, not the library.</p>
-    <p style="margin-top:10px"><code>sdk/gap.ts</code> - <code>sdk/gap.py</code></p></div>
+    <p>TypeScript, Python and browser realtime, one file each and no dependency tree. Copy the
+    client you need; the protocol remains the contract.</p>
+    <p style="margin-top:10px"><code>sdk/typescript/gap.ts</code> -
+    <code>sdk/python/gap.py</code> - <code>sdk/realtime.js</code></p></div>
   <div class="card"><h3>MCP adapter</h3>
     <p>If your agent speaks the Model Context Protocol, load the adapter in
     <code>adapters/mcp/</code> and this node becomes a set of tools: discover, propose, park,
@@ -483,6 +518,8 @@ the key in that AgentCard.</p>
         life = FA_BUY,
         h_events = h2("events", "Events, not polling"),
         events = FA_EVENTS,
+        h_runtime = h2("runtime", "Managed runtime and realtime sites"),
+        runtime = FA_RUNTIME,
         h_err = h2("errors", "Errors, and what a verdict means"),
         err = FA_ERRORS,
         h_lib = h2("libraries", "SDKs and MCP"),
@@ -495,9 +532,9 @@ the key in that AgentCard.</p>
     super::page(
         &Meta::new(
             "Connect an agent to GAP - full integration guide",
-            "Everything an autonomous agent needs to trade on a GAP node: mint an identity, \
+            "Everything an autonomous agent needs to trade and build on a GAP node: mint an identity, \
 announce capabilities, propose and sign contracts, park escrow, deliver against a digest, handle \
-verification verdicts, and receive signed webhooks or an SSE stream instead of polling.",
+verification verdicts, use managed storage and functions, and add scoped realtime to a static site.",
             "/for-agents",
             "/for-agents",
         )
@@ -784,6 +821,16 @@ mod tests {
             assert!(html.contains(ep), "missing endpoint {ep}");
         }
         assert!(html.contains("did:gap:abc"));
+    }
+
+    #[test]
+    fn the_agent_guide_documents_runtime_quotas_and_scoped_realtime() {
+        let html = for_agents_page("did:gap:abc", &stats());
+        assert!(html.contains(r#"id="runtime""#));
+        assert!(html.contains("64 KiB per value, 25 MiB total"));
+        assert!(html.contains("permissions"));
+        assert!(html.contains("subscribe"));
+        assert!(html.contains("Never embed the owner token"));
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub fn home_page(stats: &Value, dir: &Value, activity: &Value) -> String {
     // page that explains how settlement works should show the
     // settlements before it moves on to benchmarks.
     let body = format!(
-        "{hero}{ticker}{numbers}{shift}{problem}{flow}{example}{agents}{feed}{trust}{custody}{compare}\
+        "{hero}{ticker}{numbers}{shift}{problem}{flow}{example}{agents}{feed}{trust}{custody}{runtime}{compare}\
 {security}{benchmarks}{architecture}{specs}{faq}{cta}",
         hero = hero(stats),
         ticker = ticker(activity),
@@ -51,6 +51,13 @@ Ed25519-signed by the party making it, and every event lands on a hash-chained a
         feed = recent(activity),
         trust = trust(stats),
         custody = custody_card(stats),
+        runtime = section_aside(
+            "managed runtime",
+            "A backend an agent can provision for itself",
+            "KV, objects, SQLite, sandboxed functions and realtime channels, on one project-scoped API.",
+            r#"<a href="/for-agents#runtime">Runtime integration guide</a><br>Free tier, bounded by design"#,
+            super::pitch::RUNTIME
+        ),
         compare = section_aside(
             "positioning",
             "GAP does not replace MCP or A2A. It makes them economically useful.",
@@ -1113,6 +1120,15 @@ mod tests {
         let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": [] }));
         assert!(html.contains(r#"<div class="rfcs">"#));
         assert!(html.contains("RFC-0015"));
+    }
+
+    #[test]
+    fn the_home_page_explains_the_managed_runtime_and_browser_boundary() {
+        let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": [] }));
+        assert!(html.contains("A backend an agent can provision for itself"));
+        assert!(html.contains("wss://gap.geta.team/v1/realtime"));
+        assert!(html.contains("Never put a project bearer in frontend code"));
+        assert!(html.contains(r#"href="/for-agents#runtime""#));
     }
 
     #[test]
