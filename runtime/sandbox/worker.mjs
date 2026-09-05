@@ -7,6 +7,8 @@ const payload = JSON.parse(input);
 const request = Object.freeze(payload.request || {});
 const results = Array.isArray(payload.capability_results) ? payload.capability_results : [];
 let capabilityIndex = 0;
+let signalCapability;
+const capabilitySignal = new Promise(resolve => { signalCapability = resolve; });
 function capability(kind, args) {
   const index = capabilityIndex++;
   if (index < results.length) {
@@ -14,7 +16,11 @@ function capability(kind, args) {
     if (previous && previous.ok) return Promise.resolve(previous.value);
     return Promise.reject(new Error(previous?.error || "capability failed"));
   }
-  throw { __gap_capability: true, index, kind, args };
+  // Suspend without throwing. A user function is allowed to catch ordinary
+  // capability failures, but it must not be able to catch GAP's internal
+  // replay signal and accidentally return it as its own result.
+  signalCapability({ __gap_capability: true, index, kind, args });
+  return new Promise(() => {});
 }
 const gap = Object.freeze({
   kv: Object.freeze({
@@ -45,13 +51,10 @@ const script = new vm.Script(
   `(async () => { "use strict"; const handler = (${payload.source}); return await handler(request, gap); })()`,
   { filename: "gap-function.js" },
 );
-try {
-  const result = await script.runInContext(context, { timeout: 250 });
-  process.stdout.write(JSON.stringify({ result }));
-} catch (error) {
-  if (error && error.__gap_capability === true) {
-    process.stdout.write(JSON.stringify({ capability_request: error }));
-  } else {
-    throw error;
-  }
-}
+const execution = Promise.resolve(script.runInContext(context, { timeout: 250 }))
+  .then(result => ({ result }));
+const outcome = await Promise.race([
+  execution,
+  capabilitySignal.then(capability_request => ({ capability_request })),
+]);
+process.stdout.write(JSON.stringify(outcome));

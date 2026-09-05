@@ -394,6 +394,11 @@ timeout, 1 MiB responses and the headers `Accept`, `Content-Type`, `Cookie` and
 `User-Agent`. Configure exact hosts first; redirects, private/link-local
 addresses and unlisted hosts are refused:
 
+There is no separate capability-grant endpoint: the project's `/egress`
+allowlist is the grant for `gap.http`. An `approved_with_constraints` release
+ruling means the function must remain inside these runtime constraints; it does
+not disable `http.request`.
+
 ```bash
 curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/egress" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
