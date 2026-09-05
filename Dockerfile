@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # GAP node - multi-stage build
 #
 # Stage 1: compile the Rust binary (musl, statically linked).
@@ -28,25 +29,25 @@ COPY Cargo.toml Cargo.lock ./
 # it silently defeated the dependency cache below, whose errors are
 # swallowed, so every build recompiled every dependency from scratch.
 COPY benches ./benches
-# Warm the dependency cache with a stub so the real build is fast.
-RUN mkdir -p src && \
-    printf 'fn main() {}\n' > src/main.rs && \
-    printf 'pub fn _stub() {}\n' > src/lib.rs && \
-    cargo build --release 2>/dev/null; true
-# Copy the real sources.
+# Keep downloads and compiled objects outside disposable image layers. BuildKit
+# reuses these caches even when a source COPY invalidates the following layer.
+RUN --mount=type=cache,id=gap-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=gap-cargo-git,target=/usr/local/cargo/git \
+    cargo fetch
+
+# Copy the real sources only after dependency resolution.
 COPY src ./src
 COPY examples ./examples
-# Docker COPY preserves the mtimes from the build context, and those can
-# be OLDER than the stub written above. Cargo decides freshness by
-# mtime, concludes nothing changed, and ships the 531 KB stub binary -
-# a node that starts, prints nothing and exits 0. Touching the sources
-# forces the real build.
-RUN find src examples benches -name '*.rs' -exec touch {} + && \
+ENV CARGO_INCREMENTAL=1
+RUN --mount=type=cache,id=gap-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=gap-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=gap-cargo-target,target=/build/target \
     cargo build --release && \
     # Fail loudly here rather than shipping an empty binary again.
     # GAP_STORAGE is an env-var name read by main.rs, so it is present
     # verbatim in any real build and absent from a stub.
-    grep -q "GAP_STORAGE" target/release/gap
+    grep -q "GAP_STORAGE" target/release/gap && \
+    cp target/release/gap /tmp/gap-node
 
 # Stage 2: minimal runtime image.
 #
@@ -63,7 +64,7 @@ RUN find src examples benches -name '*.rs' -exec touch {} + && \
 FROM alpine:3.20
 
 WORKDIR /app
-COPY --from=builder /build/target/release/gap /usr/local/bin/gap-node
+COPY --from=builder /tmp/gap-node /usr/local/bin/gap-node
 
 # Data directory for the SQLite database (default storage). Created,
 # not declared as a VOLUME: compose bind-mounts ./data here, and a
