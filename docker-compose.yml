@@ -58,11 +58,37 @@ services:
       # default user when none is set, so the node must authenticate.
       GAP_CLICKHOUSE_USER: "${CLICKHOUSE_USER:-default}"
       GAP_CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
+      GAP_FUNCTION_SANDBOX_URL: "http://gap-function-sandbox:8090"
+      GAP_FUNCTION_SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
     depends_on:
       clickhouse:
         condition: service_healthy
+      gap-function-sandbox:
+        condition: service_healthy
     volumes:
       - ./data/gap-node:/data
+    networks:
+      - default
+      - sandbox_net
+    restart: always
+
+  gap-function-sandbox:
+    build: ./runtime/sandbox
+    environment:
+      SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
+      SANDBOX_TIMEOUT_MS: "${GAP_FUNCTION_TIMEOUT_MS:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.50
+    networks:
+      - sandbox_net
     restart: always
 
   clickhouse:
@@ -108,3 +134,7 @@ services:
     volumes:
       - ./data/gap-demo:/state
     restart: always
+
+networks:
+  sandbox_net:
+    internal: true

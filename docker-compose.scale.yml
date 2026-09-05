@@ -44,11 +44,18 @@ services:
       GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
       GAP_CLICKHOUSE_USER: "${CLICKHOUSE_USER:-default}"
       GAP_CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
+      GAP_FUNCTION_SANDBOX_URL: "http://gap-function-sandbox:8090"
+      GAP_FUNCTION_SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
     depends_on:
       clickhouse:
         condition: service_healthy
+      gap-function-sandbox:
+        condition: service_healthy
     volumes:
       - ./data/gap-node-1:/data
+    networks:
+      - default
+      - sandbox_net
     restart: always
     # No host ports: only reachable through the LB.
 
@@ -65,11 +72,18 @@ services:
       GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
       GAP_CLICKHOUSE_USER: "${CLICKHOUSE_USER:-default}"
       GAP_CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
+      GAP_FUNCTION_SANDBOX_URL: "http://gap-function-sandbox:8090"
+      GAP_FUNCTION_SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
     depends_on:
       clickhouse:
         condition: service_healthy
+      gap-function-sandbox:
+        condition: service_healthy
     volumes:
       - ./data/gap-node-2:/data
+    networks:
+      - default
+      - sandbox_net
     restart: always
 
   gap-node-3:
@@ -85,11 +99,37 @@ services:
       GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
       GAP_CLICKHOUSE_USER: "${CLICKHOUSE_USER:-default}"
       GAP_CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
+      GAP_FUNCTION_SANDBOX_URL: "http://gap-function-sandbox:8090"
+      GAP_FUNCTION_SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
     depends_on:
       clickhouse:
         condition: service_healthy
+      gap-function-sandbox:
+        condition: service_healthy
     volumes:
       - ./data/gap-node-3:/data
+    networks:
+      - default
+      - sandbox_net
+    restart: always
+
+  gap-function-sandbox:
+    build: ./runtime/sandbox
+    environment:
+      SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
+      SANDBOX_TIMEOUT_MS: "${GAP_FUNCTION_TIMEOUT_MS:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.50
+    networks:
+      - sandbox_net
     restart: always
 
   clickhouse:
@@ -114,3 +154,7 @@ services:
       timeout: 5s
       retries: 12
     restart: always
+
+networks:
+  sandbox_net:
+    internal: true

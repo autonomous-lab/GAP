@@ -483,6 +483,14 @@ pub struct NodeState {
     /// on-chain path, and re-deriving it from the policy would break if
     /// the policy changed between park and release.
     balance_holds: HashMap<String, Amount>,
+    /// GAP Runtime's global project projection. The durable copy uses
+    /// the existing ClickHouse-backed generic state table.
+    cloud_projects: HashMap<String, crate::cloud::ProjectRecord>,
+    /// Tenant SQLite files live below this directory, one directory per project.
+    cloud_root: std::path::PathBuf,
+    /// Internal-only function runner. Empty configuration fails closed.
+    function_sandbox_url: Option<String>,
+    function_sandbox_token: Option<String>,
 }
 
 impl NodeState {
@@ -699,6 +707,8 @@ impl NodeState {
             .into_iter()
             .map(|r| r.key)
             .collect();
+        let cloud_projects: HashMap<String, crate::cloud::ProjectRecord> =
+            load(&*storage, "cloud_projects");
 
         // job_ref -> contract is derivable from the job history, so it
         // is rebuilt rather than stored twice and allowed to disagree.
@@ -845,6 +855,16 @@ impl NodeState {
             balance_holds,
             credited_deposits,
             deposit_chain: None,
+            cloud_projects,
+            cloud_root: std::env::var("GAP_CLOUD_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/data/runtime-projects")),
+            function_sandbox_url: std::env::var("GAP_FUNCTION_SANDBOX_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            function_sandbox_token: std::env::var("GAP_FUNCTION_SANDBOX_TOKEN")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
         };
 
         // One-time migration of the legacy jobs rows, done here rather
@@ -893,6 +913,15 @@ impl NodeState {
     /// Configure the node-arbitration admin token.
     pub fn set_admin_token(&mut self, token: impl Into<String>) {
         self.admin_token = Some(token.into());
+    }
+
+    pub fn set_cloud_root(&mut self, root: impl Into<std::path::PathBuf>) {
+        self.cloud_root = root.into();
+    }
+
+    pub fn set_function_sandbox(&mut self, url: &str, token: &str) {
+        self.function_sandbox_url = Some(url.trim_end_matches('/').to_string());
+        self.function_sandbox_token = Some(token.to_string());
     }
 
     fn persist_contract(&mut self, contract: &Contract) {
@@ -2333,6 +2362,195 @@ the content inline"
                 "gap-node: SPINE WRITE FAILED for {kind}: {e} — the event is in memory but                  NOT persisted; it will be missing after a restart"
             ),
         }
+    }
+
+    // ---- GAP Runtime -------------------------------------------------
+
+    pub fn cloud_create_project(&mut self, token: &str) -> Result<crate::cloud::ProjectRecord> {
+        let owner_did = self.agent_by_token(token)?.identity.did().to_string();
+        use rand::RngCore;
+        let mut random = [0u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut random);
+        let project_id = format!("prj_{}", hex::encode(random));
+        crate::cloud::ProjectStore::open(&self.cloud_root, &project_id)?;
+        let now = now_unix();
+        let project = crate::cloud::ProjectRecord {
+            project_id: project_id.clone(),
+            owner_did,
+            status: "active".into(),
+            plan: "free".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        self.cloud_projects
+            .insert(project_id.clone(), project.clone());
+        self.save_state("cloud_projects", &project_id, &project);
+        self.record(
+            "cloud.project.created",
+            json!({ "project_id": project_id, "owner_did": project.owner_did }),
+        );
+        Ok(project)
+    }
+
+    pub fn cloud_list_projects(&self, token: &str) -> Result<Vec<crate::cloud::ProjectRecord>> {
+        let owner = self.agent_by_token(token)?.identity.did().to_string();
+        let mut projects: Vec<_> = self
+            .cloud_projects
+            .values()
+            .filter(|p| p.owner_did == owner)
+            .cloned()
+            .collect();
+        projects.sort_by_key(|p| p.created_at);
+        Ok(projects)
+    }
+
+    fn cloud_owned_project(&self, token: &str, project_id: &str) -> Result<crate::cloud::ProjectRecord> {
+        let owner = self.agent_by_token(token)?.identity.did().to_string();
+        let project = self
+            .cloud_projects
+            .get(project_id)
+            .cloned()
+            .ok_or_else(|| Error::Other("unknown cloud project".into()))?;
+        if project.owner_did != owner {
+            return Err(Error::Unauthorized("cloud project belongs to another agent".into()));
+        }
+        if project.status != "active" {
+            return Err(Error::Other("cloud project is not active".into()));
+        }
+        Ok(project)
+    }
+
+    pub fn cloud_put_kv(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        key: &str,
+        value: &[u8],
+        expires_at: Option<u64>,
+    ) -> Result<()> {
+        self.cloud_owned_project(token, project_id)?;
+        crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?
+            .put_kv(key, value, expires_at, now_unix())?;
+        self.record(
+            "cloud.kv.put",
+            json!({ "project_id": project_id, "key_digest": crate::sha256_hex(key.as_bytes()), "size_bytes": value.len() }),
+        );
+        Ok(())
+    }
+
+    pub fn cloud_get_kv(
+        &self,
+        token: &str,
+        project_id: &str,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        self.cloud_owned_project(token, project_id)?;
+        crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?.get_kv(key, now_unix())
+    }
+
+    pub fn cloud_put_object(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        key: &str,
+        content: &[u8],
+        media_type: &str,
+    ) -> Result<String> {
+        self.cloud_owned_project(token, project_id)?;
+        let digest = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?
+            .put_object(key, content, media_type, now_unix())?;
+        self.record(
+            "cloud.object.put",
+            json!({ "project_id": project_id, "object_digest": digest, "size_bytes": content.len() }),
+        );
+        Ok(digest)
+    }
+
+    pub fn cloud_get_object(
+        &self,
+        token: &str,
+        project_id: &str,
+        key: &str,
+    ) -> Result<Option<crate::cloud::StoredObject>> {
+        self.cloud_owned_project(token, project_id)?;
+        crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?.get_object(key)
+    }
+
+    pub fn cloud_deploy_function(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        name: &str,
+        runtime: &str,
+        source: &[u8],
+    ) -> Result<crate::cloud::FunctionVersion> {
+        self.cloud_owned_project(token, project_id)?;
+        let mut store = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?;
+        let mut version = store.deploy_function(name, runtime, source, now_unix())?;
+        // Tier 1 release judgement: supported runtime, bounded source and
+        // mandatory container constraints. It authorizes storage and later
+        // sandbox execution, never execution inside the GAP node.
+        store.set_function_ruling(
+            name,
+            version.version,
+            crate::cloud::ReleaseRuling::ApprovedWithConstraints,
+        )?;
+        version.ruling = crate::cloud::ReleaseRuling::ApprovedWithConstraints;
+        self.record(
+            "cloud.function.deployed",
+            json!({ "project_id": project_id, "name": name, "version": version.version, "digest": version.digest, "ruling": "approved_with_constraints" }),
+        );
+        Ok(version)
+    }
+
+    pub fn cloud_activate_function(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        name: &str,
+        version: u64,
+    ) -> Result<()> {
+        self.cloud_owned_project(token, project_id)?;
+        crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?
+            .activate_function(name, version)?;
+        self.record(
+            "cloud.function.activated",
+            json!({ "project_id": project_id, "name": name, "version": version }),
+        );
+        Ok(())
+    }
+
+    fn cloud_prepare_invocation(
+        &self,
+        token: &str,
+        project_id: &str,
+        name: &str,
+        request: Value,
+    ) -> Result<(String, String, Value, u64, String)> {
+        self.cloud_owned_project(token, project_id)?;
+        let function = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?
+            .active_function(name)?
+            .ok_or_else(|| Error::Other("function has no active version".into()))?;
+        if function.runtime != "javascript" {
+            return Err(Error::Other("WASM execution is not enabled yet".into()));
+        }
+        let source = String::from_utf8(function.source)
+            .map_err(|_| Error::Other("JavaScript function source is not UTF-8".into()))?;
+        let url = self
+            .function_sandbox_url
+            .clone()
+            .ok_or_else(|| Error::Other("function sandbox is not configured".into()))?;
+        let sandbox_token = self
+            .function_sandbox_token
+            .clone()
+            .ok_or_else(|| Error::Other("function sandbox token is not configured".into()))?;
+        Ok((
+            url,
+            sandbox_token,
+            json!({ "source": source, "request": request }),
+            function.version,
+            function.digest,
+        ))
     }
 
     /// Queue one event for every subscription that is active, wants the
@@ -6283,11 +6501,141 @@ pub fn route_with_ip(
         );
     }
 
+    // Sandbox I/O must happen without the global protocol lock. A slow or
+    // hostile function gets its own timeout; it must not stop contracts,
+    // payments and unrelated agents while that timeout elapses.
+    if method == "POST" {
+        if let Some((project_id, name)) = cloud_function_action(path, "invoke") {
+            let prepared = match token {
+                Some(t) => guard.cloud_prepare_invocation(
+                    t,
+                    project_id,
+                    name,
+                    body.get("request").cloned().unwrap_or_else(|| body.clone()),
+                ),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            };
+            drop(guard);
+            let result = prepared.and_then(|(url, sandbox_token, payload, version, digest)| {
+                invoke_function_sandbox(&url, &sandbox_token, &payload).map(|output| {
+                    (output, version, digest)
+                })
+            });
+            return match result {
+                Ok((output, version, digest)) => {
+                    if let Ok(mut state) = state.lock() {
+                        state.record(
+                            "cloud.function.invoked",
+                            json!({ "project_id": project_id, "name": name, "version": version, "digest": digest }),
+                        );
+                    }
+                    (200, json!({ "result": output, "version": version, "digest": digest }))
+                }
+                Err(e) => error_response(&e),
+            };
+        }
+    }
+
     let response = match (method, path) {
         // ---- health & card ----
         ("GET", "/health") => Ok(json!({ "status": "ok", "node": guard.node_did() })),
         // ---- public directory data (consumed by the web UI) ----
         ("GET", "/v1/directory") => Ok(guard.public_directory()),
+        ("POST", "/v1/cloud/projects") => match token {
+            Some(t) => guard
+                .cloud_create_project(t)
+                .and_then(|p| serde_json::to_value(p).map_err(|e| Error::Other(e.to_string()))),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
+        ("GET", "/v1/cloud/projects") => match token {
+            Some(t) => guard
+                .cloud_list_projects(t)
+                .map(|projects| json!({ "projects": projects })),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
+        (m, p) if matches!(m, "PUT" | "GET") && cloud_route(p, "kv").is_some() => {
+            let (project_id, key) = cloud_route(p, "kv").expect("guarded above");
+            match (token, m) {
+                (Some(t), "PUT") => (|| -> Result<Value> {
+                    let encoded = body.get("value_base64").and_then(Value::as_str).unwrap_or("");
+                    let value = crate::artifact::decode_base64(encoded)
+                        .ok_or_else(|| Error::Other("value_base64 is invalid".into()))?;
+                    guard.cloud_put_kv(
+                        t,
+                        project_id,
+                        &key,
+                        &value,
+                        body.get("expires_at").and_then(Value::as_u64),
+                    )?;
+                    Ok(json!({ "stored": true }))
+                })(),
+                (Some(t), "GET") => {
+                    use base64::Engine;
+                    guard.cloud_get_kv(t, project_id, &key).map(|value| match value {
+                        Some(bytes) => json!({
+                            "found": true,
+                            "value_base64": base64::engine::general_purpose::STANDARD.encode(bytes)
+                        }),
+                        None => json!({ "found": false }),
+                    })
+                }
+                (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
+                _ => unreachable!(),
+            }
+        }
+        (m, p) if matches!(m, "PUT" | "GET") && cloud_route(p, "objects").is_some() => {
+            let (project_id, key) = cloud_route(p, "objects").expect("guarded above");
+            match (token, m) {
+                (Some(t), "PUT") => (|| -> Result<Value> {
+                    let encoded = body.get("content_base64").and_then(Value::as_str).unwrap_or("");
+                    let content = crate::artifact::decode_base64(encoded)
+                        .ok_or_else(|| Error::Other("content_base64 is invalid".into()))?;
+                    let media_type = body
+                        .get("media_type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("application/octet-stream");
+                    guard
+                        .cloud_put_object(t, project_id, &key, &content, media_type)
+                        .map(|digest| json!({ "stored": true, "digest": digest }))
+                })(),
+                (Some(t), "GET") => {
+                    use base64::Engine;
+                    guard.cloud_get_object(t, project_id, &key).map(|object| match object {
+                        Some(object) => json!({
+                            "found": true,
+                            "content_base64": base64::engine::general_purpose::STANDARD.encode(object.content),
+                            "media_type": object.media_type,
+                            "digest": object.digest
+                        }),
+                        None => json!({ "found": false }),
+                    })
+                }
+                (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
+                _ => unreachable!(),
+            }
+        }
+        ("POST", p) if cloud_function_route(p, true).is_some() => {
+            let (project_id, name) = cloud_function_route(p, true).expect("guarded above");
+            let version = body.get("version").and_then(Value::as_u64).unwrap_or(0);
+            match token {
+                Some(t) if version > 0 => guard
+                    .cloud_activate_function(t, project_id, name, version)
+                    .map(|_| json!({ "active": true, "version": version })),
+                Some(_) => Err(Error::Other("version required".into())),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("POST", p) if cloud_function_route(p, false).is_some() => {
+            let (project_id, name) = cloud_function_route(p, false).expect("guarded above");
+            let runtime = body.get("runtime").and_then(Value::as_str).unwrap_or("");
+            let source = body.get("source").and_then(Value::as_str).unwrap_or("");
+            match token {
+                Some(t) => guard
+                    .cloud_deploy_function(t, project_id, name, runtime, source.as_bytes())
+                    .and_then(|v| serde_json::to_value(v).map_err(|e| Error::Other(e.to_string()))),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
         ("POST", "/v1/gateway") => match auth.and_then(|a| a.strip_prefix("Bearer ")) {
             Some(t) => guard.gateway_register(t, &body),
             None => Err(Error::Unauthorized("missing bearer token".into())),
@@ -7011,6 +7359,75 @@ pub fn error_response(e: &Error) -> (u16, Value) {
         status,
         json!({ "error": { "code": code, "message": e.to_string() } }),
     )
+}
+
+/// Parse `/v1/cloud/projects/{project}/{kind}/{key...}` without ever
+/// interpreting the key as a filesystem path.
+fn cloud_route<'a>(path: &'a str, kind: &str) -> Option<(&'a str, String)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() < 6
+        || parts[0] != "v1"
+        || parts[1] != "cloud"
+        || parts[2] != "projects"
+        || parts[4] != kind
+    {
+        return None;
+    }
+    let key = parts[5..]
+        .iter()
+        .map(|part| percent_decode(part))
+        .collect::<Vec<_>>()
+        .join("/");
+    Some((parts[3], key))
+}
+
+/// Function deployment and activation routes deliberately do not accept
+/// additional path components; the function name is an identifier, not a path.
+fn cloud_function_route(path: &str, activation: bool) -> Option<(&str, &str)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let expected = if activation { 7 } else { 6 };
+    if parts.len() != expected
+        || parts[0] != "v1"
+        || parts[1] != "cloud"
+        || parts[2] != "projects"
+        || parts[4] != "functions"
+        || (activation && parts[6] != "activate")
+    {
+        return None;
+    }
+    Some((parts[3], parts[5]))
+}
+
+fn cloud_function_action<'a>(path: &'a str, action: &str) -> Option<(&'a str, &'a str)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() != 7
+        || parts[0] != "v1"
+        || parts[1] != "cloud"
+        || parts[2] != "projects"
+        || parts[4] != "functions"
+        || parts[6] != action
+    {
+        return None;
+    }
+    Some((parts[3], parts[5]))
+}
+
+fn invoke_function_sandbox(url: &str, token: &str, payload: &Value) -> Result<Value> {
+    let endpoint = format!("{}/invoke", url.trim_end_matches('/'));
+    let mut response = ureq::post(&endpoint)
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .send(payload.to_string())
+        .map_err(|e| Error::Other(format!("function sandbox request failed: {e}")))?;
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| Error::Other(format!("function sandbox response failed: {e}")))?;
+    let body: Value = serde_json::from_str(&text)
+        .map_err(|e| Error::Other(format!("invalid function sandbox response: {e}")))?;
+    body.get("result")
+        .cloned()
+        .ok_or_else(|| Error::Other("function sandbox returned no result".into()))
 }
 
 /// Parse a discovery query from JSON body or URL query string.
@@ -8174,6 +8591,133 @@ mod tests {
             Some(&auth),
         );
         assert_eq!(s, 400);
+    }
+
+    #[test]
+    fn cloud_project_kv_and_function_lifecycle_are_owner_scoped() {
+        let arc = state();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        arc.lock().unwrap().set_cloud_root(
+            std::env::temp_dir().join(format!("gap-cloud-http-{nonce}")),
+        );
+        let owner = register(&arc);
+        let stranger = register(&arc);
+        let auth = format!("Bearer {owner}");
+
+        let (status, project) = route(
+            &arc,
+            "POST",
+            "/v1/cloud/projects",
+            b"{}",
+            Some(&auth),
+        );
+        assert_eq!(status, 200, "{project}");
+        let project_id = project["project_id"].as_str().unwrap();
+
+        let value = json!({ "value_base64": b64(b"hello"), "expires_at": now_unix() + 60 });
+        let kv_path = format!("/v1/cloud/projects/{project_id}/kv/greeting");
+        assert_eq!(
+            route(&arc, "PUT", &kv_path, value.to_string().as_bytes(), Some(&auth)).0,
+            200
+        );
+        let (status, stored) = route(&arc, "GET", &kv_path, b"", Some(&auth));
+        assert_eq!(status, 200);
+        assert_eq!(stored["value_base64"], b64(b"hello"));
+        assert_eq!(
+            route(
+                &arc,
+                "GET",
+                &kv_path,
+                b"",
+                Some(&format!("Bearer {stranger}")),
+            )
+            .0,
+            401
+        );
+
+        let object_path = format!("/v1/cloud/projects/{project_id}/objects/report.json");
+        let object = json!({
+            "content_base64": b64(br#"{"ok":true}"#),
+            "media_type": "application/json"
+        });
+        assert_eq!(
+            route(
+                &arc,
+                "PUT",
+                &object_path,
+                object.to_string().as_bytes(),
+                Some(&auth),
+            )
+            .0,
+            200
+        );
+        let (status, stored_object) = route(&arc, "GET", &object_path, b"", Some(&auth));
+        assert_eq!(status, 200);
+        assert_eq!(stored_object["content_base64"], b64(br#"{"ok":true}"#));
+        assert_eq!(stored_object["media_type"], "application/json");
+
+        let fn_path = format!("/v1/cloud/projects/{project_id}/functions/answer");
+        let deploy = json!({ "runtime": "javascript", "source": "() => 42" });
+        let (status, version) = route(
+            &arc,
+            "POST",
+            &fn_path,
+            deploy.to_string().as_bytes(),
+            Some(&auth),
+        );
+        assert_eq!(status, 200, "{version}");
+        assert_eq!(version["ruling"], "approved_with_constraints");
+        let activate = json!({ "version": version["version"] });
+        assert_eq!(
+            route(
+                &arc,
+                "POST",
+                &format!("{fn_path}/activate"),
+                activate.to_string().as_bytes(),
+                Some(&auth),
+            )
+            .0,
+            200
+        );
+
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let sandbox_url = format!("http://{}", listener.local_addr().unwrap());
+        let sandbox = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let read = socket.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer internal-test")
+            );
+            let body = r#"{"result":{"answer":42}}"#;
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        arc.lock()
+            .unwrap()
+            .set_function_sandbox(&sandbox_url, "internal-test");
+        let (status, invoked) = route(
+            &arc,
+            "POST",
+            &format!("{fn_path}/invoke"),
+            br#"{"request":{"question":"life"}}"#,
+            Some(&auth),
+        );
+        sandbox.join().unwrap();
+        assert_eq!(status, 200, "{invoked}");
+        assert_eq!(invoked["result"]["answer"], 42);
     }
 
     fn register(arc: &Arc<Mutex<NodeState>>) -> String {

@@ -267,6 +267,37 @@ stores the manifest and exposes per-step initial status.
 Per-step status: `pending | provisioning | running | delivered |
 accepted | failed | skipped`.
 
+## 6bis. GAP Runtime
+
+All Runtime routes require the agent bearer token. Projects are owned by
+the DID behind that token; knowing a project id grants no access.
+
+```text
+POST /v1/cloud/projects
+GET  /v1/cloud/projects
+
+PUT  /v1/cloud/projects/{project}/kv/{key}
+GET  /v1/cloud/projects/{project}/kv/{key}
+
+PUT  /v1/cloud/projects/{project}/objects/{key}
+GET  /v1/cloud/projects/{project}/objects/{key}
+
+POST /v1/cloud/projects/{project}/functions/{name}
+POST /v1/cloud/projects/{project}/functions/{name}/activate
+POST /v1/cloud/projects/{project}/functions/{name}/invoke
+```
+
+KV values and object content travel as standard base64. Function deployment
+accepts `{ "runtime": "javascript", "source": "..." }`; activation accepts
+`{ "version": 1 }`; invocation accepts `{ "request": {...} }`. Function code
+runs only in the separately constrained sandbox container and the node releases
+its global state lock before waiting for the result.
+
+The free-tier storage guardrails are enforced transactionally: 64 KiB per KV
+value and 10 MiB total KV data per project; 10 MiB per object and 100 MiB total
+object data per project; 512 KiB per function version. Replacing an existing
+key is charged on the resulting size, not counted twice.
+
 ## 7. Audit & compliance
 
 ### `GET /v1/audit?after=0&limit=100`
