@@ -75,7 +75,12 @@ ENV GAP_ADDR=0.0.0.0:8080 \
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+# Hydrating a production ClickHouse projection can take around a minute once
+# the event spine contains several million rows. During that bounded bootstrap
+# Docker must keep the container in `starting`, not prematurely label it
+# `unhealthy`. A 10s interval also notices readiness much sooner than the old
+# 30s cadence once the listener is finally open.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=120s --retries=6 \
     CMD wget -qO- http://127.0.0.1:8080/health || exit 1
 
 ENTRYPOINT ["gap-node"]
