@@ -9,6 +9,8 @@ const maxBody = Number(process.env.SANDBOX_MAX_BODY_BYTES || "600000");
 const timeoutMs = Number(process.env.SANDBOX_TIMEOUT_MS || "1000");
 const workerPath = fileURLToPath(new URL("./worker.mjs", import.meta.url));
 
+if (!token) throw new Error("SANDBOX_TOKEN is required");
+
 function reply(res, status, body) {
   const data = JSON.stringify(body);
   res.writeHead(status, {
