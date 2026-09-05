@@ -102,6 +102,10 @@ services:
     read_only: true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
     mem_limit: 128m
     cpus: 0.50
     pids_limit: 64
@@ -123,10 +127,6 @@ services:
       - /tmp:rw,noexec,nosuid,size=16m
     cap_drop:
       - ALL
-    cap_add:
-      - CHOWN
-      - SETGID
-      - SETUID
     security_opt:
       - no-new-privileges:true
     mem_limit: 64m
