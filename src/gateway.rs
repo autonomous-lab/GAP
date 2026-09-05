@@ -105,6 +105,29 @@ impl GatewayRoute {
         contract_id: &str,
         node_did: &str,
     ) -> serde_json::Value {
+        // An anonymous caller has no contract yet - there is no party
+        // to name - so it is told to identify itself rather than handed
+        // steps it cannot run.
+        //
+        // For everyone else: the buyer already signed this contract by
+        // proposing it, and the provider side was accepted for it, so
+        // there is nothing left to accept. The one act still required
+        // of the buyer - and its moment of consent to the criteria
+        // above - is funding.
+        let how_to_pay = if contract_id.is_empty() {
+            vec![
+                "identify yourself: send Authorization: Bearer <your node token>".to_string(),
+                "this endpoint will then draft a contract and quote it here".to_string(),
+            ]
+        } else {
+            vec![
+                format!(
+                    "POST /v1/escrow/park  {{\"contract_id\":\"{contract_id}\",\"amount\":\"{}\"}}  (as the client, with your bearer token)",
+                    self.amount
+                ),
+                format!("retry this request with header:  GAP-Contract: {contract_id}"),
+            ]
+        };
         serde_json::json!({
             "x402Version": 1,
             "accepts": [{
@@ -121,11 +144,7 @@ impl GatewayRoute {
                 "contract_id": contract_id,
                 "capability_id": self.capability_id,
                 "acceptance_criteria": self.acceptance_criteria,
-                "how_to_pay": [
-                    "POST /v1/contract/{contract_id}/accept   (as the client, with your bearer token)",
-                    "POST /v1/escrow/park                     (fund it)",
-                    "retry this request with: GAP-Contract: {contract_id}",
-                ],
+                "how_to_pay": how_to_pay,
                 "why": "settlement produces a job page with the verdict, not just a payment record",
             }
         })
@@ -409,5 +428,40 @@ mod tests {
         // The criteria are visible BEFORE paying, which is the only
         // moment the buyer can still walk away.
         assert_eq!(c["gap"]["acceptance_criteria"][0], "returns JSON");
+    }
+
+    /// The instructions have to be the ones that work. An earlier
+    /// version told the buyer to accept the contract first, which the
+    /// node refuses with a 400 - the buyer signed it by proposing it,
+    /// so funding is the only step left. An agent that follows a 402
+    /// literally and gets an error concludes the protocol is broken.
+    #[test]
+    fn how_to_pay_names_only_steps_that_succeed() {
+        let c = route().challenge("https://node/x402/acme/s", "urn:gap:ctr:9", "did:gap:node");
+        let steps = c["gap"]["how_to_pay"].to_string();
+        assert!(steps.contains("/v1/escrow/park"), "{steps}");
+        assert!(steps.contains("urn:gap:ctr:9"), "{steps}");
+        // The price to park has to be in there: an agent that guesses
+        // the amount underfunds and is turned away at the retry.
+        assert!(steps.contains("0.010000"), "{steps}");
+        assert!(steps.contains("GAP-Contract"), "{steps}");
+        assert!(
+            !steps.contains("/accept"),
+            "still tells the buyer to accept: {steps}"
+        );
+    }
+
+    /// Anonymous callers get told what they lack, not steps that need a
+    /// contract id nobody has drafted for them.
+    #[test]
+    fn the_anonymous_challenge_asks_for_identity_first() {
+        let c = route().challenge("https://node/x402/acme/s", "", "did:gap:node");
+        let steps = c["gap"]["how_to_pay"].to_string();
+        assert!(steps.contains("Bearer"), "{steps}");
+        assert!(!steps.contains("/v1/escrow/park"), "{steps}");
+        assert_eq!(c["gap"]["contract_id"], "");
+        // The price is still readable: deciding whether to bother
+        // minting an identity needs it.
+        assert_eq!(c["accepts"][0]["maxAmountRequired"], "0.010000");
     }
 }

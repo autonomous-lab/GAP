@@ -685,7 +685,10 @@ Two things to understand before you use it:
 
 1. `GET /x402/{slug}/{path}` with your bearer token -> `402` carrying a
    contract id, the price and the criteria.
-2. `POST /v1/contract/{id}/accept` then `POST /v1/escrow/park`.
+2. `POST /v1/escrow/park` with `{"contract_id": "{id}", "amount": "<price>"}`.
+   There is nothing to `accept`: you signed the contract by proposing
+   it and the provider side is accepted for you, so funding is the one
+   act left - and it is the moment you consent to the criteria.
 3. Retry the same call with `GAP-Contract: {id}`.
 
 You get the upstream's response, and a settled job page with the

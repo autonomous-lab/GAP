@@ -5295,9 +5295,13 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
             .cloned()
             .ok_or_else(|| Error::Other("gateway owner is not node-custodied".into()))?;
         // The provider side is accepted for it: a gateway sells at a
-        // published price and has nothing to negotiate. The BUYER still
-        // accepts and funds explicitly, because that is the moment it
-        // agrees to the criteria it can read in this response.
+        // published price and has nothing to negotiate. The buyer
+        // signed by proposing, so the contract is now fully signed and
+        // there is nothing left for it to accept - calling `accept`
+        // would be refused. What the buyer still does explicitly is
+        // FUND, and that is its moment of consent to the criteria it
+        // can read in this response: nothing is forwarded upstream
+        // until the escrow holds the money.
         self.accept_contract(&provider_token, &cid)?;
         Ok(crate::gateway::GatewayStep::Challenge(
             route.challenge(resource, &cid, &node_did),
@@ -9413,24 +9417,20 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        arc.lock().unwrap().set_cloud_root(
-            std::env::temp_dir().join(format!("gap-cloud-http-{nonce}")),
-        );
+        arc.lock()
+            .unwrap()
+            .set_cloud_root(std::env::temp_dir().join(format!("gap-cloud-http-{nonce}")));
         let owner = register(&arc);
         let stranger = register(&arc);
         let auth = format!("Bearer {owner}");
 
-        let (status, project) = route(
-            &arc,
-            "POST",
-            "/v1/cloud/projects",
-            b"{}",
-            Some(&auth),
-        );
+        let (status, project) = route(&arc, "POST", "/v1/cloud/projects", b"{}", Some(&auth));
         assert_eq!(status, 200, "{project}");
         let project_id = project["project_id"].as_str().unwrap();
 
-        arc.lock().unwrap().set_realtime_secret("test-realtime-secret");
+        arc.lock()
+            .unwrap()
+            .set_realtime_secret("test-realtime-secret");
         let token_path = format!("/v1/cloud/projects/{project_id}/realtime/tokens");
         let token_request = json!({
             "channels": ["contract:demo"],
@@ -9446,6 +9446,21 @@ mod tests {
         );
         assert_eq!(status, 200, "{realtime}");
         assert_eq!(realtime["token"].as_str().unwrap().split('.').count(), 2);
+        let encoded = realtime["token"]
+            .as_str()
+            .unwrap()
+            .split('.')
+            .next()
+            .unwrap();
+        use base64::Engine;
+        let claims: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims["permissions"], json!(["subscribe"]));
+        assert_eq!(claims["subject"], "visitor:42");
         assert_eq!(
             route(
                 &arc,
@@ -9461,7 +9476,14 @@ mod tests {
         let value = json!({ "value_base64": b64(b"hello"), "expires_at": now_unix() + 60 });
         let kv_path = format!("/v1/cloud/projects/{project_id}/kv/greeting");
         assert_eq!(
-            route(&arc, "PUT", &kv_path, value.to_string().as_bytes(), Some(&auth)).0,
+            route(
+                &arc,
+                "PUT",
+                &kv_path,
+                value.to_string().as_bytes(),
+                Some(&auth)
+            )
+            .0,
             200
         );
         let (status, stored) = route(&arc, "GET", &kv_path, b"", Some(&auth));
@@ -9583,11 +9605,9 @@ mod tests {
             let mut request = [0u8; 4096];
             let read = socket.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..read]);
-            assert!(
-                request
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer internal-test")
-            );
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer internal-test"));
             let body = r#"{"result":{"answer":42}}"#;
             write!(
                 socket,

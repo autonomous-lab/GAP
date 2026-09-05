@@ -687,7 +687,9 @@ mod tests {
         assert_eq!(s.head_seq().unwrap(), 3, "contiguous: they agree");
 
         // Now make them disagree, the way a rebuild does.
-        s.conn.execute("DELETE FROM events WHERE seq = 2", []).unwrap();
+        s.conn
+            .execute("DELETE FROM events WHERE seq = 2", [])
+            .unwrap();
         assert_eq!(s.event_count().unwrap(), 2, "one fewer row");
         assert_eq!(
             s.head_seq().unwrap(),

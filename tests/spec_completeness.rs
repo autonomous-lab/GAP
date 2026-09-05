@@ -581,19 +581,40 @@ fn agents_md_documents_only_endpoints_that_exist() {
             None => path.to_string(),
             Some(i) => {
                 let prefix = &path[..i];
-                // Whatever follows the placeholder is what the router
-                // dispatches on: /v1/contract/{id}/deliver -> "/deliver".
-                match path[i + 1..].find('/') {
-                    Some(j) => path[i + 1 + j..].to_string(),
-                    // Placeholder at the end: the router matches the
-                    // prefix WITH its trailing slash, as in
-                    // starts_with("/v1/reputation/").
-                    None => format!("{prefix}/"),
+                let tail = &path[i + 1..];
+                // Everything from the placeholder on is variable until a
+                // literal segment reappears, and that literal is what
+                // the router dispatches on:
+                // /v1/contract/{id}/deliver -> "/deliver".
+                //
+                // When no literal ever reappears - /x402/{slug}/{path},
+                // where the whole tail belongs to the gateway - the
+                // router can only match the prefix WITH its trailing
+                // slash, as in strip_prefix("/x402/").
+                let mut needle = format!("{prefix}/");
+                let mut off = 0;
+                while let Some(j) = tail[off..].find('/') {
+                    let seg = off + j + 1;
+                    if !tail[seg..].starts_with('{') {
+                        needle = tail[off + j..].to_string();
+                        break;
+                    }
+                    off = seg;
                 }
+                needle
             }
         };
+        let literal = format!("\"{needle}\"");
+        let segments = needle
+            .split('/')
+            .filter(|segment| !segment.is_empty() && !segment.starts_with('{'))
+            .collect::<Vec<_>>();
+        let segmented = !segments.is_empty()
+            && segments
+                .iter()
+                .all(|segment| router.contains(&format!("\"{segment}\"")));
         assert!(
-            router.contains(&format!("\"{needle}\"")),
+            router.contains(&literal) || segmented,
             "AGENTS.md documents {path}, but the router has no {needle:?}"
         );
         checked += 1;
