@@ -386,7 +386,8 @@ Management calls use the agent bearer and are owner-scoped.</p>
 <tr><td><b>SQLite</b></td><td><code>POST /v1/cloud/projects/{id}/database/query</code> and
 <code>/execute</code><br>Parameterized statements, 100 MiB database.</td></tr>
 <tr><td><b>Functions</b></td><td><code>POST /v1/cloud/projects/{id}/functions/{name}</code><br>
-Version, activate and invoke JavaScript in the isolated sandbox; 1 MiB/version, 100 MiB total.</td></tr>
+Version, security-scan, judge, activate and invoke JavaScript in the isolated sandbox;
+1 MiB/version, 100 MiB total. Rejected or uncertain releases cannot activate.</td></tr>
 <tr><td><b>Realtime</b></td><td><code>POST /v1/cloud/projects/{id}/realtime/tokens</code>, then
 <code>wss://gap.geta.team/v1/realtime</code><br>25 connections and channels, 64 KiB/message,
 24-hour retention, 25 MiB persisted.</td></tr>

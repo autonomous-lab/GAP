@@ -2580,20 +2580,86 @@ the content inline"
         source: &[u8],
     ) -> Result<crate::cloud::FunctionVersion> {
         self.cloud_owned_project(token, project_id)?;
+        let static_findings = match runtime {
+            "javascript" => crate::cloud::scan_javascript_function(source)?,
+            "wasm" => vec!["WASM requires manual security review".into()],
+            _ => Vec::new(),
+        };
+        let source_text = std::str::from_utf8(source).unwrap_or("");
+        let judges: Vec<&dyn crate::verifier::Verifier> =
+            [self.verifier.as_deref(), self.verifier_b.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect();
+        let mut opinions = Vec::new();
+        let mut security_reasons = Vec::new();
+        for judge in &judges {
+            let judge_name = judge.name();
+            match judge.judge_function_security(name, source_text) {
+                Ok((ruling, reasons)) => {
+                    security_reasons.extend(
+                        reasons
+                            .into_iter()
+                            .map(|reason| format!("[{judge_name}] {reason}")),
+                    );
+                    opinions.push(ruling);
+                }
+                Err(error) => {
+                    security_reasons.push(format!("[{judge_name}] unavailable: {error}"));
+                    opinions.push(crate::verifier::Ruling::Inconclusive);
+                }
+            }
+        }
+        let release_ruling =
+            if opinions.is_empty() || opinions.contains(&crate::verifier::Ruling::Inconclusive) {
+                if opinions.is_empty() {
+                    security_reasons.push("security judge is not configured".into());
+                }
+                crate::cloud::ReleaseRuling::NeedsReview
+            } else if opinions
+                .iter()
+                .all(|ruling| *ruling == crate::verifier::Ruling::Conforms)
+            {
+                crate::cloud::ReleaseRuling::ApprovedWithConstraints
+            } else if opinions
+                .iter()
+                .all(|ruling| *ruling == crate::verifier::Ruling::Nonconforming)
+            {
+                crate::cloud::ReleaseRuling::Rejected
+            } else {
+                security_reasons.push("security judges disagreed".into());
+                crate::cloud::ReleaseRuling::NeedsReview
+            };
+        let security_judge = if judges.is_empty() {
+            "none".into()
+        } else {
+            judges
+                .iter()
+                .map(|judge| judge.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let mut store = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?;
         let mut version = store.deploy_function(name, runtime, source, now_unix())?;
-        // Tier 1 release judgement: supported runtime, bounded source and
-        // mandatory container constraints. It authorizes storage and later
-        // sandbox execution, never execution inside the GAP node.
-        store.set_function_ruling(
-            name,
-            version.version,
-            crate::cloud::ReleaseRuling::ApprovedWithConstraints,
-        )?;
-        version.ruling = crate::cloud::ReleaseRuling::ApprovedWithConstraints;
+        store.set_function_ruling(name, version.version, release_ruling.clone())?;
+        version.ruling = release_ruling;
+        version.security_review = Some(crate::cloud::FunctionSecurityReview {
+            judge: security_judge.clone(),
+            static_findings: static_findings.clone(),
+            reasons: security_reasons.clone(),
+        });
         self.record(
             "cloud.function.deployed",
-            json!({ "project_id": project_id, "name": name, "version": version.version, "digest": version.digest, "ruling": "approved_with_constraints" }),
+            json!({
+                "project_id": project_id,
+                "name": name,
+                "version": version.version,
+                "digest": version.digest,
+                "ruling": version.ruling,
+                "security_judge": security_judge,
+                "static_findings": static_findings,
+                "security_reasons": security_reasons
+            }),
         );
         Ok(version)
     }
@@ -9446,6 +9512,11 @@ mod tests {
     #[test]
     fn cloud_project_kv_and_function_lifecycle_are_owner_scoped() {
         let arc = state();
+        arc.lock()
+            .unwrap()
+            .set_verifier(Box::new(crate::verifier::MockVerifier::new(
+                crate::verifier::Ruling::Conforms,
+            )));
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

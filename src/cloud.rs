@@ -31,6 +31,85 @@ pub const MAX_DATABASE_TIME: Duration = Duration::from_millis(250);
 pub const FUNCTION_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_FUNCTION_HTTP_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 
+/// Deterministic publication gate for JavaScript functions. This deliberately
+/// targets intent and evasion indicators rather than pretending to be a full
+/// JavaScript parser; runtime isolation remains authoritative.
+pub fn scan_javascript_function(source: &[u8]) -> Result<Vec<String>> {
+    let text = std::str::from_utf8(source)
+        .map_err(|_| Error::Other("function source must be valid UTF-8".into()))?;
+    if text
+        .bytes()
+        .any(|byte| byte == 0 || (byte < 0x09) || (byte > 0x0d && byte < 0x20))
+    {
+        return Err(Error::Other(
+            "function security scan: control bytes are forbidden".into(),
+        ));
+    }
+    if text.len() > 32 * 1024 && text.lines().any(|line| line.len() > 32 * 1024) {
+        return Err(Error::Other(
+            "function security scan: excessive minification or padding".into(),
+        ));
+    }
+
+    let lower = text.to_ascii_lowercase();
+    let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    let forbidden = [
+        ("process.env", "environment-secret access"),
+        ("deno.env", "environment-secret access"),
+        ("bun.env", "environment-secret access"),
+        ("child_process", "process execution"),
+        ("worker_threads", "worker creation"),
+        ("require(", "module loading"),
+        ("import(", "dynamic module loading"),
+        ("eval(", "dynamic code execution"),
+        ("newfunction(", "dynamic code execution"),
+        ("__proto__", "prototype manipulation"),
+        ("constructor.prototype", "prototype manipulation"),
+        ("xmlhttprequest", "unbrokered network access"),
+        ("websocket(", "unbrokered network access"),
+        ("fetch(", "unbrokered network access; use gap.http"),
+    ];
+    for (pattern, reason) in forbidden {
+        if compact.contains(pattern) {
+            return Err(Error::Other(format!(
+                "function security scan: forbidden {reason}"
+            )));
+        }
+    }
+
+    let encoded_markers = compact.matches("\\x").count()
+        + compact.matches("\\u00").count()
+        + compact.matches("fromcharcode").count()
+        + compact.matches("atob(").count()
+        + compact.matches("unescape(").count();
+    if encoded_markers > 32 {
+        return Err(Error::Other(
+            "function security scan: excessive encoded or obfuscated content".into(),
+        ));
+    }
+    let has_http = compact.contains("gap.http.");
+    let has_loop = ["for(", "while(", "dowhile("]
+        .iter()
+        .any(|p| compact.contains(p));
+    if has_http && (has_loop || compact.contains("promise.all(")) {
+        return Err(Error::Other(
+            "function security scan: bulk or looped outbound HTTP is forbidden".into(),
+        ));
+    }
+
+    let mut findings = Vec::new();
+    if has_http {
+        findings.push("outbound HTTP requires semantic review and the project allowlist".into());
+    }
+    if compact.contains("gap.kv.")
+        || compact.contains("gap.db.")
+        || compact.contains("gap.objects.")
+    {
+        findings.push("project data access requires semantic exfiltration review".into());
+    }
+    Ok(findings)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatabaseResult {
     pub columns: Vec<String>,
@@ -80,6 +159,15 @@ pub struct FunctionVersion {
     pub digest: String,
     pub ruling: ReleaseRuling,
     pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_review: Option<FunctionSecurityReview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FunctionSecurityReview {
+    pub judge: String,
+    pub static_findings: Vec<String>,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -527,6 +615,7 @@ impl ProjectStore {
             digest,
             ruling: ReleaseRuling::Pending,
             active: false,
+            security_review: None,
         })
     }
 
@@ -597,6 +686,7 @@ impl ProjectStore {
                         digest: r.get(3)?,
                         ruling: parse_ruling(&ruling),
                         active: true,
+                        security_review: None,
                     })
                 },
             )
@@ -924,6 +1014,29 @@ mod tests {
     fn project_ids_cannot_escape_the_base_directory() {
         assert!(ProjectStore::open(&std::env::temp_dir(), "../escape").is_err());
         assert!(ProjectStore::open(&std::env::temp_dir(), "a/b").is_err());
+    }
+
+    #[test]
+    fn function_security_scan_rejects_escape_obfuscation_and_http_fanout() {
+        assert!(scan_javascript_function(b"async () => fetch('https://evil.test')").is_err());
+        assert!(scan_javascript_function(b"() => process.env.SECRET").is_err());
+        assert!(scan_javascript_function(
+            b"async (_, gap) => { while (true) await gap.http.get('https://x.test'); }"
+        )
+        .is_err());
+        let encoded = format!("() => '{}';", "\\x41".repeat(33));
+        assert!(scan_javascript_function(encoded.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn function_security_scan_allows_bounded_brokered_http() {
+        let findings = scan_javascript_function(
+            b"async (request, gap) => gap.http.get('https://api.example.com/item')",
+        )
+        .unwrap();
+        assert!(findings
+            .iter()
+            .any(|finding| finding.contains("outbound HTTP")));
     }
 
     #[test]

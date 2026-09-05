@@ -194,6 +194,15 @@ delete the function and all its versions with
 prevents accidental partial cleanup, while deleting the whole function is
 intentional and immediately releases its source quota.
 
+Publication is security-gated before activation. A deterministic scanner blocks
+secret/environment access, unbrokered network and process APIs, dynamic code,
+prototype manipulation, excessive obfuscation/padding and outbound HTTP fanout.
+The configured independent judge panel then reviews intent for DDoS, abusive scraping,
+exfiltration, open proxying and sandbox escape. Its reasons are returned in
+`security_review`; `rejected` and `needs_review` releases cannot be activated,
+and judge failure or disagreement produces `needs_review` rather than silently
+approving code.
+
 Inside a function, `gap.kv`, `gap.objects`, `gap.db` and `gap.http` provide
 storage and allowlisted outbound HTTPS without exposing a database path,
 project credential or raw network socket. Configure egress with

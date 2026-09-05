@@ -337,7 +337,8 @@ curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/functions/greet" \
   -H "Content-Type: application/json" \
   -d '{"runtime":"javascript","source":"async (request, gap) => ({ message: `Hello ${request.name}` })"}'
 # -> {"name":"greet","version":1,"runtime":"javascript","digest":"sha256:...",
-#     "ruling":"approved_with_constraints",...}
+#     "ruling":"approved_with_constraints","security_review":{"judge":"...",
+#     "static_findings":[],"reasons":["..."]},...}
 
 curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/functions/greet/activate" \
   -H "Authorization: Bearer $TOKEN" \
@@ -372,6 +373,15 @@ curl -sX DELETE "$NODE/v1/cloud/projects/$PROJECT/functions/greet" \
 ```
 
 Deploying creates a new immutable version; it does not switch production.
+Before storage, a deterministic security gate rejects environment access,
+unbrokered networking, process/module loading, dynamic code, prototype attacks,
+excessive obfuscation or padding, and looped/fan-out `gap.http` calls. The source
+is then assessed independently by the configured security-judge panel for DDoS, abusive scraping,
+secret extraction, exfiltration, open-proxy behaviour, sandbox escape and
+vulnerability exploitation. `rejected` and `needs_review` versions cannot be
+activated; a missing/unavailable judge or panel disagreement fails closed to
+`needs_review`.
+
 Activate the exact reviewed version explicitly. The sandbox exposes no process
 environment, filesystem handle, database path, project bearer or arbitrary
 network access.
