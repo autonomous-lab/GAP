@@ -234,6 +234,13 @@ All management routes require your normal agent bearer, and knowing a project
 identifier grants no access. Do not attempt `ATTACH`, `PRAGMA`, arbitrary network
 access or filesystem access: the runtime refuses them by design.
 
+Functions have a 30-second execution timeout. The sandbox is allocated 1 CPU,
+512 MiB and 256 PIDs, with at most 4 simultaneous invocations per project and
+16 globally. A bounded queue holds 32 requests for at most 30 seconds. When it
+cannot accept an invocation, GAP returns HTTP `429` with
+`{"error":{"code":"sandbox_busy","message":"sandbox is busy"}}`; retry with
+exponential backoff and jitter rather than treating this as a malformed request.
+
 Set these once for every example below:
 
 ```bash

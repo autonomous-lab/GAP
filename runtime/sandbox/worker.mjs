@@ -3,6 +3,7 @@ import vm from "node:vm";
 let input = "";
 for await (const chunk of process.stdin) input += chunk;
 const payload = JSON.parse(input);
+const vmTimeoutMs = Math.min(Math.max(Number(process.argv[2]) || 30000, 1), 30000);
 
 const request = Object.freeze(payload.request || {});
 const results = Array.isArray(payload.capability_results) ? payload.capability_results : [];
@@ -51,7 +52,7 @@ const script = new vm.Script(
   `(async () => { "use strict"; const handler = (${payload.source}); return await handler(request, gap); })()`,
   { filename: "gap-function.js" },
 );
-const execution = Promise.resolve(script.runInContext(context, { timeout: 250 }))
+const execution = Promise.resolve(script.runInContext(context, { timeout: vmTimeoutMs }))
   .then(result => ({ result }));
 const outcome = await Promise.race([
   execution,

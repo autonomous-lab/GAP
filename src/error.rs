@@ -33,6 +33,8 @@ pub enum Error {
     StaleTimestamp,
     /// The message sender is not authorized for this action.
     Unauthorized(String),
+    /// The function sandbox has reached its concurrency or queue limit.
+    SandboxBusy,
     /// The message references an unknown/forged contract signature.
     UnverifiedSignature(String),
     /// Serialization/deserialization failure (JSON).
@@ -64,6 +66,7 @@ impl fmt::Display for Error {
             Error::WrongProtocol(p) => write!(f, "wrong protocol: {p}"),
             Error::StaleTimestamp => write!(f, "stale timestamp"),
             Error::Unauthorized(desc) => write!(f, "unauthorized: {desc}"),
+            Error::SandboxBusy => write!(f, "sandbox is busy"),
             Error::UnverifiedSignature(desc) => write!(f, "unverified signature: {desc}"),
             Error::Json(e) => write!(f, "json error: {e}"),
             Error::ReplayedMessage(id) => write!(f, "replayed message: {id}"),

@@ -77,8 +77,13 @@ services:
     build: ./runtime/sandbox
     environment:
       SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
-      SANDBOX_TIMEOUT_MS: "${GAP_FUNCTION_TIMEOUT_MS:-1000}"
+      SANDBOX_TIMEOUT_MS: "${GAP_FUNCTION_TIMEOUT_MS:-30000}"
+      SANDBOX_VM_TIMEOUT_MS: "${GAP_FUNCTION_VM_TIMEOUT_MS:-30000}"
       SANDBOX_CAPABILITY_TIMEOUT_MS: "${GAP_FUNCTION_CAPABILITY_TIMEOUT_MS:-35000}"
+      SANDBOX_MAX_PROJECT_CONCURRENCY: "${GAP_FUNCTION_PROJECT_CONCURRENCY:-4}"
+      SANDBOX_MAX_GLOBAL_CONCURRENCY: "${GAP_FUNCTION_GLOBAL_CONCURRENCY:-16}"
+      SANDBOX_MAX_QUEUE: "${GAP_FUNCTION_QUEUE_SIZE:-32}"
+      SANDBOX_QUEUE_TIMEOUT_MS: "${GAP_FUNCTION_QUEUE_TIMEOUT_MS:-30000}"
       CAPABILITY_URL: "http://gap-node:8080/internal/functions/capability"
     read_only: true
     tmpfs:
@@ -87,9 +92,9 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    pids_limit: 64
-    mem_limit: 128m
-    cpus: 0.50
+    pids_limit: 256
+    mem_limit: 512m
+    cpus: 1.00
     networks:
       - sandbox_net
     restart: always

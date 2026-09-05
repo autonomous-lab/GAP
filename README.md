@@ -162,7 +162,7 @@ infrastructure without operating another server:
 | KV | 64 KiB per value, 25 MiB total |
 | Objects | 1 MiB per object, 100 MiB total |
 | SQLite database | parameterized queries, 100 MiB database |
-| JavaScript functions | 1 MiB per version, 100 MiB source total; isolated container |
+| JavaScript functions | 1 MiB/version, 100 MiB total; 30 s; 4 concurrent/project, 16 global |
 | Function HTTP | scoped 60-minute tokens, path/method/query forwarding, CORS |
 | HTTP egress | exact-host allowlist, HTTPS GET/POST, anti-SSRF, 30 s timeout, 3 MiB response |
 | Schedules | `*/N * * * *` interval cron, 1–1440 minutes |
@@ -204,6 +204,10 @@ with `POST .../functions/{name}/tokens`, then call
 refreshes use `PUT /v1/cloud/projects/{project}/schedules/{id}` with a supported
 cron such as `*/15 * * * *`. Full request and JavaScript examples are in
 [`AGENTS.md`](./AGENTS.md#function-bindings-http-egress-and-browser-routes).
+The function sandbox has 1 CPU, 512 MiB and 256 PIDs. Excess invocations enter
+a bounded 32-request queue for at most 30 seconds; saturation returns HTTP `429`
+with the machine-readable code `sandbox_busy`, so clients should retry with
+exponential backoff and jitter.
 
 ### How does an agent know the job is done?
 

@@ -7811,6 +7811,7 @@ pub fn error_response(e: &Error) -> (u16, Value) {
     let code = match e {
         Error::BadSignature => "bad_signature",
         Error::Unauthorized(_) => "unauthorized",
+        Error::SandboxBusy => "sandbox_busy",
         Error::AutonomyViolation(_) => "budget_exceeded",
         Error::UnknownContract(_) => "contract_not_found",
         Error::InvalidTransition { .. } => "invalid_transition",
@@ -7822,6 +7823,7 @@ pub fn error_response(e: &Error) -> (u16, Value) {
     // malformed" from "it does not exist".
     let status = match e {
         Error::Unauthorized(_) => 401,
+        Error::SandboxBusy => 429,
         Error::UnknownContract(_) => 404,
         _ => 400,
     };
@@ -8191,7 +8193,10 @@ fn invoke_function_sandbox(url: &str, token: &str, payload: &Value) -> Result<Va
         .header("Authorization", &format!("Bearer {token}"))
         .header("Content-Type", "application/json")
         .send(payload.to_string())
-        .map_err(|e| Error::Other(format!("function sandbox request failed: {e}")))?;
+        .map_err(|e| match e {
+            ureq::Error::StatusCode(429) => Error::SandboxBusy,
+            _ => Error::Other(format!("function sandbox request failed: {e}")),
+        })?;
     let text = response
         .body_mut()
         .read_to_string()
@@ -8444,6 +8449,34 @@ mod tests {
         Arc::new(Mutex::new(NodeState::new(Box::new(
             SqliteStorage::open(":memory:").unwrap(),
         ))))
+    }
+
+    #[test]
+    fn sandbox_saturation_maps_to_retryable_429() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let sandbox_url = format!("http://{}", listener.local_addr().unwrap());
+        let sandbox = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).unwrap();
+            let body = r#"{"error":{"code":"sandbox_busy","message":"sandbox is busy"}}"#;
+            write!(
+                socket,
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let error = invoke_function_sandbox(&sandbox_url, "test", &json!({})).unwrap_err();
+        sandbox.join().unwrap();
+        assert_eq!(error, Error::SandboxBusy);
+        let (status, body) = error_response(&error);
+        assert_eq!(status, 429);
+        assert_eq!(body["error"]["code"], "sandbox_busy");
     }
 
     /// Client, provider, and a signed contract that requires escrow.
