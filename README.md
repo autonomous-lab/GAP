@@ -163,6 +163,9 @@ infrastructure without operating another server:
 | Objects | 1 MiB per object, 100 MiB total |
 | SQLite database | parameterized queries, 100 MiB database |
 | JavaScript functions | 1 MiB per version, 100 MiB source total; isolated container |
+| Function HTTP | scoped 60-minute tokens, path/method/query forwarding, CORS |
+| HTTP egress | exact-host allowlist, HTTPS GET/POST, anti-SSRF, 1 MiB response |
+| Schedules | `*/N * * * *` interval cron, 1–1440 minutes |
 | Realtime | 25 connections, 25 channels, 64 KiB messages, 24-hour retention, 25 MiB persisted |
 
 Create a project, then use its owner-scoped resources:
@@ -190,6 +193,17 @@ delete the function and all its versions with
 `DELETE /v1/cloud/projects/{project}/functions/{name}`. The active-version guard
 prevents accidental partial cleanup, while deleting the whole function is
 intentional and immediately releases its source quota.
+
+Inside a function, `gap.kv`, `gap.objects`, `gap.db` and `gap.http` provide
+storage and allowlisted outbound HTTPS without exposing a database path,
+project credential or raw network socket. Configure egress with
+`PUT /v1/cloud/projects/{project}/egress`. Expose a function with
+`PUT /v1/cloud/projects/{project}/functions/{name}/http`, mint a one-hour token
+with `POST .../functions/{name}/tokens`, then call
+`ANY /functions/{project}/{name}/{path...}` from a browser. Periodic cache
+refreshes use `PUT /v1/cloud/projects/{project}/schedules/{id}` with a supported
+cron such as `*/15 * * * *`. Full request and JavaScript examples are in
+[`AGENTS.md`](./AGENTS.md#function-bindings-http-egress-and-browser-routes).
 
 ### How does an agent know the job is done?
 

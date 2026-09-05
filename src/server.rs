@@ -2412,7 +2412,11 @@ the content inline"
         Ok(projects)
     }
 
-    fn cloud_owned_project(&self, token: &str, project_id: &str) -> Result<crate::cloud::ProjectRecord> {
+    fn cloud_owned_project(
+        &self,
+        token: &str,
+        project_id: &str,
+    ) -> Result<crate::cloud::ProjectRecord> {
         let owner = self.agent_by_token(token)?.identity.did().to_string();
         let project = self
             .cloud_projects
@@ -2420,7 +2424,9 @@ the content inline"
             .cloned()
             .ok_or_else(|| Error::Other("unknown cloud project".into()))?;
         if project.owner_did != owner {
-            return Err(Error::Unauthorized("cloud project belongs to another agent".into()));
+            return Err(Error::Unauthorized(
+                "cloud project belongs to another agent".into(),
+            ));
         }
         if project.status != "active" {
             return Err(Error::Other("cloud project is not active".into()));
@@ -2437,8 +2443,12 @@ the content inline"
         expires_at: Option<u64>,
     ) -> Result<()> {
         self.cloud_owned_project(token, project_id)?;
-        crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?
-            .put_kv(key, value, expires_at, now_unix())?;
+        crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?.put_kv(
+            key,
+            value,
+            expires_at,
+            now_unix(),
+        )?;
         self.record(
             "cloud.kv.put",
             json!({ "project_id": project_id, "key_digest": crate::sha256_hex(key.as_bytes()), "size_bytes": value.len() }),
@@ -2465,8 +2475,12 @@ the content inline"
         media_type: &str,
     ) -> Result<String> {
         self.cloud_owned_project(token, project_id)?;
-        let digest = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?
-            .put_object(key, content, media_type, now_unix())?;
+        let digest = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?.put_object(
+            key,
+            content,
+            media_type,
+            now_unix(),
+        )?;
         self.record(
             "cloud.object.put",
             json!({ "project_id": project_id, "object_digest": digest, "size_bytes": content.len() }),
@@ -2484,11 +2498,7 @@ the content inline"
         crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?.get_object(key)
     }
 
-    fn cloud_prepare_database(
-        &self,
-        token: &str,
-        project_id: &str,
-    ) -> Result<std::path::PathBuf> {
+    fn cloud_prepare_database(&self, token: &str, project_id: &str) -> Result<std::path::PathBuf> {
         self.cloud_owned_project(token, project_id)?;
         Ok(self.cloud_root.clone())
     }
@@ -2669,10 +2679,70 @@ the content inline"
         Ok((
             url,
             sandbox_token,
-            json!({ "source": source, "request": request }),
+            json!({ "source": source, "request": request, "project_id": project_id }),
             function.version,
             function.digest,
         ))
+    }
+
+    fn cloud_prepare_public_invocation(
+        &self,
+        project_id: &str,
+        name: &str,
+        request: Value,
+    ) -> Result<(String, String, Value, u64, String)> {
+        let function = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?
+            .active_function(name)?
+            .ok_or_else(|| Error::Other("function has no active version".into()))?;
+        if function.runtime != "javascript" {
+            return Err(Error::Other("WASM execution is not enabled yet".into()));
+        }
+        let source = String::from_utf8(function.source)
+            .map_err(|_| Error::Other("JavaScript function source is not UTF-8".into()))?;
+        let url = self
+            .function_sandbox_url
+            .clone()
+            .ok_or_else(|| Error::Other("function sandbox is not configured".into()))?;
+        let sandbox_token = self
+            .function_sandbox_token
+            .clone()
+            .ok_or_else(|| Error::Other("function sandbox token is not configured".into()))?;
+        Ok((
+            url,
+            sandbox_token,
+            json!({ "source": source, "request": request, "project_id": project_id }),
+            function.version,
+            function.digest,
+        ))
+    }
+
+    fn cloud_issue_function_token(
+        &self,
+        owner_token: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<Value> {
+        self.cloud_owned_project(owner_token, project_id)?;
+        let store = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?;
+        if store.function_http_policy(name)?.auth != "token" {
+            return Err(Error::Other("function HTTP auth mode is not token".into()));
+        }
+        let secret = self
+            .realtime_secret
+            .as_deref()
+            .ok_or_else(|| Error::Other("function token signing is not configured".into()))?;
+        let expires_at = now_unix().saturating_add(3600);
+        let claims = json!({ "project_id": project_id, "function": name, "exp": expires_at });
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).map_err(|e| Error::Other(e.to_string()))?);
+        use hmac::{Hmac, Mac};
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
+            .map_err(|_| Error::Other("invalid signing secret".into()))?;
+        mac.update(encoded.as_bytes());
+        Ok(
+            json!({ "token": format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes())), "expires_at": expires_at }),
+        )
     }
 
     /// Queue one event for every subscription that is active, wants the
@@ -6614,13 +6684,81 @@ pub fn route_with_ip(
         }
     };
 
-    // Rate limiting first (audit H-03): 429 when over limit.
     let token = auth.and_then(|h| h.strip_prefix("Bearer "));
+
+    // This route is reachable only over the compose-internal network and is
+    // authenticated with the sandbox shared secret. It deliberately bypasses
+    // agent auth: the runner never receives an owner's bearer token.
+    if method == "POST" && path == "/internal/functions/capability" {
+        let authorized = token.is_some() && guard.function_sandbox_token.as_deref() == token;
+        if !authorized {
+            return error_response(&Error::Unauthorized("invalid sandbox token".into()));
+        }
+        let project_id = body
+            .get("project_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let request = body.get("request").cloned().unwrap_or(Value::Null);
+        let root = guard.cloud_root.clone();
+        drop(guard);
+        return match execute_function_capability(&root, &project_id, &request) {
+            Ok(value) => (200, value),
+            Err(error) => error_response(&error),
+        };
+    }
+
+    // Rate limiting first (audit H-03): 429 when over limit.
     if guard.check_rate_limit(token, client_ip).is_err() {
         return (
             429,
             json!({ "error": { "code": "rate_limited", "message": "too many requests" } }),
         );
+    }
+
+    if let Some((project_id, name, tail)) = public_function_route(path) {
+        let store = match crate::cloud::ProjectStore::open(&guard.cloud_root, project_id) {
+            Ok(store) => store,
+            Err(error) => return error_response(&error),
+        };
+        let policy = match store.function_http_policy(name) {
+            Ok(policy) => policy,
+            Err(error) => return error_response(&error),
+        };
+        if method == "OPTIONS" {
+            return (200, json!({ "ok": true }));
+        }
+        let allowed = match policy.auth.as_str() {
+            "public" => true,
+            "token" => token.is_some_and(|candidate| {
+                verify_function_token(
+                    guard.realtime_secret.as_deref(),
+                    candidate,
+                    project_id,
+                    name,
+                )
+            }),
+            _ => token
+                .is_some_and(|candidate| guard.cloud_owned_project(candidate, project_id).is_ok()),
+        };
+        if !allowed {
+            return error_response(&Error::Unauthorized("function HTTP access denied".into()));
+        }
+        let query = raw_path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let request =
+            json!({ "method": method, "path": format!("/{tail}"), "query": query, "body": body });
+        let prepared = guard.cloud_prepare_public_invocation(project_id, name, request);
+        drop(guard);
+        return match prepared.and_then(|(url, sandbox_token, payload, version, digest)| {
+            invoke_function_sandbox(&url, &sandbox_token, &payload)
+                .map(|output| (output, version, digest))
+        }) {
+            Ok((output, version, digest)) => (
+                200,
+                json!({ "result": output, "version": version, "digest": digest }),
+            ),
+            Err(error) => error_response(&error),
+        };
     }
 
     // Sandbox I/O must happen without the global protocol lock. A slow or
@@ -6681,9 +6819,8 @@ pub fn route_with_ip(
             };
             drop(guard);
             let result = prepared.and_then(|(url, sandbox_token, payload, version, digest)| {
-                invoke_function_sandbox(&url, &sandbox_token, &payload).map(|output| {
-                    (output, version, digest)
-                })
+                invoke_function_sandbox(&url, &sandbox_token, &payload)
+                    .map(|output| (output, version, digest))
             });
             return match result {
                 Ok((output, version, digest)) => {
@@ -6693,11 +6830,77 @@ pub fn route_with_ip(
                             json!({ "project_id": project_id, "name": name, "version": version, "digest": digest }),
                         );
                     }
-                    (200, json!({ "result": output, "version": version, "digest": digest }))
+                    (
+                        200,
+                        json!({ "result": output, "version": version, "digest": digest }),
+                    )
                 }
                 Err(e) => error_response(&e),
             };
         }
+    }
+
+    if let Some(project_id) = cloud_egress_route(path) {
+        let result = match token {
+            Some(t) => guard.cloud_owned_project(t, project_id).and_then(|_| {
+                let mut store = crate::cloud::ProjectStore::open(&guard.cloud_root, project_id)?;
+                match method {
+                    "GET" => Ok(json!({ "hosts": store.egress_hosts()? })),
+                    "PUT" => {
+                        let hosts = body
+                            .get("hosts")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| Error::Other("hosts must be an array".into()))?
+                            .iter()
+                            .map(|v| {
+                                v.as_str().map(str::to_string).ok_or_else(|| {
+                                    Error::Other("each host must be a string".into())
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        store.set_egress_hosts(&hosts)?;
+                        Ok(json!({ "hosts": store.egress_hosts()? }))
+                    }
+                    _ => Err(Error::Other("method not allowed".into())),
+                }
+            }),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        };
+        return match result {
+            Ok(value) => (200, value),
+            Err(error) => error_response(&error),
+        };
+    }
+
+    if let Some((project_id, schedule_id)) = cloud_schedule_route(path) {
+        let result = match token {
+            Some(t) => guard.cloud_owned_project(t, project_id).and_then(|_| {
+                let mut store = crate::cloud::ProjectStore::open(&guard.cloud_root, project_id)?;
+                match (method, schedule_id) {
+                    ("GET", None) => Ok(json!({ "schedules": store.schedules()? })),
+                    ("PUT", Some(id)) => {
+                        let function = body.get("function").and_then(Value::as_str).unwrap_or("");
+                        let cron = body.get("cron").and_then(Value::as_str).unwrap_or("");
+                        let request = body.get("request").unwrap_or(&Value::Null);
+                        serde_json::to_value(store.put_schedule(
+                            id,
+                            function,
+                            cron,
+                            request,
+                            now_unix(),
+                        )?)
+                        .map_err(|e| Error::Other(e.to_string()))
+                    }
+                    ("DELETE", Some(id)) => Ok(json!({ "deleted": store.delete_schedule(id)? })),
+                    _ => Err(Error::Other("method not allowed".into())),
+                }
+            }),
+            None => Err(Error::Unauthorized("missing bearer token".into())),
+        };
+        return match result {
+            Ok(value) => (200, value),
+            Err(error) => error_response(&error),
+        };
     }
 
     let response = match (method, path) {
@@ -6735,22 +6938,70 @@ pub fn route_with_ip(
                     .filter_map(Value::as_str)
                     .map(str::to_string)
                     .collect::<Vec<_>>()),
-                _ => Err(Error::Other("permissions must be an array of strings".into())),
+                _ => Err(Error::Other(
+                    "permissions must be an array of strings".into(),
+                )),
             };
             let subject = body.get("subject").and_then(Value::as_str);
             match (token, channels, permissions) {
-                (Some(t), Ok(channels), Ok(permissions)) => {
-                    guard.cloud_issue_realtime_token(t, project_id, &channels, &permissions, subject)
-                }
+                (Some(t), Ok(channels), Ok(permissions)) => guard.cloud_issue_realtime_token(
+                    t,
+                    project_id,
+                    &channels,
+                    &permissions,
+                    subject,
+                ),
                 (_, Err(error), _) | (_, _, Err(error)) => Err(error),
                 (None, _, _) => Err(Error::Unauthorized("missing bearer token".into())),
             }
-        },
+        }
+        ("PUT", p) if cloud_function_http_route(p).is_some() => {
+            let (project_id, name, _) = cloud_function_http_route(p).expect("guarded above");
+            let auth_mode = body
+                .get("auth")
+                .and_then(Value::as_str)
+                .unwrap_or("private");
+            let origins = body
+                .get("cors_origins")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| Error::Other("cors_origins must contain strings".into()))
+                })
+                .collect::<Result<Vec<_>>>();
+            match (token, origins) {
+                (Some(t), Ok(origins)) => guard.cloud_owned_project(t, project_id).and_then(|_| {
+                    let mut store =
+                        crate::cloud::ProjectStore::open(&guard.cloud_root, project_id)?;
+                    store.set_function_http_policy(name, auth_mode, &origins)?;
+                    serde_json::to_value(store.function_http_policy(name)?)
+                        .map_err(|e| Error::Other(e.to_string()))
+                }),
+                (_, Err(error)) => Err(error),
+                _ => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("POST", p)
+            if cloud_function_http_route(p).is_some_and(|(_, _, action)| action == "tokens") =>
+        {
+            let (project_id, name, _) = cloud_function_http_route(p).expect("guarded above");
+            match token {
+                Some(t) => guard.cloud_issue_function_token(t, project_id, name),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
         (m, p) if matches!(m, "PUT" | "GET") && cloud_route(p, "kv").is_some() => {
             let (project_id, key) = cloud_route(p, "kv").expect("guarded above");
             match (token, m) {
                 (Some(t), "PUT") => (|| -> Result<Value> {
-                    let encoded = body.get("value_base64").and_then(Value::as_str).unwrap_or("");
+                    let encoded = body
+                        .get("value_base64")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
                     let value = crate::artifact::decode_base64(encoded)
                         .ok_or_else(|| Error::Other("value_base64 is invalid".into()))?;
                     guard.cloud_put_kv(
@@ -6780,7 +7031,10 @@ pub fn route_with_ip(
             let (project_id, key) = cloud_route(p, "objects").expect("guarded above");
             match (token, m) {
                 (Some(t), "PUT") => (|| -> Result<Value> {
-                    let encoded = body.get("content_base64").and_then(Value::as_str).unwrap_or("");
+                    let encoded = body
+                        .get("content_base64")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
                     let content = crate::artifact::decode_base64(encoded)
                         .ok_or_else(|| Error::Other("content_base64 is invalid".into()))?;
                     let media_type = body
@@ -7624,6 +7878,265 @@ fn cloud_function_action<'a>(path: &'a str, action: &str) -> Option<(&'a str, &'
     Some((parts[3], parts[5]))
 }
 
+fn cloud_egress_route(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() == 5
+        && parts[0] == "v1"
+        && parts[1] == "cloud"
+        && parts[2] == "projects"
+        && parts[4] == "egress"
+    {
+        Some(parts[3])
+    } else {
+        None
+    }
+}
+
+fn cloud_schedule_route(path: &str) -> Option<(&str, Option<&str>)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if (parts.len() == 5 || parts.len() == 6)
+        && parts[0] == "v1"
+        && parts[1] == "cloud"
+        && parts[2] == "projects"
+        && parts[4] == "schedules"
+    {
+        Some((parts[3], parts.get(5).copied()))
+    } else {
+        None
+    }
+}
+
+fn cloud_function_http_route(path: &str) -> Option<(&str, &str, &str)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() == 7
+        && parts[0] == "v1"
+        && parts[1] == "cloud"
+        && parts[2] == "projects"
+        && parts[4] == "functions"
+        && matches!(parts[6], "http" | "tokens")
+    {
+        Some((parts[3], parts[5], parts[6]))
+    } else {
+        None
+    }
+}
+
+fn public_function_route(path: &str) -> Option<(&str, &str, String)> {
+    let clean = path.split('?').next().unwrap_or(path);
+    let parts: Vec<&str> = clean.trim_matches('/').split('/').collect();
+    if parts.len() >= 3 && parts[0] == "functions" {
+        Some((parts[1], parts[2], parts[3..].join("/")))
+    } else {
+        None
+    }
+}
+
+fn verify_function_token(secret: Option<&str>, token: &str, project_id: &str, name: &str) -> bool {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+    let Some(secret) = secret else { return false };
+    let Some((encoded, signature)) = token.split_once('.') else {
+        return false;
+    };
+    let Ok(signature) = hex::decode(signature) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(encoded.as_bytes());
+    if mac.verify_slice(&signature).is_err() {
+        return false;
+    }
+    let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded) else {
+        return false;
+    };
+    let Ok(claims) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    claims.get("project_id").and_then(Value::as_str) == Some(project_id)
+        && claims.get("function").and_then(Value::as_str) == Some(name)
+        && claims
+            .get("exp")
+            .and_then(Value::as_u64)
+            .is_some_and(|exp| exp >= now_unix())
+}
+
+fn capability_text(value: &Value, field: &str) -> Result<Vec<u8>> {
+    let value = value
+        .get(field)
+        .ok_or_else(|| Error::Other(format!("missing {field}")))?;
+    match value {
+        Value::String(text) => Ok(text.as_bytes().to_vec()),
+        other => serde_json::to_vec(other).map_err(|e| Error::Other(e.to_string())),
+    }
+}
+
+fn execute_function_capability(
+    root: &std::path::Path,
+    project_id: &str,
+    request: &Value,
+) -> Result<Value> {
+    use base64::Engine;
+    let kind = request
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Other("missing capability kind".into()))?;
+    let args = request.get("args").unwrap_or(&Value::Null);
+    let key = || {
+        args.get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Other("missing capability key".into()))
+    };
+    let mut store = crate::cloud::ProjectStore::open(root, project_id)?;
+    match kind {
+        "kv.get" => Ok(match store.get_kv(key()?, now_unix())? {
+            Some(bytes) => serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned())),
+            None => Value::Null,
+        }),
+        "kv.put" => {
+            let bytes = capability_text(args, "value")?;
+            let expires_at = args.get("expires_at").and_then(Value::as_u64);
+            store.put_kv(key()?, &bytes, expires_at, now_unix())?;
+            Ok(json!({ "ok": true }))
+        }
+        "objects.get" => Ok(match store.get_object(key()?)? {
+            Some(object) => json!({
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(object.content),
+                "media_type": object.media_type,
+                "digest": object.digest
+            }),
+            None => Value::Null,
+        }),
+        "objects.put" => {
+            let content = capability_text(args, "content")?;
+            let media_type = args
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("application/octet-stream");
+            let digest = store.put_object(key()?, &content, media_type, now_unix())?;
+            Ok(json!({ "ok": true, "digest": digest }))
+        }
+        "db.query" | "db.execute" => {
+            let sql = args.get("sql").and_then(Value::as_str).unwrap_or("");
+            let params = args
+                .get("params")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let result = if kind == "db.query" {
+                store.database_query(sql, &params)?
+            } else {
+                store.database_execute(sql, &params)?
+            };
+            serde_json::to_value(result).map_err(|e| Error::Other(e.to_string()))
+        }
+        "http.request" => execute_function_http(&store, args),
+        _ => Err(Error::Other("unknown function capability".into())),
+    }
+}
+
+fn execute_function_http(store: &crate::cloud::ProjectStore, args: &Value) -> Result<Value> {
+    let method = args.get("method").and_then(Value::as_str).unwrap_or("GET");
+    if !matches!(method, "GET" | "POST") {
+        return Err(Error::Other(
+            "HTTP capability only supports GET and POST".into(),
+        ));
+    }
+    let url = args
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Other("missing HTTP URL".into()))?;
+    crate::delivery::validate_webhook_url(url)?;
+    let authority = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or("")
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    let host = authority
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(authority)
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if !store.egress_hosts()?.iter().any(|allowed| allowed == &host) {
+        return Err(Error::Unauthorized(format!(
+            "HTTP host is not in project egress allowlist: {host}"
+        )));
+    }
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .max_redirects(0)
+        .build()
+        .new_agent();
+    let mut safe_headers = Vec::new();
+    if let Some(headers) = args.get("headers").and_then(Value::as_object) {
+        for (name, value) in headers {
+            let lower = name.to_ascii_lowercase();
+            if !matches!(
+                lower.as_str(),
+                "accept" | "content-type" | "cookie" | "user-agent"
+            ) {
+                return Err(Error::Other(format!("HTTP header is not allowed: {name}")));
+            }
+            let value = value
+                .as_str()
+                .ok_or_else(|| Error::Other("HTTP header values must be strings".into()))?;
+            if value.contains(['\r', '\n']) {
+                return Err(Error::Other("invalid HTTP header value".into()));
+            }
+            safe_headers.push((name.clone(), value.to_string()));
+        }
+    }
+    // DNS is validated again immediately before the network operation to
+    // narrow the rebinding window; redirects remain disabled.
+    crate::delivery::validate_webhook_url(url)?;
+    let sent = if method == "POST" {
+        let body = args
+            .get("body")
+            .map(|v| {
+                if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else {
+                    v.to_string()
+                }
+            })
+            .unwrap_or_default();
+        let mut request = agent.post(url);
+        for (name, value) in &safe_headers {
+            request = request.header(name, value);
+        }
+        request.send(body)
+    } else {
+        let mut request = agent.get(url);
+        for (name, value) in &safe_headers {
+            request = request.header(name, value);
+        }
+        request.call()
+    };
+    let mut response = sent.map_err(|e| Error::Other(format!("HTTP capability failed: {e}")))?;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let bytes = response
+        .body_mut()
+        .read_to_vec()
+        .map_err(|e| Error::Other(format!("HTTP response failed: {e}")))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(Error::Other("HTTP response exceeds 1 MiB".into()));
+    }
+    Ok(
+        json!({ "status": status, "content_type": content_type, "body": String::from_utf8_lossy(&bytes) }),
+    )
+}
+
 fn cloud_function_version_route(path: &str) -> Option<(&str, &str, u64)> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     if parts.len() != 8
@@ -7684,6 +8197,50 @@ fn invoke_function_sandbox(url: &str, token: &str, payload: &Value) -> Result<Va
     body.get("result")
         .cloned()
         .ok_or_else(|| Error::Other("function sandbox returned no result".into()))
+}
+
+/// Execute schedules due at `now`. Preparation and bookkeeping briefly hold
+/// the protocol lock; untrusted execution and all capability I/O do not.
+pub fn run_due_function_schedules(state: &Arc<Mutex<NodeState>>, now: u64) -> usize {
+    let prepared = {
+        let guard = match state.lock() {
+            Ok(g) => g,
+            Err(_) => return 0,
+        };
+        let mut jobs = Vec::new();
+        for project_id in guard.cloud_projects.keys() {
+            let Ok(store) = crate::cloud::ProjectStore::open(&guard.cloud_root, project_id) else {
+                continue;
+            };
+            let Ok(schedules) = store.due_schedules(now) else {
+                continue;
+            };
+            for schedule in schedules {
+                if let Ok(invocation) = guard.cloud_prepare_public_invocation(
+                    project_id,
+                    &schedule.function,
+                    schedule.request.clone(),
+                ) {
+                    jobs.push((project_id.clone(), schedule.id, invocation));
+                }
+            }
+        }
+        jobs
+    };
+    let count = prepared.len();
+    for (project_id, schedule_id, (url, token, payload, _, _)) in prepared {
+        let status = match invoke_function_sandbox(&url, &token, &payload) {
+            Ok(_) => "ok",
+            Err(_) => "error",
+        };
+        if let Ok(guard) = state.lock() {
+            if let Ok(mut store) = crate::cloud::ProjectStore::open(&guard.cloud_root, &project_id)
+            {
+                let _ = store.finish_schedule(&schedule_id, now, status);
+            }
+        }
+    }
+    count
 }
 
 /// Parse a discovery query from JSON body or URL query string.

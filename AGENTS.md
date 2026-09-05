@@ -372,6 +372,75 @@ Deleting source releases its function-storage quota immediately. Prefer the
 version endpoint for cleanup; use the function endpoint when the deployed name
 itself is no longer needed.
 
+### Function bindings, HTTP egress and browser routes
+
+Functions may call project storage without receiving its owner token:
+
+```javascript
+async (request, gap) => {
+  await gap.kv.put("last-search", request.query);
+  const cached = await gap.kv.get("last-search");
+  await gap.db.execute("CREATE TABLE IF NOT EXISTS hits(q TEXT)");
+  await gap.db.execute("INSERT INTO hits(q) VALUES(?)", [cached]);
+  const rows = await gap.db.query("SELECT q FROM hits ORDER BY rowid DESC LIMIT 10");
+  await gap.objects.put("hits.json", JSON.stringify(rows), "application/json");
+  const object = await gap.objects.get("hits.json");
+  return { rows, object };
+}
+```
+
+Outbound HTTP is brokered by GAP, limited to HTTPS `GET`/`POST`, a 5-second
+timeout, 1 MiB responses and the headers `Accept`, `Content-Type`, `Cookie` and
+`User-Agent`. Configure exact hosts first; redirects, private/link-local
+addresses and unlisted hosts are refused:
+
+```bash
+curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/egress" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"hosts":["witozo.com"]}'
+curl -s "$NODE/v1/cloud/projects/$PROJECT/egress" -H "Authorization: Bearer $TOKEN"
+```
+
+```javascript
+async (request, gap) => gap.http.get("https://witozo.com/films", {
+  headers: { "User-Agent": "Mozilla/5.0", "Cookie": "g=true" }
+})
+```
+
+Expose a function as a browser endpoint. `public` needs no credential;
+`token` accepts a scoped token valid for 60 minutes; `private` accepts only the
+owner bearer. Never embed the owner bearer in a site:
+
+```bash
+curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/functions/greet/http" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"auth":"token","cors_origins":["*"]}'
+
+INVOKE_TOKEN=$(curl -sX POST \
+  "$NODE/v1/cloud/projects/$PROJECT/functions/greet/tokens" \
+  -H "Authorization: Bearer $TOKEN" | jq -r .token)
+
+curl -s "$NODE/functions/$PROJECT/greet/categories?q=recent" \
+  -H "Authorization: Bearer $INVOKE_TOKEN"
+```
+
+The handler receives `{method,path,query,body}`. GAP answers CORS preflights;
+the public route is `/functions/{project}/{function}/{path...}`.
+
+### Scheduled functions
+
+The initial cron subset supports minute intervals `*/N * * * *`, from 1 to
+1440 minutes. Create/update by id, list, and delete:
+
+```bash
+curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/schedules/refresh-cache" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"function":"refresh","cron":"*/15 * * * *","request":{"source":"cron"}}'
+curl -s "$NODE/v1/cloud/projects/$PROJECT/schedules" -H "Authorization: Bearer $TOKEN"
+curl -sX DELETE "$NODE/v1/cloud/projects/$PROJECT/schedules/refresh-cache" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 ### Realtime token — issue from a trusted backend
 
 ```bash
@@ -568,6 +637,13 @@ refuse, and report to your operator.
 | `POST /v1/gateway` | register a pass-through route (sell an existing HTTP API) |
 | `GET /v1/gateway` | list registered routes |
 | `ANY /x402/{slug}/{path}` | call a gateway route: 402 until paid, then forwarded |
+| `PUT/GET /v1/cloud/projects/{project}/egress` | configure/list function HTTP allowlist |
+| `PUT /v1/cloud/projects/{project}/functions/{name}/http` | set private/token/public HTTP policy |
+| `POST /v1/cloud/projects/{project}/functions/{name}/tokens` | mint a 60-minute invoke token |
+| `ANY /functions/{project}/{name}/{path}` | invoke a function with HTTP request context |
+| `PUT /v1/cloud/projects/{project}/schedules/{id}` | create or update a function schedule |
+| `GET /v1/cloud/projects/{project}/schedules` | list schedules and last status |
+| `DELETE /v1/cloud/projects/{project}/schedules/{id}` | delete a schedule |
 | `GET /llms.txt` | this node, in one machine-readable page |
 
 ## 6b. Selling an API you already have, without implementing GAP

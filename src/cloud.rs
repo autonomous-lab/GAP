@@ -90,6 +90,24 @@ pub struct ProjectRecord {
     pub updated_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionHttpPolicy {
+    pub auth: String,
+    pub cors_origins: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionSchedule {
+    pub id: String,
+    pub function: String,
+    pub cron: String,
+    pub request: Value,
+    pub enabled: bool,
+    pub next_run_at: u64,
+    pub last_run_at: Option<u64>,
+    pub last_status: Option<String>,
+}
+
 pub struct ProjectStore {
     project_id: String,
     root: PathBuf,
@@ -313,6 +331,154 @@ impl ProjectStore {
             .map_err(db_error)
     }
 
+    pub fn set_egress_hosts(&mut self, hosts: &[String]) -> Result<()> {
+        if hosts.len() > 32 {
+            return Err(Error::Other("too many egress hosts".into()));
+        }
+        let mut normalized = Vec::new();
+        for host in hosts {
+            let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+            if host.is_empty() || host.len() > 253 || host.contains(['/', ':', '@', '?', '#']) {
+                return Err(Error::Other("invalid egress host".into()));
+            }
+            normalized.push(host);
+        }
+        normalized.sort();
+        normalized.dedup();
+        let tx = self.control.transaction().map_err(db_error)?;
+        tx.execute("DELETE FROM egress_hosts", [])
+            .map_err(db_error)?;
+        for host in normalized {
+            tx.execute("INSERT INTO egress_hosts(host) VALUES(?1)", [host])
+                .map_err(db_error)?;
+        }
+        tx.commit().map_err(db_error)
+    }
+
+    pub fn egress_hosts(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .control
+            .prepare("SELECT host FROM egress_hosts ORDER BY host")
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([], |row| row.get(0))
+            .map_err(db_error)?;
+        rows.collect::<std::result::Result<Vec<String>, _>>()
+            .map_err(db_error)
+    }
+
+    pub fn set_function_http_policy(
+        &mut self,
+        name: &str,
+        auth: &str,
+        origins: &[String],
+    ) -> Result<()> {
+        validate_identifier("function name", name)?;
+        if !matches!(auth, "private" | "token" | "public")
+            || origins.len() > 16
+            || origins
+                .iter()
+                .any(|o| o.len() > 255 || o.contains(['\r', '\n']))
+        {
+            return Err(Error::Other("invalid function HTTP policy".into()));
+        }
+        let cors = serde_json::to_string(origins).map_err(|e| Error::Other(e.to_string()))?;
+        self.control.execute(
+            "INSERT INTO function_http(name,auth,cors_origins) VALUES(?1,?2,?3) ON CONFLICT(name) DO UPDATE SET auth=excluded.auth,cors_origins=excluded.cors_origins",
+            params![name, auth, cors],
+        ).map_err(db_error)?;
+        Ok(())
+    }
+
+    pub fn function_http_policy(&self, name: &str) -> Result<FunctionHttpPolicy> {
+        validate_identifier("function name", name)?;
+        let row: Option<(String, String)> = self
+            .control
+            .query_row(
+                "SELECT auth,cors_origins FROM function_http WHERE name=?1",
+                [name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let (auth, cors) = row.unwrap_or_else(|| ("private".into(), "[]".into()));
+        Ok(FunctionHttpPolicy {
+            auth,
+            cors_origins: serde_json::from_str(&cors).unwrap_or_default(),
+        })
+    }
+
+    pub fn put_schedule(
+        &mut self,
+        id: &str,
+        function: &str,
+        cron: &str,
+        request: &Value,
+        now: u64,
+    ) -> Result<FunctionSchedule> {
+        validate_identifier("schedule id", id)?;
+        validate_identifier("function name", function)?;
+        let minutes = parse_minute_cron(cron)?;
+        let next = now.saturating_add(minutes.saturating_mul(60));
+        let request = serde_json::to_string(request).map_err(|e| Error::Other(e.to_string()))?;
+        if request.len() > 64 * 1024 {
+            return Err(Error::Other("schedule request is too large".into()));
+        }
+        self.control.execute(
+            "INSERT INTO schedules(id,function,cron,request,enabled,next_run_at) VALUES(?1,?2,?3,?4,1,?5) ON CONFLICT(id) DO UPDATE SET function=excluded.function,cron=excluded.cron,request=excluded.request,enabled=1,next_run_at=excluded.next_run_at",
+            params![id, function, cron, request, sql_int(next)?],
+        ).map_err(db_error)?;
+        self.schedule(id)?
+            .ok_or_else(|| Error::Other("schedule was not stored".into()))
+    }
+
+    pub fn schedules(&self) -> Result<Vec<FunctionSchedule>> {
+        let mut stmt = self.control.prepare("SELECT id,function,cron,request,enabled,next_run_at,last_run_at,last_status FROM schedules ORDER BY id").map_err(db_error)?;
+        let rows = stmt.query_map([], schedule_row).map_err(db_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_error)
+    }
+
+    pub fn schedule(&self, id: &str) -> Result<Option<FunctionSchedule>> {
+        self.control.query_row("SELECT id,function,cron,request,enabled,next_run_at,last_run_at,last_status FROM schedules WHERE id=?1", [id], schedule_row).optional().map_err(db_error)
+    }
+
+    pub fn due_schedules(&self, now: u64) -> Result<Vec<FunctionSchedule>> {
+        Ok(self
+            .schedules()?
+            .into_iter()
+            .filter(|s| s.enabled && s.next_run_at <= now)
+            .collect())
+    }
+
+    pub fn finish_schedule(&mut self, id: &str, now: u64, status: &str) -> Result<()> {
+        let schedule = self
+            .schedule(id)?
+            .ok_or_else(|| Error::Other("unknown schedule".into()))?;
+        let minutes = parse_minute_cron(&schedule.cron)?;
+        self.control
+            .execute(
+                "UPDATE schedules SET last_run_at=?2,last_status=?3,next_run_at=?4 WHERE id=?1",
+                params![
+                    id,
+                    sql_int(now)?,
+                    status,
+                    sql_int(now.saturating_add(minutes * 60))?
+                ],
+            )
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    pub fn delete_schedule(&mut self, id: &str) -> Result<bool> {
+        validate_identifier("schedule id", id)?;
+        Ok(self
+            .control
+            .execute("DELETE FROM schedules WHERE id=?1", [id])
+            .map_err(db_error)?
+            > 0)
+    }
+
     pub fn deploy_function(
         &mut self,
         name: &str,
@@ -467,7 +633,9 @@ impl ProjectStore {
             .map_err(db_error)?
             .flatten();
         if active == Some(version) {
-            return Err(Error::Other("cannot delete the active function version".into()));
+            return Err(Error::Other(
+                "cannot delete the active function version".into(),
+            ));
         }
         let deleted = tx
             .execute(
@@ -695,7 +863,43 @@ CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,value BLOB NOT NULL,expires_a
 CREATE TABLE IF NOT EXISTS objects(object_key TEXT PRIMARY KEY,content BLOB NOT NULL,media_type TEXT NOT NULL,size_bytes INTEGER NOT NULL,digest TEXT NOT NULL,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS functions(name TEXT PRIMARY KEY,active_version INTEGER,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS function_versions(name TEXT NOT NULL,version INTEGER NOT NULL,runtime TEXT NOT NULL,source BLOB NOT NULL,digest TEXT NOT NULL,ruling TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(name,version),FOREIGN KEY(name) REFERENCES functions(name));
+CREATE TABLE IF NOT EXISTS egress_hosts(host TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS function_http(name TEXT PRIMARY KEY,auth TEXT NOT NULL,cors_origins TEXT NOT NULL,FOREIGN KEY(name) REFERENCES functions(name) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY,function TEXT NOT NULL,cron TEXT NOT NULL,request TEXT NOT NULL,enabled INTEGER NOT NULL,next_run_at INTEGER NOT NULL,last_run_at INTEGER,last_status TEXT,FOREIGN KEY(function) REFERENCES functions(name) ON DELETE CASCADE);
 "#;
+
+fn parse_minute_cron(cron: &str) -> Result<u64> {
+    let parts: Vec<&str> = cron.split_whitespace().collect();
+    if parts.len() != 5 || parts[1..] != ["*", "*", "*", "*"] {
+        return Err(Error::Other(
+            "cron must use the supported form */N * * * *".into(),
+        ));
+    }
+    let minutes = parts[0]
+        .strip_prefix("*/")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    if !(1..=1440).contains(&minutes) {
+        return Err(Error::Other(
+            "cron interval must be between 1 and 1440 minutes".into(),
+        ));
+    }
+    Ok(minutes)
+}
+
+fn schedule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FunctionSchedule> {
+    let request: String = row.get(3)?;
+    Ok(FunctionSchedule {
+        id: row.get(0)?,
+        function: row.get(1)?,
+        cron: row.get(2)?,
+        request: serde_json::from_str(&request).unwrap_or(Value::Null),
+        enabled: row.get::<_, i64>(4)? != 0,
+        next_run_at: row.get::<_, i64>(5)? as u64,
+        last_run_at: row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
+        last_status: row.get(7)?,
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -847,7 +1051,8 @@ mod tests {
         assert!(s.active_function("answer").unwrap().is_none());
         assert_eq!(
             s.control
-                .query_row("SELECT COUNT(*) FROM function_versions", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT COUNT(*) FROM function_versions", [], |row| row
+                    .get::<_, i64>(0))
                 .unwrap(),
             0
         );

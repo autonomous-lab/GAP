@@ -465,6 +465,15 @@ fn main() -> Result<()> {
         println!("[gap-node] event delivery: webhooks enabled (RFC-0013)");
     }
 
+    {
+        let state = state.clone();
+        std::thread::spawn(move || loop {
+            gap::server::run_due_function_schedules(&state, gap::message::now_unix());
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        println!("[gap-node] function schedules: enabled");
+    }
+
     // Resolve contracts that stopped moving.
     //
     // Without this a deal nobody funded, or nobody answered, stays open
@@ -700,6 +709,30 @@ retrieves from that URL must hash to it.",
             response.add_header(
                 Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
             );
+            if path
+                .split('?')
+                .next()
+                .unwrap_or(&path)
+                .starts_with("/functions/")
+            {
+                response.add_header(
+                    Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
+                );
+                response.add_header(
+                    Header::from_bytes(
+                        &b"Access-Control-Allow-Methods"[..],
+                        &b"GET, POST, PUT, PATCH, DELETE, OPTIONS"[..],
+                    )
+                    .unwrap(),
+                );
+                response.add_header(
+                    Header::from_bytes(
+                        &b"Access-Control-Allow-Headers"[..],
+                        &b"Authorization, Content-Type"[..],
+                    )
+                    .unwrap(),
+                );
+            }
 
             let _ = request.respond(response);
         }));

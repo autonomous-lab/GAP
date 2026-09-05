@@ -7,6 +7,8 @@ const port = Number(process.env.SANDBOX_PORT || "8090");
 const token = process.env.SANDBOX_TOKEN || "";
 const maxBody = Number(process.env.SANDBOX_MAX_BODY_BYTES || "600000");
 const timeoutMs = Number(process.env.SANDBOX_TIMEOUT_MS || "1000");
+const capabilityUrl = process.env.CAPABILITY_URL || "http://gap-node:8080/internal/functions/capability";
+const maxCapabilities = Number(process.env.SANDBOX_MAX_CAPABILITIES || "32");
 const workerPath = fileURLToPath(new URL("./worker.mjs", import.meta.url));
 
 if (!token) throw new Error("SANDBOX_TOKEN is required");
@@ -22,7 +24,7 @@ function reply(res, status, body) {
   res.end(data);
 }
 
-function invoke(payload) {
+function runWorker(payload) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [workerPath], {
       env: {},
@@ -47,6 +49,36 @@ function invoke(payload) {
     });
     child.stdin.end(JSON.stringify(payload));
   });
+}
+
+async function callCapability(projectId, request) {
+  const response = await fetch(capabilityUrl, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ project_id: projectId, request }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body?.error?.message || body?.error || "capability failed");
+  return body;
+}
+
+async function invoke(payload) {
+  const capabilityResults = [];
+  for (let count = 0; count <= maxCapabilities; count++) {
+    const output = await runWorker({ ...payload, capability_results: capabilityResults });
+    if (!output.capability_request) return output;
+    if (!payload.project_id) throw new Error("missing capability project");
+    if (output.capability_request.index !== capabilityResults.length) {
+      throw new Error("invalid capability sequence");
+    }
+    try {
+      capabilityResults.push({ ok: true, value: await callCapability(payload.project_id, output.capability_request) });
+    } catch (error) {
+      capabilityResults.push({ ok: false, error: String(error.message || error) });
+    }
+  }
+  throw new Error("too many capability calls");
 }
 
 const server = http.createServer((req, res) => {
