@@ -491,6 +491,7 @@ pub struct NodeState {
     /// Internal-only function runner. Empty configuration fails closed.
     function_sandbox_url: Option<String>,
     function_sandbox_token: Option<String>,
+    realtime_secret: Option<String>,
 }
 
 impl NodeState {
@@ -865,6 +866,9 @@ impl NodeState {
             function_sandbox_token: std::env::var("GAP_FUNCTION_SANDBOX_TOKEN")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            realtime_secret: std::env::var("GAP_REALTIME_SECRET")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
         };
 
         // One-time migration of the legacy jobs rows, done here rather
@@ -922,6 +926,10 @@ impl NodeState {
     pub fn set_function_sandbox(&mut self, url: &str, token: &str) {
         self.function_sandbox_url = Some(url.trim_end_matches('/').to_string());
         self.function_sandbox_token = Some(token.to_string());
+    }
+
+    pub fn set_realtime_secret(&mut self, secret: &str) {
+        self.realtime_secret = Some(secret.to_string());
     }
 
     fn persist_contract(&mut self, contract: &Contract) {
@@ -2483,6 +2491,53 @@ the content inline"
     ) -> Result<std::path::PathBuf> {
         self.cloud_owned_project(token, project_id)?;
         Ok(self.cloud_root.clone())
+    }
+
+    pub fn cloud_issue_realtime_token(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        channels: &[String],
+    ) -> Result<Value> {
+        self.cloud_owned_project(token, project_id)?;
+        if channels.len() > 25
+            || channels.iter().any(|channel| {
+                channel.is_empty()
+                    || channel.len() > 128
+                    || !channel.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':' | b'.')
+                    })
+            })
+        {
+            return Err(Error::Other("invalid realtime channel scope".into()));
+        }
+        let secret = self
+            .realtime_secret
+            .as_deref()
+            .ok_or_else(|| Error::Other("realtime service is not configured".into()))?;
+        use rand::RngCore;
+        let mut nonce = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        let expires_at = now_unix().saturating_add(3600);
+        let claims = json!({
+            "project_id": project_id,
+            "channels": channels,
+            "exp": expires_at,
+            "jti": hex::encode(nonce)
+        });
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).map_err(|error| Error::Other(error.to_string()))?);
+        use hmac::{Hmac, Mac};
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
+            .map_err(|_| Error::Other("invalid realtime secret".into()))?;
+        mac.update(encoded.as_bytes());
+        let signed = format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes()));
+        self.record(
+            "cloud.realtime.token.issued",
+            json!({ "project_id": project_id, "expires_at": expires_at, "channel_count": channels.len() }),
+        );
+        Ok(json!({ "token": signed, "expires_at": expires_at }))
     }
 
     pub fn cloud_deploy_function(
@@ -6604,6 +6659,25 @@ pub fn route_with_ip(
                 .map(|projects| json!({ "projects": projects })),
             None => Err(Error::Unauthorized("missing bearer token".into())),
         },
+        ("POST", p) if cloud_realtime_token_route(p).is_some() => {
+            let project_id = cloud_realtime_token_route(p).expect("guarded above");
+            let channels = match body.get("channels") {
+                None => Ok(Vec::new()),
+                Some(Value::Array(values)) if values.iter().all(Value::is_string) => Ok(values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()),
+                _ => Err(Error::Other("channels must be an array of strings".into())),
+            };
+            match (token, channels) {
+                (Some(t), Ok(channels)) => {
+                    guard.cloud_issue_realtime_token(t, project_id, &channels)
+                }
+                (_, Err(error)) => Err(error),
+                (None, _) => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        },
         (m, p) if matches!(m, "PUT" | "GET") && cloud_route(p, "kv").is_some() => {
             let (project_id, key) = cloud_route(p, "kv").expect("guarded above");
             match (token, m) {
@@ -7475,6 +7549,21 @@ fn cloud_database_action(path: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((parts[3], parts[5]))
+}
+
+fn cloud_realtime_token_route(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() == 6
+        && parts[0] == "v1"
+        && parts[1] == "cloud"
+        && parts[2] == "projects"
+        && parts[4] == "realtime"
+        && parts[5] == "tokens"
+    {
+        Some(parts[3])
+    } else {
+        None
+    }
 }
 
 fn invoke_function_sandbox(url: &str, token: &str, payload: &Value) -> Result<Value> {
@@ -8681,6 +8770,30 @@ mod tests {
         );
         assert_eq!(status, 200, "{project}");
         let project_id = project["project_id"].as_str().unwrap();
+
+        arc.lock().unwrap().set_realtime_secret("test-realtime-secret");
+        let token_path = format!("/v1/cloud/projects/{project_id}/realtime/tokens");
+        let token_request = json!({ "channels": ["contract:demo"] });
+        let (status, realtime) = route(
+            &arc,
+            "POST",
+            &token_path,
+            token_request.to_string().as_bytes(),
+            Some(&auth),
+        );
+        assert_eq!(status, 200, "{realtime}");
+        assert_eq!(realtime["token"].as_str().unwrap().split('.').count(), 2);
+        assert_eq!(
+            route(
+                &arc,
+                "POST",
+                &token_path,
+                token_request.to_string().as_bytes(),
+                Some(&format!("Bearer {stranger}")),
+            )
+            .0,
+            401
+        );
 
         let value = json!({ "value_base64": b64(b"hello"), "expires_at": now_unix() + 60 });
         let kv_path = format!("/v1/cloud/projects/{project_id}/kv/greeting");

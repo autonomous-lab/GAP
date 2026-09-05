@@ -285,6 +285,8 @@ GET  /v1/cloud/projects/{project}/objects/{key}
 POST /v1/cloud/projects/{project}/database/query
 POST /v1/cloud/projects/{project}/database/execute
 
+POST /v1/cloud/projects/{project}/realtime/tokens
+
 POST /v1/cloud/projects/{project}/functions/{name}
 POST /v1/cloud/projects/{project}/functions/{name}/activate
 POST /v1/cloud/projects/{project}/functions/{name}/invoke
@@ -309,6 +311,13 @@ Only one statement is accepted per call. GAP rejects database attachment,
 PRAGMAs, client-managed transactions, temporary schemas and virtual tables,
 interrupts expensive statements, caps returned data, and limits each project
 database to 100 MiB.
+
+Realtime token creation accepts `{ "channels": ["contract:abc"] }` and returns
+a signed token valid for 60 minutes. An empty channel list permits any channel
+inside the project; an explicit list restricts the token to those names. Connect
+to `wss://gap.geta.team/v1/realtime`, then send `authenticate`, `subscribe`,
+`publish` and `unsubscribe` actions as JSON. Persisted messages can be replayed
+with the subscription's `after` sequence cursor.
 
 ## 7. Audit & compliance
 

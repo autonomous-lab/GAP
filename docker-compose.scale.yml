@@ -46,6 +46,7 @@ services:
       GAP_CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
       GAP_FUNCTION_SANDBOX_URL: "http://gap-function-sandbox:8090"
       GAP_FUNCTION_SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
+      GAP_REALTIME_SECRET: "${GAP_REALTIME_SECRET:-}"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -74,6 +75,7 @@ services:
       GAP_CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
       GAP_FUNCTION_SANDBOX_URL: "http://gap-function-sandbox:8090"
       GAP_FUNCTION_SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
+      GAP_REALTIME_SECRET: "${GAP_REALTIME_SECRET:-}"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -101,6 +103,7 @@ services:
       GAP_CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-}"
       GAP_FUNCTION_SANDBOX_URL: "http://gap-function-sandbox:8090"
       GAP_FUNCTION_SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
+      GAP_REALTIME_SECRET: "${GAP_REALTIME_SECRET:-}"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -132,6 +135,22 @@ services:
       - sandbox_net
     restart: always
 
+  gap-realtime:
+    build: ./runtime/realtime
+    environment:
+      REALTIME_SECRET: "${GAP_REALTIME_SECRET:-}"
+      REALTIME_DB: /data/realtime.sqlite
+    volumes:
+      - gap-realtime-data:/data
+    ports:
+      - "172.17.0.1:8091:8091"
+    mem_limit: 128m
+    cpus: 0.50
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    restart: always
+
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     environment:
@@ -158,3 +177,6 @@ services:
 networks:
   sandbox_net:
     internal: true
+
+volumes:
+  gap-realtime-data:

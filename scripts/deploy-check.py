@@ -3,7 +3,9 @@ import sys, pathlib
 FILES = ["docker-compose.yml", "docker-compose.scale.yml", ".env.example",
          "Dockerfile", ".dockerignore", "deploy/haproxy/haproxy.cfg",
          "deploy/clickhouse/system-logs.xml", "runtime/sandbox/Dockerfile",
-         "runtime/sandbox/server.mjs", "runtime/sandbox/worker.mjs"]
+         "runtime/sandbox/server.mjs", "runtime/sandbox/worker.mjs",
+         "runtime/realtime/Dockerfile", "runtime/realtime/server.mjs",
+         "runtime/realtime/package.json", "runtime/realtime/package-lock.json"]
 bad = []
 for f in FILES:
     p = pathlib.Path(f)
