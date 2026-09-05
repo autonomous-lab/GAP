@@ -66,6 +66,8 @@ services:
         condition: service_healthy
       gap-function-sandbox:
         condition: service_healthy
+      gap-realtime:
+        condition: service_healthy
     volumes:
       - ./data/gap-node:/data
     networks:
@@ -98,7 +100,10 @@ services:
       REALTIME_SECRET: "${GAP_REALTIME_SECRET:-}"
       REALTIME_DB: /data/realtime.sqlite
     volumes:
-      - gap-realtime-data:/data
+      - ./data/gap-realtime:/data
+    read_only: true
+    cap_drop:
+      - ALL
     ports:
       - "172.17.0.1:8091:8091"
     mem_limit: 128m
@@ -155,6 +160,3 @@ services:
 networks:
   sandbox_net:
     internal: true
-
-volumes:
-  gap-realtime-data:

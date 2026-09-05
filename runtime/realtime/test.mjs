@@ -30,4 +30,4 @@ await new Promise(resolve => setTimeout(resolve, 100));
 assert(received.some(message => message.type === "authenticated"));
 assert(received.some(message => message.type === "subscribed"));
 assert(received.some(message => message.type === "message" && message.payload.answer === 42));
-socket.close();
+socket.terminate();

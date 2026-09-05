@@ -5,7 +5,8 @@ FILES = ["docker-compose.yml", "docker-compose.scale.yml", ".env.example",
          "deploy/clickhouse/system-logs.xml", "runtime/sandbox/Dockerfile",
          "runtime/sandbox/server.mjs", "runtime/sandbox/worker.mjs",
          "runtime/realtime/Dockerfile", "runtime/realtime/server.mjs",
-         "runtime/realtime/package.json", "runtime/realtime/package-lock.json"]
+         "runtime/realtime/package.json", "runtime/realtime/package-lock.json",
+         "runtime/realtime/entrypoint.sh"]
 bad = []
 for f in FILES:
     p = pathlib.Path(f)
