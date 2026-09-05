@@ -282,6 +282,9 @@ GET  /v1/cloud/projects/{project}/kv/{key}
 PUT  /v1/cloud/projects/{project}/objects/{key}
 GET  /v1/cloud/projects/{project}/objects/{key}
 
+POST /v1/cloud/projects/{project}/database/query
+POST /v1/cloud/projects/{project}/database/execute
+
 POST /v1/cloud/projects/{project}/functions/{name}
 POST /v1/cloud/projects/{project}/functions/{name}/activate
 POST /v1/cloud/projects/{project}/functions/{name}/invoke
@@ -297,6 +300,14 @@ The free-tier storage guardrails are enforced transactionally: 64 KiB per KV
 value and 10 MiB total KV data per project; 10 MiB per object and 100 MiB total
 object data per project; 512 KiB per function version. Replacing an existing
 key is charged on the resulting size, not counted twice.
+
+Database calls accept `{ "sql": "...", "params": [...] }`. Parameters are
+positional SQLite values; blobs use `{ "blob_base64": "..." }`. Query results
+contain `columns`, `rows` and `truncated`; mutations contain `affected_rows`.
+Only one statement is accepted per call. GAP rejects database attachment,
+PRAGMAs, client-managed transactions, temporary schemas and virtual tables,
+interrupts expensive statements, caps returned data, and limits each project
+database to 100 MiB.
 
 ## 7. Audit & compliance
 

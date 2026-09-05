@@ -9,7 +9,9 @@
 use crate::error::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub const MAX_KEY_BYTES: usize = 512;
 pub const MAX_KV_BYTES: usize = 64 * 1024;
@@ -17,6 +19,22 @@ pub const MAX_OBJECT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_FUNCTION_BYTES: usize = 512 * 1024;
 pub const MAX_PROJECT_KV_BYTES: u64 = 10 * 1024 * 1024;
 pub const MAX_PROJECT_OBJECT_BYTES: u64 = 100 * 1024 * 1024;
+pub const MAX_PROJECT_DATABASE_BYTES: u64 = 100 * 1024 * 1024;
+pub const MAX_DATABASE_SQL_BYTES: usize = 32 * 1024;
+pub const MAX_DATABASE_PARAMS: usize = 100;
+pub const MAX_DATABASE_ROWS: usize = 100;
+pub const MAX_DATABASE_COLUMNS: usize = 50;
+pub const MAX_DATABASE_CELL_BYTES: usize = 1024 * 1024;
+pub const MAX_DATABASE_RESULT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_DATABASE_TIME: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatabaseResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+    pub affected_rows: usize,
+    pub truncated: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,6 +123,102 @@ impl ProjectStore {
     }
     pub fn user_database_path(&self) -> PathBuf {
         self.root.join("database.sqlite")
+    }
+
+    pub fn database_query(&self, sql: &str, params: &[Value]) -> Result<DatabaseResult> {
+        self.database_statement(sql, params, true)
+    }
+
+    pub fn database_execute(&self, sql: &str, params: &[Value]) -> Result<DatabaseResult> {
+        self.database_statement(sql, params, false)
+    }
+
+    fn database_statement(
+        &self,
+        sql: &str,
+        values: &[Value],
+        query: bool,
+    ) -> Result<DatabaseResult> {
+        if sql.trim().is_empty() || sql.len() > MAX_DATABASE_SQL_BYTES {
+            return Err(Error::Other("database SQL is empty or too large".into()));
+        }
+        if values.len() > MAX_DATABASE_PARAMS {
+            return Err(Error::Other("too many database parameters".into()));
+        }
+        let params = values
+            .iter()
+            .map(json_to_sql_value)
+            .collect::<Result<Vec<_>>>()?;
+        let connection = Connection::open(self.user_database_path()).map_err(db_error)?;
+        connection
+            .busy_timeout(Duration::from_millis(100))
+            .map_err(db_error)?;
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .map_err(db_error)?;
+        let page_size: i64 = connection
+            .pragma_query_value(None, "page_size", |row| row.get(0))
+            .map_err(db_error)?;
+        let max_pages = sql_int(MAX_PROJECT_DATABASE_BYTES / (page_size.max(1) as u64))?;
+        connection
+            .pragma_update(None, "max_page_count", max_pages)
+            .map_err(db_error)?;
+        install_database_guards(&connection)?;
+
+        let mut statement = connection.prepare(sql).map_err(db_error)?;
+        if statement.column_count() > MAX_DATABASE_COLUMNS {
+            return Err(Error::Other("database result has too many columns".into()));
+        }
+        if query {
+            let columns = statement
+                .column_names()
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>();
+            let mut cursor = statement
+                .query(rusqlite::params_from_iter(params.iter()))
+                .map_err(db_error)?;
+            let mut rows = Vec::new();
+            let mut truncated = false;
+            let mut result_bytes = 0usize;
+            while let Some(row) = cursor.next().map_err(db_error)? {
+                if rows.len() == MAX_DATABASE_ROWS {
+                    truncated = true;
+                    break;
+                }
+                let mut output = Vec::with_capacity(columns.len());
+                for index in 0..columns.len() {
+                    let (value, bytes) = sql_to_json(row.get_ref(index).map_err(db_error)?)?;
+                    result_bytes = result_bytes.saturating_add(bytes);
+                    if result_bytes > MAX_DATABASE_RESULT_BYTES {
+                        return Err(Error::Other("database result is too large".into()));
+                    }
+                    output.push(value);
+                }
+                rows.push(output);
+            }
+            Ok(DatabaseResult {
+                columns,
+                rows,
+                affected_rows: 0,
+                truncated,
+            })
+        } else {
+            if statement.column_count() != 0 {
+                return Err(Error::Other(
+                    "use database query mode for returned rows".into(),
+                ));
+            }
+            let affected_rows = statement
+                .execute(rusqlite::params_from_iter(params.iter()))
+                .map_err(db_error)?;
+            Ok(DatabaseResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                affected_rows,
+                truncated: false,
+            })
+        }
     }
 
     pub fn put_kv(
@@ -315,6 +429,109 @@ impl ProjectStore {
     }
 }
 
+fn install_database_guards(connection: &Connection) -> Result<()> {
+    use rusqlite::hooks::{AuthAction, Authorization};
+    connection
+        .authorizer(Some(
+            |context: rusqlite::hooks::AuthContext<'_>| match context.action {
+                AuthAction::Attach { .. }
+                | AuthAction::Detach { .. }
+                | AuthAction::Pragma { .. }
+                | AuthAction::CreateVtable { .. }
+                | AuthAction::DropVtable { .. }
+                | AuthAction::CreateTempIndex { .. }
+                | AuthAction::CreateTempTable { .. }
+                | AuthAction::CreateTempTrigger { .. }
+                | AuthAction::CreateTempView { .. }
+                | AuthAction::DropTempIndex { .. }
+                | AuthAction::DropTempTable { .. }
+                | AuthAction::DropTempTrigger { .. }
+                | AuthAction::DropTempView { .. }
+                | AuthAction::Transaction { .. }
+                | AuthAction::Savepoint { .. }
+                | AuthAction::Unknown { .. } => Authorization::Deny,
+                AuthAction::Function { function_name }
+                    if matches!(
+                        function_name.to_ascii_lowercase().as_str(),
+                        "load_extension" | "randomblob" | "zeroblob" | "printf" | "format"
+                    ) =>
+                {
+                    Authorization::Deny
+                }
+                _ => Authorization::Allow,
+            },
+        ))
+        .map_err(db_error)?;
+    let started = Instant::now();
+    connection
+        .progress_handler(1_000, Some(move || started.elapsed() > MAX_DATABASE_TIME))
+        .map_err(db_error)?;
+    Ok(())
+}
+
+fn json_to_sql_value(value: &Value) -> Result<rusqlite::types::Value> {
+    use rusqlite::types::Value as SqlValue;
+    match value {
+        Value::Null => Ok(SqlValue::Null),
+        Value::Bool(value) => Ok(SqlValue::Integer(i64::from(*value))),
+        Value::Number(value) => {
+            if let Some(integer) = value.as_i64() {
+                Ok(SqlValue::Integer(integer))
+            } else if let Some(float) = value.as_f64() {
+                Ok(SqlValue::Real(float))
+            } else {
+                Err(Error::Other(
+                    "database number is outside SQLite range".into(),
+                ))
+            }
+        }
+        Value::String(value) if value.len() <= MAX_DATABASE_CELL_BYTES => {
+            Ok(SqlValue::Text(value.clone()))
+        }
+        Value::Object(value) if value.len() == 1 && value.contains_key("blob_base64") => {
+            let encoded = value["blob_base64"]
+                .as_str()
+                .ok_or_else(|| Error::Other("blob_base64 must be a string".into()))?;
+            let decoded = crate::artifact::decode_base64(encoded)
+                .ok_or_else(|| Error::Other("blob_base64 is invalid".into()))?;
+            enforce_size(
+                "database blob parameter",
+                decoded.len(),
+                MAX_DATABASE_CELL_BYTES,
+            )?;
+            Ok(SqlValue::Blob(decoded))
+        }
+        _ => Err(Error::Other(
+            "database parameters must be null, boolean, number, string or blob_base64".into(),
+        )),
+    }
+}
+
+fn sql_to_json(value: rusqlite::types::ValueRef<'_>) -> Result<(Value, usize)> {
+    use rusqlite::types::ValueRef;
+    match value {
+        ValueRef::Null => Ok((Value::Null, 0)),
+        ValueRef::Integer(value) => Ok((json!(value), 8)),
+        ValueRef::Real(value) => Ok((json!(value), 8)),
+        ValueRef::Text(value) => {
+            enforce_size("database text cell", value.len(), MAX_DATABASE_CELL_BYTES)?;
+            let text = std::str::from_utf8(value)
+                .map_err(|_| Error::Other("database returned invalid UTF-8 text".into()))?;
+            Ok((Value::String(text.to_string()), value.len()))
+        }
+        ValueRef::Blob(value) => {
+            use base64::Engine;
+            enforce_size("database blob cell", value.len(), MAX_DATABASE_CELL_BYTES)?;
+            Ok((
+                json!({
+                    "blob_base64": base64::engine::general_purpose::STANDARD.encode(value)
+                }),
+                value.len(),
+            ))
+        }
+    }
+}
+
 fn enforce_project_quota(
     tx: &rusqlite::Transaction<'_>,
     table: &str,
@@ -453,6 +670,39 @@ mod tests {
         let tx = s.control.transaction().unwrap();
         assert!(enforce_project_quota(&tx, "kv", "key", "length(value)", "b", 2, 4).is_err());
         assert!(enforce_project_quota(&tx, "kv", "key", "length(value)", "a", 4, 4).is_ok());
+    }
+
+    #[test]
+    fn database_supports_parameterized_sql_and_blocks_file_escape() {
+        let s = temp_store();
+        s.database_execute(
+            "CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT, data BLOB)",
+            &[],
+        )
+        .unwrap();
+        let blob = json!({ "blob_base64": "AQID" });
+        let inserted = s
+            .database_execute(
+                "INSERT INTO notes(body,data) VALUES(?1,?2)",
+                &[json!("hello"), blob.clone()],
+            )
+            .unwrap();
+        assert_eq!(inserted.affected_rows, 1);
+        let queried = s
+            .database_query(
+                "SELECT id,body,data FROM notes WHERE body=?1",
+                &[json!("hello")],
+            )
+            .unwrap();
+        assert_eq!(queried.columns, ["id", "body", "data"]);
+        assert_eq!(queried.rows[0], vec![json!(1), json!("hello"), blob]);
+        assert!(s
+            .database_query("ATTACH DATABASE '/tmp/escape.sqlite' AS escape", &[])
+            .is_err());
+        assert!(s.database_query("PRAGMA database_list", &[]).is_err());
+        assert!(s
+            .database_execute("CREATE TABLE a(x); CREATE TABLE b(x)", &[])
+            .is_err());
     }
 
     #[test]

@@ -2476,6 +2476,15 @@ the content inline"
         crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?.get_object(key)
     }
 
+    fn cloud_prepare_database(
+        &self,
+        token: &str,
+        project_id: &str,
+    ) -> Result<std::path::PathBuf> {
+        self.cloud_owned_project(token, project_id)?;
+        Ok(self.cloud_root.clone())
+    }
+
     pub fn cloud_deploy_function(
         &mut self,
         token: &str,
@@ -6505,6 +6514,48 @@ pub fn route_with_ip(
     // hostile function gets its own timeout; it must not stop contracts,
     // payments and unrelated agents while that timeout elapses.
     if method == "POST" {
+        if let Some((project_id, action)) = cloud_database_action(path) {
+            let prepared = match token {
+                Some(t) => guard.cloud_prepare_database(t, project_id),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            };
+            let sql = body.get("sql").and_then(Value::as_str).unwrap_or("");
+            let params = body
+                .get("params")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            drop(guard);
+            let result = prepared.and_then(|root| {
+                let store = crate::cloud::ProjectStore::open(&root, project_id)?;
+                match action {
+                    "query" => store.database_query(sql, &params),
+                    "execute" => store.database_execute(sql, &params),
+                    _ => unreachable!(),
+                }
+            });
+            return match result {
+                Ok(output) => {
+                    if let Ok(mut state) = state.lock() {
+                        state.record(
+                            &format!("cloud.database.{action}"),
+                            json!({
+                                "project_id": project_id,
+                                "sql_digest": crate::sha256_hex(sql.as_bytes()),
+                                "affected_rows": output.affected_rows,
+                                "returned_rows": output.rows.len(),
+                                "truncated": output.truncated
+                            }),
+                        );
+                    }
+                    match serde_json::to_value(output) {
+                        Ok(value) => (200, value),
+                        Err(error) => error_response(&Error::Other(error.to_string())),
+                    }
+                }
+                Err(error) => error_response(&error),
+            };
+        }
         if let Some((project_id, name)) = cloud_function_action(path, "invoke") {
             let prepared = match token {
                 Some(t) => guard.cloud_prepare_invocation(
@@ -7406,6 +7457,20 @@ fn cloud_function_action<'a>(path: &'a str, action: &str) -> Option<(&'a str, &'
         || parts[2] != "projects"
         || parts[4] != "functions"
         || parts[6] != action
+    {
+        return None;
+    }
+    Some((parts[3], parts[5]))
+}
+
+fn cloud_database_action(path: &str) -> Option<(&str, &str)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() != 6
+        || parts[0] != "v1"
+        || parts[1] != "cloud"
+        || parts[2] != "projects"
+        || parts[4] != "database"
+        || !matches!(parts[5], "query" | "execute")
     {
         return None;
     }
@@ -8658,6 +8723,57 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(stored_object["content_base64"], b64(br#"{"ok":true}"#));
         assert_eq!(stored_object["media_type"], "application/json");
+
+        let database_path = format!("/v1/cloud/projects/{project_id}/database");
+        let create_table = json!({
+            "sql": "CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT)",
+            "params": []
+        });
+        assert_eq!(
+            route(
+                &arc,
+                "POST",
+                &format!("{database_path}/execute"),
+                create_table.to_string().as_bytes(),
+                Some(&auth),
+            )
+            .0,
+            200
+        );
+        let insert = json!({
+            "sql": "INSERT INTO messages(body) VALUES(?1)",
+            "params": ["hello"]
+        });
+        let (status, inserted) = route(
+            &arc,
+            "POST",
+            &format!("{database_path}/execute"),
+            insert.to_string().as_bytes(),
+            Some(&auth),
+        );
+        assert_eq!(status, 200, "{inserted}");
+        assert_eq!(inserted["affected_rows"], 1);
+        let query = json!({ "sql": "SELECT body FROM messages", "params": [] });
+        let (status, queried) = route(
+            &arc,
+            "POST",
+            &format!("{database_path}/query"),
+            query.to_string().as_bytes(),
+            Some(&auth),
+        );
+        assert_eq!(status, 200, "{queried}");
+        assert_eq!(queried["rows"][0][0], "hello");
+        assert_eq!(
+            route(
+                &arc,
+                "POST",
+                &format!("{database_path}/query"),
+                query.to_string().as_bytes(),
+                Some(&format!("Bearer {stranger}")),
+            )
+            .0,
+            401
+        );
 
         let fn_path = format!("/v1/cloud/projects/{project_id}/functions/answer");
         let deploy = json!({ "runtime": "javascript", "source": "() => 42" });
