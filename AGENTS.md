@@ -234,6 +234,189 @@ All management routes require your normal agent bearer, and knowing a project
 identifier grants no access. Do not attempt `ATTACH`, `PRAGMA`, arbitrary network
 access or filesystem access: the runtime refuses them by design.
 
+Set these once for every example below:
+
+```bash
+export NODE=https://gap.geta.team
+export TOKEN=gat_your_agent_bearer
+```
+
+### Projects — create and list
+
+```bash
+# Create. Keep the returned project_id; it is used by every other route.
+curl -sX POST "$NODE/v1/cloud/projects" \
+  -H "Authorization: Bearer $TOKEN"
+# -> {"project_id":"prj_...","owner_did":"did:gap:...","status":"active",...}
+
+export PROJECT=prj_returned_above
+
+# List only the projects owned by this bearer.
+curl -s "$NODE/v1/cloud/projects" \
+  -H "Authorization: Bearer $TOKEN"
+# -> {"projects":[...]}
+```
+
+### KV — put and get
+
+Values use standard base64. `expires_at` is an optional Unix timestamp.
+
+```bash
+curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/kv/session-42" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"value_base64":"eyJzdGF0dXMiOiJhY3RpdmUifQ==","expires_at":1893456000}'
+# -> {"stored":true}
+
+curl -s "$NODE/v1/cloud/projects/$PROJECT/kv/session-42" \
+  -H "Authorization: Bearer $TOKEN"
+# -> {"found":true,"value_base64":"eyJzdGF0dXMiOiJhY3RpdmUifQ=="}
+# A missing or expired key returns {"found":false}.
+```
+
+### Objects — put and get
+
+```bash
+curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/objects/report.json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content_base64":"eyJvayI6dHJ1ZX0=","media_type":"application/json"}'
+# -> {"stored":true,"digest":"sha256:..."}
+
+curl -s "$NODE/v1/cloud/projects/$PROJECT/objects/report.json" \
+  -H "Authorization: Bearer $TOKEN"
+# -> {"found":true,"content_base64":"eyJvayI6dHJ1ZX0=",
+#     "media_type":"application/json","digest":"sha256:..."}
+```
+
+### SQLite — execute and query
+
+Use `execute` for schema changes and mutations, `query` for rows. Always bind
+untrusted input through `params`; never concatenate it into SQL. A binary
+parameter is encoded as `{"blob_base64":"..."}`.
+
+```bash
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/database/execute" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sql":"CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT NOT NULL)","params":[]}'
+# -> {"affected_rows":0,...}
+
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/database/execute" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sql":"INSERT INTO messages(body) VALUES (?)","params":["hello"]}'
+# -> {"affected_rows":1,...}
+
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/database/query" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sql":"SELECT id, body FROM messages WHERE id > ? ORDER BY id","params":[0]}'
+# -> {"columns":["id","body"],"rows":[[1,"hello"]],"truncated":false,...}
+```
+
+Only one statement is accepted per call. GAP refuses client-managed
+transactions, `ATTACH`, `DETACH`, `PRAGMA`, temporary schemas and virtual
+tables; retrying those statements will not make them valid.
+
+### Functions — deploy, activate and invoke
+
+The deployed `source` is a JavaScript function expression. It receives the
+JSON request as its first argument and returns a JSON-serializable result.
+
+```bash
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/functions/greet" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"runtime":"javascript","source":"async (request, gap) => ({ message: `Hello ${request.name}` })"}'
+# -> {"name":"greet","version":1,"runtime":"javascript","digest":"sha256:...",
+#     "ruling":"approved_with_constraints",...}
+
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/functions/greet/activate" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"version":1}'
+# -> {"active":true,"version":1}
+
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/functions/greet/invoke" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"request":{"name":"Ada"}}'
+# -> {"result":{"message":"Hello Ada"},"version":1,"digest":"sha256:..."}
+```
+
+Deploying creates a new immutable version; it does not switch production.
+Activate the exact reviewed version explicitly. The sandbox exposes no process
+environment, filesystem handle, database path, project bearer or arbitrary
+network access.
+
+### Realtime token — issue from a trusted backend
+
+```bash
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/realtime/tokens" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"channels":["room:customer-42"],
+       "permissions":["subscribe","publish"],
+       "subject":"visitor:8f31"}'
+# -> {"token":"base64url-claims.hmac-signature","expires_at":...}
+```
+
+The returned token lasts 60 minutes. `permissions` may contain `subscribe`,
+`publish`, or both. Omitting it grants both for backward compatibility. An
+empty `channels` array grants every channel in the project; do not issue that
+scope to public clients.
+
+### WebSocket — every client action
+
+Open `wss://gap.geta.team/v1/realtime`. The wire protocol is JSON. Authenticate
+within five seconds, then subscribe before publishing to a channel.
+
+```json
+{"action":"authenticate","token":"TOKEN_RETURNED_ABOVE"}
+```
+
+```json
+{"type":"authenticated","project_id":"prj_...","subject":"visitor:8f31",
+ "permissions":["subscribe","publish"],"expires_at":1893456000}
+```
+
+Subscribe and optionally replay up to 100 persisted messages after a known
+sequence cursor:
+
+```json
+{"action":"subscribe","channel":"room:customer-42","after":1042}
+{"type":"subscribed","channel":"room:customer-42"}
+```
+
+Publish an ephemeral message, or set `persist` to retain it for at most 24
+hours:
+
+```json
+{"action":"publish","channel":"room:customer-42",
+ "payload":{"kind":"status","value":"ready"},"persist":true}
+```
+
+Subscribers receive:
+
+```json
+{"type":"message","channel":"room:customer-42","seq":1043,
+ "payload":{"kind":"status","value":"ready"},"created_at":1893452400,
+ "replay":false}
+```
+
+Replayed messages carry `"replay":true`. Ephemeral messages have `"seq":null`.
+Unsubscribe without closing the socket:
+
+```json
+{"action":"unsubscribe","channel":"room:customer-42"}
+{"type":"unsubscribed","channel":"room:customer-42"}
+```
+
+Protocol or quota failures arrive as `{"type":"error","error":"..."}`. A
+client must stop or back off on errors such as `message rate exceeded`, renew
+after `token expired`, and never reconnect in a tight loop.
+
 ### Realtime for a static site
 
 Your browser connects to `wss://gap.geta.team/v1/realtime`, but it must never
