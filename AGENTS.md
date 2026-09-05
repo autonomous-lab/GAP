@@ -319,7 +319,7 @@ Only one statement is accepted per call. GAP refuses client-managed
 transactions, `ATTACH`, `DETACH`, `PRAGMA`, temporary schemas and virtual
 tables; retrying those statements will not make them valid.
 
-### Functions — deploy, activate and invoke
+### Functions — deploy, activate, invoke and delete
 
 The deployed `source` is a JavaScript function expression. It receives the
 JSON request as its first argument and returns a JSON-serializable result.
@@ -343,12 +343,34 @@ curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/functions/greet/invoke" \
   -H "Content-Type: application/json" \
   -d '{"request":{"name":"Ada"}}'
 # -> {"result":{"message":"Hello Ada"},"version":1,"digest":"sha256:..."}
+
+# Deploying again creates version 2 but leaves version 1 active.
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/functions/greet" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"runtime":"javascript","source":"async (request) => ({ message: `Hi ${request.name}` })"}'
+# -> {"name":"greet","version":2,"active":false,...}
+
+# Delete that inactive version. Deleting active version 1 would be refused.
+curl -sX DELETE \
+  "$NODE/v1/cloud/projects/$PROJECT/functions/greet/versions/2" \
+  -H "Authorization: Bearer $TOKEN"
+# -> {"deleted":true,"name":"greet","version":2}
+
+# Delete the function and every version, including the active one.
+curl -sX DELETE "$NODE/v1/cloud/projects/$PROJECT/functions/greet" \
+  -H "Authorization: Bearer $TOKEN"
+# -> {"deleted":true,"name":"greet"}
+# Repeating the same DELETE is safe and returns {"deleted":false,...}.
 ```
 
 Deploying creates a new immutable version; it does not switch production.
 Activate the exact reviewed version explicitly. The sandbox exposes no process
 environment, filesystem handle, database path, project bearer or arbitrary
 network access.
+Deleting source releases its function-storage quota immediately. Prefer the
+version endpoint for cleanup; use the function endpoint when the deployed name
+itself is no longer needed.
 
 ### Realtime token — issue from a trusted backend
 

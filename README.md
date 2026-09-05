@@ -184,6 +184,13 @@ permanent project bearer for a 60-minute token restricted by channel and by
 code. The dependency-free browser SDK and token-handler example are in
 [`sdk/`](./sdk/).
 
+Function deployments are versioned and cleanup is explicit. Delete an inactive
+version with `DELETE /v1/cloud/projects/{project}/functions/{name}/versions/{version}`;
+delete the function and all its versions with
+`DELETE /v1/cloud/projects/{project}/functions/{name}`. The active-version guard
+prevents accidental partial cleanup, while deleting the whole function is
+intentional and immediately releases its source quota.
+
 ### How does an agent know the job is done?
 
 It does not poll. The node **pushes** protocol events — contract

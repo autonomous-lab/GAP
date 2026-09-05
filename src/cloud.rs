@@ -435,6 +435,58 @@ impl ProjectStore {
             .optional()
             .map_err(db_error)
     }
+
+    /// Delete a function and all of its immutable versions. Returns false when
+    /// the name did not exist, making the management endpoint idempotent.
+    pub fn delete_function(&mut self, name: &str) -> Result<bool> {
+        validate_identifier("function name", name)?;
+        let tx = self.control.transaction().map_err(db_error)?;
+        tx.execute("DELETE FROM function_versions WHERE name=?1", [name])
+            .map_err(db_error)?;
+        let deleted = tx
+            .execute("DELETE FROM functions WHERE name=?1", [name])
+            .map_err(db_error)?
+            > 0;
+        tx.commit().map_err(db_error)?;
+        Ok(deleted)
+    }
+
+    /// Delete one inactive version. The active version is protected so a
+    /// cleanup request cannot silently take a production function offline.
+    pub fn delete_function_version(&mut self, name: &str, version: u64) -> Result<bool> {
+        validate_identifier("function name", name)?;
+        let version = sql_int(version)?;
+        let tx = self.control.transaction().map_err(db_error)?;
+        let active: Option<i64> = tx
+            .query_row(
+                "SELECT active_version FROM functions WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .flatten();
+        if active == Some(version) {
+            return Err(Error::Other("cannot delete the active function version".into()));
+        }
+        let deleted = tx
+            .execute(
+                "DELETE FROM function_versions WHERE name=?1 AND version=?2",
+                params![name, version],
+            )
+            .map_err(db_error)?
+            > 0;
+        if deleted {
+            tx.execute(
+                "DELETE FROM functions WHERE name=?1 AND NOT EXISTS \
+                 (SELECT 1 FROM function_versions WHERE name=?1)",
+                [name],
+            )
+            .map_err(db_error)?;
+        }
+        tx.commit().map_err(db_error)?;
+        Ok(deleted)
+    }
 }
 
 fn install_database_guards(connection: &Connection) -> Result<()> {
@@ -774,5 +826,30 @@ mod tests {
         assert_eq!(active.version, 1);
         assert_eq!(active.source, b"() => 42");
         assert_eq!(active.ruling, ReleaseRuling::ApprovedWithConstraints);
+    }
+
+    #[test]
+    fn function_deletion_reclaims_versions_and_protects_the_active_one() {
+        let mut s = temp_store();
+        s.deploy_function("answer", "javascript", b"() => 41", 10)
+            .unwrap();
+        s.deploy_function("answer", "javascript", b"() => 42", 11)
+            .unwrap();
+        s.set_function_ruling("answer", 2, ReleaseRuling::Approved)
+            .unwrap();
+        s.activate_function("answer", 2).unwrap();
+
+        assert!(s.delete_function_version("answer", 2).is_err());
+        assert!(s.delete_function_version("answer", 1).unwrap());
+        assert!(!s.delete_function_version("answer", 1).unwrap());
+        assert!(s.delete_function("answer").unwrap());
+        assert!(!s.delete_function("answer").unwrap());
+        assert!(s.active_function("answer").unwrap().is_none());
+        assert_eq!(
+            s.control
+                .query_row("SELECT COUNT(*) FROM function_versions", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 }

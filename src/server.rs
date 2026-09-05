@@ -2605,6 +2605,43 @@ the content inline"
         Ok(())
     }
 
+    pub fn cloud_delete_function(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<bool> {
+        self.cloud_owned_project(token, project_id)?;
+        let deleted = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?
+            .delete_function(name)?;
+        if deleted {
+            self.record(
+                "cloud.function.deleted",
+                json!({ "project_id": project_id, "name": name }),
+            );
+        }
+        Ok(deleted)
+    }
+
+    pub fn cloud_delete_function_version(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        name: &str,
+        version: u64,
+    ) -> Result<bool> {
+        self.cloud_owned_project(token, project_id)?;
+        let deleted = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?
+            .delete_function_version(name, version)?;
+        if deleted {
+            self.record(
+                "cloud.function.version.deleted",
+                json!({ "project_id": project_id, "name": name, "version": version }),
+            );
+        }
+        Ok(deleted)
+    }
+
     fn cloud_prepare_invocation(
         &self,
         token: &str,
@@ -6792,6 +6829,25 @@ pub fn route_with_ip(
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
+        ("DELETE", p) if cloud_function_version_route(p).is_some() => {
+            let (project_id, name, version) =
+                cloud_function_version_route(p).expect("guarded above");
+            match token {
+                Some(t) => guard
+                    .cloud_delete_function_version(t, project_id, name, version)
+                    .map(|deleted| json!({ "deleted": deleted, "name": name, "version": version })),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("DELETE", p) if cloud_function_route(p, false).is_some() => {
+            let (project_id, name) = cloud_function_route(p, false).expect("guarded above");
+            match token {
+                Some(t) => guard
+                    .cloud_delete_function(t, project_id, name)
+                    .map(|deleted| json!({ "deleted": deleted, "name": name })),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
         ("POST", "/v1/gateway") => match auth.and_then(|a| a.strip_prefix("Bearer ")) {
             Some(t) => guard.gateway_register(t, &body),
             None => Err(Error::Unauthorized("missing bearer token".into())),
@@ -7566,6 +7622,21 @@ fn cloud_function_action<'a>(path: &'a str, action: &str) -> Option<(&'a str, &'
         return None;
     }
     Some((parts[3], parts[5]))
+}
+
+fn cloud_function_version_route(path: &str) -> Option<(&str, &str, u64)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() != 8
+        || parts[0] != "v1"
+        || parts[1] != "cloud"
+        || parts[2] != "projects"
+        || parts[4] != "functions"
+        || parts[6] != "versions"
+    {
+        return None;
+    }
+    let version = parts[7].parse().ok()?;
+    Some((parts[3], parts[5], version))
 }
 
 fn cloud_database_action(path: &str) -> Option<(&str, &str)> {
@@ -8982,6 +9053,30 @@ mod tests {
         sandbox.join().unwrap();
         assert_eq!(status, 200, "{invoked}");
         assert_eq!(invoked["result"]["answer"], 42);
+
+        let version_delete = format!("{fn_path}/versions/{}", version["version"]);
+        assert_eq!(
+            route(&arc, "DELETE", &version_delete, b"", Some(&auth)).0,
+            400,
+            "the active version must be protected"
+        );
+        assert_eq!(
+            route(
+                &arc,
+                "DELETE",
+                &fn_path,
+                b"",
+                Some(&format!("Bearer {stranger}")),
+            )
+            .0,
+            401
+        );
+        let (status, deleted) = route(&arc, "DELETE", &fn_path, b"", Some(&auth));
+        assert_eq!(status, 200, "{deleted}");
+        assert_eq!(deleted["deleted"], true);
+        let (status, deleted_again) = route(&arc, "DELETE", &fn_path, b"", Some(&auth));
+        assert_eq!(status, 200, "{deleted_again}");
+        assert_eq!(deleted_again["deleted"], false);
     }
 
     fn register(arc: &Arc<Mutex<NodeState>>) -> String {

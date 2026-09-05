@@ -290,6 +290,8 @@ POST /v1/cloud/projects/{project}/realtime/tokens
 POST /v1/cloud/projects/{project}/functions/{name}
 POST /v1/cloud/projects/{project}/functions/{name}/activate
 POST /v1/cloud/projects/{project}/functions/{name}/invoke
+DELETE /v1/cloud/projects/{project}/functions/{name}/versions/{version}
+DELETE /v1/cloud/projects/{project}/functions/{name}
 ```
 
 KV values and object content travel as standard base64. Function deployment
@@ -297,6 +299,9 @@ accepts `{ "runtime": "javascript", "source": "..." }`; activation accepts
 `{ "version": 1 }`; invocation accepts `{ "request": {...} }`. Function code
 runs only in the separately constrained sandbox container and the node releases
 its global state lock before waiting for the result.
+Deleting a function is idempotent and removes all versions, including the
+active one. Deleting one version is also idempotent but refuses the active
+version. Successful deletions release their source quota immediately.
 
 The free-tier storage guardrails are enforced transactionally: 64 KiB per KV
 value and 25 MiB total KV data per project; 1 MiB per object and 100 MiB total
