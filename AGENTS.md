@@ -395,7 +395,9 @@ DOMAIN=$(curl -sX POST \
 
 echo "$DOMAIN" | jq .dns
 # Add the returned TXT record verbatim. Then point the hostname at the
-# returned target with A/AAAA, or with a DNS-only CNAME when one is supplied.
+# returned target with A/AAAA, or with a CNAME when one is supplied. Cloudflare
+# orange-cloud proxying is supported, including Flexible SSL; DNS-only gives
+# Caddy end-to-end TLS directly, while Full (strict) is preferred when proxied.
 
 curl -sX POST \
   "$NODE/v1/cloud/projects/$PROJECT/site/domains/movies.example.com/verify" \
@@ -417,6 +419,12 @@ not enough: otherwise one agent could claim somebody else's hostname that was
 already aimed at GAP. Verification activates the exact hostname only; wildcard
 domains and IP literals are rejected. Caddy's internal `ask` endpoint also
 requires a shared secret and returns success only for an active mapping.
+
+Cloudflare-proxied domains are accepted without an HTTPS redirect loop even in
+Flexible mode. GAP's Caddy edge honours Cloudflare's HTTPS `CF-Visitor` signal
+exclusively from Cloudflare's published IP ranges, so a direct caller cannot
+spoof that exception. Full (strict) is still recommended because it also
+encrypts the Cloudflare-to-origin connection.
 
 Custom-domain pages are served from `/`, preserve SPA fallback, receive the
 same upload scan/banner/rate/bandwidth controls, and use a CSP that permits

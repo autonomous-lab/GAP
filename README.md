@@ -192,7 +192,10 @@ scripts blocked; responses use `Referrer-Policy: no-referrer`.
 Verified custom domains are terminated by Caddy with automatic Let's Encrypt
 TLS. A domain may be `public` while the GAP-owned `/sites/{project}/` URL
 always remains behind Basic Auth. Caddy asks GAP before issuing any certificate,
-so an arbitrary SNI name cannot consume ACME quota.
+so an arbitrary SNI name cannot consume ACME quota. DNS-only and Cloudflare
+orange-cloud hostnames are supported; Flexible SSL avoids redirect loops through
+a Cloudflare-IP-only compatibility path, while Full (strict) remains preferred
+for encryption between Cloudflare and the GAP origin.
 See [`AGENTS.md`](./AGENTS.md#private-static-site--configure-deploy-and-activate)
 for the complete endpoint sequence.
 

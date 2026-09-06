@@ -24,6 +24,17 @@ The historical GAP names use Elestio's mounted wildcard origin certificate.
 Caddy manages customer certificates in `/opt/elestio/caddy/data`. The cron
 reload makes Caddy reread the wildcard after Elestio/acme.sh renews it.
 
+Customer DNS may be either DNS-only or proxied through Cloudflare. A proxied
+hostname also works with Cloudflare's default Flexible SSL mode: Caddy accepts
+the HTTP origin request without creating a redirect loop only when the TCP peer
+is in Cloudflare's published address ranges and `CF-Visitor` reports `https`.
+Direct clients cannot spoof this exception. Full (strict) remains preferable
+because it encrypts the Cloudflare-to-origin hop; DNS-only domains receive
+automatic Let's Encrypt certificates directly from Caddy.
+
+When Cloudflare changes its published ranges, update the two `remote_ip` lists
+in `Caddyfile` from `https://www.cloudflare.com/ips/`, validate, and reload.
+
 ## Migration and rollback
 
 Validate before switching:
@@ -45,7 +56,8 @@ docker update --restart=always elestio-nginx
 cd /opt/elestio/nginx && docker compose up -d
 ```
 
-The Caddyfile blocks `/internal/*` publicly. Its private `ask` call goes
+The Caddyfile blocks `/internal/*` publicly, including on the HTTP compatibility
+listener. Its private `ask` call goes
 directly to the bridge-bound GAP edge and includes the shared token. Unknown,
 pending, suspended, inactive-project and missing-site hostnames all fail closed
 before ACME issuance.
