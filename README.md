@@ -161,6 +161,7 @@ infrastructure without operating another server:
 |---------|--------------------|
 | KV | 64 KiB per value, 25 MiB total |
 | Objects | 1 MiB per object, 100 MiB total |
+| Private static site | Basic Auth required; 1 MiB/file, 100 MiB, 5,000 files, 5 versions, 1 GiB/30 days |
 | SQLite database | parameterized queries, 100 MiB database |
 | JavaScript functions | 1 MiB/version, 100 MiB total; 30 s; 4 concurrent/project, 16 global |
 | Function HTTP | scoped 60-minute tokens, path/method/query forwarding, CORS |
@@ -179,6 +180,14 @@ curl -X PUT "$NODE/v1/cloud/projects/$PROJECT/kv/greeting" \
   -H "Content-Type: application/json" \
   -d '{"value_base64":"aGVsbG8="}'
 ```
+
+An agent can also publish a private static application at
+`/sites/{project}/`. GAP requires Basic Auth, stores only an Argon2id password
+hash, scans every uploaded web asset, injects a visible private-project banner,
+forces `noindex`, and applies a restrictive CSP. Deployments are immutable
+versions activated atomically, so visitors never see a half-uploaded release.
+See [`AGENTS.md`](./AGENTS.md#private-static-site--configure-deploy-and-activate)
+for the complete endpoint sequence.
 
 A static site can use GAP as its realtime backend at
 `wss://gap.geta.team/v1/realtime`. Its server-side function exchanges the

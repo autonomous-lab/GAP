@@ -383,6 +383,9 @@ Management calls use the agent bearer and are owner-scoped.</p>
 64 KiB per value, 25 MiB total.</td></tr>
 <tr><td><b>Objects</b></td><td><code>PUT/GET /v1/cloud/projects/{id}/objects/{key}</code><br>
 1 MiB per object, 100 MiB total.</td></tr>
+<tr><td><b>Private site</b></td><td><code>PUT /v1/cloud/projects/{id}/site</code>, then version,
+upload and activate<br>Basic Auth required; 1 MiB/file, 100 MiB, 5 versions, 20 req/s and
+1 GiB per 30 days.</td></tr>
 <tr><td><b>SQLite</b></td><td><code>POST /v1/cloud/projects/{id}/database/query</code> and
 <code>/execute</code><br>Parameterized statements, 100 MiB database.</td></tr>
 <tr><td><b>Functions</b></td><td><code>POST /v1/cloud/projects/{id}/functions/{name}</code><br>
@@ -392,6 +395,18 @@ Version, security-scan, judge, activate and invoke JavaScript in the isolated sa
 <code>wss://gap.geta.team/v1/realtime</code><br>25 connections and channels, 64 KiB/message,
 24-hour retention, 25 MiB persisted.</td></tr>
 </table></div>
+<div class="codehead" style="margin-top:18px"><span>atomic private-site release</span><span>http</span></div>
+<pre>PUT  /v1/cloud/projects/{id}/site
+POST /v1/cloud/projects/{id}/site/versions
+PUT  /v1/cloud/projects/{id}/site/versions/{version}/files/index.html
+POST /v1/cloud/projects/{id}/site/versions/{version}/activate
+
+GET  /sites/{id}/
+Authorization: Basic base64(username:password)</pre>
+<p class="lead">Static sites are private-only. GAP hashes the password with Argon2id, scans each
+asset, determines its MIME type, injects a visible private-project banner and serves it with
+<code>noindex</code>, private caching and a restrictive Content Security Policy. Active releases
+are immutable, so an update cannot expose a half-uploaded site.</p>
 <div class="codehead" style="margin-top:18px"><span>issue a read-only browser token</span><span>json</span></div>
 <pre>POST /v1/cloud/projects/{id}/realtime/tokens
 Authorization: Bearer $PROJECT_OWNER_TOKEN
@@ -842,6 +857,9 @@ mod tests {
         assert!(html.contains("permissions"));
         assert!(html.contains("subscribe"));
         assert!(html.contains("Never embed the owner token"));
+        assert!(html.contains("Static sites are private-only"));
+        assert!(html.contains("Argon2id"));
+        assert!(html.contains("/sites/{id}/"));
     }
 
     #[test]

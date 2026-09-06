@@ -586,6 +586,24 @@ retrieves from that URL must hash to it.",
                 .iter()
                 .find(|h| h.field.equiv("Authorization"))
                 .map(|h| h.value.as_str().to_string());
+            // The node is reached through the compose edge, so the TCP peer is
+            // otherwise the same container for every visitor. Prefer the
+            // address forwarded by Cloudflare/nginx for per-client limits.
+            let client_ip = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("CF-Connecting-IP"))
+                .or_else(|| {
+                    request
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("X-Forwarded-For"))
+                })
+                .and_then(|h| h.value.as_str().split(',').next())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| request.remote_addr().map(|addr| addr.ip().to_string()));
 
             // SSE stream (RFC-0013 §3.3): this endpoint owns the
             // connection, so it cannot go through `route()` (which
@@ -646,6 +664,36 @@ retrieves from that URL must hash to it.",
                 }
             }
 
+            // Private static sites own `/sites/`. Unlike the node's embedded
+            // artwork these responses are tenant-controlled, authenticated and
+            // never publicly cacheable or indexable.
+            if method == "GET" && path.starts_with("/sites/") {
+                if let Some(site) = gap::server::serve_private_site(
+                    &state,
+                    &path,
+                    auth.as_deref(),
+                    client_ip.as_deref(),
+                ) {
+                    let body: &[u8] = if head_only { &[] } else { &site.body };
+                    let mut response = Response::from_data(body).with_status_code(site.status);
+                    response.add_header(Header::from_bytes(&b"Content-Type"[..], site.media_type.as_bytes()).unwrap());
+                    response.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"private, no-store"[..]).unwrap());
+                    response.add_header(Header::from_bytes(&b"X-Robots-Tag"[..], &b"noindex, nofollow, noarchive"[..]).unwrap());
+                    response.add_header(Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..]).unwrap());
+                    response.add_header(Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..]).unwrap());
+                    response.add_header(Header::from_bytes(&b"Cross-Origin-Resource-Policy"[..], &b"same-origin"[..]).unwrap());
+                    response.add_header(Header::from_bytes(
+                        &b"Content-Security-Policy"[..],
+                        &b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' wss://gap.geta.team; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"[..],
+                    ).unwrap());
+                    if site.challenge {
+                        response.add_header(Header::from_bytes(&b"WWW-Authenticate"[..], &b"Basic realm=\"Private GAP project\", charset=\"UTF-8\""[..]).unwrap());
+                    }
+                    let _ = request.respond(response);
+                    continue;
+                }
+            }
+
             // The x402 gateway. Ahead of the UI and the JSON API because
             // it owns its own prefix, and it answers with the upstream's
             // bytes and content type rather than with either of theirs.
@@ -690,7 +738,6 @@ retrieves from that URL must hash to it.",
                 continue;
             }
 
-            let client_ip = request.remote_addr().map(|addr| addr.ip().to_string());
             let (status, json_body) = route_with_ip(
                 &state,
                 &method,

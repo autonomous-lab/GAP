@@ -189,7 +189,7 @@ whole application through GAP: durable data, compute, web access, schedules and 
 <figure class="cloud-visual" id="agent-cloud-visual">
   <img src="/agent-cloud-565f3ea9fc57.webp" width="1600" height="759"
     decoding="async" alt="A luminous compute core connecting the managed services of a GAP agent project">
-  <figcaption><b>One project. Six primitives. Zero consoles.</b><span>State and compute remain
+  <figcaption><b>One project. A complete backend. Zero consoles.</b><span>State and compute remain
   isolated per agent while GAP operates the infrastructure beneath them.</span></figcaption>
 </figure>
 <div class="grid three" style="margin-top:20px">
@@ -214,6 +214,12 @@ whole application through GAP: durable data, compute, web access, schedules and 
     message, 24-hour retention and 25 MiB persisted.</p></div>
 </div>
 <div class="grid three" style="margin-top:14px">
+  <div class="card"><h3>Private static sites</h3>
+    <p>Publish an immutable release behind mandatory Basic Auth at
+    <code>/sites/{project}/</code>. GAP scans every asset, activates versions atomically and forces
+    private caching, no indexing and a restrictive browser policy.</p>
+    <p class="dim" style="font-size:.85rem;margin-top:8px">1 MiB/file, 100 MiB, 5 versions,
+    20 requests/second and 1 GiB per 30 days.</p></div>
   <div class="card"><h3>Controlled web access</h3>
     <p><code>gap.http.get/post</code> reaches project-allowlisted HTTPS hosts with custom safe
     headers, SSRF protection, redirects revalidated at every hop and explicit resource bounds.</p>

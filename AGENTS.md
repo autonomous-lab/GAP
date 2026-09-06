@@ -223,6 +223,9 @@ an owner-scoped cloud project with `POST /v1/cloud/projects`. The node provides:
 
 - KV: 64 KiB per value, 25 MiB per project;
 - objects: 1 MiB per object, 100 MiB per project;
+- private static hosting: Basic Auth mandatory, 1 MiB per file, 100 MiB total,
+  5,000 files, 5 retained versions, 20 requests/second and 1 GiB per rolling
+  30-day period;
 - SQLite: parameterized queries, one 100 MiB database per project;
 - JavaScript functions: 1 MiB per version, 100 MiB total, executed in the
   separately constrained sandbox container;
@@ -295,6 +298,82 @@ curl -s "$NODE/v1/cloud/projects/$PROJECT/objects/report.json" \
 # -> {"found":true,"content_base64":"eyJvayI6dHJ1ZX0=",
 #     "media_type":"application/json","digest":"sha256:..."}
 ```
+
+### Private static site — configure, deploy and activate
+
+Static hosting is intentionally private-only. There is no public mode: every
+request below `/sites/{project}/` requires the configured HTTP Basic
+credential. The owner bearer manages releases but is never used by visitors.
+
+Configure the site first. Passwords must contain 12–128 bytes; GAP stores an
+Argon2id hash and never returns the password or hash. On later updates, omit
+`password` to keep the existing credential.
+
+```bash
+curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/site" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"enabled":true,"entrypoint":"index.html","spa_fallback":true,
+       "auth":{"mode":"basic","username":"visitor",
+               "password":"replace-with-at-least-12-bytes"}}'
+
+# Read configuration, retained versions, active version, URL and exact quotas.
+curl -s "$NODE/v1/cloud/projects/$PROJECT/site" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Create a draft version, upload each file as standard base64, then activate the
+completed version. MIME types come from a server-side extension allowlist; an
+upload cannot choose its own `Content-Type`.
+
+```bash
+VERSION=$(curl -sX POST \
+  "$NODE/v1/cloud/projects/$PROJECT/site/versions" \
+  -H "Authorization: Bearer $TOKEN" | jq -r .version)
+
+curl -sX PUT \
+  "$NODE/v1/cloud/projects/$PROJECT/site/versions/$VERSION/files/index.html" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"content_base64":"PCFkb2N0eXBlIGh0bWw+PGh0bWw+PGJvZHk+PGgxPkhlbGxvPC9oMT48L2JvZHk+PC9odG1sPg=="}'
+
+# Inspect the draft manifest or remove one draft file.
+curl -s "$NODE/v1/cloud/projects/$PROJECT/site/versions/$VERSION/files" \
+  -H "Authorization: Bearer $TOKEN"
+curl -sX DELETE \
+  "$NODE/v1/cloud/projects/$PROJECT/site/versions/$VERSION/files/obsolete.css" \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -sX POST \
+  "$NODE/v1/cloud/projects/$PROJECT/site/versions/$VERSION/activate" \
+  -H "Authorization: Bearer $TOKEN"
+
+# The browser receives 401 + WWW-Authenticate until credentials are supplied.
+curl -u 'visitor:replace-with-at-least-12-bytes' \
+  "$NODE/sites/$PROJECT/"
+```
+
+An activated version is immutable and activation fails unless its entrypoint
+exists. Create the next version for an update; activation switches every path
+atomically. Delete only inactive versions:
+
+```bash
+curl -sX DELETE \
+  "$NODE/v1/cloud/projects/$PROJECT/site/versions/1" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Allowed assets are HTML, CSS, JavaScript modules, JSON, text, XML, SVG, common
+web images and web fonts. GAP rejects hidden/path-traversal names, executables,
+oversized files, control bytes, excessive padding/obfuscation, embedded private
+keys or recognizable API credentials, `<base>` overrides and meta refreshes.
+Every HTML response receives a non-removable "Hosted by GAP - private agent
+project" banner. All site responses use `private, no-store`, `nosniff`,
+`noindex, nofollow, noarchive`, no referrer, same-origin resource policy and a
+restrictive CSP. Inline JavaScript, arbitrary external connections, framing,
+plugins and cross-origin form submission are blocked.
+
+Free projects receive 1 MiB per file, 100 MiB across retained versions, 5,000
+files, 5 versions, 20 requests/second and 1 GiB per rolling 30-day period.
+Delete an inactive release to reclaim both its storage and version slot.
 
 ### SQLite — execute and query
 

@@ -6363,6 +6363,163 @@ pub fn static_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
     None
 }
 
+pub struct SiteHttpResponse {
+    pub status: u16,
+    pub media_type: String,
+    pub body: Vec<u8>,
+    pub challenge: bool,
+}
+
+/// Serve an activated private static site. Authentication is deliberately
+/// checked before the requested asset is read, so even file existence cannot
+/// be probed without the site's Basic credential.
+pub fn serve_private_site(
+    state: &Arc<Mutex<NodeState>>,
+    path: &str,
+    auth: Option<&str>,
+    client_ip: Option<&str>,
+) -> Option<SiteHttpResponse> {
+    let clean = path.split('?').next().unwrap_or(path);
+    let parts: Vec<&str> = clean.trim_start_matches('/').split('/').collect();
+    if parts.len() < 2 || parts[0] != "sites" {
+        return None;
+    }
+    let project_id = parts[1];
+    let requested = parts[2..]
+        .iter()
+        .map(|part| percent_decode(part))
+        .collect::<Vec<_>>()
+        .join("/");
+    let mut guard = state.lock().ok()?;
+    if guard.check_rate_limit(None, client_ip).is_err() {
+        return Some(site_response(
+            429,
+            "text/plain; charset=utf-8",
+            b"too many requests".to_vec(),
+            false,
+        ));
+    }
+    let project_exists = guard
+        .cloud_projects
+        .get(project_id)
+        .is_some_and(|project| project.status == "active");
+    if !project_exists {
+        return Some(site_response(
+            404,
+            "text/plain; charset=utf-8",
+            b"site not found".to_vec(),
+            false,
+        ));
+    }
+    let mut store = match crate::cloud::ProjectStore::open(&guard.cloud_root, project_id) {
+        Ok(store) => store,
+        Err(_) => {
+            return Some(site_response(
+                404,
+                "text/plain; charset=utf-8",
+                b"site not found".to_vec(),
+                false,
+            ))
+        }
+    };
+    drop(guard);
+
+    let credentials = auth.and_then(parse_basic_credentials);
+    let authenticated = credentials.as_ref().is_some_and(|(username, password)| {
+        store.authenticate_site(username, password).unwrap_or(false)
+    });
+    if !authenticated {
+        return Some(site_response(
+            401,
+            "text/plain; charset=utf-8",
+            b"authentication required".to_vec(),
+            true,
+        ));
+    }
+    let asset = match store.active_site_asset(&requested) {
+        Ok(Some(asset)) => asset,
+        Ok(None) => {
+            return Some(site_response(
+                404,
+                "text/plain; charset=utf-8",
+                b"file not found".to_vec(),
+                false,
+            ))
+        }
+        Err(_) => {
+            return Some(site_response(
+                404,
+                "text/plain; charset=utf-8",
+                b"file not found".to_vec(),
+                false,
+            ))
+        }
+    };
+    let media_type = asset.media_type;
+    let body = if media_type.starts_with("text/html") {
+        inject_site_banner(asset.content)
+    } else {
+        asset.content
+    };
+    if let Err(error) = store.consume_site_quota(body.len() as u64, now_unix()) {
+        let status = if error.to_string().contains("rate exceeded") {
+            429
+        } else {
+            403
+        };
+        return Some(site_response(
+            status,
+            "text/plain; charset=utf-8",
+            error.to_string().into_bytes(),
+            false,
+        ));
+    }
+    Some(site_response(200, &media_type, body, false))
+}
+
+fn site_response(
+    status: u16,
+    media_type: &str,
+    body: Vec<u8>,
+    challenge: bool,
+) -> SiteHttpResponse {
+    SiteHttpResponse {
+        status,
+        media_type: media_type.into(),
+        body,
+        challenge,
+    }
+}
+
+fn parse_basic_credentials(auth: &str) -> Option<(String, String)> {
+    use base64::Engine;
+    let encoded = auth.strip_prefix("Basic ")?;
+    if encoded.len() > 512 {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let (username, password) = decoded.split_once(':')?;
+    Some((username.to_string(), password.to_string()))
+}
+
+fn inject_site_banner(content: Vec<u8>) -> Vec<u8> {
+    let Ok(html) = String::from_utf8(content) else {
+        return Vec::new();
+    };
+    const BANNER: &str = r#"<div role="note" style="position:relative;z-index:2147483647;padding:7px 12px;background:#07130f;color:#b9f8d8;border-bottom:1px solid #245c47;font:12px/1.4 system-ui,sans-serif;text-align:center">Hosted by GAP - private agent project</div>"#;
+    let lower = html.to_ascii_lowercase();
+    let at = lower
+        .find("<body")
+        .and_then(|start| lower[start..].find('>').map(|end| start + end + 1));
+    match at {
+        Some(index) => format!("{}{}{}", &html[..index], BANNER, &html[index..]).into_bytes(),
+        None => format!("{BANNER}{html}").into_bytes(),
+    }
+}
+
 pub fn route_html(
     state: &Arc<Mutex<NodeState>>,
     method: &str,
@@ -7011,6 +7168,154 @@ pub fn route_with_ip(
                 .map(|projects| json!({ "projects": projects })),
             None => Err(Error::Unauthorized("missing bearer token".into())),
         },
+        (m, p) if matches!(m, "GET" | "PUT") && cloud_site_route(p).is_some() => {
+            let project_id = cloud_site_route(p).expect("guarded above");
+            match token {
+                Some(t) => (|| -> Result<Value> {
+                    guard.cloud_owned_project(t, project_id)?;
+                    let mut store =
+                        crate::cloud::ProjectStore::open(&guard.cloud_root, project_id)?;
+                    if m == "PUT" {
+                        let auth = body.get("auth").unwrap_or(&Value::Null);
+                        let mode = auth.get("mode").and_then(Value::as_str).unwrap_or("basic");
+                        if mode != "basic" {
+                            return Err(Error::Other(
+                                "static sites require auth.mode=basic".into(),
+                            ));
+                        }
+                        let username = auth.get("username").and_then(Value::as_str).unwrap_or("");
+                        let password = auth.get("password").and_then(Value::as_str);
+                        let config = store.configure_site(
+                            body.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+                            body.get("entrypoint")
+                                .and_then(Value::as_str)
+                                .unwrap_or("index.html"),
+                            body.get("spa_fallback")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                            username,
+                            password,
+                            now_unix(),
+                        )?;
+                        guard.record(
+                            "cloud.site.configured",
+                            json!({
+                                "project_id": project_id, "enabled": config.enabled,
+                                "spa_fallback": config.spa_fallback
+                            }),
+                        );
+                    }
+                    Ok(json!({
+                        "site": store.site_config()?,
+                        "versions": store.site_versions()?,
+                        "url": format!("/sites/{project_id}/"),
+                        "limits": {
+                            "file_bytes": crate::cloud::MAX_SITE_FILE_BYTES,
+                            "project_bytes": crate::cloud::MAX_PROJECT_SITE_BYTES,
+                            "files": crate::cloud::MAX_SITE_FILES,
+                            "versions": crate::cloud::MAX_SITE_VERSIONS,
+                            "requests_per_second": crate::cloud::MAX_SITE_REQUESTS_PER_SECOND,
+                            "bandwidth_per_30_days": crate::cloud::MAX_SITE_BANDWIDTH_PER_PERIOD
+                        }
+                    }))
+                })(),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("GET", p) if cloud_site_files_route(p).is_some() => {
+            let (project_id, version) = cloud_site_files_route(p).expect("guarded above");
+            match token {
+                Some(t) => guard.cloud_owned_project(t, project_id).and_then(|_| {
+                    let store = crate::cloud::ProjectStore::open(&guard.cloud_root, project_id)?;
+                    Ok(json!({ "version": version, "files": store.site_files(version)? }))
+                }),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        (m, p) if matches!(m, "PUT" | "DELETE") && cloud_site_file_route(p).is_some() => {
+            let (project_id, version, file) = cloud_site_file_route(p).expect("guarded above");
+            match token {
+                Some(t) => (|| -> Result<Value> {
+                    guard.cloud_owned_project(t, project_id)?;
+                    let mut store =
+                        crate::cloud::ProjectStore::open(&guard.cloud_root, project_id)?;
+                    if m == "DELETE" {
+                        let deleted = store.delete_site_file(version, &file)?;
+                        if deleted {
+                            guard.record(
+                                "cloud.site.file.deleted",
+                                json!({
+                                    "project_id": project_id, "version": version,
+                                    "path_digest": crate::sha256_hex(file.as_bytes())
+                                }),
+                            );
+                        }
+                        return Ok(json!({ "deleted": deleted, "version": version, "path": file }));
+                    }
+                    use base64::Engine;
+                    let encoded = body
+                        .get("content_base64")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let content = base64::engine::general_purpose::STANDARD
+                        .decode(encoded)
+                        .map_err(|_| Error::Other("content_base64 is invalid".into()))?;
+                    let asset = store.put_site_file(version, &file, &content, now_unix())?;
+                    guard.record(
+                        "cloud.site.file.put",
+                        json!({
+                            "project_id": project_id, "version": version,
+                            "path_digest": crate::sha256_hex(file.as_bytes()),
+                            "digest": asset.digest, "size_bytes": content.len()
+                        }),
+                    );
+                    Ok(json!({ "stored": true, "version": version, "path": file,
+                        "digest": asset.digest, "media_type": asset.media_type }))
+                })(),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        (m, p) if cloud_site_versions_route(p).is_some() => {
+            let (project_id, version, action) =
+                cloud_site_versions_route(p).expect("guarded above");
+            match token {
+                Some(t) => (|| -> Result<Value> {
+                    guard.cloud_owned_project(t, project_id)?;
+                    let mut store =
+                        crate::cloud::ProjectStore::open(&guard.cloud_root, project_id)?;
+                    match (m, version, action) {
+                        ("POST", None, None) => {
+                            let release = store.create_site_version(now_unix())?;
+                            guard.record(
+                                "cloud.site.version.created",
+                                json!({ "project_id": project_id, "version": release.version }),
+                            );
+                            serde_json::to_value(release).map_err(|e| Error::Other(e.to_string()))
+                        }
+                        ("POST", Some(version), Some("activate")) => {
+                            let config = store.activate_site_version(version)?;
+                            guard.record(
+                                "cloud.site.version.activated",
+                                json!({ "project_id": project_id, "version": version }),
+                            );
+                            Ok(json!({ "active": true, "version": version, "site": config }))
+                        }
+                        ("DELETE", Some(version), None) => {
+                            let deleted = store.delete_site_version(version)?;
+                            if deleted {
+                                guard.record(
+                                    "cloud.site.version.deleted",
+                                    json!({ "project_id": project_id, "version": version }),
+                                );
+                            }
+                            Ok(json!({ "deleted": deleted, "version": version }))
+                        }
+                        _ => Err(Error::Other("method not allowed".into())),
+                    }
+                })(),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
         ("POST", p) if cloud_realtime_token_route(p).is_some() => {
             let project_id = cloud_realtime_token_route(p).expect("guarded above");
             let channels = match body.get("channels") {
@@ -7938,6 +8243,82 @@ fn cloud_route<'a>(path: &'a str, kind: &str) -> Option<(&'a str, String)> {
         .collect::<Vec<_>>()
         .join("/");
     Some((parts[3], key))
+}
+
+fn cloud_site_route(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() == 5
+        && parts[0] == "v1"
+        && parts[1] == "cloud"
+        && parts[2] == "projects"
+        && parts[4] == "site"
+    {
+        Some(parts[3])
+    } else {
+        None
+    }
+}
+
+fn cloud_site_versions_route(path: &str) -> Option<(&str, Option<u64>, Option<&str>)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() < 6
+        || parts[0] != "v1"
+        || parts[1] != "cloud"
+        || parts[2] != "projects"
+        || parts[4] != "site"
+        || parts[5] != "versions"
+    {
+        return None;
+    }
+    match parts.len() {
+        6 => Some((parts[3], None, None)),
+        7 => parts[6]
+            .parse()
+            .ok()
+            .map(|version| (parts[3], Some(version), None)),
+        8 if parts[7] == "activate" => parts[6]
+            .parse()
+            .ok()
+            .map(|version| (parts[3], Some(version), Some("activate"))),
+        _ => None,
+    }
+}
+
+fn cloud_site_file_route(path: &str) -> Option<(&str, u64, String)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() < 9
+        || parts[0] != "v1"
+        || parts[1] != "cloud"
+        || parts[2] != "projects"
+        || parts[4] != "site"
+        || parts[5] != "versions"
+        || parts[7] != "files"
+    {
+        return None;
+    }
+    let version = parts[6].parse().ok()?;
+    let file = parts[8..]
+        .iter()
+        .map(|part| percent_decode(part))
+        .collect::<Vec<_>>()
+        .join("/");
+    Some((parts[3], version, file))
+}
+
+fn cloud_site_files_route(path: &str) -> Option<(&str, u64)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() == 8
+        && parts[0] == "v1"
+        && parts[1] == "cloud"
+        && parts[2] == "projects"
+        && parts[4] == "site"
+        && parts[5] == "versions"
+        && parts[7] == "files"
+    {
+        parts[6].parse().ok().map(|version| (parts[3], version))
+    } else {
+        None
+    }
 }
 
 /// Function deployment and activation routes deliberately do not accept
@@ -9894,6 +10275,105 @@ mod tests {
         let (status, deleted_again) = route(&arc, "DELETE", &fn_path, b"", Some(&auth));
         assert_eq!(status, 200, "{deleted_again}");
         assert_eq!(deleted_again["deleted"], false);
+    }
+
+    #[test]
+    fn cloud_static_site_is_versioned_owner_managed_and_basic_auth_only() {
+        use base64::Engine;
+        let arc = state();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        arc.lock()
+            .unwrap()
+            .set_cloud_root(std::env::temp_dir().join(format!("gap-site-http-{nonce}")));
+        let owner = register(&arc);
+        let stranger = register(&arc);
+        let owner_auth = format!("Bearer {owner}");
+        let (status, project) = route(&arc, "POST", "/v1/cloud/projects", b"{}", Some(&owner_auth));
+        assert_eq!(status, 200, "{project}");
+        let project_id = project["project_id"].as_str().unwrap();
+        let site_path = format!("/v1/cloud/projects/{project_id}/site");
+        let config = json!({
+            "enabled": true,
+            "entrypoint": "index.html",
+            "spa_fallback": true,
+            "auth": { "mode": "basic", "username": "visitor", "password": "correct horse battery" }
+        });
+        assert_eq!(
+            route(
+                &arc,
+                "PUT",
+                &site_path,
+                config.to_string().as_bytes(),
+                Some(&format!("Bearer {stranger}"))
+            )
+            .0,
+            401
+        );
+        let (status, configured) = route(
+            &arc,
+            "PUT",
+            &site_path,
+            config.to_string().as_bytes(),
+            Some(&owner_auth),
+        );
+        assert_eq!(status, 200, "{configured}");
+        assert!(configured
+            .to_string()
+            .find("correct horse battery")
+            .is_none());
+
+        let versions_path = format!("{site_path}/versions");
+        let (status, version) = route(&arc, "POST", &versions_path, b"{}", Some(&owner_auth));
+        assert_eq!(status, 200, "{version}");
+        assert_eq!(version["version"], 1);
+        let file_path = format!("{versions_path}/1/files/index.html");
+        let file = json!({ "content_base64": b64(b"<!doctype html><html><body><h1>Private</h1></body></html>") });
+        let (status, stored) = route(
+            &arc,
+            "PUT",
+            &file_path,
+            file.to_string().as_bytes(),
+            Some(&owner_auth),
+        );
+        assert_eq!(status, 200, "{stored}");
+        assert_eq!(stored["media_type"], "text/html; charset=utf-8");
+        let (status, activated) = route(
+            &arc,
+            "POST",
+            &format!("{versions_path}/1/activate"),
+            b"{}",
+            Some(&owner_auth),
+        );
+        assert_eq!(status, 200, "{activated}");
+
+        let public_path = format!("/sites/{project_id}/nested/spa/path");
+        let challenge = serve_private_site(&arc, &public_path, None, Some("192.0.2.10")).unwrap();
+        assert_eq!(challenge.status, 401);
+        assert!(challenge.challenge);
+        let wrong = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("visitor:wrong")
+        );
+        assert_eq!(
+            serve_private_site(&arc, &public_path, Some(&wrong), Some("192.0.2.10"))
+                .unwrap()
+                .status,
+            401
+        );
+        let basic = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("visitor:correct horse battery")
+        );
+        let served =
+            serve_private_site(&arc, &public_path, Some(&basic), Some("192.0.2.10")).unwrap();
+        assert_eq!(served.status, 200);
+        assert_eq!(served.media_type, "text/html; charset=utf-8");
+        let html = String::from_utf8(served.body).unwrap();
+        assert!(html.contains("Hosted by GAP - private agent project"));
+        assert!(html.contains("<h1>Private</h1>"));
     }
 
     fn register(arc: &Arc<Mutex<NodeState>>) -> String {

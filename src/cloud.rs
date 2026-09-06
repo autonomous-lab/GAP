@@ -30,6 +30,45 @@ pub const MAX_DATABASE_RESULT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_DATABASE_TIME: Duration = Duration::from_millis(250);
 pub const FUNCTION_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_FUNCTION_HTTP_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
+pub const MAX_SITE_FILE_BYTES: usize = 1024 * 1024;
+pub const MAX_PROJECT_SITE_BYTES: u64 = 100 * 1024 * 1024;
+pub const MAX_SITE_FILES: u64 = 5_000;
+pub const MAX_SITE_VERSIONS: u64 = 5;
+pub const MAX_SITE_REQUESTS_PER_SECOND: u64 = 20;
+pub const MAX_SITE_BANDWIDTH_PER_PERIOD: u64 = 1024 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteConfig {
+    pub enabled: bool,
+    pub entrypoint: String,
+    pub spa_fallback: bool,
+    pub username: String,
+    pub active_version: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteVersion {
+    pub version: u64,
+    pub active: bool,
+    pub file_count: u64,
+    pub size_bytes: u64,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteAsset {
+    pub content: Vec<u8>,
+    pub media_type: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteFileInfo {
+    pub path: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub digest: String,
+}
 
 /// Deterministic publication gate for JavaScript functions. This deliberately
 /// targets intent and evasion indicators rather than pretending to be a full
@@ -422,6 +461,370 @@ impl ProjectStore {
             )
             .optional()
             .map_err(db_error)
+    }
+
+    pub fn configure_site(
+        &mut self,
+        enabled: bool,
+        entrypoint: &str,
+        spa_fallback: bool,
+        username: &str,
+        password: Option<&str>,
+        now: u64,
+    ) -> Result<SiteConfig> {
+        validate_site_path(entrypoint)?;
+        if username.is_empty()
+            || username.len() > 64
+            || !username
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'@'))
+        {
+            return Err(Error::Other("invalid site Basic Auth username".into()));
+        }
+        let existing_hash: Option<String> = self
+            .control
+            .query_row(
+                "SELECT password_hash FROM site_config WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let password_hash = match password {
+            Some(password) => hash_site_password(password)?,
+            None => existing_hash.ok_or_else(|| {
+                Error::Other(
+                    "password is required when configuring a site for the first time".into(),
+                )
+            })?,
+        };
+        self.control.execute(
+            "INSERT INTO site_config(id,enabled,entrypoint,spa_fallback,username,password_hash,updated_at) \
+             VALUES(1,?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET \
+             enabled=excluded.enabled,entrypoint=excluded.entrypoint,spa_fallback=excluded.spa_fallback,\
+             username=excluded.username,password_hash=excluded.password_hash,updated_at=excluded.updated_at",
+            params![i64::from(enabled), entrypoint, i64::from(spa_fallback), username, password_hash, sql_int(now)?],
+        ).map_err(db_error)?;
+        self.site_config()?
+            .ok_or_else(|| Error::Other("site configuration was not stored".into()))
+    }
+
+    pub fn site_config(&self) -> Result<Option<SiteConfig>> {
+        self.control.query_row(
+            "SELECT enabled,entrypoint,spa_fallback,username,active_version FROM site_config WHERE id=1",
+            [],
+            |r| Ok(SiteConfig {
+                enabled: r.get::<_, i64>(0)? != 0,
+                entrypoint: r.get(1)?,
+                spa_fallback: r.get::<_, i64>(2)? != 0,
+                username: r.get(3)?,
+                active_version: r.get::<_, Option<i64>>(4)?.map(|v| v as u64),
+            }),
+        ).optional().map_err(db_error)
+    }
+
+    pub fn create_site_version(&mut self, now: u64) -> Result<SiteVersion> {
+        if self.site_config()?.is_none() {
+            return Err(Error::Other(
+                "configure the site before creating a version".into(),
+            ));
+        }
+        let count: i64 = self
+            .control
+            .query_row("SELECT COUNT(*) FROM site_versions", [], |r| r.get(0))
+            .map_err(db_error)?;
+        if count.max(0) as u64 >= MAX_SITE_VERSIONS {
+            return Err(Error::Other(format!(
+                "site version limit is {MAX_SITE_VERSIONS}; delete an inactive version first"
+            )));
+        }
+        let version: i64 = self
+            .control
+            .query_row(
+                "SELECT COALESCE(MAX(version),0)+1 FROM site_versions",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(db_error)?;
+        self.control
+            .execute(
+                "INSERT INTO site_versions(version,created_at) VALUES(?1,?2)",
+                params![version, sql_int(now)?],
+            )
+            .map_err(db_error)?;
+        self.site_version(version as u64)?
+            .ok_or_else(|| Error::Other("site version was not stored".into()))
+    }
+
+    pub fn site_versions(&self) -> Result<Vec<SiteVersion>> {
+        let mut statement = self
+            .control
+            .prepare(
+                "SELECT v.version,CASE WHEN c.active_version=v.version THEN 1 ELSE 0 END,\
+             COUNT(f.path),COALESCE(SUM(f.size_bytes),0),v.created_at FROM site_versions v \
+             LEFT JOIN site_config c ON c.id=1 LEFT JOIN site_files f ON f.version=v.version \
+             GROUP BY v.version,c.active_version,v.created_at ORDER BY v.version DESC",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([], site_version_row)
+            .map_err(db_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_error)
+    }
+
+    pub fn site_version(&self, version: u64) -> Result<Option<SiteVersion>> {
+        self.site_versions()
+            .map(|versions| versions.into_iter().find(|v| v.version == version))
+    }
+
+    pub fn put_site_file(
+        &mut self,
+        version: u64,
+        path: &str,
+        content: &[u8],
+        now: u64,
+    ) -> Result<SiteAsset> {
+        validate_site_path(path)?;
+        enforce_size("site file", content.len(), MAX_SITE_FILE_BYTES)?;
+        scan_static_site_file(path, content)?;
+        let media_type = site_media_type(path)?.to_string();
+        let digest = format!("sha256:{}", crate::sha256_hex(content));
+        let tx = self.control.transaction().map_err(db_error)?;
+        let exists: Option<i64> = tx
+            .query_row(
+                "SELECT version FROM site_versions WHERE version=?1",
+                [sql_int(version)?],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        if exists.is_none() {
+            return Err(Error::Other("unknown site version".into()));
+        }
+        let active: Option<i64> = tx
+            .query_row(
+                "SELECT active_version FROM site_config WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .flatten();
+        if active == Some(sql_int(version)?) {
+            return Err(Error::Other("an active site version is immutable".into()));
+        }
+        let file_count: i64 = tx
+            .query_row("SELECT COUNT(*) FROM site_files", [], |r| r.get(0))
+            .map_err(db_error)?;
+        let replacing: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM site_files WHERE version=?1 AND path=?2",
+                params![sql_int(version)?, path],
+                |r| r.get(0),
+            )
+            .map_err(db_error)?;
+        if replacing == 0 && file_count.max(0) as u64 >= MAX_SITE_FILES {
+            return Err(Error::Other(format!("site file limit is {MAX_SITE_FILES}")));
+        }
+        let used: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(size_bytes),0) FROM site_files",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(db_error)?;
+        let replaced: i64 = tx
+            .query_row(
+                "SELECT COALESCE(size_bytes,0) FROM site_files WHERE version=?1 AND path=?2",
+                params![sql_int(version)?, path],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .unwrap_or(0);
+        let projected = (used.max(0) as u64)
+            .saturating_sub(replaced.max(0) as u64)
+            .saturating_add(content.len() as u64);
+        if projected > MAX_PROJECT_SITE_BYTES {
+            return Err(Error::Other(format!("project site quota exceeded: {projected} bytes would exceed {MAX_PROJECT_SITE_BYTES}")));
+        }
+        tx.execute(
+            "INSERT INTO site_files(version,path,content,media_type,size_bytes,digest,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7) \
+             ON CONFLICT(version,path) DO UPDATE SET content=excluded.content,media_type=excluded.media_type,size_bytes=excluded.size_bytes,digest=excluded.digest,created_at=excluded.created_at",
+            params![sql_int(version)?, path, content, media_type, sql_int(content.len() as u64)?, digest, sql_int(now)?],
+        ).map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        Ok(SiteAsset {
+            content: content.to_vec(),
+            media_type,
+            digest,
+        })
+    }
+
+    pub fn site_files(&self, version: u64) -> Result<Vec<SiteFileInfo>> {
+        let mut statement = self.control.prepare(
+            "SELECT path,media_type,size_bytes,digest FROM site_files WHERE version=?1 ORDER BY path"
+        ).map_err(db_error)?;
+        let rows = statement
+            .query_map([sql_int(version)?], |row| {
+                Ok(SiteFileInfo {
+                    path: row.get(0)?,
+                    media_type: row.get(1)?,
+                    size_bytes: row.get::<_, i64>(2)? as u64,
+                    digest: row.get(3)?,
+                })
+            })
+            .map_err(db_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_error)
+    }
+
+    pub fn delete_site_file(&mut self, version: u64, path: &str) -> Result<bool> {
+        validate_site_path(path)?;
+        if self.site_config()?.and_then(|config| config.active_version) == Some(version) {
+            return Err(Error::Other("an active site version is immutable".into()));
+        }
+        Ok(self
+            .control
+            .execute(
+                "DELETE FROM site_files WHERE version=?1 AND path=?2",
+                params![sql_int(version)?, path],
+            )
+            .map_err(db_error)?
+            > 0)
+    }
+
+    pub fn activate_site_version(&mut self, version: u64) -> Result<SiteConfig> {
+        let config = self
+            .site_config()?
+            .ok_or_else(|| Error::Other("site is not configured".into()))?;
+        let entrypoint: Option<i64> = self
+            .control
+            .query_row(
+                "SELECT 1 FROM site_files WHERE version=?1 AND path=?2",
+                params![sql_int(version)?, config.entrypoint],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        if entrypoint.is_none() {
+            return Err(Error::Other(format!(
+                "site version has no {} entrypoint",
+                config.entrypoint
+            )));
+        }
+        self.control
+            .execute(
+                "UPDATE site_config SET active_version=?1 WHERE id=1",
+                [sql_int(version)?],
+            )
+            .map_err(db_error)?;
+        self.site_config()?
+            .ok_or_else(|| Error::Other("site configuration disappeared".into()))
+    }
+
+    pub fn delete_site_version(&mut self, version: u64) -> Result<bool> {
+        let active = self.site_config()?.and_then(|c| c.active_version);
+        if active == Some(version) {
+            return Err(Error::Other("cannot delete the active site version".into()));
+        }
+        Ok(self
+            .control
+            .execute(
+                "DELETE FROM site_versions WHERE version=?1",
+                [sql_int(version)?],
+            )
+            .map_err(db_error)?
+            > 0)
+    }
+
+    pub fn authenticate_site(&self, username: &str, password: &str) -> Result<bool> {
+        let row: Option<(String, String, i64)> = self
+            .control
+            .query_row(
+                "SELECT username,password_hash,enabled FROM site_config WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let Some((expected_username, hash, enabled)) = row else {
+            return Ok(false);
+        };
+        if enabled == 0 || username != expected_username {
+            return Ok(false);
+        }
+        verify_site_password(password, &hash)
+    }
+
+    pub fn active_site_asset(&self, requested_path: &str) -> Result<Option<SiteAsset>> {
+        let config = self
+            .site_config()?
+            .ok_or_else(|| Error::Other("site is not configured".into()))?;
+        if !config.enabled {
+            return Ok(None);
+        }
+        let version = config
+            .active_version
+            .ok_or_else(|| Error::Other("site has no active version".into()))?;
+        let path = if requested_path.is_empty() {
+            config.entrypoint.clone()
+        } else {
+            requested_path.to_string()
+        };
+        validate_site_path(&path)?;
+        let load =
+            |path: &str| -> Result<Option<SiteAsset>> {
+                self.control.query_row(
+                "SELECT content,media_type,digest FROM site_files WHERE version=?1 AND path=?2",
+                params![sql_int(version)?, path],
+                |r| Ok(SiteAsset { content: r.get(0)?, media_type: r.get(1)?, digest: r.get(2)? }),
+            ).optional().map_err(db_error)
+            };
+        match load(&path)? {
+            Some(asset) => Ok(Some(asset)),
+            None if config.spa_fallback && !path.contains('.') => load(&config.entrypoint),
+            None => Ok(None),
+        }
+    }
+
+    pub fn consume_site_quota(&mut self, bytes: u64, now: u64) -> Result<()> {
+        let second = sql_int(now)?;
+        let period = sql_int(now / (30 * 24 * 60 * 60))?;
+        let tx = self.control.transaction().map_err(db_error)?;
+        tx.execute(
+            "DELETE FROM site_rate WHERE second<?1",
+            [second.saturating_sub(2)],
+        )
+        .map_err(db_error)?;
+        let requests: i64 = tx
+            .query_row(
+                "SELECT requests FROM site_rate WHERE second=?1",
+                [second],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .unwrap_or(0);
+        if requests.max(0) as u64 >= MAX_SITE_REQUESTS_PER_SECOND {
+            return Err(Error::Other("site request rate exceeded".into()));
+        }
+        let used: i64 = tx
+            .query_row(
+                "SELECT bytes FROM site_bandwidth WHERE period=?1",
+                [period],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .unwrap_or(0);
+        if (used.max(0) as u64).saturating_add(bytes) > MAX_SITE_BANDWIDTH_PER_PERIOD {
+            return Err(Error::Other("site bandwidth quota exceeded".into()));
+        }
+        tx.execute("INSERT INTO site_rate(second,requests) VALUES(?1,1) ON CONFLICT(second) DO UPDATE SET requests=requests+1", [second]).map_err(db_error)?;
+        tx.execute("INSERT INTO site_bandwidth(period,bytes) VALUES(?1,?2) ON CONFLICT(period) DO UPDATE SET bytes=bytes+excluded.bytes", params![period, sql_int(bytes)?]).map_err(db_error)?;
+        tx.commit().map_err(db_error)
     }
 
     pub fn set_egress_hosts(&mut self, hosts: &[String]) -> Result<()> {
@@ -951,6 +1354,143 @@ fn sql_int(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| Error::Other("integer exceeds SQLite range".into()))
 }
 
+fn hash_site_password(password: &str) -> Result<String> {
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    if !(12..=128).contains(&password.len()) {
+        return Err(Error::Other(
+            "site password must contain 12 to 128 bytes".into(),
+        ));
+    }
+    use rand::RngCore;
+    let mut salt = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    let salt = SaltString::encode_b64(&salt)
+        .map_err(|e| Error::Other(format!("site password salt: {e}")))?;
+    argon2::Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|e| Error::Other(format!("site password hash: {e}")))
+}
+
+fn verify_site_password(password: &str, encoded: &str) -> Result<bool> {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    let hash =
+        PasswordHash::new(encoded).map_err(|e| Error::Other(format!("site password hash: {e}")))?;
+    Ok(argon2::Argon2::default()
+        .verify_password(password.as_bytes(), &hash)
+        .is_ok())
+}
+
+fn validate_site_path(path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.len() > MAX_KEY_BYTES
+        || path.starts_with('/')
+        || path.ends_with('/')
+        || path.contains(['\0', '\\'])
+        || path.split('/').any(|part| {
+            part.is_empty()
+                || part == "."
+                || part == ".."
+                || part.starts_with('.')
+                || part.len() > 128
+        })
+    {
+        return Err(Error::Other("invalid or unsafe site path".into()));
+    }
+    Ok(())
+}
+
+fn site_media_type(path: &str) -> Result<&'static str> {
+    let extension = path
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("html" | "htm") => Ok("text/html; charset=utf-8"),
+        Some("css") => Ok("text/css; charset=utf-8"),
+        Some("js" | "mjs") => Ok("text/javascript; charset=utf-8"),
+        Some("json") => Ok("application/json; charset=utf-8"),
+        Some("txt") => Ok("text/plain; charset=utf-8"),
+        Some("xml") => Ok("application/xml; charset=utf-8"),
+        Some("svg") => Ok("image/svg+xml"),
+        Some("png") => Ok("image/png"),
+        Some("jpg" | "jpeg") => Ok("image/jpeg"),
+        Some("gif") => Ok("image/gif"),
+        Some("webp") => Ok("image/webp"),
+        Some("avif") => Ok("image/avif"),
+        Some("ico") => Ok("image/x-icon"),
+        Some("woff") => Ok("font/woff"),
+        Some("woff2") => Ok("font/woff2"),
+        Some("ttf") => Ok("font/ttf"),
+        _ => Err(Error::Other("site file type is not allowed".into())),
+    }
+}
+
+fn scan_static_site_file(path: &str, content: &[u8]) -> Result<()> {
+    let media = site_media_type(path)?;
+    if !media.starts_with("text/")
+        && !matches!(
+            media,
+            "application/json; charset=utf-8" | "application/xml; charset=utf-8" | "image/svg+xml"
+        )
+    {
+        return Ok(());
+    }
+    let text = std::str::from_utf8(content)
+        .map_err(|_| Error::Other("text site file must be valid UTF-8".into()))?;
+    if text
+        .bytes()
+        .any(|byte| byte == 0 || byte < 0x09 || (byte > 0x0d && byte < 0x20))
+    {
+        return Err(Error::Other(
+            "site security scan: control bytes are forbidden".into(),
+        ));
+    }
+    if text.len() > 32 * 1024 && text.lines().any(|line| line.len() > 32 * 1024) {
+        return Err(Error::Other(
+            "site security scan: excessive minification or padding".into(),
+        ));
+    }
+    let lower = text.to_ascii_lowercase();
+    let forbidden = [
+        ("-----begin private key", "embedded private key"),
+        ("-----begin rsa private key", "embedded private key"),
+        ("aws_secret_access_key=", "embedded cloud credential"),
+        ("openai_api_key=", "embedded API credential"),
+        ("github_token=", "embedded API credential"),
+        ("<meta http-equiv=\"refresh\"", "automatic redirect"),
+        ("<meta http-equiv='refresh'", "automatic redirect"),
+        ("<base ", "base URL override"),
+    ];
+    for (pattern, reason) in forbidden {
+        if lower.contains(pattern) {
+            return Err(Error::Other(format!(
+                "site security scan: forbidden {reason}"
+            )));
+        }
+    }
+    let encoded_markers = lower.matches("\\x").count()
+        + lower.matches("\\u00").count()
+        + lower.matches("fromcharcode").count()
+        + lower.matches("atob(").count()
+        + lower.matches("unescape(").count();
+    if encoded_markers > 64 {
+        return Err(Error::Other(
+            "site security scan: excessive encoded or obfuscated content".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn site_version_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SiteVersion> {
+    Ok(SiteVersion {
+        version: row.get::<_, i64>(0)? as u64,
+        active: row.get::<_, i64>(1)? != 0,
+        file_count: row.get::<_, i64>(2)? as u64,
+        size_bytes: row.get::<_, i64>(3)? as u64,
+        created_at: row.get::<_, i64>(4)? as u64,
+    })
+}
+
 const SCHEMA: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -961,6 +1501,11 @@ CREATE TABLE IF NOT EXISTS function_versions(name TEXT NOT NULL,version INTEGER 
 CREATE TABLE IF NOT EXISTS egress_hosts(host TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS function_http(name TEXT PRIMARY KEY,auth TEXT NOT NULL,cors_origins TEXT NOT NULL,FOREIGN KEY(name) REFERENCES functions(name) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY,function TEXT NOT NULL,cron TEXT NOT NULL,request TEXT NOT NULL,enabled INTEGER NOT NULL,next_run_at INTEGER NOT NULL,last_run_at INTEGER,last_status TEXT,FOREIGN KEY(function) REFERENCES functions(name) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS site_config(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL,entrypoint TEXT NOT NULL,spa_fallback INTEGER NOT NULL,username TEXT NOT NULL,password_hash TEXT NOT NULL,active_version INTEGER,updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS site_versions(version INTEGER PRIMARY KEY,created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS site_files(version INTEGER NOT NULL,path TEXT NOT NULL,content BLOB NOT NULL,media_type TEXT NOT NULL,size_bytes INTEGER NOT NULL,digest TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(version,path),FOREIGN KEY(version) REFERENCES site_versions(version) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS site_rate(second INTEGER PRIMARY KEY,requests INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS site_bandwidth(period INTEGER PRIMARY KEY,bytes INTEGER NOT NULL);
 "#;
 
 fn parse_minute_cron(cron: &str) -> Result<u64> {
@@ -1174,5 +1719,115 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn private_site_versions_activate_atomically_and_authenticate() {
+        let mut store = temp_store();
+        let config = store
+            .configure_site(
+                true,
+                "index.html",
+                true,
+                "visitor",
+                Some("correct horse battery"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(config.active_version, None);
+        assert!(store
+            .authenticate_site("visitor", "correct horse battery")
+            .unwrap());
+        assert!(!store
+            .authenticate_site("visitor", "wrong password")
+            .unwrap());
+        assert!(!store
+            .authenticate_site("other", "correct horse battery")
+            .unwrap());
+
+        let version = store.create_site_version(11).unwrap();
+        assert_eq!(version.version, 1);
+        store
+            .put_site_file(1, "index.html", b"<!doctype html><body>Hello</body>", 12)
+            .unwrap();
+        store
+            .put_site_file(1, "assets/app.js", b"document.body.dataset.ready='yes'", 12)
+            .unwrap();
+        assert_eq!(store.site_files(1).unwrap().len(), 2);
+        assert!(store.delete_site_file(1, "assets/app.js").unwrap());
+        assert_eq!(store.site_files(1).unwrap().len(), 1);
+        store.activate_site_version(1).unwrap();
+        assert_eq!(
+            store.site_config().unwrap().unwrap().active_version,
+            Some(1)
+        );
+        assert_eq!(
+            store
+                .active_site_asset("route/inside/spa")
+                .unwrap()
+                .unwrap()
+                .content,
+            b"<!doctype html><body>Hello</body>"
+        );
+        assert!(store.put_site_file(1, "late.css", b"body{}", 13).is_err());
+        assert!(store.delete_site_version(1).is_err());
+    }
+
+    #[test]
+    fn static_site_scan_blocks_secrets_redirects_and_unsafe_paths() {
+        let mut store = temp_store();
+        store
+            .configure_site(
+                true,
+                "index.html",
+                false,
+                "demo",
+                Some("a sufficiently long password"),
+                1,
+            )
+            .unwrap();
+        store.create_site_version(2).unwrap();
+        assert!(store.put_site_file(1, ".env", b"SECRET=x", 3).is_err());
+        assert!(store
+            .put_site_file(1, "../index.html", b"hello", 3)
+            .is_err());
+        assert!(store.put_site_file(1, "payload.exe", b"MZ", 3).is_err());
+        assert!(store
+            .put_site_file(
+                1,
+                "index.html",
+                br#"<meta http-equiv="refresh" content="0;url=https://evil.test">"#,
+                3
+            )
+            .is_err());
+        assert!(store
+            .put_site_file(1, "app.js", b"const OPENAI_API_KEY='not allowed';", 3)
+            .is_err());
+        assert!(store
+            .put_site_file(1, "huge.js", &vec![b'a'; MAX_SITE_FILE_BYTES + 1], 3)
+            .is_err());
+    }
+
+    #[test]
+    fn static_site_enforces_version_and_request_limits() {
+        let mut store = temp_store();
+        store
+            .configure_site(
+                true,
+                "index.html",
+                false,
+                "demo",
+                Some("a sufficiently long password"),
+                1,
+            )
+            .unwrap();
+        for _ in 0..MAX_SITE_VERSIONS {
+            store.create_site_version(2).unwrap();
+        }
+        assert!(store.create_site_version(2).is_err());
+        for _ in 0..MAX_SITE_REQUESTS_PER_SECOND {
+            store.consume_site_quota(1, 100).unwrap();
+        }
+        assert!(store.consume_site_quota(1, 100).is_err());
     }
 }
