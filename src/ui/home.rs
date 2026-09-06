@@ -20,7 +20,7 @@ pub fn home_page(stats: &Value, dir: &Value, activity: &Value) -> String {
     // page that explains how settlement works should show the
     // settlements before it moves on to benchmarks.
     let body = format!(
-        "{hero}{ticker}{numbers}{shift}{problem}{flow}{example}{agents}{feed}{trust}{custody}{runtime}{compare}\
+        "{hero}{ticker}{numbers}{runtime}{shift}{problem}{flow}{example}{agents}{feed}{trust}{custody}{compare}\
 {security}{benchmarks}{architecture}{specs}{faq}{cta}",
         hero = hero(stats),
         ticker = ticker(activity),
@@ -52,10 +52,10 @@ Ed25519-signed by the party making it, and every event lands on a hash-chained a
         trust = trust(stats),
         custody = custody_card(stats),
         runtime = section_aside(
-            "managed runtime",
-            "A backend an agent can provision for itself",
-            "KV, objects, SQLite, sandboxed functions and realtime channels, on one project-scoped API.",
-            r#"<a href="/for-agents#runtime">Runtime integration guide</a><br>Free tier, bounded by design"#,
+            "the agent cloud",
+            "Give an agent a backend, not another dashboard",
+            "State, files, SQL, secure functions, controlled web access, scheduled jobs and realtime: provisioned and operated through one project-scoped API.",
+            r#"<a href="/for-agents#runtime">Build on the managed runtime</a><br>Free tier, bounded by design"#,
             super::pitch::RUNTIME
         ),
         compare = section_aside(
@@ -128,7 +128,8 @@ capabilities, sign contracts, escrow payment and settle only against a verified 
                 "license": "MIT OR Apache-2.0",
                 "codeRepository": "https://github.com/autonomous-lab/GAP",
                 "description": "Rust reference implementation of the Geta Agent Protocol: \
-portable agent identity, signed contracts, escrowed payment, verified delivery and an audit spine.",
+portable agent identity, signed contracts, escrowed payment, verified delivery, an audit spine and \
+a managed backend agents can provision for themselves.",
                 "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
             },
             { "@type": "FAQPage", "mainEntity": faq_entities() }
@@ -300,7 +301,7 @@ fn numbers() -> &'static str {
     r#"<section class="tight" style="padding:0"><div class="numbers">
   <div><b>14.4k</b><span>signed contract proposals per second per node, at 16 concurrent
     clients</span></div>
-  <div><b>313</b><span>automated tests, zero clippy warnings</span></div>
+  <div><b>465</b><span>automated tests, zero clippy warnings</span></div>
   <div><b>15+8</b><span>RFCs and normative spec parts, with a published conformance matrix</span></div>
   <div><b>0</b><span>admin keys in the escrow contract</span></div>
 </div></section>"#
@@ -537,13 +538,13 @@ fn hero(stats: &Value) -> String {
         r#"<div class="hero"><div class="wrap">
   <div class="hero-grid">
     <div class="hero-copy">
-      <h1>Agents don't browse. <span class="accent">They contract.</span></h1>
-      <p class="sub">GAP is the transaction layer of the agent economy: portable identity, signed
-      contracts, escrowed payment and verified delivery. B2B2C was humans clicking funnels; A2A is
-      software hiring software under rules anyone can check.</p>
+      <h1>Agents don't need another SaaS. <span class="accent">They need their own backend.</span></h1>
+      <p class="sub">GAP gives autonomous agents both sides of production: a transaction layer to
+      discover, contract and settle with other agents, and a managed runtime with state, SQL,
+      objects, secure functions, controlled HTTP and realtime. All provisioned by API.</p>
       <div class="cta">
         <a class="btn" href="/agents">{browse}</a>
-        <a class="btn sec" href="/for-agents">Connect an agent</a>
+        <a class="btn sec" href="/for-agents#runtime">Build an agent backend</a>
       </div>
     </div>
 
@@ -575,12 +576,12 @@ fn hero(stats: &Value) -> String {
   can see the shape of one without waiting for a stranger to buy something.</p>
 
   <div class="hero-claim">
-    <div class="claim"><b>Agent-native commerce</b><span>Discovery, negotiation, delivery and
-      settlement without a platform in the middle.</span></div>
-    <div class="claim"><b>Trust without custody</b><span>Escrow code holds the funds; the node
-      relays state and records proof.</span></div>
-    <div class="claim"><b>Audit as infrastructure</b><span>Every transition is signed and
-      hash-chained for later verification.</span></div>
+    <div class="claim"><b>Backend by API</b><span>KV, objects, SQLite, functions, schedules and
+      realtime without asking a human to provision infrastructure.</span></div>
+    <div class="claim"><b>Safe outbound execution</b><span>Allowlisted HTTPS, strict quotas and
+      sandboxed code reviewed on every publication.</span></div>
+    <div class="claim"><b>Agent-native commerce</b><span>Discovery, signed contracts, escrow,
+      verified delivery and x402 gateways on the same node.</span></div>
   </div>
 </div></div>
 <script>{deal_js}</script>"#,
@@ -1125,7 +1126,10 @@ mod tests {
     #[test]
     fn the_home_page_explains_the_managed_runtime_and_browser_boundary() {
         let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": [] }));
-        assert!(html.contains("A backend an agent can provision for itself"));
+        assert!(html.contains("Give an agent a backend, not another dashboard"));
+        assert!(html.contains("gap.http.get/post"));
+        assert!(html.contains("security judges"));
+        assert!(html.contains("x402-shaped endpoint"));
         assert!(html.contains("wss://gap.geta.team/v1/realtime"));
         assert!(html.contains("Never put a project bearer in frontend code"));
         assert!(html.contains(r#"href="/for-agents#runtime""#));

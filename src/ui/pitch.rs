@@ -177,9 +177,9 @@ modes.</p>
 
 /// Managed primitives an agent can consume without operating another stack.
 pub const RUNTIME: &str = r#"
-<p class="lead">An agent can need durable state, a database or a live channel long before it
-needs a Kubernetes cluster. A GAP project provides those primitives behind the same agent
-identity, with small and explicit free-tier limits.</p>
+<p class="lead">An agent can now create and operate a useful backend without a cloud console,
+DNS change or permanent infrastructure credential. It creates a project once, then manages the
+whole application through GAP: durable data, compute, web access, schedules and live channels.</p>
 <div class="grid three" style="margin-top:20px">
   <div class="card"><h3>State</h3>
     <p><b>KV</b> for small values, <b>objects</b> for artifacts and an isolated <b>SQLite</b>
@@ -188,10 +188,11 @@ identity, with small and explicit free-tier limits.</p>
     <p class="dim" style="font-size:.85rem;margin-top:8px">64 KiB/value and 25 MiB KV; 1 MiB/object
     and 100 MiB objects; 100 MiB database.</p></div>
   <div class="card"><h3>Functions</h3>
-    <p>Versioned JavaScript runs in a separate constrained container, with bounded time, memory,
-    source and output. No arbitrary filesystem or network access is inherited from the node.</p>
-    <p class="dim" style="font-size:.85rem;margin-top:8px">1 MiB/version, 100 MiB source per
-    project.</p></div>
+    <p>Versioned JavaScript runs in a separate sandbox. Every publication is statically scanned
+    and reviewed by independent security judges before activation. Public browser routes receive
+    real method, path, query and body data, with CORS handled by GAP.</p>
+    <p class="dim" style="font-size:.85rem;margin-top:8px">30-second execution; 4 concurrent per
+    project, 16 globally; saturation returns 429.</p></div>
   <div class="card"><h3>Realtime</h3>
     <p>A static site can subscribe and publish over
     <code>wss://gap.geta.team/v1/realtime</code>. Sixty-minute tokens restrict channels and
@@ -199,6 +200,23 @@ identity, with small and explicit free-tier limits.</p>
     never reaches the browser.</p>
     <p class="dim" style="font-size:.85rem;margin-top:8px">25 connections, 25 channels, 64 KiB per
     message, 24-hour retention and 25 MiB persisted.</p></div>
+</div>
+<div class="grid three" style="margin-top:14px">
+  <div class="card"><h3>Controlled web access</h3>
+    <p><code>gap.http.get/post</code> reaches project-allowlisted HTTPS hosts with custom safe
+    headers, SSRF protection, redirects revalidated at every hop and explicit resource bounds.</p>
+    <p class="dim" style="font-size:.85rem;margin-top:8px">30-second timeout; 3 MiB response;
+    direct sockets and arbitrary network access remain unavailable.</p></div>
+  <div class="card"><h3>Schedules</h3>
+    <p>Attach an interval cron to a function for cache refreshes, synchronization and maintenance.
+    The invocation receives a normal request and runs under the same sandbox and quotas.</p>
+    <p class="dim" style="font-size:.85rem;margin-top:8px">Intervals from every minute to every
+    1,440 minutes.</p></div>
+  <div class="card"><h3>Sell an existing API</h3>
+    <p>Register a pass-through gateway and GAP exposes an x402-shaped endpoint: callers receive
+    the price, pay, then reach the upstream service. Commerce and execution share one identity.</p>
+    <p class="dim" style="font-size:.85rem;margin-top:8px">No application-specific billing proxy
+    to build or operate.</p></div>
 </div>
 <div class="codehead" style="margin-top:18px"><span>browser — dependency-free SDK</span><span>js</span></div>
 <pre>import GapRealtime from "./realtime.js";
@@ -209,9 +227,9 @@ const live = new GapRealtime({
 });
 await live.connect();
 live.subscribe("room:lobby", event =&gt; render(event.payload));</pre>
-<div class="note warn"><b>Never put a project bearer in frontend code.</b> A server-side function
-authenticates the visitor and exchanges that credential for a short, narrowly scoped realtime
-token. The repository ships both halves in <code>sdk/</code>.</div>
+<div class="note warn"><b>Never put a project bearer in frontend code.</b> A GAP function can call
+<code>gap.realtime.issueToken()</code> to mint a short, narrowly scoped token without ever seeing
+the signing secret. The repository ships both halves in <code>sdk/</code>.</div>
 "#;
 
 /// The paper trail.
