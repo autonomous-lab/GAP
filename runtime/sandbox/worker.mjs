@@ -41,6 +41,9 @@ const gap = Object.freeze({
     get: (url, options = {}) => capability("http.request", { method: "GET", url, ...options }),
     post: (url, options = {}) => capability("http.request", { method: "POST", url, ...options }),
   }),
+  realtime: Object.freeze({
+    issueToken: (options = {}) => capability("realtime.token", options),
+  }),
 });
 const context = vm.createContext(Object.create(null), {
   codeGeneration: { strings: false, wasm: false },

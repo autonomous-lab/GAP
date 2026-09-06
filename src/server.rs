@@ -2512,63 +2512,67 @@ the content inline"
         subject: Option<&str>,
     ) -> Result<Value> {
         self.cloud_owned_project(token, project_id)?;
-        if channels.len() > 25
-            || channels.iter().any(|channel| {
-                channel.is_empty()
-                    || channel.len() > 128
-                    || !channel.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':' | b'.')
-                    })
-            })
-        {
-            return Err(Error::Other("invalid realtime channel scope".into()));
-        }
-        if permissions.is_empty()
-            || permissions.len() > 2
-            || permissions
-                .iter()
-                .any(|permission| !matches!(permission.as_str(), "subscribe" | "publish"))
-        {
-            return Err(Error::Other("invalid realtime permissions".into()));
-        }
-        if subject.is_some_and(|value| {
-            value.is_empty()
-                || value.len() > 128
-                || !value.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':' | b'.' | b'@')
-                })
-        }) {
-            return Err(Error::Other("invalid realtime subject".into()));
-        }
         let secret = self
             .realtime_secret
             .as_deref()
             .ok_or_else(|| Error::Other("realtime service is not configured".into()))?;
-        use rand::RngCore;
-        let mut nonce = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
-        let expires_at = now_unix().saturating_add(3600);
-        let claims = json!({
-            "project_id": project_id,
-            "channels": channels,
-            "permissions": permissions,
-            "subject": subject,
-            "exp": expires_at,
-            "jti": hex::encode(nonce)
-        });
-        use base64::Engine;
-        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&claims).map_err(|error| Error::Other(error.to_string()))?);
-        use hmac::{Hmac, Mac};
-        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
-            .map_err(|_| Error::Other("invalid realtime secret".into()))?;
-        mac.update(encoded.as_bytes());
-        let signed = format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes()));
+        let result =
+            issue_realtime_token(secret, project_id, channels, permissions, subject, 3600)?;
+        let expires_at = result["expires_at"].as_u64().unwrap_or_default();
         self.record(
             "cloud.realtime.token.issued",
             json!({ "project_id": project_id, "expires_at": expires_at, "channel_count": channels.len(), "permissions": permissions }),
         );
-        Ok(json!({ "token": signed, "expires_at": expires_at }))
+        Ok(result)
+    }
+
+    fn cloud_issue_realtime_token_for_function(
+        &mut self,
+        project_id: &str,
+        args: &Value,
+    ) -> Result<Value> {
+        if !self.cloud_projects.contains_key(project_id) {
+            return Err(Error::Other("unknown cloud project".into()));
+        }
+        let channels = string_array(args, "channels", None)?;
+        if channels.is_empty() {
+            return Err(Error::Other(
+                "function-issued realtime tokens require at least one channel".into(),
+            ));
+        }
+        let permissions = string_array(
+            args,
+            "permissions",
+            Some(vec!["subscribe".into(), "publish".into()]),
+        )?;
+        let subject = args.get("subject").and_then(Value::as_str);
+        let expires_in = args
+            .get("expires_in")
+            .and_then(Value::as_u64)
+            .unwrap_or(3600);
+        let secret = self
+            .realtime_secret
+            .as_deref()
+            .ok_or_else(|| Error::Other("realtime service is not configured".into()))?;
+        let result = issue_realtime_token(
+            secret,
+            project_id,
+            &channels,
+            &permissions,
+            subject,
+            expires_in,
+        )?;
+        self.record(
+            "cloud.realtime.token.issued",
+            json!({
+                "project_id": project_id,
+                "expires_at": result["expires_at"],
+                "channel_count": channels.len(),
+                "permissions": permissions,
+                "source": "function"
+            }),
+        );
+        Ok(result)
     }
 
     pub fn cloud_deploy_function(
@@ -6770,6 +6774,13 @@ pub fn route_with_ip(
             .unwrap_or("")
             .to_string();
         let request = body.get("request").cloned().unwrap_or(Value::Null);
+        if request.get("kind").and_then(Value::as_str) == Some("realtime.token") {
+            let args = request.get("args").unwrap_or(&Value::Null);
+            return match guard.cloud_issue_realtime_token_for_function(&project_id, args) {
+                Ok(value) => (200, value),
+                Err(error) => error_response(&error),
+            };
+        }
         let root = guard.cloud_root.clone();
         drop(guard);
         return match execute_function_capability(&root, &project_id, &request) {
@@ -8042,6 +8053,82 @@ fn capability_text(value: &Value, field: &str) -> Result<Vec<u8>> {
         Value::String(text) => Ok(text.as_bytes().to_vec()),
         other => serde_json::to_vec(other).map_err(|e| Error::Other(e.to_string())),
     }
+}
+
+fn string_array(value: &Value, field: &str, default: Option<Vec<String>>) -> Result<Vec<String>> {
+    match value.get(field) {
+        None => default.ok_or_else(|| Error::Other(format!("{field} is required"))),
+        Some(Value::Array(values)) if values.iter().all(Value::is_string) => Ok(values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()),
+        _ => Err(Error::Other(format!("{field} must be an array of strings"))),
+    }
+}
+
+fn issue_realtime_token(
+    secret: &str,
+    project_id: &str,
+    channels: &[String],
+    permissions: &[String],
+    subject: Option<&str>,
+    expires_in: u64,
+) -> Result<Value> {
+    if channels.len() > 25
+        || channels.iter().any(|channel| {
+            channel.is_empty()
+                || channel.len() > 128
+                || !channel.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':' | b'.')
+                })
+        })
+    {
+        return Err(Error::Other("invalid realtime channel scope".into()));
+    }
+    if permissions.is_empty()
+        || permissions.len() > 2
+        || permissions
+            .iter()
+            .any(|permission| !matches!(permission.as_str(), "subscribe" | "publish"))
+    {
+        return Err(Error::Other("invalid realtime permissions".into()));
+    }
+    if subject.is_some_and(|value| {
+        value.is_empty()
+            || value.len() > 128
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':' | b'.' | b'@')
+            })
+    }) {
+        return Err(Error::Other("invalid realtime subject".into()));
+    }
+    if !(60..=3600).contains(&expires_in) {
+        return Err(Error::Other(
+            "realtime token lifetime must be between 60 and 3600 seconds".into(),
+        ));
+    }
+    use rand::RngCore;
+    let mut nonce = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let expires_at = now_unix().saturating_add(expires_in);
+    let claims = json!({
+        "project_id": project_id,
+        "channels": channels,
+        "permissions": permissions,
+        "subject": subject,
+        "exp": expires_at,
+        "jti": hex::encode(nonce)
+    });
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&claims).map_err(|error| Error::Other(error.to_string()))?);
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|_| Error::Other("invalid realtime secret".into()))?;
+    mac.update(encoded.as_bytes());
+    let signed = format!("{encoded}.{}", hex::encode(mac.finalize().into_bytes()));
+    Ok(json!({ "token": signed, "expires_at": expires_at }))
 }
 
 fn execute_function_capability(
@@ -9565,6 +9652,45 @@ mod tests {
         .unwrap();
         assert_eq!(claims["permissions"], json!(["subscribe"]));
         assert_eq!(claims["subject"], "visitor:42");
+
+        arc.lock()
+            .unwrap()
+            .set_function_sandbox("http://unused", "internal-test");
+        let capability = json!({
+            "project_id": project_id,
+            "request": {
+                "kind": "realtime.token",
+                "args": {
+                    "channels": ["room:function-test"],
+                    "permissions": ["subscribe"],
+                    "subject": "visitor:function",
+                    "expires_in": 600
+                }
+            }
+        });
+        let (status, function_token) = route(
+            &arc,
+            "POST",
+            "/internal/functions/capability",
+            capability.to_string().as_bytes(),
+            Some("Bearer internal-test"),
+        );
+        assert_eq!(status, 200, "{function_token}");
+        let encoded = function_token["token"]
+            .as_str()
+            .unwrap()
+            .split('.')
+            .next()
+            .unwrap();
+        let claims: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims["project_id"], project_id);
+        assert_eq!(claims["channels"][0], "room:function-test");
+        assert_eq!(claims["permissions"][0], "subscribe");
         assert_eq!(
             route(
                 &arc,

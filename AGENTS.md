@@ -480,6 +480,28 @@ The returned token lasts 60 minutes. `permissions` may contain `subscribe`,
 empty `channels` array grants every channel in the project; do not issue that
 scope to public clients.
 
+A GAP function is itself a trusted token backend without ever receiving the
+owner bearer or realtime signing secret. Prefer this native capability over
+storing a bearer in KV or attempting to pass `Authorization` through
+`gap.http` (that header remains forbidden):
+
+```javascript
+async (request, gap) => {
+  // Authenticate/authorize request.user in your application logic first.
+  return await gap.realtime.issueToken({
+    channels: [`room:${request.room}`],
+    permissions: ["subscribe", "publish"],
+    subject: `visitor:${request.user}`,
+    expires_in: 600
+  });
+}
+```
+
+`channels` is mandatory and must contain 1–25 explicit scopes for tokens
+issued by functions. `permissions` defaults to both permissions, `subject` is
+optional, and `expires_in` must be between 60 and 3600 seconds. GAP injects the
+project scope, signs internally and audits the issuance.
+
 ### WebSocket — every client action
 
 Open `wss://gap.geta.team/v1/realtime`. The wire protocol is JSON. Authenticate

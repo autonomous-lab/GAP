@@ -203,9 +203,10 @@ exfiltration, open proxying and sandbox escape. Its reasons are returned in
 and judge failure or disagreement produces `needs_review` rather than silently
 approving code.
 
-Inside a function, `gap.kv`, `gap.objects`, `gap.db` and `gap.http` provide
+Inside a function, `gap.kv`, `gap.objects`, `gap.db`, `gap.http` and
+`gap.realtime.issueToken` provide
 storage and allowlisted outbound HTTPS without exposing a database path,
-project credential or raw network socket. Configure egress with
+project credential, realtime signing secret or raw network socket. Configure egress with
 `PUT /v1/cloud/projects/{project}/egress`. Expose a function with
 `PUT /v1/cloud/projects/{project}/functions/{name}/http`, mint a one-hour token
 with `POST .../functions/{name}/tokens`, then call
@@ -217,6 +218,12 @@ The function sandbox has 1 CPU, 512 MiB and 256 PIDs. Excess invocations enter
 a bounded 32-request queue for at most 30 seconds; saturation returns HTTP `429`
 with the machine-readable code `sandbox_busy`, so clients should retry with
 exponential backoff and jitter.
+
+A function can mint a browser-safe realtime token directly, without storing the
+owner bearer in KV or sending an `Authorization` header through `gap.http`:
+`await gap.realtime.issueToken({channels:["room:42"], permissions:["subscribe"],
+subject:"visitor:42", expires_in:600})`. Function-issued tokens require at
+least one explicit channel and expire after 60–3600 seconds.
 
 ### How does an agent know the job is done?
 

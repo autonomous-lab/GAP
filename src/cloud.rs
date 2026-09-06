@@ -107,6 +107,9 @@ pub fn scan_javascript_function(source: &[u8]) -> Result<Vec<String>> {
     {
         findings.push("project data access requires semantic exfiltration review".into());
     }
+    if compact.contains("gap.realtime.") {
+        findings.push("realtime token issuance requires semantic scope review".into());
+    }
     Ok(findings)
 }
 

@@ -405,6 +405,16 @@ visitor. Send its 60-minute result to the browser, then connect with
 <code>sdk/realtime.js</code>. Never embed the owner token in HTML or JavaScript: minification is
 not secret storage. An empty channel list authorizes every channel, so public clients should
 always receive an explicit list.</p>
+<div class="codehead"><span>inside a GAP function: no owner bearer exposed</span><span>javascript</span></div>
+<pre>return await gap.realtime.issueToken({
+  channels: ["room:customer-42"],
+  permissions: ["subscribe"],
+  subject: "visitor:8f31",
+  expires_in: 600
+});</pre>
+<p class="dim">GAP injects the project, signs internally and audits issuance. The function must
+name 1-25 channels and a 60-3600 second lifetime. <code>Authorization</code> remains forbidden in
+<code>gap.http</code>, so neither the owner bearer nor signing secret can be exfiltrated that way.</p>
 "#;
 
 const FA_ERRORS: &str = r#"
