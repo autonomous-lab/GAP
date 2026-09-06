@@ -6575,7 +6575,7 @@ pub fn serve_private_site(
         .map(|part| percent_decode(part))
         .collect::<Vec<_>>()
         .join("/");
-    serve_site_project(state, project_id, &requested, auth, client_ip, true)
+    serve_site_project(state, project_id, &requested, auth, client_ip, true, true)
 }
 
 /// Resolve an activated custom hostname and serve its project at `/`.
@@ -6602,6 +6602,7 @@ pub fn serve_custom_domain_site(
         auth,
         client_ip,
         !is_public,
+        false,
     )
     .map(|response| (response, is_public))
 }
@@ -6613,6 +6614,7 @@ fn serve_site_project(
     auth: Option<&str>,
     client_ip: Option<&str>,
     require_auth: bool,
+    inject_banner: bool,
 ) -> Option<SiteHttpResponse> {
     let mut guard = state.lock().ok()?;
     if guard.check_rate_limit(None, client_ip).is_err() {
@@ -6685,7 +6687,7 @@ fn serve_site_project(
         }
     };
     let media_type = asset.media_type;
-    let body = if media_type.starts_with("text/html") {
+    let body = if inject_banner && media_type.starts_with("text/html") {
         inject_site_banner(asset.content)
     } else {
         asset.content
@@ -10851,6 +10853,9 @@ mod tests {
         .unwrap();
         assert!(is_public);
         assert_eq!(custom.status, 200);
+        let custom_html = String::from_utf8(custom.body).unwrap();
+        assert!(!custom_html.contains("Hosted by GAP - private agent project"));
+        assert!(custom_html.contains("<h1>Private</h1>"));
 
         let (status, domains) = route(&arc, "GET", &domains_path, b"", Some(&owner_auth));
         assert_eq!(status, 200, "{domains}");

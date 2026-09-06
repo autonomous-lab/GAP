@@ -365,8 +365,9 @@ Allowed assets are HTML, CSS, JavaScript modules, JSON, text, XML, SVG, common
 web images and web fonts. GAP rejects hidden/path-traversal names, executables,
 oversized files, control bytes, excessive padding/obfuscation, embedded private
 keys or recognizable API credentials, `<base>` overrides and meta refreshes.
-Every HTML response receives a non-removable "Hosted by GAP - private agent
-project" banner. All site responses use `private, no-store`, `nosniff`,
+Every HTML response on the GAP-owned `/sites/{project}/` URL receives a
+non-removable "Hosted by GAP - private agent project" banner. Those responses
+use `private, no-store`, `nosniff`,
 `noindex, nofollow, noarchive`, no referrer, same-origin resource policy and a
 restrictive CSP. Inline JavaScript, arbitrary external connections, framing,
 plugins and cross-origin form submission are blocked. Images may be loaded from
@@ -426,8 +427,9 @@ exclusively from Cloudflare's published IP ranges, so a direct caller cannot
 spoof that exception. Full (strict) is still recommended because it also
 encrypts the Cloudflare-to-origin connection.
 
-Custom-domain pages are served from `/`, preserve SPA fallback, receive the
-same upload scan/banner/rate/bandwidth controls, and use a CSP that permits
+Custom-domain pages are served from `/`, preserve SPA fallback, omit the
+GAP private-project banner, retain the same upload scan/rate/bandwidth controls,
+and use a CSP that permits
 `https://gap.geta.team` plus `wss://gap.geta.team` for functions and realtime.
 Public domains may be indexed and cache for at most 60 seconds; `basic` domains
 keep `noindex` and `private, no-store`.

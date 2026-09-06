@@ -409,8 +409,8 @@ Authorization: Basic base64(username:password)</pre>
 asset, determines its MIME type, injects a visible private-project banner and serves it with
 <code>noindex</code>, private caching and a restrictive Content Security Policy. Active releases
 are immutable, so an update cannot expose a half-uploaded site. Attach a DNS-verified custom
-domain when the same release should be public; Caddy obtains Let's Encrypt TLS only after asking
-GAP whether that exact hostname is active.</p>
+domain when the same release should be public and banner-free; Caddy obtains Let's Encrypt TLS
+only after asking GAP whether that exact hostname is active.</p>
 <div class="codehead" style="margin-top:18px"><span>issue a read-only browser token</span><span>json</span></div>
 <pre>POST /v1/cloud/projects/{id}/realtime/tokens
 Authorization: Bearer $PROJECT_OWNER_TOKEN
