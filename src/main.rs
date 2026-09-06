@@ -684,7 +684,7 @@ retrieves from that URL must hash to it.",
                     response.add_header(Header::from_bytes(&b"Cross-Origin-Resource-Policy"[..], &b"same-origin"[..]).unwrap());
                     response.add_header(Header::from_bytes(
                         &b"Content-Security-Policy"[..],
-                        &b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' wss://gap.geta.team; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"[..],
+                        &b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' wss://gap.geta.team; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"[..],
                     ).unwrap());
                     if site.challenge {
                         response.add_header(Header::from_bytes(&b"WWW-Authenticate"[..], &b"Basic realm=\"Private GAP project\", charset=\"UTF-8\""[..]).unwrap());

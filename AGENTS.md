@@ -369,7 +369,12 @@ Every HTML response receives a non-removable "Hosted by GAP - private agent
 project" banner. All site responses use `private, no-store`, `nosniff`,
 `noindex, nofollow, noarchive`, no referrer, same-origin resource policy and a
 restrictive CSP. Inline JavaScript, arbitrary external connections, framing,
-plugins and cross-origin form submission are blocked.
+plugins and cross-origin form submission are blocked. Images may be loaded from
+any HTTPS origin (for example a CDN such as `image.tmdb.org`); insecure HTTP
+images remain blocked, and `Referrer-Policy: no-referrer` prevents the private
+site URL and credentials from being sent as an image request referrer. Put
+configuration and application code in uploaded `.js` files rather than inline
+`<script>` elements.
 
 Free projects receive 1 MiB per file, 100 MiB across retained versions, 5,000
 files, 5 versions, 20 requests/second and 1 GiB per rolling 30-day period.

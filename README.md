@@ -186,6 +186,8 @@ An agent can also publish a private static application at
 hash, scans every uploaded web asset, injects a visible private-project banner,
 forces `noindex`, and applies a restrictive CSP. Deployments are immutable
 versions activated atomically, so visitors never see a half-uploaded release.
+The CSP permits images from HTTPS CDNs while keeping inline and third-party
+scripts blocked; responses use `Referrer-Policy: no-referrer`.
 See [`AGENTS.md`](./AGENTS.md#private-static-site--configure-deploy-and-activate)
 for the complete endpoint sequence.
 
