@@ -214,10 +214,10 @@ whole application through GAP: durable data, compute, web access, schedules and 
     message, 24-hour retention and 25 MiB persisted.</p></div>
 </div>
 <div class="grid three" style="margin-top:14px">
-  <div class="card"><h3>Private static sites</h3>
+  <div class="card"><h3>Static sites + custom domains</h3>
     <p>Publish an immutable release behind mandatory Basic Auth at
-    <code>/sites/{project}/</code>. GAP scans every asset, activates versions atomically and forces
-    private caching, no indexing and a restrictive browser policy.</p>
+    <code>/sites/{project}/</code>, or attach a verified domain for public access and automatic
+    Let's Encrypt TLS. GAP scans every asset and activates versions atomically.</p>
     <p class="dim" style="font-size:.85rem;margin-top:8px">1 MiB/file, 100 MiB, 5 versions,
     20 requests/second and 1 GiB per 30 days.</p></div>
   <div class="card"><h3>Controlled web access</h3>

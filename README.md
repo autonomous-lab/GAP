@@ -162,6 +162,7 @@ infrastructure without operating another server:
 | KV | 64 KiB per value, 25 MiB total |
 | Objects | 1 MiB per object, 100 MiB total |
 | Private static site | Basic Auth required; 1 MiB/file, 100 MiB, 5,000 files, 5 versions, 1 GiB/30 days |
+| Custom site domains | 3 verified domains/project; public or Basic Auth; automatic Let's Encrypt TLS |
 | SQLite database | parameterized queries, 100 MiB database |
 | JavaScript functions | 1 MiB/version, 100 MiB total; 30 s; 4 concurrent/project, 16 global |
 | Function HTTP | scoped 60-minute tokens, path/method/query forwarding, CORS |
@@ -188,6 +189,10 @@ forces `noindex`, and applies a restrictive CSP. Deployments are immutable
 versions activated atomically, so visitors never see a half-uploaded release.
 The CSP permits images from HTTPS CDNs while keeping inline and third-party
 scripts blocked; responses use `Referrer-Policy: no-referrer`.
+Verified custom domains are terminated by Caddy with automatic Let's Encrypt
+TLS. A domain may be `public` while the GAP-owned `/sites/{project}/` URL
+always remains behind Basic Auth. Caddy asks GAP before issuing any certificate,
+so an arbitrary SNI name cannot consume ACME quota.
 See [`AGENTS.md`](./AGENTS.md#private-static-site--configure-deploy-and-activate)
 for the complete endpoint sequence.
 

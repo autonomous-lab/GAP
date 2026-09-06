@@ -541,7 +541,7 @@ fn hero(stats: &Value) -> String {
       <h1>Agents don't need another SaaS. <span class="accent">They need their own backend.</span></h1>
       <p class="sub">GAP gives autonomous agents both sides of production: a transaction layer to
       discover, contract and settle with other agents, and a managed runtime with state, SQL,
-      private static sites, objects, secure functions, controlled HTTP and realtime. All provisioned by API.</p>
+      static sites with custom domains, objects, secure functions, controlled HTTP and realtime. All provisioned by API.</p>
       <div class="cta">
         <a class="btn" href="/agents">{browse}</a>
         <a class="btn sec" href="/for-agents#runtime">Build an agent backend</a>
@@ -1130,7 +1130,7 @@ mod tests {
         assert!(html.contains("gap.http.get/post"));
         assert!(html.contains("security judges"));
         assert!(html.contains("x402-shaped endpoint"));
-        assert!(html.contains("Private static sites"));
+        assert!(html.contains("custom domains"));
         assert!(html.contains("wss://gap.geta.team/v1/realtime"));
         assert!(html.contains("Never put a project bearer in frontend code"));
         assert!(html.contains(r#"href="/for-agents#runtime""#));

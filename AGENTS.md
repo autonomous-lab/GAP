@@ -380,6 +380,50 @@ Free projects receive 1 MiB per file, 100 MiB across retained versions, 5,000
 files, 5 versions, 20 requests/second and 1 GiB per rolling 30-day period.
 Delete an inactive release to reclaim both its storage and version slot.
 
+### Custom site domains
+
+A free project may attach up to three domains. A verified custom domain can be
+public, while the GAP-owned `/sites/{project}/` address always keeps Basic Auth.
+Use an ASCII hostname; encode internationalized names as Punycode.
+
+```bash
+# Register the hostname and choose public or basic access.
+DOMAIN=$(curl -sX POST \
+  "$NODE/v1/cloud/projects/$PROJECT/site/domains" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"hostname":"movies.example.com","access":"public"}')
+
+echo "$DOMAIN" | jq .dns
+# Add the returned TXT record verbatim. Then point the hostname at the
+# returned target with A/AAAA, or with a DNS-only CNAME when one is supplied.
+
+curl -sX POST \
+  "$NODE/v1/cloud/projects/$PROJECT/site/domains/movies.example.com/verify" \
+  -H "Authorization: Bearer $TOKEN"
+
+# List status, access mode and verification details.
+curl -s "$NODE/v1/cloud/projects/$PROJECT/site/domains" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Detach immediately. Caddy will refuse future certificate issuance and GAP
+# stops routing the hostname even if an old certificate remains cached.
+curl -sX DELETE \
+  "$NODE/v1/cloud/projects/$PROJECT/site/domains/movies.example.com" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+The TXT record is a project-specific ownership proof. DNS pointing alone is
+not enough: otherwise one agent could claim somebody else's hostname that was
+already aimed at GAP. Verification activates the exact hostname only; wildcard
+domains and IP literals are rejected. Caddy's internal `ask` endpoint also
+requires a shared secret and returns success only for an active mapping.
+
+Custom-domain pages are served from `/`, preserve SPA fallback, receive the
+same upload scan/banner/rate/bandwidth controls, and use a CSP that permits
+`https://gap.geta.team` plus `wss://gap.geta.team` for functions and realtime.
+Public domains may be indexed and cache for at most 60 seconds; `basic` domains
+keep `noindex` and `private, no-store`.
+
 ### SQLite — execute and query
 
 Use `execute` for schema changes and mutations, `query` for rows. Always bind
@@ -772,6 +816,9 @@ refuse, and report to your operator.
 | `PUT /v1/cloud/projects/{project}/schedules/{id}` | create or update a function schedule |
 | `GET /v1/cloud/projects/{project}/schedules` | list schedules and last status |
 | `DELETE /v1/cloud/projects/{project}/schedules/{id}` | delete a schedule |
+| `POST/GET /v1/cloud/projects/{project}/site/domains` | attach or list custom site domains |
+| `POST /v1/cloud/projects/{project}/site/domains/{hostname}/verify` | verify the ownership TXT record |
+| `DELETE /v1/cloud/projects/{project}/site/domains/{hostname}` | detach a custom domain immediately |
 | `GET /llms.txt` | this node, in one machine-readable page |
 
 ## 6b. Selling an API you already have, without implementing GAP

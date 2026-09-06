@@ -1,0 +1,31 @@
+services:
+  caddy:
+    image: caddy:2.10.2-alpine
+    container_name: gap-caddy
+    network_mode: host
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data:/data
+      - ./config:/config
+      # Elestio renews this wildcard certificate with acme.sh. Caddy uses it
+      # only for GAP's historical origin names; customer domains use on-demand
+      # Let's Encrypt certificates in ./data.
+      - /root/.acme.sh/vm.elestio.app:/certs:ro
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.50
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+      start_period: 5s

@@ -486,12 +486,19 @@ pub struct NodeState {
     /// GAP Runtime's global project projection. The durable copy uses
     /// the existing ClickHouse-backed generic state table.
     cloud_projects: HashMap<String, crate::cloud::ProjectRecord>,
+    /// Verified custom hostname -> project mapping. Kept globally so a TLS
+    /// handshake and a Host-routed request are O(1), not a scan of tenant DBs.
+    custom_domains: HashMap<String, crate::cloud::SiteDomain>,
     /// Tenant SQLite files live below this directory, one directory per project.
     cloud_root: std::path::PathBuf,
     /// Internal-only function runner. Empty configuration fails closed.
     function_sandbox_url: Option<String>,
     function_sandbox_token: Option<String>,
     realtime_secret: Option<String>,
+    /// Shared only with Caddy's internal `ask` request. Empty means custom
+    /// certificate issuance fails closed.
+    caddy_ask_token: Option<String>,
+    custom_domain_target: Option<String>,
 }
 
 impl NodeState {
@@ -710,6 +717,8 @@ impl NodeState {
             .collect();
         let cloud_projects: HashMap<String, crate::cloud::ProjectRecord> =
             load(&*storage, "cloud_projects");
+        let custom_domains: HashMap<String, crate::cloud::SiteDomain> =
+            load(&*storage, "cloud_domains");
 
         // job_ref -> contract is derivable from the job history, so it
         // is rebuilt rather than stored twice and allowed to disagree.
@@ -857,6 +866,7 @@ impl NodeState {
             credited_deposits,
             deposit_chain: None,
             cloud_projects,
+            custom_domains,
             cloud_root: std::env::var("GAP_CLOUD_ROOT")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| std::path::PathBuf::from("/data/runtime-projects")),
@@ -867,6 +877,12 @@ impl NodeState {
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             realtime_secret: std::env::var("GAP_REALTIME_SECRET")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            caddy_ask_token: std::env::var("GAP_CADDY_ASK_TOKEN")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            custom_domain_target: std::env::var("GAP_CUSTOM_DOMAIN_TARGET")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
         };
@@ -2410,6 +2426,175 @@ the content inline"
             .collect();
         projects.sort_by_key(|p| p.created_at);
         Ok(projects)
+    }
+
+    pub fn cloud_create_site_domain(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        hostname: &str,
+        access: &str,
+    ) -> Result<crate::cloud::SiteDomain> {
+        self.cloud_owned_project(token, project_id)?;
+        let hostname = normalize_custom_hostname(hostname)?;
+        if !matches!(access, "public" | "basic") {
+            return Err(Error::Other("domain access must be public or basic".into()));
+        }
+        if let Some(existing) = self.custom_domains.get(&hostname) {
+            if existing.project_id == project_id {
+                return Ok(existing.clone());
+            }
+            return Err(Error::Other(
+                "domain already belongs to another project".into(),
+            ));
+        }
+        if self
+            .custom_domains
+            .values()
+            .filter(|domain| domain.project_id == project_id)
+            .count()
+            >= crate::cloud::MAX_SITE_CUSTOM_DOMAINS
+        {
+            return Err(Error::Other("custom domain limit exceeded".into()));
+        }
+        use rand::RngCore;
+        let mut random = [0u8; 24];
+        rand::rngs::OsRng.fill_bytes(&mut random);
+        let now = now_unix();
+        let domain = crate::cloud::SiteDomain {
+            verification_name: format!("_gap-verify.{hostname}"),
+            verification_value: format!("gap-verification={}", hex::encode(random)),
+            hostname: hostname.clone(),
+            project_id: project_id.into(),
+            access: access.into(),
+            status: "pending_dns".into(),
+            created_at: now,
+            updated_at: now,
+            verified_at: None,
+        };
+        self.custom_domains.insert(hostname.clone(), domain.clone());
+        self.save_state("cloud_domains", &hostname, &domain);
+        self.record(
+            "cloud.site.domain.created",
+            json!({ "project_id": project_id, "hostname": hostname, "access": access }),
+        );
+        Ok(domain)
+    }
+
+    pub fn cloud_site_domains(
+        &self,
+        token: &str,
+        project_id: &str,
+    ) -> Result<Vec<crate::cloud::SiteDomain>> {
+        self.cloud_owned_project(token, project_id)?;
+        let mut domains = self
+            .custom_domains
+            .values()
+            .filter(|domain| domain.project_id == project_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        domains.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+        Ok(domains)
+    }
+
+    fn cloud_site_domain_for_verification(
+        &self,
+        token: &str,
+        project_id: &str,
+        hostname: &str,
+    ) -> Result<crate::cloud::SiteDomain> {
+        self.cloud_owned_project(token, project_id)?;
+        let hostname = normalize_custom_hostname(hostname)?;
+        self.custom_domains
+            .get(&hostname)
+            .filter(|domain| domain.project_id == project_id)
+            .cloned()
+            .ok_or_else(|| Error::Other("unknown custom domain".into()))
+    }
+
+    fn cloud_activate_site_domain(
+        &mut self,
+        project_id: &str,
+        hostname: &str,
+        expected_value: &str,
+    ) -> Result<crate::cloud::SiteDomain> {
+        let hostname = normalize_custom_hostname(hostname)?;
+        let now = now_unix();
+        let output = {
+            let domain = self
+                .custom_domains
+                .get_mut(&hostname)
+                .filter(|domain| domain.project_id == project_id)
+                .ok_or_else(|| Error::Other("unknown custom domain".into()))?;
+            if domain.verification_value != expected_value {
+                return Err(Error::Other("domain verification changed; retry".into()));
+            }
+            domain.status = "active".into();
+            domain.updated_at = now;
+            domain.verified_at = Some(now);
+            domain.clone()
+        };
+        self.save_state("cloud_domains", &hostname, &output);
+        self.record(
+            "cloud.site.domain.verified",
+            json!({ "project_id": project_id, "hostname": hostname }),
+        );
+        Ok(output)
+    }
+
+    pub fn cloud_delete_site_domain(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        hostname: &str,
+    ) -> Result<bool> {
+        self.cloud_owned_project(token, project_id)?;
+        let hostname = normalize_custom_hostname(hostname)?;
+        if !self
+            .custom_domains
+            .get(&hostname)
+            .is_some_and(|domain| domain.project_id == project_id)
+        {
+            return Ok(false);
+        }
+        self.custom_domains.remove(&hostname);
+        self.forget_state("cloud_domains", &hostname);
+        self.record(
+            "cloud.site.domain.deleted",
+            json!({ "project_id": project_id, "hostname": hostname }),
+        );
+        Ok(true)
+    }
+
+    fn custom_domain(&self, hostname: &str) -> Option<crate::cloud::SiteDomain> {
+        normalize_custom_hostname(hostname)
+            .ok()
+            .and_then(|hostname| self.custom_domains.get(&hostname).cloned())
+            .filter(|domain| domain.status == "active")
+    }
+
+    fn caddy_may_issue(&self, supplied_token: Option<&str>, hostname: &str) -> bool {
+        let authorized = supplied_token.is_some()
+            && self.caddy_ask_token.as_deref() == supplied_token
+            && self.caddy_ask_token.is_some();
+        if !authorized {
+            return false;
+        }
+        let Some(domain) = self.custom_domain(hostname) else {
+            return false;
+        };
+        if !self
+            .cloud_projects
+            .get(&domain.project_id)
+            .is_some_and(|project| project.status == "active")
+        {
+            return false;
+        }
+        crate::cloud::ProjectStore::open(&self.cloud_root, &domain.project_id)
+            .and_then(|store| store.site_config())
+            .ok()
+            .flatten()
+            .is_some_and(|site| site.enabled && site.active_version.is_some())
     }
 
     fn cloud_owned_project(
@@ -6390,6 +6575,45 @@ pub fn serve_private_site(
         .map(|part| percent_decode(part))
         .collect::<Vec<_>>()
         .join("/");
+    serve_site_project(state, project_id, &requested, auth, client_ip, true)
+}
+
+/// Resolve an activated custom hostname and serve its project at `/`.
+/// The returned boolean is true only for a verified domain explicitly
+/// configured as public; callers use it to choose cache/indexing headers.
+pub fn serve_custom_domain_site(
+    state: &Arc<Mutex<NodeState>>,
+    hostname: &str,
+    path: &str,
+    auth: Option<&str>,
+    client_ip: Option<&str>,
+) -> Option<(SiteHttpResponse, bool)> {
+    let domain = state.lock().ok()?.custom_domain(hostname)?;
+    let requested = path
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .trim_start_matches('/');
+    let is_public = domain.access == "public";
+    serve_site_project(
+        state,
+        &domain.project_id,
+        requested,
+        auth,
+        client_ip,
+        !is_public,
+    )
+    .map(|response| (response, is_public))
+}
+
+fn serve_site_project(
+    state: &Arc<Mutex<NodeState>>,
+    project_id: &str,
+    requested: &str,
+    auth: Option<&str>,
+    client_ip: Option<&str>,
+    require_auth: bool,
+) -> Option<SiteHttpResponse> {
     let mut guard = state.lock().ok()?;
     if guard.check_rate_limit(None, client_ip).is_err() {
         return Some(site_response(
@@ -6424,10 +6648,15 @@ pub fn serve_private_site(
     };
     drop(guard);
 
-    let credentials = auth.and_then(parse_basic_credentials);
-    let authenticated = credentials.as_ref().is_some_and(|(username, password)| {
-        store.authenticate_site(username, password).unwrap_or(false)
-    });
+    let authenticated = if require_auth {
+        auth.and_then(parse_basic_credentials)
+            .as_ref()
+            .is_some_and(|(username, password)| {
+                store.authenticate_site(username, password).unwrap_or(false)
+            })
+    } else {
+        true
+    };
     if !authenticated {
         return Some(site_response(
             401,
@@ -6475,6 +6704,79 @@ pub fn serve_private_site(
         ));
     }
     Some(site_response(200, &media_type, body, false))
+}
+
+fn normalize_custom_hostname(value: &str) -> Result<String> {
+    let hostname = value.trim().trim_end_matches('.').to_ascii_lowercase();
+    if hostname.is_empty()
+        || hostname.len() > 253
+        || hostname == "localhost"
+        || hostname == "gap.geta.team"
+        || hostname.ends_with(".gap.geta.team")
+        || hostname.contains(':')
+        || hostname.parse::<std::net::IpAddr>().is_ok()
+    {
+        return Err(Error::Other("invalid or reserved custom hostname".into()));
+    }
+    let labels = hostname.split('.').collect::<Vec<_>>();
+    if labels.len() < 2
+        || labels.iter().any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+    {
+        return Err(Error::Other(
+            "hostname must be an ASCII domain name (use punycode for IDNs)".into(),
+        ));
+    }
+    Ok(hostname)
+}
+
+fn verify_domain_txt(domain: &crate::cloud::SiteDomain) -> Result<()> {
+    let resolver = std::env::var("GAP_DNS_JSON_RESOLVER")
+        .unwrap_or_else(|_| "https://dns.google/resolve".into());
+    let url = format!(
+        "{}?name={}&type=TXT",
+        resolver.trim_end_matches('/'),
+        domain.verification_name,
+    );
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(8)))
+        .max_redirects(0)
+        .build()
+        .new_agent();
+    let mut response = agent
+        .get(&url)
+        .header("Accept", "application/dns-json")
+        .call()
+        .map_err(|error| Error::Other(format!("DNS verification failed: {error}")))?;
+    let payload: Value = serde_json::from_slice(
+        &response
+            .body_mut()
+            .read_to_vec()
+            .map_err(|error| Error::Other(format!("read DNS response: {error}")))?,
+    )
+    .map_err(|error| Error::Other(format!("invalid DNS response: {error}")))?;
+    let matched = payload
+        .get("Answer")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|answer| answer.get("data").and_then(Value::as_str))
+        .map(|txt| txt.trim_matches('"').replace("\" \"", ""))
+        .any(|txt| txt == domain.verification_value);
+    if !matched {
+        return Err(Error::Other(format!(
+            "TXT {} must equal {}",
+            domain.verification_name, domain.verification_value
+        )));
+    }
+    Ok(())
 }
 
 fn site_response(
@@ -6927,6 +7229,22 @@ pub fn route_with_ip(
 
     let token = auth.and_then(|h| h.strip_prefix("Bearer "));
 
+    // Caddy calls this over the bridge address before issuing an on-demand
+    // certificate. A shared secret is still required so accidentally exposing
+    // the route through another proxy does not turn it into a hostname oracle.
+    if method == "GET" && path == "/internal/tls/ask" {
+        let params = parse_url_params(raw_path);
+        let allowed = guard.caddy_may_issue(
+            params.get("token").map(String::as_str),
+            params.get("domain").map(String::as_str).unwrap_or(""),
+        );
+        return if allowed {
+            (200, json!({ "allowed": true }))
+        } else {
+            (403, json!({ "allowed": false }))
+        };
+    }
+
     // This route is reachable only over the compose-internal network and is
     // authenticated with the sandbox shared secret. It deliberately bypasses
     // agent auth: the runner never receives an owner's bearer token.
@@ -7151,6 +7469,41 @@ pub fn route_with_ip(
         };
     }
 
+    // DNS I/O must not hold the global protocol lock. Capture the immutable
+    // challenge, resolve it, then activate only if the record is unchanged.
+    if method == "POST" {
+        if let Some((project_id, hostname)) = cloud_site_domain_verify_route(path) {
+            let pending = match token {
+                Some(token) => {
+                    guard.cloud_site_domain_for_verification(token, project_id, &hostname)
+                }
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            };
+            let pending = match pending {
+                Ok(domain) => domain,
+                Err(error) => return error_response(&error),
+            };
+            let expected = pending.verification_value.clone();
+            drop(guard);
+            if let Err(error) = verify_domain_txt(&pending) {
+                return error_response(&error);
+            }
+            let mut guard = match state.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return (
+                        500,
+                        json!({ "error": { "code": "internal", "message": "state lock poisoned" } }),
+                    )
+                }
+            };
+            return match guard.cloud_activate_site_domain(project_id, &hostname, &expected) {
+                Ok(domain) => (200, json!({ "domain": domain })),
+                Err(error) => error_response(&error),
+            };
+        }
+    }
+
     let response = match (method, path) {
         // ---- health & card ----
         ("GET", "/health") => Ok(json!({ "status": "ok", "node": guard.node_did() })),
@@ -7219,6 +7572,49 @@ pub fn route_with_ip(
                         }
                     }))
                 })(),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        (m, p) if matches!(m, "GET" | "POST") && cloud_site_domains_route(p).is_some() => {
+            let project_id = cloud_site_domains_route(p).expect("guarded above");
+            match token {
+                Some(token) if m == "GET" => {
+                    guard.cloud_site_domains(token, project_id).map(|domains| {
+                        json!({
+                            "domains": domains,
+                            "limit": crate::cloud::MAX_SITE_CUSTOM_DOMAINS,
+                            "target": guard.custom_domain_target.clone()
+                        })
+                    })
+                }
+                Some(token) => {
+                    let hostname = body.get("hostname").and_then(Value::as_str).unwrap_or("");
+                    let access = body
+                        .get("access")
+                        .and_then(Value::as_str)
+                        .unwrap_or("public");
+                    guard
+                        .cloud_create_site_domain(token, project_id, hostname, access)
+                        .map(|domain| {
+                            json!({
+                                "dns": {
+                                    "txt_name": domain.verification_name.clone(),
+                                    "txt_value": domain.verification_value.clone(),
+                                    "target": guard.custom_domain_target.clone()
+                                },
+                                "domain": domain
+                            })
+                        })
+                }
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("DELETE", p) if cloud_site_domain_route(p).is_some() => {
+            let (project_id, hostname) = cloud_site_domain_route(p).expect("guarded above");
+            match token {
+                Some(token) => guard
+                    .cloud_delete_site_domain(token, project_id, &hostname)
+                    .map(|deleted| json!({ "deleted": deleted })),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
             }
         }
@@ -8254,6 +8650,52 @@ fn cloud_site_route(path: &str) -> Option<&str> {
         && parts[4] == "site"
     {
         Some(parts[3])
+    } else {
+        None
+    }
+}
+
+fn cloud_site_domains_route(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() == 6
+        && parts[0] == "v1"
+        && parts[1] == "cloud"
+        && parts[2] == "projects"
+        && parts[4] == "site"
+        && parts[5] == "domains"
+    {
+        Some(parts[3])
+    } else {
+        None
+    }
+}
+
+fn cloud_site_domain_route(path: &str) -> Option<(&str, String)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() == 7
+        && parts[0] == "v1"
+        && parts[1] == "cloud"
+        && parts[2] == "projects"
+        && parts[4] == "site"
+        && parts[5] == "domains"
+    {
+        Some((parts[3], percent_decode(parts[6])))
+    } else {
+        None
+    }
+}
+
+fn cloud_site_domain_verify_route(path: &str) -> Option<(&str, String)> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() == 8
+        && parts[0] == "v1"
+        && parts[1] == "cloud"
+        && parts[2] == "projects"
+        && parts[4] == "site"
+        && parts[5] == "domains"
+        && parts[7] == "verify"
+    {
+        Some((parts[3], percent_decode(parts[6])))
     } else {
         None
     }
@@ -10374,6 +10816,62 @@ mod tests {
         let html = String::from_utf8(served.body).unwrap();
         assert!(html.contains("Hosted by GAP - private agent project"));
         assert!(html.contains("<h1>Private</h1>"));
+
+        let domains_path = format!("{site_path}/domains");
+        let (status, pending) = route(
+            &arc,
+            "POST",
+            &domains_path,
+            br#"{"hostname":"movies.example.com","access":"public"}"#,
+            Some(&owner_auth),
+        );
+        assert_eq!(status, 200, "{pending}");
+        assert_eq!(pending["domain"]["status"], "pending_dns");
+        let expected = pending["domain"]["verification_value"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        {
+            let mut state = arc.lock().unwrap();
+            state.caddy_ask_token = Some("caddy-secret".into());
+            assert!(!state.caddy_may_issue(Some("caddy-secret"), "movies.example.com"));
+            state
+                .cloud_activate_site_domain(project_id, "movies.example.com", &expected)
+                .unwrap();
+            assert!(state.caddy_may_issue(Some("caddy-secret"), "movies.example.com"));
+            assert!(!state.caddy_may_issue(Some("wrong"), "movies.example.com"));
+        }
+        let (custom, is_public) = serve_custom_domain_site(
+            &arc,
+            "MOVIES.EXAMPLE.COM.",
+            "/nested/spa/path",
+            None,
+            Some("192.0.2.11"),
+        )
+        .unwrap();
+        assert!(is_public);
+        assert_eq!(custom.status, 200);
+
+        let (status, domains) = route(&arc, "GET", &domains_path, b"", Some(&owner_auth));
+        assert_eq!(status, 200, "{domains}");
+        assert_eq!(domains["domains"].as_array().unwrap().len(), 1);
+        let (status, deleted) = route(
+            &arc,
+            "DELETE",
+            &format!("{domains_path}/movies.example.com"),
+            b"",
+            Some(&owner_auth),
+        );
+        assert_eq!(status, 200, "{deleted}");
+        assert_eq!(deleted["deleted"], true);
+        assert!(serve_custom_domain_site(
+            &arc,
+            "movies.example.com",
+            "/",
+            None,
+            Some("192.0.2.12")
+        )
+        .is_none());
     }
 
     fn register(arc: &Arc<Mutex<NodeState>>) -> String {

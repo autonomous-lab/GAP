@@ -586,6 +586,15 @@ retrieves from that URL must hash to it.",
                 .iter()
                 .find(|h| h.field.equiv("Authorization"))
                 .map(|h| h.value.as_str().to_string());
+            let host = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Host"))
+                .map(|h| h.value.as_str().trim().to_string())
+                .unwrap_or_default();
+            let custom_domain_request = request.headers().iter().any(|h| {
+                h.field.equiv("X-GAP-Custom-Domain") && h.value.as_str().trim() == "1"
+            });
             // The node is reached through the compose edge, so the TCP peer is
             // otherwise the same container for every visitor. Prefer the
             // address forwarded by Cloudflare/nginx for per-client limits.
@@ -642,6 +651,46 @@ retrieves from that URL must hash to it.",
                 continue;
             }
 
+            // Caddy marks requests accepted by its on-demand custom-domain
+            // listener. Host routing happens before the GAP UI and API so `/`
+            // belongs to the tenant. A removed/unknown mapping fails closed
+            // instead of accidentally exposing the GAP homepage.
+            if method == "GET" && custom_domain_request {
+                if let Some((site, is_public)) = gap::server::serve_custom_domain_site(
+                    &state,
+                    &host,
+                    &path,
+                    auth.as_deref(),
+                    client_ip.as_deref(),
+                ) {
+                    let body: &[u8] = if head_only { &[] } else { &site.body };
+                    let mut response = Response::from_data(body).with_status_code(site.status);
+                    response.add_header(Header::from_bytes(&b"Content-Type"[..], site.media_type.as_bytes()).unwrap());
+                    let cache = if is_public { &b"public, max-age=60"[..] } else { &b"private, no-store"[..] };
+                    response.add_header(Header::from_bytes(&b"Cache-Control"[..], cache).unwrap());
+                    if !is_public {
+                        response.add_header(Header::from_bytes(&b"X-Robots-Tag"[..], &b"noindex, nofollow, noarchive"[..]).unwrap());
+                    }
+                    response.add_header(Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..]).unwrap());
+                    response.add_header(Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..]).unwrap());
+                    response.add_header(Header::from_bytes(&b"Cross-Origin-Resource-Policy"[..], &b"same-origin"[..]).unwrap());
+                    response.add_header(Header::from_bytes(
+                        &b"Content-Security-Policy"[..],
+                        &b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://gap.geta.team wss://gap.geta.team; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"[..],
+                    ).unwrap());
+                    if site.challenge {
+                        response.add_header(Header::from_bytes(&b"WWW-Authenticate"[..], &b"Basic realm=\"Private GAP project\", charset=\"UTF-8\""[..]).unwrap());
+                    }
+                    let _ = request.respond(response);
+                } else {
+                    let response = Response::from_string("site not found")
+                        .with_status_code(404)
+                        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..]).unwrap());
+                    let _ = request.respond(response);
+                }
+                continue;
+            }
+
             // Static binary assets first: the Open Graph card is fetched
             // by crawlers that never send an Accept header we could
             // route on.
@@ -684,7 +733,7 @@ retrieves from that URL must hash to it.",
                     response.add_header(Header::from_bytes(&b"Cross-Origin-Resource-Policy"[..], &b"same-origin"[..]).unwrap());
                     response.add_header(Header::from_bytes(
                         &b"Content-Security-Policy"[..],
-                        &b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' wss://gap.geta.team; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"[..],
+                        &b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://gap.geta.team wss://gap.geta.team; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"[..],
                     ).unwrap());
                     if site.challenge {
                         response.add_header(Header::from_bytes(&b"WWW-Authenticate"[..], &b"Basic realm=\"Private GAP project\", charset=\"UTF-8\""[..]).unwrap());

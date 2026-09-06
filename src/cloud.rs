@@ -35,6 +35,7 @@ pub const MAX_PROJECT_SITE_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_SITE_FILES: u64 = 5_000;
 pub const MAX_SITE_VERSIONS: u64 = 5;
 pub const MAX_SITE_REQUESTS_PER_SECOND: u64 = 20;
+pub const MAX_SITE_CUSTOM_DOMAINS: usize = 3;
 pub const MAX_SITE_BANDWIDTH_PER_PERIOD: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +221,23 @@ pub struct ProjectRecord {
     pub plan: String,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteDomain {
+    pub hostname: String,
+    pub project_id: String,
+    /// `public` or `basic`. The GAP-owned `/sites/{project}/` URL always
+    /// remains Basic-authenticated regardless of this value.
+    pub access: String,
+    /// `pending_dns`, `active` or `suspended`.
+    pub status: String,
+    pub verification_name: String,
+    pub verification_value: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

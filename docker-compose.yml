@@ -59,6 +59,8 @@ services:
       GAP_FUNCTION_SANDBOX_URL: "http://gap-function-sandbox:8090"
       GAP_FUNCTION_SANDBOX_TOKEN: "${GAP_FUNCTION_SANDBOX_TOKEN:-}"
       GAP_REALTIME_SECRET: "${GAP_REALTIME_SECRET:-}"
+      GAP_CADDY_ASK_TOKEN: "${GAP_CADDY_ASK_TOKEN:-}"
+      GAP_CUSTOM_DOMAIN_TARGET: "${GAP_CUSTOM_DOMAIN_TARGET:-}"
     depends_on:
       clickhouse:
         condition: service_healthy
