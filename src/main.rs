@@ -580,7 +580,7 @@ retrieves from that URL must hash to it.",
             } else {
                 request.method().as_str().to_string()
             };
-            let path = request.url().to_string();
+            let original_path = request.url().to_string();
             let auth = request
                 .headers()
                 .iter()
@@ -595,6 +595,23 @@ retrieves from that URL must hash to it.",
             let custom_domain_request = request.headers().iter().any(|h| {
                 h.field.equiv("X-GAP-Custom-Domain") && h.value.as_str().trim() == "1"
             });
+            let custom_gap_request = original_path
+                .split('?')
+                .next()
+                .unwrap_or(&original_path)
+                .starts_with("/_gap/");
+            let custom_project = (custom_domain_request && custom_gap_request)
+                .then(|| {
+                    state
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.custom_domain_project(&host))
+                })
+                .flatten();
+            let path = custom_project
+                .as_deref()
+                .and_then(|project_id| gap::server::custom_function_alias(project_id, &original_path))
+                .unwrap_or_else(|| original_path.clone());
             // The node is reached through the compose edge, so the TCP peer is
             // otherwise the same container for every visitor. Prefer the
             // address forwarded by Cloudflare/nginx for per-client limits.
@@ -655,7 +672,7 @@ retrieves from that URL must hash to it.",
             // listener. Host routing happens before the GAP UI and API so `/`
             // belongs to the tenant. A removed/unknown mapping fails closed
             // instead of accidentally exposing the GAP homepage.
-            if method == "GET" && custom_domain_request {
+            if method == "GET" && custom_domain_request && !custom_gap_request {
                 if let Some((site, is_public)) = gap::server::serve_custom_domain_site(
                     &state,
                     &host,

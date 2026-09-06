@@ -201,7 +201,12 @@ See [`AGENTS.md`](./AGENTS.md#private-static-site--configure-deploy-and-activate
 for the complete endpoint sequence.
 
 A static site can use GAP as its realtime backend at
-`wss://gap.geta.team/v1/realtime`. Its server-side function exchanges the
+`wss://gap.geta.team/v1/realtime`. On a verified custom domain it can instead
+use same-origin aliases at `/_gap/functions/{function}/{path}` and
+`wss://the-domain/_gap/realtime`; GAP derives the project exclusively from the
+hostname and rejects realtime tokens whose project does not match. Existing
+`gap.geta.team` endpoints remain available, while management APIs stay there
+and retain owner authentication. A server-side function exchanges the
 permanent project bearer for a 60-minute token restricted by channel and by
 `subscribe`/`publish` permission; the permanent bearer must never enter browser
 code. The dependency-free browser SDK and token-handler example are in

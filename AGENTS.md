@@ -434,6 +434,32 @@ and use a CSP that permits
 Public domains may be indexed and cache for at most 60 seconds; `basic` domains
 keep `noindex` and `private, no-store`.
 
+The verified hostname also exposes project-bound, same-origin aliases:
+
+```text
+ANY https://movies.example.com/_gap/functions/{function}/{path...}
+WS  wss://movies.example.com/_gap/realtime
+```
+
+The function alias is equivalent to
+`https://gap.geta.team/functions/{project}/{function}/{path...}`, including its
+`public`, scoped-token or owner authentication policy, method, query and body.
+The project id is taken exclusively from the verified hostname and must not be
+included in the alias URL. Management endpoints remain on `gap.geta.team` and
+still require the owner bearer.
+
+```js
+const categories = await fetch('/_gap/functions/movix/categories').then(r => r.json());
+const wsScheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const socket = new WebSocket(`${wsScheme}//${location.host}/_gap/realtime`);
+```
+
+The WebSocket wire protocol and token format are unchanged. During
+authentication GAP verifies that the token's signed `project_id` matches the
+project attached to the hostname. Removing the domain, disabling its site or
+suspending its project disables both aliases immediately. `/_gap/` is reserved
+by the platform and cannot be shadowed by the site's SPA fallback.
+
 ### SQLite — execute and query
 
 Use `execute` for schema changes and mutations, `query` for rows. Always bind
@@ -642,7 +668,8 @@ project scope, signs internally and audits the issuance.
 
 ### WebSocket — every client action
 
-Open `wss://gap.geta.team/v1/realtime`. The wire protocol is JSON. Authenticate
+Open `wss://gap.geta.team/v1/realtime`, or `wss://your-domain/_gap/realtime` on
+a verified custom domain. The wire protocol is JSON. Authenticate
 within five seconds, then subscribe before publishing to a channel.
 
 ```json

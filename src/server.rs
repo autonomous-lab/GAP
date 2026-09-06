@@ -2573,6 +2573,31 @@ the content inline"
             .filter(|domain| domain.status == "active")
     }
 
+    /// Project selected by a verified custom hostname. This is the only
+    /// authority used by same-origin `/_gap/*` aliases: callers never get to
+    /// supply a project id separately from the Host header.
+    pub fn custom_domain_project(&self, hostname: &str) -> Option<String> {
+        let domain = self.custom_domain(hostname)?;
+        self.cloud_projects
+            .get(&domain.project_id)
+            .filter(|project| project.status == "active")?;
+        let store = crate::cloud::ProjectStore::open(&self.cloud_root, &domain.project_id).ok()?;
+        let site = store.site_config().ok().flatten()?;
+        (site.enabled && site.active_version.is_some()).then_some(domain.project_id)
+    }
+
+    fn realtime_custom_domain_allows(
+        &self,
+        supplied_token: Option<&str>,
+        hostname: &str,
+        project_id: &str,
+    ) -> bool {
+        supplied_token.is_some()
+            && self.realtime_secret.as_deref() == supplied_token
+            && self.realtime_secret.is_some()
+            && self.custom_domain_project(hostname).as_deref() == Some(project_id)
+    }
+
     fn caddy_may_issue(&self, supplied_token: Option<&str>, hostname: &str) -> bool {
         let authorized = supplied_token.is_some()
             && self.caddy_ask_token.as_deref() == supplied_token
@@ -6555,6 +6580,18 @@ pub struct SiteHttpResponse {
     pub challenge: bool,
 }
 
+/// Expand a custom-domain same-origin function alias into the canonical route.
+/// The caller supplies the project selected from the verified Host mapping;
+/// the browser can never choose a different project in the URL.
+pub fn custom_function_alias(project_id: &str, raw_path: &str) -> Option<String> {
+    let rest = raw_path.strip_prefix("/_gap/functions/")?;
+    let function = rest.split(['/', '?']).next().unwrap_or("");
+    if function.is_empty() {
+        return None;
+    }
+    Some(format!("/functions/{project_id}/{rest}"))
+}
+
 /// Serve an activated private static site. Authentication is deliberately
 /// checked before the requested asset is read, so even file existence cannot
 /// be probed without the site's Basic credential.
@@ -7239,6 +7276,23 @@ pub fn route_with_ip(
         let allowed = guard.caddy_may_issue(
             params.get("token").map(String::as_str),
             params.get("domain").map(String::as_str).unwrap_or(""),
+        );
+        return if allowed {
+            (200, json!({ "allowed": true }))
+        } else {
+            (403, json!({ "allowed": false }))
+        };
+    }
+
+    // The realtime sidecar checks this before accepting a token through a
+    // custom-domain WebSocket alias. The shared realtime secret authenticates
+    // the sidecar, while Host -> project remains GAP's source of truth.
+    if method == "GET" && path == "/internal/realtime/custom-domain" {
+        let params = parse_url_params(raw_path);
+        let allowed = guard.realtime_custom_domain_allows(
+            token,
+            params.get("hostname").map(String::as_str).unwrap_or(""),
+            params.get("project_id").map(String::as_str).unwrap_or(""),
         );
         return if allowed {
             (200, json!({ "allowed": true }))
@@ -10836,13 +10890,48 @@ mod tests {
         {
             let mut state = arc.lock().unwrap();
             state.caddy_ask_token = Some("caddy-secret".into());
+            state.realtime_secret = Some("realtime-secret".into());
             assert!(!state.caddy_may_issue(Some("caddy-secret"), "movies.example.com"));
             state
                 .cloud_activate_site_domain(project_id, "movies.example.com", &expected)
                 .unwrap();
             assert!(state.caddy_may_issue(Some("caddy-secret"), "movies.example.com"));
             assert!(!state.caddy_may_issue(Some("wrong"), "movies.example.com"));
+            assert_eq!(
+                state.custom_domain_project("movies.example.com").as_deref(),
+                Some(project_id)
+            );
         }
+        assert_eq!(
+            custom_function_alias(project_id, "/_gap/functions/search?q=matrix").as_deref(),
+            Some(format!("/functions/{project_id}/search?q=matrix").as_str())
+        );
+        assert!(custom_function_alias(project_id, "/_gap/functions/").is_none());
+        let realtime_check = format!(
+            "/internal/realtime/custom-domain?hostname=movies.example.com&project_id={project_id}"
+        );
+        assert_eq!(
+            route(
+                &arc,
+                "GET",
+                &realtime_check,
+                b"",
+                Some("Bearer realtime-secret")
+            )
+            .0,
+            200
+        );
+        assert_eq!(
+            route(
+                &arc,
+                "GET",
+                "/internal/realtime/custom-domain?hostname=movies.example.com&project_id=prj_wrong",
+                b"",
+                Some("Bearer realtime-secret")
+            )
+            .0,
+            403
+        );
         let (custom, is_public) = serve_custom_domain_site(
             &arc,
             "MOVIES.EXAMPLE.COM.",
@@ -10869,6 +10958,11 @@ mod tests {
         );
         assert_eq!(status, 200, "{deleted}");
         assert_eq!(deleted["deleted"], true);
+        assert!(arc
+            .lock()
+            .unwrap()
+            .custom_domain_project("movies.example.com")
+            .is_none());
         assert!(serve_custom_domain_site(
             &arc,
             "movies.example.com",

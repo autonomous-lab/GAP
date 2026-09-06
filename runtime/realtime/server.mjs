@@ -6,6 +6,7 @@ import { WebSocketServer } from "ws";
 const port = Number(process.env.REALTIME_PORT || 8091);
 const secret = process.env.REALTIME_SECRET || "";
 const dbPath = process.env.REALTIME_DB || "/data/realtime.sqlite";
+const gapNodeInternalUrl = process.env.GAP_NODE_INTERNAL_URL || "http://gap-node:8080";
 const MAX_CONNECTIONS = 25;
 const MAX_CHANNELS = 25;
 const MAX_MESSAGE_BYTES = 64 * 1024;
@@ -51,6 +52,21 @@ function parseToken(token) {
     throw new Error("invalid permissions");
   }
   return claims;
+}
+
+async function customDomainAllows(hostname, projectId) {
+  const url = new URL("/internal/realtime/custom-domain", gapNodeInternalUrl);
+  url.searchParams.set("hostname", hostname);
+  url.searchParams.set("project_id", projectId);
+  try {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${secret}` },
+      signal: AbortSignal.timeout(3000)
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 function now() { return Math.floor(Date.now() / 1000); }
@@ -106,18 +122,30 @@ const server = http.createServer((req, res) => {
 const websocket = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
 server.on("upgrade", (req, socket, head) => {
   if (req.url !== "/v1/realtime") return socket.destroy();
-  websocket.handleUpgrade(req, socket, head, ws => websocket.emit("connection", ws));
+  const customHost = String(req.headers["x-gap-custom-host"] || "")
+    .trim().toLowerCase().replace(/\.$/, "");
+  websocket.handleUpgrade(req, socket, head, ws => {
+    ws.gapCustomHost = customHost;
+    websocket.emit("connection", ws);
+  });
 });
 
 websocket.on("connection", socket => {
-  const state = { authenticated: false, connectionRate: new Map(), channels: new Set() };
+  const state = { authenticated: false, authenticating: false, connectionRate: new Map(), channels: new Set() };
   const timer = setTimeout(() => socket.close(4401, "authentication required"), 5_000);
-  socket.on("message", raw => {
+  socket.on("message", async raw => {
     try {
       const message = JSON.parse(raw.toString());
       if (!state.authenticated) {
+        if (state.authenticating) throw new Error("authentication in progress");
         if (message.action !== "authenticate") throw new Error("authentication required");
         const claims = parseToken(message.token);
+        if (socket.gapCustomHost) {
+          state.authenticating = true;
+          const allowed = await customDomainAllows(socket.gapCustomHost, claims.project_id);
+          state.authenticating = false;
+          if (!allowed) throw new Error("token project does not match custom domain");
+        }
         if (projectConnections(claims.project_id) >= MAX_CONNECTIONS) throw new Error("connection quota exceeded");
         Object.assign(state, {
           authenticated: true,

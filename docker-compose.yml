@@ -106,6 +106,7 @@ services:
     environment:
       REALTIME_SECRET: "${GAP_REALTIME_SECRET:-}"
       REALTIME_DB: /data/realtime.sqlite
+      GAP_NODE_INTERNAL_URL: http://gap-node:8080
     volumes:
       - ./data/gap-realtime:/data
     read_only: true
