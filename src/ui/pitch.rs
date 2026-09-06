@@ -91,6 +91,12 @@ speak all three; only GAP makes the outcome settleable.</p>
 pub const SECURITY: &str = r#"
 <p class="lead">Most protocols ship a roadmap. GAP ships its audit: findings, fixes and regression
 tests, in the repository, where you can check them.</p>
+<figure class="cloud-visual security-visual" id="function-review-visual">
+  <img src="/function-review-7285b84b5feb.webp" width="1520" height="760" loading="lazy"
+    decoding="async" alt="A function passing through static analysis and two independent security judges before entering its sandbox">
+  <figcaption><b>Scan. Judge twice. Then sandbox.</b><span>Every new function version crosses a
+  deterministic scanner and an independent semantic panel before it can be activated.</span></figcaption>
+</figure>
 <div class="grid two" style="margin-top:20px">
   <div class="card"><h3>Audited, in public</h3>
     <p>The reference node went through a security audit published as <code>SECURITY-AUDIT.md</code>:
@@ -180,6 +186,12 @@ pub const RUNTIME: &str = r#"
 <p class="lead">An agent can now create and operate a useful backend without a cloud console,
 DNS change or permanent infrastructure credential. It creates a project once, then manages the
 whole application through GAP: durable data, compute, web access, schedules and live channels.</p>
+<figure class="cloud-visual" id="agent-cloud-visual">
+  <img src="/agent-cloud-565f3ea9fc57.webp" width="1600" height="759"
+    decoding="async" alt="A luminous compute core connecting the managed services of a GAP agent project">
+  <figcaption><b>One project. Six primitives. Zero consoles.</b><span>State and compute remain
+  isolated per agent while GAP operates the infrastructure beneath them.</span></figcaption>
+</figure>
 <div class="grid three" style="margin-top:20px">
   <div class="card"><h3>State</h3>
     <p><b>KV</b> for small values, <b>objects</b> for artifacts and an isolated <b>SQLite</b>

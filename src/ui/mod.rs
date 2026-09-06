@@ -353,6 +353,22 @@ border-radius:var(--radius);padding:18px 19px}
 .ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}.cy{color:var(--cyan)}
 small{font-size:.82rem}
 
+/* The generated artwork is atmosphere, while its caption carries the
+   actual claim as selectable HTML. The edge fade lets it belong to the
+   page rather than read as a rectangular stock image dropped into it. */
+.cloud-visual{position:relative;margin-top:24px;min-height:260px;overflow:hidden;
+border:1px solid var(--line);border-radius:16px;background:var(--panel);isolation:isolate}
+.cloud-visual:after{content:"";position:absolute;inset:0;z-index:1;pointer-events:none;
+background:linear-gradient(90deg,rgba(4,6,12,.76),transparent 34%,transparent 70%,rgba(4,6,12,.32)),
+linear-gradient(0deg,rgba(4,6,12,.9),transparent 48%)}
+.cloud-visual img{display:block;width:100%;height:auto;min-height:260px;object-fit:cover;object-position:center;
+filter:saturate(.9) contrast(1.05)}
+.cloud-visual figcaption{position:absolute;z-index:2;left:24px;right:24px;bottom:21px;max-width:520px}
+.cloud-visual figcaption b{display:block;font-size:1.12rem;color:var(--text);letter-spacing:-.01em}
+.cloud-visual figcaption span{display:block;color:var(--muted);font-size:.86rem;line-height:1.45;margin-top:3px}
+.security-visual:after{background:linear-gradient(90deg,rgba(4,6,12,.48),transparent 38%),
+linear-gradient(0deg,rgba(4,6,12,.92),transparent 52%)}
+
 /* ---------------------------------------------------------- stats */
 /* 1px grid gap over a line-coloured background draws the dividers, so
    they stay correct however many items wrap onto the last row - a
@@ -705,6 +721,9 @@ header.nav nav a{padding:13px 2px;border-radius:0;border-bottom:1px solid var(--
 }
 @media(max-width:640px){
 .wrap{padding:0 18px}
+.cloud-visual{min-height:310px}
+.cloud-visual img{height:310px;min-height:310px;object-position:55% center}
+.cloud-visual figcaption{left:17px;right:17px;bottom:16px}
 /* On a narrow masthead the node identifier matters more than the word
    "Protocol": one says which escrow you are looking at. */
 .brand b{font-size:.98rem}
@@ -1514,6 +1533,32 @@ mod tests {
         // Anything that embedded /og.png before it was versioned must
         // not start 404ing.
         assert!(crate::server::static_asset("/og.png").is_some());
+    }
+
+    #[test]
+    fn the_agent_cloud_artwork_is_a_small_versioned_web_asset() {
+        let (ctype, bytes) = crate::server::static_asset("/agent-cloud-565f3ea9fc57.webp")
+            .expect("the home artwork is served");
+        assert_eq!(ctype, "image/webp");
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert!(
+            bytes.len() > 50_000 && bytes.len() < 250_000,
+            "{} bytes",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn the_function_review_artwork_is_a_small_versioned_web_asset() {
+        let (ctype, bytes) = crate::server::static_asset("/function-review-7285b84b5feb.webp")
+            .expect("the function review artwork is served");
+        assert_eq!(ctype, "image/webp");
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert!(
+            bytes.len() > 50_000 && bytes.len() < 250_000,
+            "{} bytes",
+            bytes.len()
+        );
     }
 
     #[test]

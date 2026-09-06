@@ -6319,6 +6319,10 @@ pub fn route(
 /// its preview image depending on the working directory is a deployment
 /// trap nobody should have to find.
 const OG_IMAGE: &[u8] = include_bytes!("ui/og.png");
+const AGENT_CLOUD_IMAGE: &[u8] = include_bytes!("ui/agent-cloud.webp");
+const AGENT_CLOUD_IMAGE_PATH: &str = "/agent-cloud-565f3ea9fc57.webp";
+const FUNCTION_REVIEW_IMAGE: &[u8] = include_bytes!("ui/function-review.webp");
+const FUNCTION_REVIEW_IMAGE_PATH: &str = "/function-review-7285b84b5feb.webp";
 
 /// The card's URL path, versioned by the bytes it serves.
 ///
@@ -6349,6 +6353,12 @@ pub fn og_image_path() -> &'static str {
 pub fn static_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
     if path == "/og.png" || path == og_image_path() {
         return Some(("image/png", OG_IMAGE));
+    }
+    if path == AGENT_CLOUD_IMAGE_PATH {
+        return Some(("image/webp", AGENT_CLOUD_IMAGE));
+    }
+    if path == FUNCTION_REVIEW_IMAGE_PATH {
+        return Some(("image/webp", FUNCTION_REVIEW_IMAGE));
     }
     None
 }
