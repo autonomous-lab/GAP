@@ -7,13 +7,20 @@ const port = Number(process.env.REALTIME_PORT || 8091);
 const secret = process.env.REALTIME_SECRET || "";
 const dbPath = process.env.REALTIME_DB || "/data/realtime.sqlite";
 const gapNodeInternalUrl = process.env.GAP_NODE_INTERNAL_URL || "http://gap-node:8080";
-const MAX_CONNECTIONS = 25;
-const MAX_CHANNELS = 25;
-const MAX_MESSAGE_BYTES = 64 * 1024;
-const CONNECTION_RATE = 30;
-const PROJECT_RATE = 300;
+const FREE_CONNECTIONS = 25;
+const HARD_CONNECTIONS = 100;
+const FREE_CHANNELS = 25;
+const HARD_CHANNELS = 100;
+const FREE_MESSAGE_BYTES = 64 * 1024;
+const HARD_MESSAGE_BYTES = 256 * 1024;
+const FREE_CONNECTION_RATE = 30;
+const HARD_CONNECTION_RATE = 300;
+const FREE_PROJECT_RATE = 300;
+const HARD_PROJECT_RATE = 3000;
 const RETENTION_SECONDS = 24 * 60 * 60;
-const MAX_PERSISTED_BYTES = 25 * 1024 * 1024;
+const FREE_PERSISTED_BYTES = 25 * 1024 * 1024;
+const HARD_PERSISTED_BYTES = 100 * 1024 * 1024;
+const MIB = 1024 * 1024;
 
 if (!secret) throw new Error("REALTIME_SECRET is required");
 const db = new DatabaseSync(dbPath);
@@ -69,17 +76,37 @@ async function customDomainAllows(hostname, projectId) {
   }
 }
 
+async function spendCredits(projectId, charges) {
+  const filtered = Object.fromEntries(Object.entries(charges).filter(([, amount]) => amount > 0));
+  if (Object.keys(filtered).length === 0) return;
+  const url = new URL("/internal/realtime/credits/spend", gapNodeInternalUrl);
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: projectId, charges: filtered }),
+      signal: AbortSignal.timeout(3000)
+    });
+  } catch {
+    throw new Error("credit service unavailable");
+  }
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    throw new Error(result?.error?.message || "insufficient realtime credits");
+  }
+}
+
 function now() { return Math.floor(Date.now() / 1000); }
-function bucket(map, key, limit) {
+function bucketCount(map, key) {
   const minute = Math.floor(Date.now() / 60000);
   const current = map.get(key);
   if (!current || current.minute !== minute) {
     map.set(key, { minute, count: 1 });
-    return true;
+    return 1;
   }
-  if (current.count >= limit) return false;
   current.count++;
-  return true;
+  return current.count;
 }
 function projectConnections(projectId) {
   let count = 0;
@@ -103,12 +130,6 @@ function send(socket, value) {
 function prune() {
   const timestamp = now();
   db.prepare("DELETE FROM messages WHERE expires_at<=?").run(timestamp);
-  const usage = db.prepare("SELECT COALESCE(SUM(size_bytes),0) AS bytes FROM messages").get().bytes;
-  if (usage > MAX_PERSISTED_BYTES) {
-    db.prepare(`DELETE FROM messages WHERE seq IN
-      (SELECT seq FROM messages ORDER BY seq LIMIT
-       (SELECT COUNT(*) FROM messages)/10 + 1)`).run();
-  }
 }
 setInterval(prune, 60_000).unref();
 
@@ -119,7 +140,7 @@ const server = http.createServer((req, res) => {
   }
   res.writeHead(404).end();
 });
-const websocket = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
+const websocket = new WebSocketServer({ noServer: true, maxPayload: HARD_MESSAGE_BYTES + 16 * 1024 });
 server.on("upgrade", (req, socket, head) => {
   if (req.url !== "/v1/realtime") return socket.destroy();
   const customHost = String(req.headers["x-gap-custom-host"] || "")
@@ -131,7 +152,7 @@ server.on("upgrade", (req, socket, head) => {
 });
 
 websocket.on("connection", socket => {
-  const state = { authenticated: false, authenticating: false, connectionRate: new Map(), channels: new Set() };
+  const state = { authenticated: false, authenticating: false, connectionRate: new Map(), channels: new Set(), renewalTimer: null, paidConnection: false };
   const timer = setTimeout(() => socket.close(4401, "authentication required"), 5_000);
   socket.on("message", async raw => {
     try {
@@ -146,7 +167,12 @@ websocket.on("connection", socket => {
           state.authenticating = false;
           if (!allowed) throw new Error("token project does not match custom domain");
         }
-        if (projectConnections(claims.project_id) >= MAX_CONNECTIONS) throw new Error("connection quota exceeded");
+        const connectionCount = projectConnections(claims.project_id);
+        if (connectionCount >= HARD_CONNECTIONS) throw new Error("hard connection limit exceeded");
+        if (connectionCount >= FREE_CONNECTIONS) {
+          await spendCredits(claims.project_id, { connection_hour: 1 });
+          state.paidConnection = true;
+        }
         Object.assign(state, {
           authenticated: true,
           projectId: claims.project_id,
@@ -157,18 +183,38 @@ websocket.on("connection", socket => {
           connectionId: claims.jti
         });
         clients.set(socket, state);
+        if (state.paidConnection) {
+          state.renewalTimer = setInterval(async () => {
+            if (projectConnections(state.projectId) <= FREE_CONNECTIONS) return;
+            try {
+              await spendCredits(state.projectId, { connection_hour: 1 });
+            } catch {
+              socket.close(4402, "realtime credits exhausted");
+            }
+          }, 60 * 60 * 1000);
+          state.renewalTimer.unref();
+        }
         clearTimeout(timer);
         return send(socket, { type: "authenticated", project_id: state.projectId,
           subject: state.subject, permissions: state.permissions, expires_at: state.expiresAt });
       }
       if (state.expiresAt <= now()) return socket.close(4401, "token expired");
-      if (!bucket(state.connectionRate, "messages", CONNECTION_RATE) ||
-          !bucket(projectRates, state.projectId, PROJECT_RATE)) throw new Error("message rate exceeded");
+      const connectionRate = bucketCount(state.connectionRate, "messages");
+      const projectRate = bucketCount(projectRates, state.projectId);
+      if (connectionRate > HARD_CONNECTION_RATE || projectRate > HARD_PROJECT_RATE) {
+        throw new Error("hard message rate exceeded");
+      }
+      const charges = {};
+      if (connectionRate > FREE_CONNECTION_RATE || projectRate > FREE_PROJECT_RATE) {
+        charges.rate_overage = 1;
+      }
       if (!allowed(state, message.channel)) throw new Error("channel not allowed");
       if (message.action === "subscribe") {
         if (!state.permissions.includes("subscribe")) throw new Error("subscribe not allowed");
         const active = projectChannels(state.projectId);
-        if (!active.has(message.channel) && active.size >= MAX_CHANNELS) throw new Error("channel quota exceeded");
+        if (!active.has(message.channel) && active.size >= HARD_CHANNELS) throw new Error("hard channel limit exceeded");
+        if (!active.has(message.channel) && active.size >= FREE_CHANNELS) charges.channel_activation = 1;
+        await spendCredits(state.projectId, charges);
         state.channels.add(message.channel);
         const after = Number.isSafeInteger(message.after) ? message.after : 0;
         const history = db.prepare(`SELECT seq,body,created_at FROM messages
@@ -179,6 +225,7 @@ websocket.on("connection", socket => {
           seq: item.seq, payload: JSON.parse(item.body), created_at: item.created_at, replay: true });
       } else if (message.action === "unsubscribe") {
         if (!state.permissions.includes("subscribe")) throw new Error("subscribe not allowed");
+        await spendCredits(state.projectId, charges);
         state.channels.delete(message.channel);
         send(socket, { type: "unsubscribed", channel: message.channel });
       } else if (message.action === "publish") {
@@ -186,17 +233,25 @@ websocket.on("connection", socket => {
         if (!state.channels.has(message.channel)) throw new Error("subscribe before publishing");
         const body = JSON.stringify(message.payload ?? null);
         const bytes = Buffer.byteLength(body);
-        if (bytes > MAX_MESSAGE_BYTES) throw new Error("message too large");
+        if (bytes > HARD_MESSAGE_BYTES) throw new Error("hard message size limit exceeded");
+        if (bytes > FREE_MESSAGE_BYTES) {
+          charges.payload_chunk = Math.ceil(bytes / FREE_MESSAGE_BYTES) - 1;
+        }
         let seq = null;
         const createdAt = now();
         if (message.persist === true) {
           prune();
-          const used = db.prepare("SELECT COALESCE(SUM(size_bytes),0) AS bytes FROM messages").get().bytes;
-          if (used + bytes > MAX_PERSISTED_BYTES) throw new Error("persistence quota exceeded");
+          const used = db.prepare("SELECT COALESCE(SUM(size_bytes),0) AS bytes FROM messages WHERE project_id=?")
+            .get(state.projectId).bytes;
+          if (used + bytes > HARD_PERSISTED_BYTES) throw new Error("hard persistence limit exceeded");
+          const before = Math.ceil(Math.max(used - FREE_PERSISTED_BYTES, 0) / MIB);
+          const after = Math.ceil(Math.max(used + bytes - FREE_PERSISTED_BYTES, 0) / MIB);
+          if (after > before) charges.persisted_megabyte = after - before;
+          await spendCredits(state.projectId, charges);
           seq = Number(db.prepare(`INSERT INTO messages(project_id,channel,body,size_bytes,created_at,expires_at)
             VALUES(?,?,?,?,?,?)`).run(state.projectId, message.channel, body, bytes,
               createdAt, createdAt + RETENTION_SECONDS).lastInsertRowid);
-        }
+        } else await spendCredits(state.projectId, charges);
         for (const [peer, client] of clients) {
           if (client.projectId === state.projectId && client.channels.has(message.channel)) {
             send(peer, { type: "message", channel: message.channel, seq,
@@ -208,8 +263,8 @@ websocket.on("connection", socket => {
       send(socket, { type: "error", error: String(error.message || error) });
     }
   });
-  socket.on("close", () => { clearTimeout(timer); clients.delete(socket); });
-  socket.on("error", () => clients.delete(socket));
+  socket.on("close", () => { clearTimeout(timer); clearInterval(state.renewalTimer); clients.delete(socket); });
+  socket.on("error", () => { clearInterval(state.renewalTimer); clients.delete(socket); });
 });
 
 server.listen(port, "0.0.0.0");

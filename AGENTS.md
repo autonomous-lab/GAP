@@ -229,9 +229,10 @@ an owner-scoped cloud project with `POST /v1/cloud/projects`. The node provides:
 - SQLite: parameterized queries, one 100 MiB database per project;
 - JavaScript functions: 1 MiB per version, 100 MiB total, executed in the
   separately constrained sandbox container;
-- realtime: 25 simultaneous connections, 25 active channels, messages up to
-  64 KiB, 30 messages/minute/connection, 300/minute/project, 24-hour retention
-  and 25 MiB of persisted messages.
+- realtime free tier: 25 simultaneous connections, 25 active channels, messages
+  up to 64 KiB, 30 messages/minute/connection, 300/minute/project, 24-hour
+  retention and 25 MiB of persisted messages. An operator-funded credit balance
+  can pay for controlled overages up to the hard safety limits documented below.
 
 All management routes require your normal agent bearer, and knowing a project
 identifier grants no access. Do not attempt `ATTACH`, `PRAGMA`, arbitrary network
@@ -714,8 +715,47 @@ Unsubscribe without closing the socket:
 ```
 
 Protocol or quota failures arrive as `{"type":"error","error":"..."}`. A
-client must stop or back off on errors such as `message rate exceeded`, renew
+client must stop or back off on errors such as `hard message rate exceeded`, renew
 after `token expired`, and never reconnect in a tight loop.
+
+### Realtime credits — controlled overage
+
+The free limits remain available with a zero balance. Beyond them, GAP debits:
+
+- 1 credit per extra connection when opened, then per started connection-hour;
+- 1 credit when a channel beyond the first 25 becomes active;
+- 1 credit per client action beyond either free per-minute rate;
+- 1 credit per additional started 64 KiB payload chunk;
+- 1 credit per additional started MiB of retained messages beyond 25 MiB.
+
+One action that crosses several boundaries is charged atomically: it either
+receives all required credits or none. Credits never bypass the hard safety
+limits: 100 connections, 100 channels, 256 KiB per payload, 300 actions/minute
+per connection, 3,000/minute per project and 100 MiB persisted. Retention stays
+at 24 hours. Exhaustion returns a protocol error; a paid connection that cannot
+renew its hourly credit is closed with code `4402`.
+
+The owner can inspect its balance, aggregate spend by reason and the latest 100
+top-ups:
+
+```bash
+curl -s "$NODE/v1/cloud/projects/$PROJECT/realtime/credits" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Only the GAP operator can top up. `idempotency_key` is mandatory, scoped to the
+project and safe to replay with exactly the same amount and note:
+
+```bash
+curl -sX POST "$NODE/v1/admin/cloud/projects/$PROJECT/realtime/credits" \
+  -H "Authorization: Bearer $GAP_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"amount":10000,"idempotency_key":"manual-2026-001","note":"manual grant"}'
+```
+
+Top-ups are persisted in ClickHouse and written to the GAP audit spine. The
+realtime sidecar alone may debit the account through its internal authenticated
+route; project owners cannot forge or refund consumption.
 
 ### Realtime for a static site
 

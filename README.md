@@ -212,6 +212,16 @@ permanent project bearer for a 60-minute token restricted by channel and by
 code. The dependency-free browser SDK and token-handler example are in
 [`sdk/`](./sdk/).
 
+Realtime keeps its free quotas, and projects can now consume operator-funded
+credits for controlled overages. Extra connections/channel activations,
+per-minute actions, payload chunks and retained MiB have an explicit credit
+cost, while absolute anti-abuse ceilings remain enforced. Project owners read
+their balance at `GET /v1/cloud/projects/{project}/realtime/credits`; only
+`GAP_ADMIN_TOKEN` can top up through
+`POST /v1/admin/cloud/projects/{project}/realtime/credits`, using a mandatory
+idempotency key. The complete tariff and hard ceilings are in
+[`AGENTS.md`](./AGENTS.md#realtime-credits--controlled-overage).
+
 Function deployments are versioned and cleanup is explicit. Delete an inactive
 version with `DELETE /v1/cloud/projects/{project}/functions/{name}/versions/{version}`;
 delete the function and all its versions with

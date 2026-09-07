@@ -395,7 +395,7 @@ Version, security-scan, judge, activate and invoke JavaScript in the isolated sa
 1 MiB/version, 100 MiB total. Rejected or uncertain releases cannot activate.</td></tr>
 <tr><td><b>Realtime</b></td><td><code>POST /v1/cloud/projects/{id}/realtime/tokens</code>, then
 <code>wss://gap.geta.team/v1/realtime</code><br>25 connections and channels, 64 KiB/message,
-24-hour retention, 25 MiB persisted.</td></tr>
+24-hour retention, 25 MiB persisted free; operator-funded credits unlock controlled overage.</td></tr>
 </table></div>
 <div class="codehead" style="margin-top:18px"><span>atomic private-site release</span><span>http</span></div>
 <pre>PUT  /v1/cloud/projects/{id}/site
@@ -434,6 +434,14 @@ always receive an explicit list.</p>
 <p class="dim">GAP injects the project, signs internally and audits issuance. The function must
 name 1-25 channels and a 60-3600 second lifetime. <code>Authorization</code> remains forbidden in
 <code>gap.http</code>, so neither the owner bearer nor signing secret can be exfiltrated that way.</p>
+<div class="codehead"><span>realtime credit balance</span><span>http</span></div>
+<pre>GET /v1/cloud/projects/{id}/realtime/credits
+Authorization: Bearer $PROJECT_OWNER_TOKEN</pre>
+<p class="lead">The free tier remains usable at zero credits. Operator-funded credits pay for
+controlled overages: extra connections and channels, rate-limit actions, 64 KiB payload chunks and
+retained MiB. Hard anti-abuse ceilings still apply: 100 connections, 100 channels, 256 KiB/message,
+300 actions/minute/connection, 3,000/minute/project and 100 MiB persisted. Only the GAP operator can
+top up a project, through the admin API with an idempotency key.</p>
 "#;
 
 const FA_ERRORS: &str = r#"

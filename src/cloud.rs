@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,27 @@ pub const MAX_SITE_VERSIONS: u64 = 5;
 pub const MAX_SITE_REQUESTS_PER_SECOND: u64 = 20;
 pub const MAX_SITE_CUSTOM_DOMAINS: usize = 3;
 pub const MAX_SITE_BANDWIDTH_PER_PERIOD: u64 = 1024 * 1024 * 1024;
+pub const MAX_REALTIME_CREDIT_TOP_UP: u64 = 1_000_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RealtimeCreditAccount {
+    pub balance: u64,
+    pub credited_total: u64,
+    pub spent_total: u64,
+    #[serde(default)]
+    pub spent_by_reason: BTreeMap<String, u64>,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealtimeCreditTopUp {
+    pub idempotency_key: String,
+    pub project_id: String,
+    pub amount: u64,
+    pub balance_after: u64,
+    pub note: String,
+    pub created_at: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SiteConfig {

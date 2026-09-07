@@ -489,6 +489,10 @@ pub struct NodeState {
     /// Verified custom hostname -> project mapping. Kept globally so a TLS
     /// handshake and a Host-routed request are O(1), not a scan of tenant DBs.
     custom_domains: HashMap<String, crate::cloud::SiteDomain>,
+    /// Paid realtime overage balance, separate from escrow/payment balances.
+    realtime_credits: HashMap<String, crate::cloud::RealtimeCreditAccount>,
+    /// Operator top-ups are idempotent and durably auditable.
+    realtime_credit_topups: HashMap<String, crate::cloud::RealtimeCreditTopUp>,
     /// Tenant SQLite files live below this directory, one directory per project.
     cloud_root: std::path::PathBuf,
     /// Internal-only function runner. Empty configuration fails closed.
@@ -790,6 +794,10 @@ impl NodeState {
             load(&*storage, "delegations");
         let cooling_off: HashMap<String, Value> = load(&*storage, "cooling_off");
         let policies: HashMap<String, crate::policy::Policy> = load(&*storage, "policies");
+        let realtime_credits: HashMap<String, crate::cloud::RealtimeCreditAccount> =
+            load(&*storage, "cloud_realtime_credits");
+        let realtime_credit_topups: HashMap<String, crate::cloud::RealtimeCreditTopUp> =
+            load(&*storage, "cloud_realtime_credit_topups");
 
         let mut jobs_by_ref = HashMap::new();
         for records in jobs.values() {
@@ -867,6 +875,8 @@ impl NodeState {
             deposit_chain: None,
             cloud_projects,
             custom_domains,
+            realtime_credits,
+            realtime_credit_topups,
             cloud_root: std::env::var("GAP_CLOUD_ROOT")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| std::path::PathBuf::from("/data/runtime-projects")),
@@ -2734,6 +2744,150 @@ the content inline"
             json!({ "project_id": project_id, "expires_at": expires_at, "channel_count": channels.len(), "permissions": permissions }),
         );
         Ok(result)
+    }
+
+    pub fn cloud_realtime_credit_account(&self, token: &str, project_id: &str) -> Result<Value> {
+        self.cloud_owned_project(token, project_id)?;
+        let account = self
+            .realtime_credits
+            .get(project_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut topups = self
+            .realtime_credit_topups
+            .values()
+            .filter(|entry| entry.project_id == project_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        topups.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
+        topups.truncate(100);
+        Ok(json!({ "project_id": project_id, "account": account, "topups": topups }))
+    }
+
+    pub fn admin_top_up_realtime_credits(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        amount: u64,
+        idempotency_key: &str,
+        note: &str,
+    ) -> Result<Value> {
+        if self.admin_token.as_deref() != Some(token) {
+            return Err(Error::Unauthorized("operator token required".into()));
+        }
+        if !self.cloud_projects.contains_key(project_id) {
+            return Err(Error::Other("unknown project".into()));
+        }
+        if amount == 0 || amount > crate::cloud::MAX_REALTIME_CREDIT_TOP_UP {
+            return Err(Error::Other(format!(
+                "amount must be between 1 and {}",
+                crate::cloud::MAX_REALTIME_CREDIT_TOP_UP
+            )));
+        }
+        if idempotency_key.is_empty()
+            || idempotency_key.len() > 128
+            || !idempotency_key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        {
+            return Err(Error::Other("invalid idempotency_key".into()));
+        }
+        if note.len() > 500 {
+            return Err(Error::Other("note exceeds 500 bytes".into()));
+        }
+        let operation_key = format!("{project_id}:{idempotency_key}");
+        if let Some(existing) = self.realtime_credit_topups.get(&operation_key) {
+            if existing.amount != amount || existing.note != note {
+                return Err(Error::Other(
+                    "idempotency_key was already used with different values".into(),
+                ));
+            }
+            return Ok(json!({ "created": false, "topup": existing }));
+        }
+        let now = now_unix();
+        let account = self.realtime_credits.entry(project_id.into()).or_default();
+        let balance = account
+            .balance
+            .checked_add(amount)
+            .ok_or_else(|| Error::Other("credit balance overflow".into()))?;
+        let credited_total = account
+            .credited_total
+            .checked_add(amount)
+            .ok_or_else(|| Error::Other("credit total overflow".into()))?;
+        account.balance = balance;
+        account.credited_total = credited_total;
+        account.updated_at = now;
+        let account = account.clone();
+        let topup = crate::cloud::RealtimeCreditTopUp {
+            idempotency_key: idempotency_key.into(),
+            project_id: project_id.into(),
+            amount,
+            balance_after: account.balance,
+            note: note.into(),
+            created_at: now,
+        };
+        self.realtime_credit_topups
+            .insert(operation_key.clone(), topup.clone());
+        self.save_state("cloud_realtime_credits", project_id, &account);
+        self.save_state("cloud_realtime_credit_topups", &operation_key, &topup);
+        self.record(
+            "cloud.realtime.credits.topped_up",
+            json!({ "project_id": project_id, "amount": amount,
+                "balance_after": account.balance, "idempotency_key": idempotency_key,
+                "note": note }),
+        );
+        Ok(json!({ "created": true, "topup": topup }))
+    }
+
+    fn spend_realtime_credits(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        charges: &[(String, u64)],
+    ) -> Result<Value> {
+        if self.realtime_secret.as_deref() != Some(token) || self.realtime_secret.is_none() {
+            return Err(Error::Unauthorized("invalid realtime service token".into()));
+        }
+        let amount = charges.iter().try_fold(0u64, |total, (_, amount)| {
+            total
+                .checked_add(*amount)
+                .ok_or_else(|| Error::Other("invalid realtime credit debit".into()))
+        })?;
+        if amount == 0 || amount > 1024 || charges.is_empty() || charges.len() > 5 {
+            return Err(Error::Other("invalid realtime credit debit".into()));
+        }
+        for (reason, amount) in charges {
+            if *amount == 0
+                || !matches!(
+                    reason.as_str(),
+                    "connection_hour"
+                        | "channel_activation"
+                        | "rate_overage"
+                        | "payload_chunk"
+                        | "persisted_megabyte"
+                )
+            {
+                return Err(Error::Other("invalid realtime credit reason".into()));
+            }
+        }
+        if !self.cloud_projects.contains_key(project_id) {
+            return Err(Error::Other("unknown project".into()));
+        }
+        let now = now_unix();
+        let account = self.realtime_credits.entry(project_id.into()).or_default();
+        if account.balance < amount {
+            return Err(Error::Other("insufficient realtime credits".into()));
+        }
+        account.balance -= amount;
+        account.spent_total = account.spent_total.saturating_add(amount);
+        for (reason, amount) in charges {
+            let reason_total = account.spent_by_reason.entry(reason.clone()).or_default();
+            *reason_total = reason_total.saturating_add(*amount);
+        }
+        account.updated_at = now;
+        let account = account.clone();
+        self.save_state("cloud_realtime_credits", project_id, &account);
+        Ok(json!({ "spent": amount, "balance": account.balance, "charges": charges }))
     }
 
     fn cloud_issue_realtime_token_for_function(
@@ -7301,6 +7455,27 @@ pub fn route_with_ip(
         };
     }
 
+    if method == "POST" && path == "/internal/realtime/credits/spend" {
+        let project_id = body.get("project_id").and_then(Value::as_str).unwrap_or("");
+        let charges = body
+            .get("charges")
+            .and_then(Value::as_object)
+            .map(|charges| {
+                charges
+                    .iter()
+                    .map(|(reason, amount)| (reason.clone(), amount.as_u64().unwrap_or(0)))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        return match token {
+            Some(token) => match guard.spend_realtime_credits(token, project_id, &charges) {
+                Ok(value) => (200, value),
+                Err(error) => error_response(&error),
+            },
+            None => error_response(&Error::Unauthorized("missing service token".into())),
+        };
+    }
+
     // This route is reachable only over the compose-internal network and is
     // authenticated with the sandbox shared secret. It deliberately bypasses
     // agent auth: the runner never receives an owner's bearer token.
@@ -7766,6 +7941,32 @@ pub fn route_with_ip(
                     }
                 })(),
                 None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("GET", p) if cloud_realtime_credit_route(p).is_some() => {
+            let project_id = cloud_realtime_credit_route(p).expect("guarded above");
+            match token {
+                Some(t) => guard.cloud_realtime_credit_account(t, project_id),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
+        }
+        ("POST", p) if admin_realtime_credit_route(p).is_some() => {
+            let project_id = admin_realtime_credit_route(p).expect("guarded above");
+            let amount = body.get("amount").and_then(Value::as_u64).unwrap_or(0);
+            let idempotency_key = body
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let note = body.get("note").and_then(Value::as_str).unwrap_or("");
+            match token {
+                Some(t) => guard.admin_top_up_realtime_credits(
+                    t,
+                    project_id,
+                    amount,
+                    idempotency_key,
+                    note,
+                ),
+                None => Err(Error::Unauthorized("operator token required".into())),
             }
         }
         ("POST", p) if cloud_realtime_token_route(p).is_some() => {
@@ -9224,6 +9425,37 @@ fn cloud_realtime_token_route(path: &str) -> Option<&str> {
         && parts[5] == "tokens"
     {
         Some(parts[3])
+    } else {
+        None
+    }
+}
+
+fn cloud_realtime_credit_route(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() == 6
+        && parts[0] == "v1"
+        && parts[1] == "cloud"
+        && parts[2] == "projects"
+        && parts[4] == "realtime"
+        && parts[5] == "credits"
+    {
+        Some(parts[3])
+    } else {
+        None
+    }
+}
+
+fn admin_realtime_credit_route(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() == 7
+        && parts[0] == "v1"
+        && parts[1] == "admin"
+        && parts[2] == "cloud"
+        && parts[3] == "projects"
+        && parts[5] == "realtime"
+        && parts[6] == "credits"
+    {
+        Some(parts[4])
     } else {
         None
     }
@@ -10773,6 +11005,91 @@ mod tests {
         let (status, deleted_again) = route(&arc, "DELETE", &fn_path, b"", Some(&auth));
         assert_eq!(status, 200, "{deleted_again}");
         assert_eq!(deleted_again["deleted"], false);
+    }
+
+    #[test]
+    fn realtime_credits_are_operator_funded_owner_visible_and_atomically_spent() {
+        let arc = state();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        arc.lock()
+            .unwrap()
+            .set_cloud_root(std::env::temp_dir().join(format!("gap-credit-test-{nonce}")));
+        arc.lock().unwrap().set_admin_token("operator");
+        arc.lock().unwrap().set_realtime_secret("realtime");
+        let owner = register(&arc);
+        let auth = format!("Bearer {owner}");
+        let (_, project) = route(&arc, "POST", "/v1/cloud/projects", b"{}", Some(&auth));
+        let project_id = project["project_id"].as_str().unwrap();
+        let owner_path = format!("/v1/cloud/projects/{project_id}/realtime/credits");
+        assert_eq!(
+            route(&arc, "GET", &owner_path, b"", Some(&auth)).1["account"]["balance"],
+            0
+        );
+
+        let admin_path = format!("/v1/admin/cloud/projects/{project_id}/realtime/credits");
+        let topup = json!({"amount": 50, "idempotency_key": "invoice-1", "note": "test"});
+        let (status, created) = route(
+            &arc,
+            "POST",
+            &admin_path,
+            topup.to_string().as_bytes(),
+            Some("Bearer operator"),
+        );
+        assert_eq!(status, 200, "{created}");
+        assert_eq!(created["created"], true);
+        let (_, replay) = route(
+            &arc,
+            "POST",
+            &admin_path,
+            topup.to_string().as_bytes(),
+            Some("Bearer operator"),
+        );
+        assert_eq!(replay["created"], false);
+
+        let spend = json!({"project_id": project_id, "charges": {
+            "rate_overage": 3, "payload_chunk": 2
+        }});
+        let (status, spent) = route(
+            &arc,
+            "POST",
+            "/internal/realtime/credits/spend",
+            spend.to_string().as_bytes(),
+            Some("Bearer realtime"),
+        );
+        assert_eq!(status, 200, "{spent}");
+        assert_eq!(spent["spent"], 5);
+        assert_eq!(spent["balance"], 45);
+        let (_, account) = route(&arc, "GET", &owner_path, b"", Some(&auth));
+        assert_eq!(account["account"]["balance"], 45);
+        assert_eq!(account["account"]["spent_by_reason"]["rate_overage"], 3);
+
+        let too_much = json!({"project_id": project_id, "charges": {"rate_overage": 46}});
+        let (status, _) = route(
+            &arc,
+            "POST",
+            "/internal/realtime/credits/spend",
+            too_much.to_string().as_bytes(),
+            Some("Bearer realtime"),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(
+            route(&arc, "GET", &owner_path, b"", Some(&auth)).1["account"]["balance"],
+            45
+        );
+        assert_eq!(
+            route(
+                &arc,
+                "POST",
+                &admin_path,
+                topup.to_string().as_bytes(),
+                Some(&auth)
+            )
+            .0,
+            401
+        );
     }
 
     #[test]
