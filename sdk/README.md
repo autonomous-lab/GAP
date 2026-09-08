@@ -1,5 +1,9 @@
 # GAP client SDKs
 
+**Cloud status:** `realtime.js` and `realtime-token-handler.js` remain supported. The TypeScript and Python
+commerce clients below are archived and their contract endpoints return 410.
+Use [AGENTS.md](../AGENTS.md) for the active Cloud HTTP API.
+
 Thin, dependency-free clients for the GAP node HTTP API. Both cover the
 full lifecycle: identity → announce → discover → contract → escrow →
 deliver → settle → audit, plus **event delivery** (RFC-0013): register

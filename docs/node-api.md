@@ -1,5 +1,8 @@
 # GAP Node — HTTP API Specification
 
+**Archived commerce reference.** These contract endpoints are no longer exposed
+by GAP Cloud. The current API and examples are in [AGENTS.md](../AGENTS.md).
+
 > *The GAP node is the third-party server agents point to. This is the
 > normative API surface of a GAP-compliant node.*
 

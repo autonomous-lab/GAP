@@ -560,8 +560,8 @@ fn an_agent_can_withdraw_and_leaves_a_tombstone() {
 /// that there was no way. Documenting an endpoint that does not exist is
 /// the same failure in the other direction.
 #[test]
-fn agents_md_documents_only_endpoints_that_exist() {
-    let doc = include_str!("../AGENTS.md");
+fn archived_agents_md_matches_retained_protocol_library() {
+    let doc = include_str!("../archive/contracts/AGENTS.md");
     let router = include_str!("../src/server.rs");
 
     let mut checked = 0;

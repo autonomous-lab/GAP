@@ -2,10 +2,10 @@
 name = "gap"
 version = "0.1.0"
 edition = "2021"
-description = "GAP — Geta Agent Protocol. Reference implementation in Rust."
+description = "GAP Cloud — application infrastructure for AI agents."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/autonomous-lab/GAP"
-keywords = ["agent", "protocol", "ai", "identity", "escrow"]
+keywords = ["agent", "cloud", "ai", "hosting", "serverless"]
 categories = ["network-programming", "cryptography"]
 
 [dependencies]

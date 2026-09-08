@@ -1,8 +1,10 @@
 openapi: 3.1.0
 info:
-  title: GAP Node API
+  title: Archived GAP Contract API (not the GAP Cloud API)
   version: 0.1.0
   description: |
+    ARCHIVED: contract endpoints are disabled in GAP Cloud. For the supported
+    project API, see the root AGENTS.md. This specification is historical.
     HTTP API of a GAP node — the server agents point at to get identity,
     discovery, contracts, escrow, and audit. Human-oriented reference:
     docs/node-api.md. Protocol semantics: the normative spec in /spec.

@@ -37,6 +37,7 @@ RUN --mount=type=cache,id=gap-cargo-registry,target=/usr/local/cargo/registry \
 
 # Copy the real sources only after dependency resolution.
 COPY src ./src
+COPY AGENTS.md ./AGENTS.md
 COPY examples ./examples
 ENV CARGO_INCREMENTAL=1
 RUN --mount=type=cache,id=gap-cargo-registry,target=/usr/local/cargo/registry \

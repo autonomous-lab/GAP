@@ -543,6 +543,30 @@ impl NodeState {
         ip_cap: u32,
         vault: Option<crate::vault::Vault>,
     ) -> Self {
+        Self::with_vault_mode(storage, seed, token_cap, ip_cap, vault, false)
+    }
+
+    /// Production Cloud startup: retain identities and Cloud state, never
+    /// hydrate or migrate historical commerce projections (on any backend).
+    pub fn cloud_with_rate_limits(
+        storage: Box<dyn Storage>,
+        seed: Option<[u8; 32]>,
+        token_cap: u32,
+        ip_cap: u32,
+    ) -> Self {
+        let vault = crate::vault::Vault::from_env()
+            .map(|r| r.expect("invalid GAP_MASTER_KEY (need 64 hex chars)"));
+        Self::with_vault_mode(storage, seed, token_cap, ip_cap, vault, true)
+    }
+
+    fn with_vault_mode(
+        storage: Box<dyn Storage>,
+        seed: Option<[u8; 32]>,
+        token_cap: u32,
+        ip_cap: u32,
+        vault: Option<crate::vault::Vault>,
+        cloud_only: bool,
+    ) -> Self {
         let identity = match seed {
             Some(seed_bytes) => AgentIdentity::from_seed(&seed_bytes),
             None => AgentIdentity::generate(),
@@ -582,7 +606,11 @@ impl NodeState {
         }
 
         let mut registry = Registry::new();
-        for rec in storage.list_announcements().unwrap_or_default() {
+        for rec in if cloud_only {
+            Vec::new()
+        } else {
+            storage.list_announcements().unwrap_or_default()
+        } {
             if let Ok(ann) = serde_json::from_str::<Announcement>(&rec.announcement_json) {
                 let _ = registry.announce(ann);
             }
@@ -593,7 +621,11 @@ impl NodeState {
         // would keep whichever 5,000 the backend happened to return
         // last, which is not the same thing and is invisible when it is
         // wrong.
-        let mut records = storage.list_contracts().unwrap_or_default();
+        let mut records = if cloud_only {
+            Vec::new()
+        } else {
+            storage.list_contracts().unwrap_or_default()
+        };
         records.sort_by_key(|r| r.updated_at);
         let mut contracts = Contracts::default();
         // Every contract id ever seen, resident or not. The job index
@@ -612,7 +644,11 @@ impl NodeState {
         }
 
         let mut escrows = HashMap::new();
-        for rec in storage.list_escrows().unwrap_or_default() {
+        for rec in if cloud_only {
+            Vec::new()
+        } else {
+            storage.list_escrows().unwrap_or_default()
+        } {
             if let Some(contract) = contracts.get(&rec.contract_id).cloned() {
                 if let (Ok(state), Ok(held)) = (
                     crate::payment::EscrowState::parse(&rec.state),
@@ -636,7 +672,11 @@ impl NodeState {
         fn load<T: serde::de::DeserializeOwned>(
             storage: &dyn Storage,
             scope: &str,
+            cloud_only: bool,
         ) -> HashMap<String, T> {
+            if cloud_only && !scope.starts_with("cloud_") {
+                return HashMap::new();
+            }
             let mut out = HashMap::new();
             for rec in storage.list_state(scope).unwrap_or_default() {
                 match serde_json::from_str::<T>(&rec.value) {
@@ -649,8 +689,10 @@ impl NodeState {
             out
         }
 
-        let gateways: HashMap<String, crate::gateway::GatewayRoute> = load(&*storage, "gateways");
-        let verdicts: HashMap<String, crate::verifier::Verdict> = load(&*storage, "verdicts");
+        let gateways: HashMap<String, crate::gateway::GatewayRoute> =
+            load(&*storage, "gateways", cloud_only);
+        let verdicts: HashMap<String, crate::verifier::Verdict> =
+            load(&*storage, "verdicts", cloud_only);
         // Jobs are read in both shapes: one row per job (current), and
         // one row per agent holding the whole list (legacy). Reading
         // only the new shape would silently drop every job recorded
@@ -659,7 +701,11 @@ impl NodeState {
         // rewritten one per job and tombstoned, once.
         let mut jobs: HashMap<String, Vec<JobRecord>> = HashMap::new();
         let mut legacy_agents: Vec<String> = Vec::new();
-        for rec in storage.list_state("jobs").unwrap_or_default() {
+        for rec in if cloud_only {
+            Vec::new()
+        } else {
+            storage.list_state("jobs").unwrap_or_default()
+        } {
             match rec.key.split_once('/') {
                 Some((agent, _job_ref)) => match serde_json::from_str::<JobRecord>(&rec.value) {
                     Ok(v) => jobs.entry(agent.to_string()).or_default().push(v),
@@ -700,29 +746,34 @@ impl NodeState {
         let window = newest.len().saturating_sub(RECENT_JOBS);
         let recent_jobs: std::collections::VecDeque<JobRecord> =
             newest[window..].iter().map(|r| (*r).clone()).collect();
-        let disputes: HashMap<String, DisputeStats> = load(&*storage, "disputes");
+        let disputes: HashMap<String, DisputeStats> = load(&*storage, "disputes", cloud_only);
         let bindings: HashMap<String, crate::principal::PrincipalBinding> =
-            load(&*storage, "bindings");
-        let vetoes: HashMap<String, Vec<crate::principal::Veto>> = load(&*storage, "vetoes");
-        let budgets: HashMap<String, crate::principal::BudgetGrant> = load(&*storage, "budgets");
+            load(&*storage, "bindings", cloud_only);
+        let vetoes: HashMap<String, Vec<crate::principal::Veto>> =
+            load(&*storage, "vetoes", cloud_only);
+        let budgets: HashMap<String, crate::principal::BudgetGrant> =
+            load(&*storage, "budgets", cloud_only);
         let escalations: HashMap<String, crate::verifier::Escalation> =
-            load(&*storage, "escalations");
+            load(&*storage, "escalations", cloud_only);
         let subscriptions: HashMap<String, crate::delivery::Subscription> =
-            load(&*storage, "subscriptions");
+            load(&*storage, "subscriptions", cloud_only);
         // Balances are other people's money: losing them on a restart
         // would be the most expensive amnesia of all.
-        let balances: HashMap<String, crate::custody::Balance> = load(&*storage, "balances");
-        let balance_holds: HashMap<String, Amount> = load(&*storage, "holds");
-        let credited_deposits: std::collections::HashSet<String> = storage
-            .list_state("credited")
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| r.key)
-            .collect();
+        let balances: HashMap<String, crate::custody::Balance> =
+            load(&*storage, "balances", cloud_only);
+        let balance_holds: HashMap<String, Amount> = load(&*storage, "holds", cloud_only);
+        let credited_deposits: std::collections::HashSet<String> = if cloud_only {
+            Vec::new()
+        } else {
+            storage.list_state("credited").unwrap_or_default()
+        }
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
         let cloud_projects: HashMap<String, crate::cloud::ProjectRecord> =
-            load(&*storage, "cloud_projects");
+            load(&*storage, "cloud_projects", cloud_only);
         let custom_domains: HashMap<String, crate::cloud::SiteDomain> =
-            load(&*storage, "cloud_domains");
+            load(&*storage, "cloud_domains", cloud_only);
 
         // job_ref -> contract is derivable from the job history, so it
         // is rebuilt rather than stored twice and allowed to disagree.
@@ -789,15 +840,16 @@ impl NodeState {
             }
         }
 
-        let withdrawals: HashMap<String, Value> = load(&*storage, "withdrawals");
+        let withdrawals: HashMap<String, Value> = load(&*storage, "withdrawals", cloud_only);
         let delegations: HashMap<String, crate::delegation::TokenChain> =
-            load(&*storage, "delegations");
-        let cooling_off: HashMap<String, Value> = load(&*storage, "cooling_off");
-        let policies: HashMap<String, crate::policy::Policy> = load(&*storage, "policies");
+            load(&*storage, "delegations", cloud_only);
+        let cooling_off: HashMap<String, Value> = load(&*storage, "cooling_off", cloud_only);
+        let policies: HashMap<String, crate::policy::Policy> =
+            load(&*storage, "policies", cloud_only);
         let realtime_credits: HashMap<String, crate::cloud::RealtimeCreditAccount> =
-            load(&*storage, "cloud_realtime_credits");
+            load(&*storage, "cloud_realtime_credits", cloud_only);
         let realtime_credit_topups: HashMap<String, crate::cloud::RealtimeCreditTopUp> =
-            load(&*storage, "cloud_realtime_credit_topups");
+            load(&*storage, "cloud_realtime_credit_topups", cloud_only);
 
         let mut jobs_by_ref = HashMap::new();
         for records in jobs.values() {
@@ -812,7 +864,11 @@ impl NodeState {
         // rows matter. Without it a restart hands out a fresh allowance.
         let today = now_unix() / 86_400;
         let mut spend_today = HashMap::new();
-        for rec in storage.list_state("spend").unwrap_or_default() {
+        for rec in if cloud_only {
+            Vec::new()
+        } else {
+            storage.list_state("spend").unwrap_or_default()
+        } {
             let (did, day) = match rec.key.rsplit_once('|') {
                 Some((d, day)) => (d.to_string(), day.parse::<u64>().unwrap_or(0)),
                 None => continue,
@@ -9732,6 +9788,59 @@ mod tests {
         Arc::new(Mutex::new(NodeState::new(Box::new(
             SqliteStorage::open(":memory:").unwrap(),
         ))))
+    }
+
+    #[test]
+    fn cloud_boot_keeps_identity_and_project_but_does_not_migrate_legacy_jobs() {
+        let mut storage = SqliteStorage::open(":memory:").unwrap();
+        let identity = AgentIdentity::generate();
+        let project = crate::cloud::ProjectRecord {
+            project_id: "prj_cloud_boot".into(),
+            owner_did: identity.did().to_string(),
+            status: "active".into(),
+            plan: "free".into(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        storage
+            .upsert_state(&crate::storage::StateRecord {
+                scope: "cloud_projects".into(),
+                key: project.project_id.clone(),
+                value: serde_json::to_string(&project).unwrap(),
+                updated_at: 1,
+            })
+            .unwrap();
+        // Old per-agent job lists were automatically rewritten on protocol boot.
+        // Even an empty list would be tombstoned. Cloud must leave it untouched.
+        storage
+            .upsert_state(&crate::storage::StateRecord {
+                scope: "jobs".into(),
+                key: "did:gap:archived".into(),
+                value: "[]".into(),
+                updated_at: 1,
+            })
+            .unwrap();
+        let mut legacy = NodeState::with_vault(Box::new(storage), None, 120, 600, None);
+        let (_, token) = legacy.create_identity();
+        // Reinsert after the historical constructor has demonstrated migration.
+        legacy
+            .storage
+            .upsert_state(&crate::storage::StateRecord {
+                scope: "jobs".into(),
+                key: "did:gap:archived".into(),
+                value: "[]".into(),
+                updated_at: 2,
+            })
+            .unwrap();
+        let state = NodeState::with_vault_mode(legacy.storage, None, 120, 600, None, true);
+        assert!(state.agents.contains_key(&token));
+        assert_eq!(
+            state.cloud_projects.get(&project.project_id),
+            Some(&project)
+        );
+        assert!(state.jobs.is_empty());
+        assert!(state.balances.is_empty());
+        assert_eq!(state.storage.list_state("jobs").unwrap().len(), 1);
     }
 
     #[test]

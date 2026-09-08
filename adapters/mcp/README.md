@@ -1,5 +1,8 @@
 # GAP MCP adapter
 
+**Archived:** this adapter targets the retired contract protocol, not GAP Cloud.
+Do not install it for Cloud. See [current agent instructions](../../AGENTS.md).
+
 Exposes a GAP node as **MCP tools** over stdio. Any MCP-capable agent
 (Claude Desktop, Claude Code, or any assistant with an MCP client)
 gains the full GAP lifecycle — identity, announce, discover, contract,

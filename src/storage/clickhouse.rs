@@ -517,6 +517,15 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
     /// ClickHouse quotes 64-bit integers in JSON by default, which does
     /// not deserialize into `u64`.
     pub fn hydrate(&self) -> Result<HydrateSummary> {
+        self.hydrate_selected(false)
+    }
+
+    /// Preserve the audit head and identities without loading archived commerce.
+    pub fn hydrate_cloud(&self) -> Result<HydrateSummary> {
+        self.hydrate_selected(true)
+    }
+
+    fn hydrate_selected(&self, cloud_only: bool) -> Result<HydrateSummary> {
         let mut summary = HydrateSummary::default();
 
         // Load only the TAIL of the spine.
@@ -554,33 +563,35 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             summary.events = total as usize;
         }
 
-        for rec in self.select_paged::<ContractRecord>(
-            "SELECT contract_id, client, provider, capability_id, state, contract_json, \
+        if !cloud_only {
+            for rec in self.select_paged::<ContractRecord>(
+                "SELECT contract_id, client, provider, capability_id, state, contract_json, \
              updated_at FROM gap_contracts FINAL",
-            "contract_id",
-        )? {
-            self.contracts
-                .lock()
-                .map_err(|_| Error::Other("contracts lock poisoned".into()))?
-                .insert(rec.contract_id.clone(), rec);
-            summary.contracts += 1;
-        }
-
-        for rec in self.select_paged::<AnnouncementRecord>(
-            "SELECT agent_did, announcement_json, expires_at FROM gap_announcements FINAL",
-            "agent_did",
-        )? {
-            // An empty body is a tombstone from `delete_announcement`.
-            // Loading it would put a withdrawn agent back in the
-            // directory, which is the bug the tombstone exists to fix.
-            if rec.announcement_json.trim().is_empty() {
-                continue;
+                "contract_id",
+            )? {
+                self.contracts
+                    .lock()
+                    .map_err(|_| Error::Other("contracts lock poisoned".into()))?
+                    .insert(rec.contract_id.clone(), rec);
+                summary.contracts += 1;
             }
-            self.announcements
-                .lock()
-                .map_err(|_| Error::Other("announcements lock poisoned".into()))?
-                .insert(rec.agent_did.clone(), rec);
-            summary.announcements += 1;
+
+            for rec in self.select_paged::<AnnouncementRecord>(
+                "SELECT agent_did, announcement_json, expires_at FROM gap_announcements FINAL",
+                "agent_did",
+            )? {
+                // An empty body is a tombstone from `delete_announcement`.
+                // Loading it would put a withdrawn agent back in the
+                // directory, which is the bug the tombstone exists to fix.
+                if rec.announcement_json.trim().is_empty() {
+                    continue;
+                }
+                self.announcements
+                    .lock()
+                    .map_err(|_| Error::Other("announcements lock poisoned".into()))?
+                    .insert(rec.agent_did.clone(), rec);
+                summary.announcements += 1;
+            }
         }
 
         for rec in self.select_paged::<IdentityRecord>(
@@ -594,31 +605,37 @@ impl<T: HttpTransport> ClickHouseStorage<T> {
             summary.identities += 1;
         }
 
-        for rec in self.select_paged::<EscrowRecord>(
-            "SELECT contract_id, state, held, currency, updated_at FROM gap_escrows FINAL",
-            "contract_id",
-        )? {
-            self.escrows
-                .lock()
-                .map_err(|_| Error::Other("escrows lock poisoned".into()))?
-                .insert(rec.contract_id.clone(), rec);
-            summary.escrows += 1;
-        }
+        if !cloud_only {
+            for rec in self.select_paged::<EscrowRecord>(
+                "SELECT contract_id, state, held, currency, updated_at FROM gap_escrows FINAL",
+                "contract_id",
+            )? {
+                self.escrows
+                    .lock()
+                    .map_err(|_| Error::Other("escrows lock poisoned".into()))?
+                    .insert(rec.contract_id.clone(), rec);
+                summary.escrows += 1;
+            }
 
-        for rec in self.select_paged::<DeliverableRecord>(
-            "SELECT contract_id, digest, encoding, media_type, content, uri, delivered_at \
+            for rec in self.select_paged::<DeliverableRecord>(
+                "SELECT contract_id, digest, encoding, media_type, content, uri, delivered_at \
              FROM gap_deliverables FINAL",
-            "contract_id",
-        )? {
-            self.deliverables
-                .lock()
-                .map_err(|_| Error::Other("deliverables lock poisoned".into()))?
-                .insert(rec.contract_id.clone(), rec);
-            summary.deliverables += 1;
+                "contract_id",
+            )? {
+                self.deliverables
+                    .lock()
+                    .map_err(|_| Error::Other("deliverables lock poisoned".into()))?
+                    .insert(rec.contract_id.clone(), rec);
+                summary.deliverables += 1;
+            }
         }
 
         for rec in self.select_paged::<StateRecord>(
-            "SELECT scope, key, value, updated_at FROM gap_state FINAL",
+            if cloud_only {
+                "SELECT scope, key, value, updated_at FROM gap_state FINAL WHERE startsWith(scope, 'cloud_')"
+            } else {
+                "SELECT scope, key, value, updated_at FROM gap_state FINAL"
+            },
             "scope, key",
         )? {
             // A tombstone: deleted entries are written back with an
@@ -1328,6 +1345,26 @@ mod tests {
     /// `uri too long` while the node went on publishing a settled count
     /// derived from the stale snapshot - 3,985 against 310,696 contracts
     /// actually accepted.
+    #[test]
+    fn cloud_hydration_never_queries_commerce_projections() {
+        let storage = ClickHouseStorage::new(MockTransport::default());
+        storage.hydrate_cloud().unwrap();
+        let queries = storage.transport.queries.borrow();
+        assert!(queries
+            .iter()
+            .any(|q| q.contains("startsWith(scope, 'cloud_')")));
+        assert!(queries.iter().any(|q| q.contains("gap_identities")));
+        assert!(queries.iter().any(|q| q.contains("gap_events")));
+        for table in [
+            "gap_contracts",
+            "gap_escrows",
+            "gap_announcements",
+            "gap_deliverables",
+        ] {
+            assert!(!queries.iter().any(|q| q.contains(table)), "{table}");
+        }
+    }
+
     #[test]
     fn a_large_state_value_goes_in_the_body_not_the_url() {
         let mut storage = ClickHouseStorage::new(MockTransport::default());

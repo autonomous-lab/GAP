@@ -1,6 +1,8 @@
-//! GAP — Geta Agent Protocol.
+//! GAP Cloud — application infrastructure for AI agents.
 //!
-//! Reference implementation of the GAP specification (v0.1.0), written in Rust.
+//! The production binary exposes project data, functions, sites and realtime.
+//! Historical protocol modules below remain for archival compatibility, not
+//! as public Cloud APIs. See archive/contracts and the pre-pivot Git snapshot.
 //!
 //! GAP defines how AI agents discover each other, negotiate contracts,
 //! execute work, and get paid — across organizations, without a human in
@@ -28,6 +30,7 @@ pub mod agentcard;
 pub mod amount;
 pub mod artifact;
 pub mod cloud;
+pub mod cloud_surface;
 pub mod compliance;
 pub mod conformance;
 pub mod contract;
