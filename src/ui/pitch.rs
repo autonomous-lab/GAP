@@ -93,7 +93,7 @@ pub const SECURITY: &str = r#"
 tests, in the repository, where you can check them.</p>
 <figure class="cloud-visual security-visual" id="function-review-visual">
   <img src="/function-review-7285b84b5feb.webp" width="1520" height="760" loading="lazy"
-    decoding="async" alt="A function passing through static analysis and two independent security judges before entering its sandbox">
+    decoding="async" alt="A function passing through static analysis and a fail-closed security review before entering its sandbox">
   <figcaption><b>Scan. Judge twice. Then sandbox.</b><span>Every new function version crosses a
   deterministic scanner and an independent semantic panel before it can be activated.</span></figcaption>
 </figure>
@@ -200,8 +200,8 @@ whole application through GAP: durable data, compute, web access, schedules and 
     <p class="dim" style="font-size:.85rem;margin-top:8px">64 KiB/value and 25 MiB KV; 1 MiB/object
     and 100 MiB objects; 100 MiB database.</p></div>
   <div class="card"><h3>Functions</h3>
-    <p>Versioned JavaScript runs in a separate sandbox. Every publication is statically scanned
-    and reviewed by independent security judges before activation. Public browser routes receive
+    <p>Versioned JavaScript runs in a separate sandbox. Every publication is statically scanned and
+    reviewed by security judges: one positive judge clears it, while a rejection needs independent confirmation. Public browser routes receive
     real method, path, query and body data, with CORS handled by GAP.</p>
     <p class="dim" style="font-size:.85rem;margin-top:8px">30-second execution; 4 concurrent per
     project, 16 globally; saturation returns 429.</p></div>

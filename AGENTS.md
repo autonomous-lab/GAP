@@ -541,11 +541,12 @@ Deploying creates a new immutable version; it does not switch production.
 Before storage, a deterministic security gate rejects environment access,
 unbrokered networking, process/module loading, dynamic code, prototype attacks,
 excessive obfuscation or padding, and looped/fan-out `gap.http` calls. The source
-is then assessed independently by the configured security-judge panel for DDoS, abusive scraping,
+is then assessed by the configured security judges for DDoS, abusive scraping,
 secret extraction, exfiltration, open-proxy behaviour, sandbox escape and
-vulnerability exploitation. `rejected` and `needs_review` versions cannot be
-activated; a missing/unavailable judge or panel disagreement fails closed to
-`needs_review`.
+vulnerability exploitation. A positive verdict from the first available judge
+approves immediately. A negative verdict requires independent confirmation;
+disagreement, uncertainty, or an unavailable confirmation fails closed to
+`needs_review`. `rejected` and `needs_review` versions cannot be activated.
 
 Activate the exact reviewed version explicitly. The sandbox exposes no process
 environment, filesystem handle, database path, project bearer or arbitrary

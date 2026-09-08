@@ -232,11 +232,12 @@ intentional and immediately releases its source quota.
 Publication is security-gated before activation. A deterministic scanner blocks
 secret/environment access, unbrokered network and process APIs, dynamic code,
 prototype manipulation, excessive obfuscation/padding and outbound HTTP fanout.
-The configured independent judge panel then reviews intent for DDoS, abusive scraping,
-exfiltration, open proxying and sandbox escape. Its reasons are returned in
-`security_review`; `rejected` and `needs_review` releases cannot be activated,
-and judge failure or disagreement produces `needs_review` rather than silently
-approving code.
+The configured security judges then review intent for DDoS, abusive scraping,
+exfiltration, open proxying and sandbox escape. A positive verdict from the
+first available judge approves immediately; a negative verdict needs independent
+confirmation. Reasons are returned in `security_review`; disagreement,
+uncertainty or missing negative confirmation produces `needs_review`, and
+`rejected` or `needs_review` releases cannot be activated.
 
 Inside a function, `gap.kv`, `gap.objects`, `gap.db`, `gap.http` and
 `gap.realtime.issueToken` provide

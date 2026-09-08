@@ -2960,9 +2960,11 @@ the content inline"
                 .flatten()
                 .collect();
         let mut opinions = Vec::new();
+        let mut consulted_judges = Vec::new();
         let mut security_reasons = Vec::new();
         for judge in &judges {
             let judge_name = judge.name();
+            consulted_judges.push(judge_name.clone());
             match judge.judge_function_security(name, source_text) {
                 Ok((ruling, reasons)) => {
                     security_reasons.extend(
@@ -2971,6 +2973,17 @@ the content inline"
                             .map(|reason| format!("[{judge_name}] {reason}")),
                     );
                     opinions.push(ruling);
+                    // A positive security verdict clears the release by itself
+                    // unless a previous judge explicitly found malicious
+                    // behaviour. The second opinion exists to confirm a
+                    // rejection or resolve uncertainty, not to turn a healthy
+                    // publication into a failure because another provider is
+                    // temporarily unavailable.
+                    if ruling == crate::verifier::Ruling::Conforms
+                        && !opinions.contains(&crate::verifier::Ruling::Nonconforming)
+                    {
+                        break;
+                    }
                 }
                 Err(error) => {
                     security_reasons.push(format!("[{judge_name}] unavailable: {error}"));
@@ -2978,34 +2991,30 @@ the content inline"
                 }
             }
         }
-        let release_ruling =
-            if opinions.is_empty() || opinions.contains(&crate::verifier::Ruling::Inconclusive) {
-                if opinions.is_empty() {
-                    security_reasons.push("security judge is not configured".into());
-                }
-                crate::cloud::ReleaseRuling::NeedsReview
-            } else if opinions
-                .iter()
-                .all(|ruling| *ruling == crate::verifier::Ruling::Conforms)
-            {
-                crate::cloud::ReleaseRuling::ApprovedWithConstraints
-            } else if opinions
+        let has_positive = opinions.contains(&crate::verifier::Ruling::Conforms);
+        let has_negative = opinions.contains(&crate::verifier::Ruling::Nonconforming);
+        let release_ruling = if opinions.is_empty() {
+            security_reasons.push("security judge is not configured".into());
+            crate::cloud::ReleaseRuling::NeedsReview
+        } else if has_positive && !has_negative {
+            crate::cloud::ReleaseRuling::ApprovedWithConstraints
+        } else if has_negative
+            && opinions.len() >= 2
+            && opinions
                 .iter()
                 .all(|ruling| *ruling == crate::verifier::Ruling::Nonconforming)
-            {
-                crate::cloud::ReleaseRuling::Rejected
-            } else {
-                security_reasons.push("security judges disagreed".into());
-                crate::cloud::ReleaseRuling::NeedsReview
-            };
-        let security_judge = if judges.is_empty() {
+        {
+            crate::cloud::ReleaseRuling::Rejected
+        } else if has_positive && has_negative {
+            security_reasons.push("security judges disagreed".into());
+            crate::cloud::ReleaseRuling::NeedsReview
+        } else {
+            crate::cloud::ReleaseRuling::NeedsReview
+        };
+        let security_judge = if consulted_judges.is_empty() {
             "none".into()
         } else {
-            judges
-                .iter()
-                .map(|judge| judge.name())
-                .collect::<Vec<_>>()
-                .join(", ")
+            consulted_judges.join(", ")
         };
         let mut store = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?;
         let mut version = store.deploy_function(name, runtime, source, now_unix())?;
@@ -11090,6 +11099,44 @@ mod tests {
             .0,
             401
         );
+    }
+
+    #[test]
+    fn a_positive_primary_function_judge_does_not_wait_for_the_second() {
+        let arc = state();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        arc.lock()
+            .unwrap()
+            .set_cloud_root(std::env::temp_dir().join(format!("gap-judge-test-{nonce}")));
+        let mut primary = crate::verifier::MockVerifier::new(crate::verifier::Ruling::Conforms);
+        primary.label = Some("primary".into());
+        let mut second = crate::verifier::MockVerifier::new(crate::verifier::Ruling::Conforms);
+        second.label = Some("second".into());
+        second.set_fail(true);
+        arc.lock().unwrap().set_verifier(Box::new(primary));
+        arc.lock().unwrap().set_second_verifier(Box::new(second));
+        let owner = register(&arc);
+        let auth = format!("Bearer {owner}");
+        let (_, project) = route(&arc, "POST", "/v1/cloud/projects", b"{}", Some(&auth));
+        let project_id = project["project_id"].as_str().unwrap();
+        let path = format!("/v1/cloud/projects/{project_id}/functions/positive");
+        let deploy = json!({ "runtime": "javascript", "source": "() => 42" });
+        let (status, version) = route(
+            &arc,
+            "POST",
+            &path,
+            deploy.to_string().as_bytes(),
+            Some(&auth),
+        );
+        assert_eq!(status, 200, "{version}");
+        assert_eq!(version["ruling"], "approved_with_constraints");
+        assert_eq!(version["security_review"]["judge"], "primary");
+        assert!(!version["security_review"]["reasons"]
+            .to_string()
+            .contains("unavailable"));
     }
 
     #[test]
