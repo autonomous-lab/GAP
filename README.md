@@ -73,6 +73,8 @@ cargo test --lib
 python3 scripts/deploy-check.py
 ```
 
-The Cloud landing page and HTTP surface live in `src/cloud_surface.rs`.
+The Cloud HTTP surface lives in `src/cloud_surface.rs`; its responsive landing
+template is `src/ui/cloud_home.html`. Artwork provenance and UI behavior are
+documented in `src/ui/cloud-design.md`.
 Project storage lives in `src/cloud.rs`; function and realtime sidecars live
 under `runtime/`. Cloud request examples are maintained in `AGENTS.md`.

@@ -6780,6 +6780,9 @@ pub fn og_image_path() -> &'static str {
 /// was versioned still resolves - it simply serves whatever the current
 /// card is, which is the honest answer to an unversioned request.
 pub fn static_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
+    if path == "/cloud-core-v2.webp" {
+        return Some(("image/webp", include_bytes!("ui/cloud-core-v2.webp")));
+    }
     if path == "/og.png" || path == og_image_path() {
         return Some(("image/png", OG_IMAGE));
     }

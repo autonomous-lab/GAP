@@ -1,0 +1,24 @@
+# GAP Cloud landing — graphite / acid lime
+
+The active landing is embedded from `cloud_home.html` by `cloud_surface.rs`.
+Keep the API surface, tenant sites and authentication separate from this UI.
+
+## Design and behavior
+
+- Graphite background, acid-lime highlights, large editorial typography.
+- Integrated hardware-style hero, not a separate stock-art rectangle.
+- Responsive mobile composition, native expandable navigation, 44px-class actions.
+- Illustrative product panels are explicitly illustrative, not live telemetry.
+- Working code tabs (including keyboard navigation), instruction-copy control
+  with selection fallback, visible focus, skip link and reduced-motion support.
+- No external fonts, frontend frameworks, trackers or animation dependencies.
+- Generated artwork converted to WebP (quality 84); original generation: 1536x1024.
+
+## Artwork provenance
+
+Built-in Imagegen, new generation. Final project asset: `cloud-core-v2.webp`.
+No generated text is used for navigation, instructions or product claims.
+
+Generation prompt:
+
+> Use case: stylized-concept. Asset type: premium developer cloud website hero artwork, not a website mockup. Create a spectacular high-end 3D studio render of a single sculptural cloud compute core: three thick floating rounded-square dark smoked-glass and brushed titanium plates stacked vertically, pulled slightly apart, suspended in space, with a brilliant acid-lime luminous energy core between the plates. Precision machined edges, subtle circuit engravings, light refracting through green glass, exquisite industrial product photography like a luxury hardware launch. A few very fine lime orbital filaments curve around the sculpture. Background is nearly pure black #070909 seamlessly fading to black on ALL edges, no visible horizon, no floor. Composition: landscape 3:2, object centered, viewed from elevated three-quarter angle, generous black breathing room around entire object, entire silhouette visible. Palette strictly graphite black, silver, acid lime #c6ff6b, restrained warm white highlights. Dramatic directional lighting, strong silhouette, crisp material detail, sophisticated and minimal, not a busy sci-fi city, not a server rack, no rainbow, no purple, no cyan. No text, no letters, no logos, no UI, no watermark. This will be the right-hand artwork on an actual live landing page, with typography implemented separately in HTML.
