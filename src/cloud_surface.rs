@@ -35,7 +35,26 @@ pub fn page(path: &str) -> Option<(&'static str, String)> {
 const HOME: &str = include_str!("ui/cloud_home.html");
 
 fn render_markdown(source: &str) -> String {
-    use pulldown_cmark::{Event, Options, Parser, Tag};
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
+    let mut headings = Vec::new();
+    let mut heading = None;
+    for event in Parser::new_ext(source, options) {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => heading = Some((level, String::new())),
+            Event::Text(text) | Event::Code(text) => {
+                if let Some((_, title)) = &mut heading {
+                    title.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some(value) = heading.take() {
+                    headings.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
     let parser = Parser::new_ext(
         source,
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH,
@@ -65,6 +84,49 @@ fn render_markdown(source: &str) -> String {
     });
     let mut html = String::new();
     pulldown_cmark::html::push_html(&mut html, parser);
+    let mut seen = std::collections::HashMap::<String, usize>::new();
+    let mut old_index = 0;
+    for (level, title) in headings {
+        let base = title
+            .split(" — ")
+            .next()
+            .unwrap_or(&title)
+            .to_ascii_lowercase();
+        let slug = base
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        let slug = if slug.is_empty() {
+            "heading".to_string()
+        } else {
+            slug
+        };
+        let count = seen.entry(slug.clone()).or_default();
+        *count += 1;
+        let id = if *count == 1 {
+            slug
+        } else {
+            format!("{slug}-{count}")
+        };
+        // Keep existing positional bookmarks working, but use named anchors
+        // for new links. Both are emitted server-side, including without JS.
+        let alias = if matches!(
+            level,
+            pulldown_cmark::HeadingLevel::H2 | pulldown_cmark::HeadingLevel::H3
+        ) {
+            let value = format!("<span id=\"section-{old_index}\" aria-hidden=\"true\"></span>");
+            old_index += 1;
+            value
+        } else {
+            String::new()
+        };
+        html = html.replacen(
+            &format!("<{level}>"),
+            &format!("{alias}<{level} id=\"{id}\">"),
+            1,
+        );
+    }
     html
 }
 
@@ -84,8 +146,8 @@ mod tests {
     #[test]
     fn documentation_renders_markdown_and_preserves_raw_agent_instructions() {
         let html = page("/docs").unwrap().1;
-        assert!(html.contains("<h1>GAP Cloud"));
-        assert!(html.contains("<h3>Projects"));
+        assert!(html.contains("id=\"gap-cloud\">GAP Cloud"));
+        assert!(html.contains("id=\"projects\">Projects"));
         assert!(html.contains("<pre><code class=\"language-bash\">"));
         assert!(html.contains("https://github.com/autonomous-lab/GAP/blob/main/sdk/realtime.js"));
         assert_eq!(page("/agents.md").unwrap().1, include_str!("../AGENTS.md"));
@@ -96,6 +158,30 @@ mod tests {
         assert!(sample.contains("<table>"));
         assert!(!sample.contains("<script>"));
     }
+    #[test]
+    fn feature_links_have_server_rendered_documentation_targets() {
+        let docs = page("/docs").unwrap().1;
+        for fragment in HOME.split("href=\"/docs#").skip(1) {
+            let id = fragment.split('"').next().unwrap();
+            assert!(
+                docs.contains(&format!("id=\"{id}\"")),
+                "missing anchor {id}"
+            );
+        }
+        for id in [
+            "sqlite",
+            "functions",
+            "websocket",
+            "private-static-site",
+            "custom-site-domains",
+            "section-0",
+        ] {
+            assert!(docs.contains(&format!("id=\"{id}\"")), "{id}");
+        }
+        let duplicate = render_markdown("## Example\n\n## Example\n");
+        assert!(duplicate.contains("id=\"example-2\""));
+    }
+
     #[test]
     fn landing_has_accessible_navigation_and_local_artwork() {
         let (_, home) = page("/").unwrap();
