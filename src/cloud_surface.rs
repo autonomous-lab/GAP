@@ -26,10 +26,7 @@ pub fn page(path: &str) -> Option<(&'static str, String)> {
         "/agents.md" | "/AGENTS.md" | "/llms.txt" => Some(("text/plain; charset=utf-8", include_str!("../AGENTS.md").into())),
         "/robots.txt" => Some(("text/plain", "User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /internal/\nDisallow: /sites/\n".into())),
         "/" => Some(("text/html; charset=utf-8", HOME.into())),
-        "/docs" | "/for-agents" | "/for-humans" | "/how-it-works" => Some(("text/html; charset=utf-8", format!(
-            "<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>GAP Cloud documentation</title><style>body{{background:#080e1a;color:#e5edf9;font:16px/1.6 system-ui;max-width:1000px;margin:auto;padding:32px}}a{{color:#69e2cd}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.7 monospace}}</style><nav><a href='/'>GAP Cloud</a> · <a href='/agents.md'>Download agent instructions</a></nav><h1>Build with GAP Cloud</h1><pre>{}</pre></html>",
-            include_str!("../AGENTS.md").replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-        ))),
+        "/docs" | "/for-agents" | "/for-humans" | "/how-it-works" => Some(("text/html; charset=utf-8", documentation().to_string())),
         "/.well-known/gap-agent.json" => Some(("application/json", "{\"name\":\"GAP Cloud\",\"description\":\"Application infrastructure for AI agents\",\"documentation\":\"/agents.md\",\"projects\":\"/v1/cloud/projects\"}".into())),
         _ => None,
     }
@@ -37,9 +34,68 @@ pub fn page(path: &str) -> Option<(&'static str, String)> {
 
 const HOME: &str = include_str!("ui/cloud_home.html");
 
+fn render_markdown(source: &str) -> String {
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+    let parser = Parser::new_ext(
+        source,
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH,
+    )
+    .map(|event| match event {
+        // The input is repository-owned, but keep raw HTML inert anyway.
+        Event::Html(text) | Event::InlineHtml(text) => Event::Text(text),
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => {
+            let url = if let Some(path) = dest_url.strip_prefix("./") {
+                format!("https://github.com/autonomous-lab/GAP/blob/main/{path}").into()
+            } else {
+                dest_url
+            };
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url: url,
+                title,
+                id,
+            })
+        }
+        other => other,
+    });
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, parser);
+    html
+}
+
+fn documentation() -> &'static str {
+    static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PAGE.get_or_init(|| {
+        include_str!("ui/cloud_docs.html").replace(
+            "<!-- CONTENT -->",
+            &render_markdown(include_str!("../AGENTS.md")),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn documentation_renders_markdown_and_preserves_raw_agent_instructions() {
+        let html = page("/docs").unwrap().1;
+        assert!(html.contains("<h1>GAP Cloud"));
+        assert!(html.contains("<h3>Projects"));
+        assert!(html.contains("<pre><code class=\"language-bash\">"));
+        assert!(html.contains("https://github.com/autonomous-lab/GAP/blob/main/sdk/realtime.js"));
+        assert_eq!(page("/agents.md").unwrap().1, include_str!("../AGENTS.md"));
+        let sample = render_markdown(
+            "# Title\n\n**bold**\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n<script>alert(1)</script>",
+        );
+        assert!(sample.contains("<strong>bold</strong>"));
+        assert!(sample.contains("<table>"));
+        assert!(!sample.contains("<script>"));
+    }
     #[test]
     fn landing_has_accessible_navigation_and_local_artwork() {
         let (_, home) = page("/").unwrap();

@@ -27,6 +27,7 @@ tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 rand_core = "0.10.1"
 base64 = "0.22.1"
 argon2 = "0.5.3"
+pulldown-cmark = { version = "=0.13.4", default-features = false, features = ["html"] }
 
 [dev-dependencies]
 criterion = "0.8.2"
