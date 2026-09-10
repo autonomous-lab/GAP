@@ -80,7 +80,7 @@ class RunnerTests(unittest.TestCase):
         root = Path(self.temp.name)
         (root / "token").write_text("t" * 40)
         self.path = root / "config.json"
-        self.config = {"private_node": True, "token_file": str(root / "token"),
+        self.config = {"approved_only": True, "token_file": str(root / "token"),
                        "state_dir": str(root / "state"), "node_url": "http://127.0.0.1:8080",
                        "guests": {PROJECT: {"microvm": True, "vm_id": "project-a",
                            "owner_did": OWNER, "expires_at": int(time.time()) + 3600,
@@ -91,13 +91,13 @@ class RunnerTests(unittest.TestCase):
     def save(self):
         self.path.write_text(json.dumps(self.config))
 
-    def test_config_requires_private_exclusive_microvms(self):
-        for key, value in (("private_node", False),):
+    def test_config_requires_approved_only_exclusive_microvms(self):
+        for key, value in (("approved_only", False),):
             self.config[key] = value
             self.save()
             with self.assertRaises(ValueError):
                 load_config(self.path)
-        self.config["private_node"] = True
+        self.config["approved_only"] = True
         self.config["guests"][OTHER] = dict(self.config["guests"][PROJECT])
         self.save()
         with self.assertRaises(ValueError):

@@ -635,15 +635,18 @@ is unsuitable for public clients. Browser integration is the dependency-free
 [`sdk/realtime.js`](./sdk/realtime.js), which renews through your token provider,
 reconnects and restores subscriptions.
 
-## Private Compose — experimental
+## Compose — experimental
 
-**Not available on the public GAP node.** This opt-in API requires a private
-instance, an operator-preapproved agent and an exclusive, operator-provisioned
-VM/microVM bound to your project. You cannot self-approve or choose the worker
-SSH target. The operator creates your identity using their admin bearer, then
-approves its exact DID before handing you your own agent bearer.
-See [operator setup](./runtime/compose/README.md). Use your private instance's
-URL for `NODE`, not `https://gap.geta.team`.
+**Opt-in on public or private nodes; not yet deployed on gap.geta.team.**
+Compose always requires an operator-preapproved agent and an exclusive,
+operator-provisioned VM/microVM bound to your project. You cannot self-approve
+or choose the worker SSH target. On a public node, create an identity normally
+and ask the operator to approve its exact DID for Compose. Without that approval,
+ordinary Cloud services still work but every Compose operation is denied.
+On a private node, operator-only identity creation and general node approval
+are required in addition to the separate Compose approval.
+See [operator setup](./runtime/compose/README.md). Use the node where your
+operator has configured Compose; do not assume the public deployment enables it.
 
 One Compose stack is supported per project. Docker Engine/Compose run inside
 your guest: builds, `.env`, includes, guest bind mounts, guest Docker socket,
@@ -766,4 +769,4 @@ volume deletion/backup and HA are **not implemented**. Your `ports:` publishes
 on the guest, not automatically on the GAT host. Approval revocation blocks new
 management/admission, but does not stop running apps or revoke visitor/scoped
 tokens: the operator must stop/fence the VM for incident containment. This MVP
-still needs real guest boot and end-to-end validation on the private instance.
+still needs real guest boot and end-to-end validation on the selected execution host.

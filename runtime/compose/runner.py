@@ -1,4 +1,4 @@
-"""Private Compose control worker. Runs SSH only, never Docker on the host.
+"""Preapproved Compose control worker. Runs SSH only, never Docker on the host.
 
 Operator-provisioned, exclusive microVMs are required. This worker does not
 create VMs or attest their isolation; an inventory entry is operator trust.
@@ -37,8 +37,8 @@ class Failure(Exception):
 
 def load_config(path):
     config = json.loads(Path(path).read_text())
-    if config.get("private_node") is not True:
-        raise ValueError("runner requires explicit private_node=true")
+    if config.get("approved_only") is not True:
+        raise ValueError("runner requires explicit approved_only=true")
     seen = set()
     for project, guest in config["guests"].items():
         if not PROJECT.fullmatch(project) or guest.get("microvm") is not True:

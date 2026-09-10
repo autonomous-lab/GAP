@@ -1,11 +1,12 @@
-# Private GAP: trusted Compose in project microVMs
+# GAP: preapproved Compose in project microVMs
 
 Status: experimental implementation, not deployed on public GAP.
 See [operator setup and limitations](../runtime/compose/README.md).
 
 ## Agreed architecture
 
-- Operator-preapproved agents on a private instance only.
+- Operator-preapproved agents on public or private nodes. Compose approval is
+  separate from general private-node admission; public registration stays open.
 - One exclusive VM/microVM per project; ordinary Docker Engine and Compose
   inside the guest, including guest-root privileges.
 - Regular Compose builds, includes, .env, volumes, guest bind mounts, guest
@@ -25,7 +26,7 @@ first implementation; stacks may operate their own databases inside the guest.
 
 ## First implementation
 
-Approved owner -> private GAP API -> authenticated asynchronous runner job ->
+Approved owner -> GAP API -> authenticated asynchronous runner job ->
 pinned SSH -> exclusive guest -> Docker Compose.
 
 GAP checks live approval and project ownership. The worker checks its operator
@@ -53,12 +54,12 @@ change on update. Inspect state before retrying after timeout or disconnection.
   must fence/stop a VM through the hypervisor for incident containment.
 - Removal of existing Cloud service quotas or automatic GAT identity bootstrap.
 
-Do not convert the public GAP node into a trusted private execution host.
+Enabling Compose does not make a public node private or approve all its agents.
 KVM probing and simulated worker tests do not prove real guest boot.
 
 ## Next acceptance gate
 
-On an explicitly selected private instance: provision a Docker-capable guest,
+On an explicitly selected execution host: provision a Docker-capable guest,
 install the helper, pin SSH host identity and configure project/owner approval.
 Test real multi-service builds, persistent volumes, partial updates, controller
 restart, SSH failure and revocation. Check no host secrets/control sockets are

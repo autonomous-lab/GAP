@@ -7535,7 +7535,7 @@ pub fn route_with_ip(
                     .is_some_and(|project| {
                         project.status == "active"
                             && body["owner_did"].as_str() == Some(project.owner_did.as_str())
-                            && policy.authorize(&project.owner_did).is_ok()
+                            && policy.authorize_compose(&project.owner_did).is_ok()
                     })
         });
         return (if allowed { 200 } else { 403 }, json!({"allowed": allowed}));
@@ -7555,6 +7555,14 @@ pub fn route_with_ip(
             Ok(project) => project,
             Err(error) => return error_response(&error),
         };
+        if let Err(error) = guard
+            .private_node
+            .as_ref()
+            .unwrap()
+            .authorize_compose(&project.owner_did)
+        {
+            return error_response(&error);
+        }
         // Only submit/poll here: guest execution happens asynchronously on the
         // runner. No network call or Compose operation under the state lock.
         drop(guard);
@@ -8375,7 +8383,10 @@ pub fn route_with_ip(
 
         // ---- identity ----
         ("POST", "/v1/identity") => {
-            if guard.private_node.is_some()
+            if guard
+                .private_node
+                .as_ref()
+                .is_some_and(|policy| policy.private)
                 && (token.is_none() || guard.admin_token.as_deref() != token)
             {
                 return error_response(&Error::Unauthorized(
@@ -9926,7 +9937,9 @@ mod tests {
             let mut state = arc.lock().unwrap();
             state.set_admin_token("operator-only");
             state.private_node = Some(crate::private_node::PrivateNode {
+                private: true,
                 approvals: path.clone(),
+                compose_approvals: None,
                 runner: None,
             });
         }
@@ -9995,7 +10008,9 @@ mod tests {
         {
             let mut state = arc.lock().unwrap();
             state.private_node = Some(crate::private_node::PrivateNode {
+                private: true,
                 approvals: path.clone(),
+                compose_approvals: Some(path.clone()),
                 runner: Some(("http://127.0.0.1:9".into(), "runner-secret".into())),
             });
             state.cloud_projects.insert(

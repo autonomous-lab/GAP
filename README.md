@@ -88,20 +88,21 @@ See the [archive inventory and migration notes](./archive/contracts/STATUS.md).
 
 ## Development
 
-Experimental: [private-node Compose hosting](./runtime/compose/README.md),
+Experimental: [preapproved Compose hosting](./runtime/compose/README.md),
 restricted to operator-preapproved agents and **operator-provisioned exclusive
 project microVMs**. The API and asynchronous SSH worker support deploy/update,
 start/stop, status and logs with request-id deduplication. Docker runs only in
 the guest; no GAT host Docker socket is given to GAP or workloads.
 
-Enable only on a selected private instance with `GAP_PRIVATE_NODE=1`, an
-operator-owned identity approval file and `GAP_COMPOSE_ENABLED=1`. Public mode
-is unchanged. Classic guest Compose is accepted without additional commercial
+Enable on public or private nodes with `GAP_COMPOSE_ENABLED=1` and the mandatory
+operator-owned `GAP_COMPOSE_APPROVALS_FILE`. Public registration and ordinary
+Cloud services remain open; only listed owners can use Compose. Private nodes
+also require the separate general node approval. Classic guest Compose is accepted without additional commercial
 resource quotas or GAP egress ACLs; existing Cloud service quotas are unchanged.
 There is no automatic VM provisioning, app ingress/TLS, rollback or automatic
 VM fencing on revocation yet. Real guest boot and end-to-end deployment testing
 are still required before production. See the [current architecture](./docs/private-compose-plan.md)
-and [API examples](./AGENTS.md#private-compose--experimental).
+and [API examples](./AGENTS.md#compose--experimental).
 
 ```bash
 cargo test --lib

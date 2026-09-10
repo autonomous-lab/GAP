@@ -29,17 +29,26 @@ def free_port():
 @unittest.skipUnless(os.environ.get("GAP_TEST_BINARY"), "GAP_TEST_BINARY required")
 class Integration(unittest.TestCase):
     def test_private_end_to_end_control_plane(self):
+        self.exercise(True)
+
+    def test_public_end_to_end_control_plane(self):
+        self.exercise(False)
+
+    def exercise(self, private):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             approval = root / "agents.json"
             approval.write_text('{"agents":[]}')
+            compose_approval = root / "compose-agents.json"
+            compose_approval.write_text('{"agents":[]}')
             admin, service = "a" * 64, "b" * 64
             node_port, runner_port = free_port(), free_port()
             node_url = f"http://127.0.0.1:{node_port}"
             env = {"PATH": os.environ["PATH"], "GAP_ADDR": f"127.0.0.1:{node_port}",
                    "GAP_STORAGE": "sqlite", "GAP_SQLITE_PATH": str(root / "node.sqlite"),
                    "GAP_CLOUD_ROOT": str(root / "projects"), "GAP_WORKERS": "4",
-                   "GAP_PRIVATE_NODE": "1", "GAP_PRIVATE_APPROVALS_FILE": str(approval),
+                   "GAP_PRIVATE_NODE": "1" if private else "0", "GAP_PRIVATE_APPROVALS_FILE": str(approval),
+                   "GAP_COMPOSE_APPROVALS_FILE": str(compose_approval),
                    "GAP_ADMIN_TOKEN": admin, "GAP_COMPOSE_ENABLED": "1",
                    "GAP_COMPOSE_RUNNER_TOKEN": service,
                    "GAP_COMPOSE_RUNNER_URL": f"http://127.0.0.1:{runner_port}"}
@@ -68,18 +77,18 @@ class Integration(unittest.TestCase):
                     if process.poll() is not None:
                         self.fail("GAP exited during private bootstrap")
                     time.sleep(.05)
-                self.assertEqual(request("POST", "/v1/identity")[0], 401)
+                self.assertEqual(request("POST", "/v1/identity")[0], 401 if private else 200)
                 status, identity = request("POST", "/v1/identity", admin)
                 self.assertEqual(status, 200)
                 token, owner = identity["token"], identity["did"]
                 _, other = request("POST", "/v1/identity", admin)
-                self.assertEqual(request("POST", "/v1/cloud/projects", token)[0], 401)
+                self.assertEqual(request("POST", "/v1/cloud/projects", token)[0], 401 if private else 200)
                 approval.write_text(json.dumps({"agents": [owner, other["did"]]}))
                 status, project = request("POST", "/v1/cloud/projects", token)
                 self.assertEqual(status, 200)
                 project_id = project["project_id"]
                 (root / "token").write_text(service)
-                config = {"private_node": True, "token_file": str(root / "token"),
+                config = {"approved_only": True, "token_file": str(root / "token"),
                           "state_dir": str(root / "runner"), "node_url": node_url,
                           "guests": {project_id: {"microvm": True, "vm_id": "test-guest",
                               "owner_did": owner, "expires_at": int(time.time()) + 3600,
@@ -101,6 +110,9 @@ class Integration(unittest.TestCase):
                           "files": {"compose.yaml": base64.b64encode(b"services: {}").decode()}}
                 self.assertEqual(request("POST", prefix + "/releases", None, bundle)[0], 401)
                 self.assertEqual(request("POST", prefix + "/releases", other["token"], bundle)[0], 401)
+                self.assertEqual(request("POST", prefix + "/releases", token, bundle)[0], 401)
+                self.assertFalse(executions)
+                compose_approval.write_text(json.dumps({"agents": [owner]}))
                 status, job = request("POST", prefix + "/releases", token, bundle)
                 self.assertEqual(status, 202, job)
                 job_path = prefix + "/jobs/" + job["job_id"]
@@ -120,10 +132,13 @@ class Integration(unittest.TestCase):
                 self.assertEqual(request("GET", "/health")[0], 200)
                 self.assertEqual(request("POST", "/internal/compose/authorize", "wrong",
                                          {"project_id": project_id, "owner_did": owner})[0], 403)
-                approval.write_text('{"agents":[]}')
+                compose_approval.write_text('{"agents":[]}')
                 self.assertEqual(request("GET", job_path, token)[0], 401)
+                self.assertEqual(request("GET", "/v1/cloud/projects", token)[0], 200)
                 self.assertEqual(request("POST", "/internal/compose/authorize", service,
                                          {"project_id": project_id, "owner_did": owner})[0], 403)
+                approval.write_text('{"agents":[]}')
+                self.assertEqual(request("GET", "/v1/cloud/projects", token)[0], 401 if private else 200)
             finally:
                 if server:
                     server.shutdown()

@@ -1,4 +1,4 @@
-//! Opt-in private management admission and Compose transport.
+//! Independent private management admission and preapproved Compose transport.
 //! The runner, never this process, talks to operator-provisioned guests.
 use crate::{Error, Result};
 use serde::Deserialize;
@@ -7,7 +7,9 @@ use std::{io::Read, path::PathBuf};
 
 #[derive(Clone)]
 pub struct PrivateNode {
+    pub private: bool,
     pub approvals: PathBuf,
+    pub compose_approvals: Option<PathBuf>,
     pub runner: Option<(String, String)>,
 }
 
@@ -28,19 +30,28 @@ impl PrivateNode {
         };
         let private = flag("GAP_PRIVATE_NODE")?;
         let compose = flag("GAP_COMPOSE_ENABLED")?;
-        if !private {
-            if compose {
-                return Err(Error::Other("Compose requires GAP_PRIVATE_NODE=1".into()));
-            }
+        if !private && !compose {
             return Ok(None);
         }
-        if std::env::var("GAP_ADMIN_TOKEN").unwrap_or_default().len() < 32 {
+        if private && std::env::var("GAP_ADMIN_TOKEN").unwrap_or_default().len() < 32 {
             return Err(Error::Other(
                 "private mode requires GAP_ADMIN_TOKEN (32+ bytes)".into(),
             ));
         }
-        let approvals = std::env::var("GAP_PRIVATE_APPROVALS_FILE")
-            .map_err(|_| Error::Other("GAP_PRIVATE_APPROVALS_FILE is required".into()))?;
+        let approvals = if private {
+            std::env::var("GAP_PRIVATE_APPROVALS_FILE")
+                .map_err(|_| Error::Other("GAP_PRIVATE_APPROVALS_FILE is required".into()))?
+        } else {
+            String::new()
+        };
+        let compose_approvals = if compose {
+            Some(PathBuf::from(
+                std::env::var("GAP_COMPOSE_APPROVALS_FILE")
+                    .map_err(|_| Error::Other("GAP_COMPOSE_APPROVALS_FILE is required".into()))?,
+            ))
+        } else {
+            None
+        };
         let runner = if compose {
             let url = std::env::var("GAP_COMPOSE_RUNNER_URL").unwrap_or_default();
             let token = std::env::var("GAP_COMPOSE_RUNNER_TOKEN").unwrap_or_default();
@@ -54,17 +65,24 @@ impl PrivateNode {
             None
         };
         let policy = Self {
+            private,
             approvals: approvals.into(),
+            compose_approvals,
             runner,
         };
-        policy.read_approvals()?;
+        if private {
+            Self::read_approvals(&policy.approvals)?;
+        }
+        if let Some(path) = &policy.compose_approvals {
+            Self::read_approvals(path)?;
+        }
         Ok(Some(policy))
     }
 
-    fn read_approvals(&self) -> Result<Approvals> {
+    fn read_approvals(path: &std::path::Path) -> Result<Approvals> {
         // Reload on every management authorization. Missing/corrupt files deny,
         // and atomic file replacement takes effect without restarting GAP.
-        let file = std::fs::File::open(&self.approvals)
+        let file = std::fs::File::open(path)
             .map_err(|_| Error::Unauthorized("private approval file unavailable".into()))?;
         let mut bytes = Vec::new();
         file.take(65_537)
@@ -86,14 +104,29 @@ impl PrivateNode {
     }
 
     pub fn authorize(&self, did: &str) -> Result<()> {
-        if !self
-            .read_approvals()?
+        if !self.private {
+            return Ok(());
+        }
+        Self::authorize_file(&self.approvals, did)
+    }
+
+    pub fn authorize_compose(&self, did: &str) -> Result<()> {
+        self.authorize(did)?;
+        let path = self
+            .compose_approvals
+            .as_ref()
+            .ok_or_else(|| Error::Unauthorized("Compose approval is not configured".into()))?;
+        Self::authorize_file(path, did)
+    }
+
+    fn authorize_file(path: &std::path::Path, did: &str) -> Result<()> {
+        if !Self::read_approvals(path)?
             .agents
             .iter()
             .any(|candidate| candidate == did)
         {
             return Err(Error::Unauthorized(
-                "agent is not preapproved on this private node".into(),
+                "agent is not preapproved for this operation".into(),
             ));
         }
         Ok(())
@@ -176,7 +209,9 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("gap-approval-test-{}", rand::random::<u64>()));
         let policy = PrivateNode {
+            private: true,
             approvals: path.clone(),
+            compose_approvals: None,
             runner: None,
         };
         let did = format!("did:gap:{}", "a".repeat(64));
@@ -187,6 +222,30 @@ mod tests {
         assert!(policy.authorize(&did).is_err());
         std::fs::write(&path, r#"{"agents":["*"]}"#).unwrap();
         assert!(policy.authorize(&did).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn public_cloud_access_does_not_grant_compose_access() {
+        let path =
+            std::env::temp_dir().join(format!("gap-compose-approval-{}", rand::random::<u64>()));
+        let did = format!("did:gap:{}", "a".repeat(64));
+        let mut policy = PrivateNode {
+            private: false,
+            approvals: path.with_extension("missing"),
+            compose_approvals: Some(path.clone()),
+            runner: None,
+        };
+        assert!(policy.authorize(&did).is_ok());
+        assert!(policy.authorize_compose(&did).is_err());
+        std::fs::write(&path, json!({"agents":[did]}).to_string()).unwrap();
+        assert!(policy.authorize_compose(&did).is_ok());
+        policy.private = true;
+        assert!(policy.authorize_compose(&did).is_err()); // private approval still required
+        policy.private = false;
+        std::fs::write(&path, r#"{"agents":[]}"#).unwrap();
+        assert!(policy.authorize(&did).is_ok());
+        assert!(policy.authorize_compose(&did).is_err());
         std::fs::remove_file(path).unwrap();
     }
 }

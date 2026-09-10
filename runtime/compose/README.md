@@ -1,4 +1,4 @@
-# Private Compose worker (experimental)
+# Preapproved Compose worker (experimental)
 
 This opt-in worker deploys to **operator-provisioned exclusive project VMs**.
 It is not a VM provisioner and is not enabled on `gap.geta.team`. It needs Linux,
@@ -50,14 +50,14 @@ The operator allocates physical RAM/vCPU/disk. The worker adds no commercial
 resource quotas or egress ACLs. Existing routing/firewalls still apply, and
 unrestricted access can reach internal services or saturate the host.
 
-## Private GAP configuration
+## GAP configuration: public or private
 
-Only on the selected private instance:
+Public-node example (ordinary identities/Cloud services remain public):
 
 ```dotenv
-GAP_PRIVATE_NODE=1
-GAP_PRIVATE_APPROVALS_FILE=/data/private-agents.json
+GAP_PRIVATE_NODE=0
 GAP_COMPOSE_ENABLED=1
+GAP_COMPOSE_APPROVALS_FILE=/data/compose-agents.json
 GAP_COMPOSE_RUNNER_URL=http://172.17.0.1:8092
 GAP_COMPOSE_RUNNER_TOKEN=<random-secret-at-least-32-characters>
 GAP_ADMIN_TOKEN=<different-random-secret-at-least-32-characters>
@@ -65,9 +65,20 @@ GAP_ADMIN_TOKEN=<different-random-secret-at-least-32-characters>
 
 Generate secrets independently with `openssl rand -hex 32`. The current Compose
 stack passes `.env` to GAP and mounts `./data/gap-node` as `/data`. Provision an
-operator-owned approval file, initially `{"agents":[]}`; never put it in an
-agent-writable project directory. Private mode requires the operator bearer to
-create an identity:
+operator-owned Compose approval file, initially `{"agents":[]}`; never put it
+in an agent-writable project directory. Compose without this file fails startup;
+an empty, missing or corrupt list never grants access. Public nodes allow normal
+identity/project creation without Compose approval. Approve the owner's exact
+DID for Compose by atomically replacing `/data/compose-agents.json`:
+
+```json
+{"agents":["did:gap:<64-hex-character-identity>"]}
+```
+
+For a private node, additionally set `GAP_PRIVATE_NODE=1` and
+`GAP_PRIVATE_APPROVALS_FILE=/data/private-agents.json`. This second list controls
+general Cloud management, not Compose privileges. An agent needs both approvals
+to use Compose in private mode. Private identity creation requires the operator:
 
 ```bash
 curl -sX POST "$NODE/v1/identity" -H "Authorization: Bearer $ADMIN_TOKEN"
@@ -81,7 +92,7 @@ Approve the exact returned DID by atomically replacing the approval file:
 
 The approved agent can now create a project with its own bearer. The file is
 reloaded on management authentication; missing/corrupt files deny access. There
-is no self-approval endpoint. Compose without private mode fails startup.
+is no self-approval endpoint. Compose is supported in either node mode.
 Private management admission does not replace visitor authentication: existing
 site/public-function/scoped-WS access rules remain separate. Do not accidentally
 expose the private instance. Existing Cloud service quotas are unchanged.
@@ -97,7 +108,7 @@ Example config; replace placeholders and expiry before use:
 
 ```json
 {
-  "private_node": true,
+  "approved_only": true,
   "token_file": "/var/lib/gap-compose-runner/service.token",
   "state_dir": "/var/lib/gap-compose-runner/state",
   "node_url": "http://172.17.0.1:8080",
@@ -136,12 +147,13 @@ callback also requires the shared worker secret. No owner bearer goes to guests.
 Service-token rotation requires coordinated worker/node restarts.
 
 GAP forwards scoped jobs outside its global lock. The worker checks inventory
-and calls GAP to recheck the active project, owner and private approval before
+and calls GAP to recheck the active project, owner and Compose approval (plus
+general node approval in private mode) before
 admission and execution. Agents cannot choose an IP, key or host command.
 
 ## Operations and failure semantics
 
-See [AGENTS.md](../../AGENTS.md#private-compose--experimental) for all API examples.
+See [AGENTS.md](../../AGENTS.md#compose--experimental) for all API examples.
 One stack per project: deploy/update, start, stop, status, logs and job polling.
 Ordinary Compose builds, includes, .env, privileged, guest bind mounts and guest
 Docker sockets are accepted. Compose is parsed and executed only in the guest.
@@ -189,7 +201,7 @@ GAP_TEST_BINARY=target/debug/gap python3 runtime/compose/integration_test.py
 Tests simulate guest execution to check admission, idempotency, serialization,
 revocation, bundle paths and command boundaries. They do not prove guest boot,
 Docker compatibility or hypervisor isolation. Real end-to-end testing on the
-selected private instance is required before calling this production-ready.
+selected execution host is required before calling this production-ready.
 The integration test requires `cargo build --bin gap` first. It starts a fresh
-private GAP node and real HTTP worker against temporary SQLite stores, but
+GAP nodes in both public and private modes and a real HTTP worker against temporary SQLite stores, but
 simulates guest execution. It never connects to production or starts a VM.
