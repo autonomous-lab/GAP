@@ -420,7 +420,8 @@ pub struct NodeState {
     /// keyed by `GAP_MASTER_KEY` when set.
     vault: Option<crate::vault::Vault>,
     /// Optional delivery judge (RFC-0014). None = deterministic checks only.
-    verifier: Option<Box<dyn crate::verifier::Verifier>>,
+    verifier: Option<Arc<dyn crate::verifier::Verifier>>,
+    function_publication: Arc<Mutex<()>>,
     /// contract_id -> the signed verdict produced for it.
     verdicts: HashMap<String, crate::verifier::Verdict>,
     /// Registered pass-through routes, by slug (see `crate::gateway`).
@@ -460,7 +461,7 @@ pub struct NodeState {
     spend_today: HashMap<(String, u64), crate::amount::Amount>,
     /// Second, independent judge (RFC-0015): a different model on a
     /// different host, so the two do not share a failure mode.
-    verifier_b: Option<Box<dyn crate::verifier::Verifier>>,
+    verifier_b: Option<Arc<dyn crate::verifier::Verifier>>,
     /// Verdicts awaiting a human: contract_id -> why.
     escalations: HashMap<String, crate::verifier::Escalation>,
     /// Delivery subscriptions, id -> subscription (RFC-0013).
@@ -907,9 +908,10 @@ impl NodeState {
             admin_token: None,
             vault,
             verifier: crate::verifier::OpenRouterVerifier::from_env()
-                .map(|v| Box::new(v) as Box<dyn crate::verifier::Verifier>),
+                .map(|v| Arc::new(v) as Arc<dyn crate::verifier::Verifier>),
+            function_publication: Arc::new(Mutex::new(())),
             verifier_b: crate::verifier::OpenRouterVerifier::second_from_env()
-                .map(|v| Box::new(v) as Box<dyn crate::verifier::Verifier>),
+                .map(|v| Arc::new(v) as Arc<dyn crate::verifier::Verifier>),
             verdicts,
             gateways,
             job_stats,
@@ -2995,30 +2997,32 @@ the content inline"
         Ok(result)
     }
 
-    pub fn cloud_deploy_function(
-        &mut self,
-        token: &str,
-        project_id: &str,
+    fn review_cloud_function(
+        judges: &[Arc<dyn crate::verifier::Verifier>],
         name: &str,
         runtime: &str,
         source: &[u8],
-    ) -> Result<crate::cloud::FunctionVersion> {
-        self.cloud_owned_project(token, project_id)?;
+    ) -> Result<(
+        crate::cloud::ReleaseRuling,
+        crate::cloud::FunctionSecurityReview,
+    )> {
+        crate::cloud::validate_identifier("function name", name)?;
+        if !matches!(runtime, "javascript" | "wasm") {
+            return Err(Error::Other("runtime must be javascript or wasm".into()));
+        }
+        if source.len() > crate::cloud::MAX_FUNCTION_BYTES {
+            return Err(Error::Other("function exceeds size limit".into()));
+        }
         let static_findings = match runtime {
             "javascript" => crate::cloud::scan_javascript_function(source)?,
             "wasm" => vec!["WASM requires manual security review".into()],
             _ => Vec::new(),
         };
         let source_text = std::str::from_utf8(source).unwrap_or("");
-        let judges: Vec<&dyn crate::verifier::Verifier> =
-            [self.verifier.as_deref(), self.verifier_b.as_deref()]
-                .into_iter()
-                .flatten()
-                .collect();
         let mut opinions = Vec::new();
         let mut consulted_judges = Vec::new();
         let mut security_reasons = Vec::new();
-        for judge in &judges {
+        for judge in judges {
             let judge_name = judge.name();
             consulted_judges.push(judge_name.clone());
             match judge.judge_function_security(name, source_text) {
@@ -3072,15 +3076,37 @@ the content inline"
         } else {
             consulted_judges.join(", ")
         };
+        Ok((
+            release_ruling,
+            crate::cloud::FunctionSecurityReview {
+                judge: security_judge,
+                static_findings,
+                reasons: security_reasons,
+            },
+        ))
+    }
+
+    fn commit_cloud_function(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        name: &str,
+        runtime: &str,
+        source: &[u8],
+        review: (
+            crate::cloud::ReleaseRuling,
+            crate::cloud::FunctionSecurityReview,
+        ),
+    ) -> Result<crate::cloud::FunctionVersion> {
+        // Ownership, credential validity, project status and storage quotas may
+        // have changed while the judge was running. Recheck before writing.
+        self.cloud_owned_project(token, project_id)?;
+        let (release_ruling, security_review) = review;
         let mut store = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?;
         let mut version = store.deploy_function(name, runtime, source, now_unix())?;
         store.set_function_ruling(name, version.version, release_ruling.clone())?;
         version.ruling = release_ruling;
-        version.security_review = Some(crate::cloud::FunctionSecurityReview {
-            judge: security_judge.clone(),
-            static_findings: static_findings.clone(),
-            reasons: security_reasons.clone(),
-        });
+        version.security_review = Some(security_review.clone());
         self.record(
             "cloud.function.deployed",
             json!({
@@ -3089,9 +3115,9 @@ the content inline"
                 "version": version.version,
                 "digest": version.digest,
                 "ruling": version.ruling,
-                "security_judge": security_judge,
-                "static_findings": static_findings,
-                "security_reasons": security_reasons
+                "security_judge": security_review.judge,
+                "static_findings": security_review.static_findings,
+                "security_reasons": security_review.reasons
             }),
         );
         Ok(version)
@@ -3315,12 +3341,12 @@ the content inline"
 
     /// Attach a delivery judge explicitly (tests, or a non-hosted judge).
     pub fn set_verifier(&mut self, verifier: Box<dyn crate::verifier::Verifier>) {
-        self.verifier = Some(verifier);
+        self.verifier = Some(Arc::from(verifier));
     }
 
     /// Attach the second, independent judge (RFC-0015).
     pub fn set_second_verifier(&mut self, verifier: Box<dyn crate::verifier::Verifier>) {
-        self.verifier_b = Some(verifier);
+        self.verifier_b = Some(Arc::from(verifier));
     }
 
     /// The configured judge's name, for the docs page.
@@ -8193,12 +8219,50 @@ pub fn route_with_ip(
             let (project_id, name) = cloud_function_route(p, false).expect("guarded above");
             let runtime = body.get("runtime").and_then(Value::as_str).unwrap_or("");
             let source = body.get("source").and_then(Value::as_str).unwrap_or("");
-            match token {
-                Some(t) => guard
-                    .cloud_deploy_function(t, project_id, name, runtime, source.as_bytes())
-                    .and_then(|v| serde_json::to_value(v).map_err(|e| Error::Other(e.to_string()))),
-                None => Err(Error::Unauthorized("missing bearer token".into())),
+            let Some(token) = token else {
+                return error_response(&Error::Unauthorized("missing bearer token".into()));
+            };
+            if let Err(error) = guard.cloud_owned_project(token, project_id) {
+                return error_response(&error);
             }
+            // A review must never hold NodeState or exhaust the HTTP worker
+            // pool. Keep the existing one-at-a-time publication policy, but
+            // reject contention immediately rather than queueing workers.
+            let publication = guard.function_publication.clone();
+            let judges: Vec<_> = [guard.verifier.clone(), guard.verifier_b.clone()]
+                .into_iter()
+                .flatten()
+                .collect();
+            drop(guard);
+            let _permit = match publication.try_lock() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    return (
+                        429,
+                        json!({"error": {
+                            "code": "publication_busy",
+                            "message": "another function publication is in progress; retry with backoff"
+                        }}),
+                    )
+                }
+            };
+            let review =
+                match NodeState::review_cloud_function(&judges, name, runtime, source.as_bytes()) {
+                    Ok(review) => review,
+                    Err(error) => return error_response(&error),
+                };
+            let mut guard = match state.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return (
+                        500,
+                        json!({"error": {"code": "internal", "message": "state lock poisoned"}}),
+                    )
+                }
+            };
+            guard
+                .commit_cloud_function(token, project_id, name, runtime, source.as_bytes(), review)
+                .and_then(|v| serde_json::to_value(v).map_err(|e| Error::Other(e.to_string())))
         }
         ("DELETE", p) if cloud_function_version_route(p).is_some() => {
             let (project_id, name, version) =
@@ -11211,6 +11275,112 @@ mod tests {
             .0,
             401
         );
+    }
+
+    #[test]
+    fn function_review_does_not_block_readers_or_queue_publications() {
+        check_concurrent_function_publication(false);
+    }
+
+    #[test]
+    fn function_publication_rechecks_project_after_review() {
+        check_concurrent_function_publication(true);
+    }
+
+    fn check_concurrent_function_publication(suspend: bool) {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        struct PausedJudge {
+            entered: mpsc::Sender<()>,
+            resume: Mutex<mpsc::Receiver<()>>,
+        }
+        impl crate::verifier::Verifier for PausedJudge {
+            fn name(&self) -> String {
+                "paused-test-judge".into()
+            }
+            fn judge(
+                &self,
+                _: &crate::verifier::Evidence,
+            ) -> Result<(crate::verifier::Ruling, Vec<String>)> {
+                unreachable!()
+            }
+            fn judge_function_security(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<(crate::verifier::Ruling, Vec<String>)> {
+                self.entered.send(()).unwrap();
+                self.resume
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+                Ok((crate::verifier::Ruling::Conforms, vec![]))
+            }
+        }
+        let arc = state();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        arc.lock()
+            .unwrap()
+            .set_cloud_root(std::env::temp_dir().join(format!("gap-review-concurrency-{nonce}")));
+        let owner = register(&arc);
+        let auth = format!("Bearer {owner}");
+        let (_, project) = route(&arc, "POST", "/v1/cloud/projects", b"{}", Some(&auth));
+        let project_id = project["project_id"].as_str().unwrap().to_string();
+        let path = format!("/v1/cloud/projects/{project_id}/functions/concurrent");
+        let source = json!({"runtime":"javascript","source":"() => 42"}).to_string();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        arc.lock().unwrap().set_verifier(Box::new(PausedJudge {
+            entered: entered_tx,
+            resume: Mutex::new(resume_rx),
+        }));
+        let worker = {
+            let (arc, path, source, auth) =
+                (arc.clone(), path.clone(), source.clone(), auth.clone());
+            std::thread::spawn(move || route(&arc, "POST", &path, source.as_bytes(), Some(&auth)))
+        };
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Release the judge even on regression, so a failing test never hangs.
+        let available = arc.try_lock().is_ok();
+        if !available {
+            resume_tx.send(()).unwrap();
+            worker.join().unwrap();
+            panic!("security judge held the global state lock");
+        }
+        let health = route(&arc, "GET", "/health", b"", None);
+        let busy = route(&arc, "POST", &path, source.as_bytes(), Some(&auth));
+        if suspend {
+            arc.lock()
+                .unwrap()
+                .cloud_projects
+                .get_mut(&project_id)
+                .unwrap()
+                .status = "suspended".into();
+        }
+        resume_tx.send(()).unwrap();
+        let result = worker.join().unwrap();
+        assert_eq!(health.0, 200);
+        assert_eq!(busy.0, 429);
+        assert_eq!(busy.1["error"]["code"], "publication_busy");
+        let guard = arc.lock().unwrap();
+        assert!(guard.function_publication.try_lock().is_ok());
+        let mut store = crate::cloud::ProjectStore::open(&guard.cloud_root, &project_id).unwrap();
+        if suspend {
+            assert_ne!(result.0, 200);
+            assert!(store.active_function("concurrent").unwrap().is_none());
+            assert!(
+                !store.delete_function("concurrent").unwrap(),
+                "no version may be persisted after suspension"
+            );
+        } else {
+            assert_eq!(result.0, 200, "{:?}", result.1);
+            assert_eq!(result.1["ruling"], "approved_with_constraints");
+            assert_eq!(result.1["version"], 1);
+        }
     }
 
     #[test]

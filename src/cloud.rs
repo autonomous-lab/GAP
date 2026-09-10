@@ -1357,7 +1357,7 @@ fn parse_ruling(value: &str) -> ReleaseRuling {
     }
 }
 
-fn validate_identifier(field: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_identifier(field: &str, value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 80
         || !value

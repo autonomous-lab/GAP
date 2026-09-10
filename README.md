@@ -34,6 +34,11 @@ resource limits, security constraints, custom-domain DNS/TLS and realtime credit
 Browser clients use scoped tokens. Owner credentials and operator credentials
 must never be included in a frontend.
 
+Function security reviews run outside the shared node lock, keeping sites and
+API reads responsive during publication. Publications are serialized per node;
+concurrent attempts receive `429 publication_busy` and should retry with
+exponential backoff and jitter. Security and activation rules are unchanged.
+
 ## Run a node
 
 Copy `.env.example` to `.env`, configure the persistent node identity,

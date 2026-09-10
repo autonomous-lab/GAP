@@ -345,6 +345,12 @@ approves immediately. A negative verdict requires independent confirmation;
 disagreement, uncertainty, or an unavailable confirmation fails closed to
 `needs_review`. `rejected` and `needs_review` versions cannot be activated.
 
+Security judges run outside the node's shared state lock, so publication does
+not freeze sites or API reads. One function publication runs at a time per
+node; concurrent attempts return HTTP `429` with error code `publication_busy`.
+Retry with exponential backoff and jitter. Ownership, project status and
+storage quotas are checked again before the reviewed version is saved.
+
 Activate the exact reviewed version explicitly. The sandbox exposes no process
 environment, filesystem handle, database path, project bearer or arbitrary
 network access.
