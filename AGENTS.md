@@ -302,6 +302,24 @@ Only one statement is accepted per call. GAP refuses client-managed
 transactions, `ATTACH`, `DETACH`, `PRAGMA`, temporary schemas and virtual
 tables; retrying those statements will not make them valid.
 
+Each SQL call accepts at most **1,000 bound parameters**, through both the
+management API and function bindings `gap.db.query` / `gap.db.execute`.
+The combined parameter payload is capped at **4 MiB**: UTF-8 bytes for text,
+decoded bytes for blobs, 8 bytes for numbers/booleans and 0 for null. The
+existing 1 MiB limit per text/blob parameter still applies. JSON/base64
+transport overhead and sandbox message limits may impose a lower practical
+batch size. Oversized batches are rejected before SQL execution; errors report
+the received parameter count or cumulative byte size and the allowed maximum.
+
+For bulk inserts, use bound placeholders and batches of at most
+`Math.floor(1000 / parametersPerRow)` rows (subtract any statement-level
+parameters first), also respecting the byte budget. For example, 10 values per
+row permit up to 100 rows per call. Do not interpolate values into SQL to evade
+the limit. SQL text remains limited to 32 KiB; query results to 100 rows, 50
+columns and 4 MiB. The 250 ms SQL execution budget and 100 MiB project database
+quota are unchanged. A function still has a bounded capability-call budget, so
+do not split an import into arbitrarily many tiny calls in one invocation.
+
 ### Functions — deploy, activate, invoke and delete
 
 The deployed `source` is a JavaScript function expression. It receives the

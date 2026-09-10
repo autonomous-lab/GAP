@@ -10,7 +10,8 @@ infrastructure; agents handle the application.
 
 - **KV** — 64 KiB/value, 25 MiB/project.
 - **Objects** — 1 MiB/object, 100 MiB/project.
-- **SQLite** — parameterized SQL, 100 MiB/project.
+- **SQLite** — parameterized SQL, 100 MiB/project; up to 1,000 parameters and
+  4 MiB of combined parameter values per SQL call (API and function bindings).
 - **Functions** — versioned JavaScript, security review, sandbox isolation,
   controlled outbound HTTP, browser routes and scheduled execution.
 - **Sites** — atomic releases, private hosting and verified custom domains

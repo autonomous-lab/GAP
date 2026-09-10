@@ -23,7 +23,8 @@ pub const MAX_PROJECT_OBJECT_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_PROJECT_FUNCTION_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_PROJECT_DATABASE_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_DATABASE_SQL_BYTES: usize = 32 * 1024;
-pub const MAX_DATABASE_PARAMS: usize = 100;
+pub const MAX_DATABASE_PARAMS: usize = 1_000;
+pub const MAX_DATABASE_PARAMS_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_DATABASE_ROWS: usize = 100;
 pub const MAX_DATABASE_COLUMNS: usize = 50;
 pub const MAX_DATABASE_CELL_BYTES: usize = 1024 * 1024;
@@ -343,12 +344,33 @@ impl ProjectStore {
             return Err(Error::Other("database SQL is empty or too large".into()));
         }
         if values.len() > MAX_DATABASE_PARAMS {
-            return Err(Error::Other("too many database parameters".into()));
+            return Err(Error::Other(format!(
+                "too many database parameters: received {}, maximum {}",
+                values.len(),
+                MAX_DATABASE_PARAMS
+            )));
         }
-        let params = values
-            .iter()
-            .map(json_to_sql_value)
-            .collect::<Result<Vec<_>>>()?;
+        // Bound decoded SQL values incrementally, before opening/preparing the
+        // database. Do not materialize an entire oversized batch first.
+        let mut params = Vec::with_capacity(values.len());
+        let mut parameter_bytes = 0usize;
+        for value in values {
+            let parameter = json_to_sql_value(value)?;
+            let bytes = match &parameter {
+                rusqlite::types::Value::Null => 0,
+                rusqlite::types::Value::Integer(_) | rusqlite::types::Value::Real(_) => 8,
+                rusqlite::types::Value::Text(text) => text.len(),
+                rusqlite::types::Value::Blob(blob) => blob.len(),
+            };
+            parameter_bytes = parameter_bytes.saturating_add(bytes);
+            if parameter_bytes > MAX_DATABASE_PARAMS_BYTES {
+                return Err(Error::Other(format!(
+                    "database parameters too large: cumulative size {} bytes exceeds maximum {} bytes",
+                    parameter_bytes, MAX_DATABASE_PARAMS_BYTES
+                )));
+            }
+            params.push(parameter);
+        }
         let connection = Connection::open(self.user_database_path()).map_err(db_error)?;
         connection
             .busy_timeout(Duration::from_millis(100))
@@ -1696,6 +1718,68 @@ mod tests {
         let tx = s.control.transaction().unwrap();
         assert!(enforce_project_quota(&tx, "kv", "key", "length(value)", "b", 2, 4).is_err());
         assert!(enforce_project_quota(&tx, "kv", "key", "length(value)", "a", 4, 4).is_ok());
+    }
+
+    #[test]
+    fn database_accepts_one_thousand_parameters_and_rejects_overflow() {
+        let s = temp_store();
+        s.database_execute("CREATE TABLE batch(value INTEGER)", &[])
+            .unwrap();
+        let values = vec![json!(7); MAX_DATABASE_PARAMS];
+        let placeholders = vec!["(?)"; values.len()].join(",");
+        let result = s
+            .database_execute(&format!("INSERT INTO batch VALUES {placeholders}"), &values)
+            .unwrap();
+        assert_eq!(result.affected_rows, 1000);
+        let placeholders = vec!["?"; values.len()].join(",");
+        let result = s
+            .database_query(
+                &format!("SELECT count(*) FROM batch WHERE value IN ({placeholders})"),
+                &values,
+            )
+            .unwrap();
+        assert_eq!(result.rows, vec![vec![json!(1000)]]);
+        let overflow = vec![json!(7); MAX_DATABASE_PARAMS + 1];
+        for query in [false, true] {
+            let error = s
+                .database_statement("SELECT 1", &overflow, query)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("received 1001, maximum 1000"), "{error}");
+        }
+    }
+
+    #[test]
+    fn database_parameter_bytes_count_utf8_decoded_blobs_and_scalars() {
+        use base64::Engine;
+        let s = temp_store();
+        s.database_execute("CREATE TABLE bytes(value)", &[])
+            .unwrap();
+        // Each text is one MiB of UTF-8, not one MiB of characters.
+        let text = json!("é".repeat(MAX_DATABASE_CELL_BYTES / 2));
+        let blob = json!({"blob_base64": base64::engine::general_purpose::STANDARD.encode(vec![0u8; MAX_DATABASE_CELL_BYTES])});
+        let mut values = vec![text.clone(), text.clone(), text, blob];
+        assert_eq!(
+            s.database_execute("INSERT INTO bytes VALUES (?),(?),(?),(?)", &values)
+                .unwrap()
+                .affected_rows,
+            4
+        );
+        values.push(json!(true));
+        let error = s
+            .database_execute("INSERT INTO bytes VALUES (?),(?),(?),(?),(?)", &values)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("4194312 bytes exceeds maximum 4194304 bytes"),
+            "{error}"
+        );
+        let count = s.database_query("SELECT count(*) FROM bytes", &[]).unwrap();
+        assert_eq!(
+            count.rows,
+            vec![vec![json!(4)]],
+            "oversized batches must not partially write"
+        );
     }
 
     #[test]
