@@ -81,6 +81,16 @@ def compose(release, filename, *arguments):
 
 def run(payload, root=ROOT, execute=compose):
     action, body = payload["action"], payload["body"]
+    if action == 'vm_probe' and body == {}:
+        result = subprocess.run(['docker', 'info', '--format', '{{.ServerVersion}}'],
+                                capture_output=True, timeout=10)
+        return {'ok': result.returncode == 0, 'docker_version': result.stdout.decode().strip()}
+    if action == 'vm_shutdown' and body == {}:
+        # Guest-only fixed command. Reply before stopping SSH and the guest.
+        subprocess.Popen(['/bin/sh', '-c', 'sleep 1; sync; /sbin/poweroff'],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        return {'ok': True, 'shutdown_requested': True}
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (root / "operation.lock").open("a") as lock:
         try:

@@ -1,7 +1,8 @@
-"""Real GAP HTTP -> runner HTTP -> GAP authorization, with a simulated guest.
+"""Real GAP HTTP -> runner HTTP -> GAP authorization.
 
 Run after cargo build: GAP_TEST_BINARY=target/debug/gap python3 .../integration_test.py
-This does not claim to boot a VM or execute Docker.
+Guests are simulated by default. GAP_VM_TEST_ALLOW_CREATE=1 plus isolated state
+and image paths enables disposable real KVM/Compose tests (see README.md).
 """
 import base64
 import json
@@ -13,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -95,13 +97,19 @@ class Integration(unittest.TestCase):
                               "address": "127.0.0.1", "port": 2222,
                               "ssh_key": str(root / "unused-test-key"),
                               "known_hosts": str(root / "unused-host-key")}}}
+                managed = os.environ.get("GAP_VM_TEST_ALLOW_CREATE") == "1"
+                if managed:
+                    config.pop("guests")
+                    config["hypervisor"] = {"state_dir": os.environ["GAP_VM_TEST_STATE_DIR"],
+                                            "image_dir": os.environ["GAP_VM_TEST_IMAGE_DIR"]}
                 config_path = root / "runner.json"
                 config_path.write_text(json.dumps(config))
                 executions = []
                 def execute(vm, payload):
                     executions.append(payload)
                     return {"ok": True, "output": "simulated guest"}
-                runner = Runner(config_path, execute=execute)
+                from runner import execute_guest
+                runner = Runner(config_path, execute=execute_guest if managed else execute)
                 server = ThreadingHTTPServer(("127.0.0.1", runner_port), handler_for(runner))
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
@@ -113,6 +121,9 @@ class Integration(unittest.TestCase):
                 self.assertEqual(request("POST", prefix + "/releases", token, bundle)[0], 401)
                 self.assertFalse(executions)
                 compose_approval.write_text(json.dumps({"agents": [owner]}))
+                if managed:
+                    self.exercise_managed(request, prefix, token, other["token"], runner, project_id, owner, compose_approval)
+                    return
                 status, job = request("POST", prefix + "/releases", token, bundle)
                 self.assertEqual(status, 202, job)
                 job_path = prefix + "/jobs/" + job["job_id"]
@@ -149,6 +160,73 @@ class Integration(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+
+    def exercise_managed(self, request, prefix, token, other_token, runner, project, owner, approval):
+        def operation(method, path, body=None):
+            body = {"request_id": uuid.uuid4().hex, **(body or {})}
+            status, job = request(method, prefix + path, token, body)
+            self.assertEqual(status, 202, job)
+            retry_status, retry = request(method, prefix + path, token, body)
+            self.assertEqual(retry_status, 200, retry)
+            self.assertEqual(job["job_id"], retry["job_id"])
+            deadline = time.monotonic() + 600
+            while time.monotonic() < deadline:
+                _, result = request("GET", prefix + "/jobs/" + job["job_id"], token)
+                if result["status"] not in ("queued", "running"):
+                    self.assertEqual(result["status"], "succeeded", result)
+                    return result["result"]
+                time.sleep(.2)
+            self.fail("managed job timeout")
+        manager = runner.hypervisor
+        try:
+            self.assertEqual(request("GET", prefix + "/vm", token)[1]["state"], "absent")
+            self.assertEqual(request("POST", prefix + "/vm", other_token, {"request_id": uuid.uuid4().hex})[0], 401)
+            vm = operation("POST", "/vm", {"vcpus": 1, "memory_mib": 1024, "disk_gib": 4, "ports": [8000]})["vm"]
+            identity = {"vm_id": vm["vm_id"]}
+            from runner import execute_guest
+            def ready():
+                deadline = time.monotonic() + 180
+                while time.monotonic() < deadline:
+                    try:
+                        if execute_guest(manager.guest(project, owner), {"action": "vm_probe", "body": {}}, timeout=12).get("ok"):
+                            return
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                self.fail("guest Docker unavailable")
+            ready()
+            sources = {
+                "compose.yaml": 'services:\n  web:\n    build: .\n    ports: ["8000:8000"]\n    volumes: ["data:/persist"]\nvolumes:\n  data: {}\n',
+                "Dockerfile": 'FROM alpine:3.23\nRUN apk add --no-cache busybox-extras\nCMD ["sh", "-c", "test -f /persist/index.html || cat /proc/sys/kernel/random/uuid > /persist/index.html; exec busybox-extras httpd -f -p 8000 -h /persist"]\n'}
+            operation("POST", "/releases", {"compose_file": "compose.yaml", "files": {
+                name: base64.b64encode(value.encode()).decode() for name, value in sources.items()}})
+            url = 'http://127.0.0.1:' + str(vm["ports"][0]["worker_port"])
+            def page():
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    return response.read().strip()
+            persisted = page()
+            self.assertEqual(len(persisted), 36)
+            operation("POST", "/vm/stop", identity)
+            operation("PATCH", "/vm", {**identity, "vcpus": 2, "memory_mib": 1280, "disk_gib": 5})
+            operation("POST", "/vm/start", identity)
+            ready()
+            operation("POST", "/start")
+            self.assertEqual(page(), persisted, "named volume must survive VM stop/resize/restart")
+            operation("POST", "/status")
+            operation("POST", "/logs")
+            operation("POST", "/vm/stop", identity)
+            operation("DELETE", "/vm", {**identity, "delete_data": True, "confirm_data_loss": True})
+            self.assertEqual(request("GET", prefix + "/vm", token)[1]["state"], "destroyed")
+            self.assertFalse(manager.folder(manager.read(project, owner)).exists())
+            approval.write_text('{"agents":[]}')
+            self.assertEqual(request("POST", prefix + "/vm", token, {"request_id": uuid.uuid4().hex})[0], 401)
+            print("REAL GAP HTTP + APPROVAL + KVM + COMPOSE BUILD + HTTP + PERSISTENCE + RESIZE + DELETE: OK", flush=True)
+        finally:
+            meta = manager.read(project, owner)
+            if meta and meta['state'] != 'destroyed':
+                if manager.alive(meta):
+                    manager.perform(project, owner, 'vm/stop', {'vm_id': meta['vm_id'], 'force': True})
+                manager.perform(project, owner, 'vm/destroy', {'vm_id': meta['vm_id'], 'delete_data': True, 'confirm_data_loss': True})
 
 
 if __name__ == "__main__":

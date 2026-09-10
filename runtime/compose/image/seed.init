@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+description="Install per-VM SSH identity from a guest-only seed disk"
+depend() {
+    need localmount
+    before sshd docker
+}
+start() {
+    ebegin "Initializing project VM identity"
+    mkdir -p /run/gap-seed /root/.ssh
+    mount -t ext4 -o ro /dev/vdb /run/gap-seed || return 1
+    cp /run/gap-seed/authorized_keys /root/.ssh/authorized_keys
+    cp /run/gap-seed/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key
+    cp /run/gap-seed/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub
+    chmod 700 /root/.ssh
+    chmod 600 /root/.ssh/authorized_keys /etc/ssh/ssh_host_ed25519_key
+    umount /run/gap-seed
+    resize2fs /dev/vda
+    eend $?
+}

@@ -29,8 +29,8 @@ first implementation; stacks may operate their own databases inside the guest.
 Approved owner -> GAP API -> authenticated asynchronous runner job ->
 pinned SSH -> exclusive guest -> Docker Compose.
 
-GAP checks live approval and project ownership. The worker checks its operator
-inventory (owner, project, guest and expiry), then calls GAP again before job
+GAP checks live approval and project ownership. The worker maintains its owner/project VM catalog (or checks the legacy
+operator inventory with expiry), then calls GAP again before job
 admission and execution. Agents never choose the SSH target, key or host command.
 
 The API supports releases, start, stop, status and logs; one stack per project.
@@ -45,10 +45,12 @@ change on update. Inspect state before retrying after timeout or disconnection.
 
 ## Not delivered yet
 
-- Automatic image creation, VM provisioning, scheduling, reboot or destruction.
-  Operators must prepare exclusive guests; inventory is not VM attestation.
-- Application ingress, domain/TLS integration or host port forwarding.
-- HA, migration, automatic rollback, volume backup/restore or deletion.
+- Multi-host scheduling and live migration. The managed worker now builds guest
+  assets and creates, starts, stops, resizes offline and destroys QEMU/KVM VMs.
+- Application ingress, domain/TLS integration or public host port forwarding.
+  Managed VMs have optional worker-loopback TCP forwards.
+- HA, migration, automatic rollback and volume backup/restore. Explicit whole-VM
+  deletion is supported, with retention by default and data-loss confirmation for purge.
 - Automatic VM fencing on revocation. Revocation blocks new management and
   queued execution at recheck; already running apps can continue. The operator
   must fence/stop a VM through the hypervisor for incident containment.
@@ -57,10 +59,12 @@ change on update. Inspect state before retrying after timeout or disconnection.
 Enabling Compose does not make a public node private or approve all its agents.
 KVM probing and simulated worker tests do not prove real guest boot.
 
-## Next acceptance gate
+## Acceptance tests and remaining production gate
 
-On an explicitly selected execution host: provision a Docker-capable guest,
-install the helper, pin SSH host identity and configure project/owner approval.
+Automated disposable tests cover KVM boot, Compose build/HTTP, offline resize,
+controller reconstruction and deletion. The HTTP integration test also supports
+real guests with public/private node approval and persistent volume verification.
+Before production activation on a selected execution host:
 Test real multi-service builds, persistent volumes, partial updates, controller
 restart, SSH failure and revocation. Check no host secrets/control sockets are
 present. Test approved, unapproved and cross-project callers before production.

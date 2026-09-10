@@ -1,7 +1,6 @@
-"""Preapproved Compose control worker. Runs SSH only, never Docker on the host.
+"""Preapproved Compose control worker. Runs QEMU and SSH, never Docker on the host.
 
-Operator-provisioned, exclusive microVMs are required. This worker does not
-create VMs or attest their isolation; an inventory entry is operator trust.
+Managed QEMU/KVM microVMs or legacy operator-provisioned guests are supported.
 """
 import argparse
 from contextlib import contextmanager
@@ -26,7 +25,8 @@ MAX_BODY = 5 * 1024 * 1024  # HTTP framing budget, not a guest storage quota
 MAX_OUTPUT = 1024 * 1024
 PROJECT = re.compile(r"prj_[0-9a-f]{24}\Z")
 REQUEST = re.compile(r"[0-9a-f]{32}\Z")
-ACTION = {"releases", "start", "stop", "status", "logs"}
+ACTION = {"releases", "start", "stop", "status", "logs",
+          "vm/create", "vm/start", "vm/stop", "vm/update", "vm/destroy"}
 
 
 class Failure(Exception):
@@ -40,7 +40,9 @@ def load_config(path):
     if config.get("approved_only") is not True:
         raise ValueError("runner requires explicit approved_only=true")
     seen = set()
-    for project, guest in config["guests"].items():
+    if config.get('hypervisor') and config.get('guests'):
+        raise ValueError('choose managed hypervisor or legacy guest inventory, not both')
+    for project, guest in config.get("guests", {}).items():
         if not PROJECT.fullmatch(project) or guest.get("microvm") is not True:
             raise ValueError("each project requires an operator-provisioned microVM")
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", guest["vm_id"]):
@@ -85,7 +87,7 @@ def ssh_command(guest):
             "root@" + guest["address"], "python3 /usr/local/lib/gap-compose-guest.py"]
 
 
-def execute_guest(guest, payload):
+def execute_guest(guest, payload, timeout=600):
     # Source is stdin, never part of a host command. No local Compose parsing,
     # env interpolation, archive extraction, Docker socket or host bind mounts.
     with tempfile.TemporaryFile() as source:
@@ -95,7 +97,7 @@ def execute_guest(guest, payload):
                                    stderr=subprocess.STDOUT,
                                    env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
         output = bytearray()
-        deadline = time.monotonic() + 600
+        deadline = time.monotonic() + timeout
         try:
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
@@ -137,6 +139,11 @@ class Runner:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db_path = root / "jobs.sqlite"
         self.lock = threading.Lock()
+        self.hypervisor = None
+        self.hypervisor_config = config.get('hypervisor')
+        if config.get('hypervisor'):
+            from microvm import MicroVMs
+            self.hypervisor = MicroVMs(config['hypervisor'], execute)
         with self.db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs(
                 id TEXT PRIMARY KEY, project TEXT NOT NULL, owner TEXT NOT NULL,
@@ -159,8 +166,12 @@ class Runner:
 
     def authorize(self, project, owner):
         config = load_config(self.path)  # reload approvals before each operation
-        guest = config["guests"].get(project)
-        if not guest or guest["owner_did"] != owner or guest["expires_at"] <= time.time():
+        guest = config.get("guests", {}).get(project)
+        if self.hypervisor:
+            if config.get('hypervisor') != self.hypervisor_config:
+                raise Failure(503, 'hypervisor_config_changed_restart_worker')
+            guest = {'managed': True, 'project_id': project, 'owner_did': owner}
+        elif not guest or guest["owner_did"] != owner or guest["expires_at"] <= time.time():
             raise Failure(403, "compose_not_preapproved")
         request = urllib.request.Request(config["node_url"].rstrip("/") + "/internal/compose/authorize",
             data=json.dumps({"project_id": project, "owner_did": owner}).encode(),
@@ -185,6 +196,13 @@ class Runner:
             raise Failure(400, "invalid_project")
         self.authorize(project, owner)
         method, action, body = rpc.get("method"), rpc.get("action"), rpc.get("body")
+        if action == 'vm':
+            if method == 'GET':
+                if not self.hypervisor:
+                    raise Failure(409, 'managed_hypervisor_not_configured')
+                return 200, self.hypervisor.public(self.hypervisor.read(project, owner))
+            action = {'POST': 'vm/create', 'PATCH': 'vm/update', 'DELETE': 'vm/destroy'}.get(method)
+            method = 'POST'
         if method == "GET" and isinstance(action, str):
             with self.db() as db:
                 if action == "":
@@ -201,7 +219,15 @@ class Runner:
         request_id = body.get("request_id")
         if not isinstance(request_id, str) or not REQUEST.fullmatch(request_id):
             raise Failure(400, "request_id_must_be_32_lowercase_hex_characters")
-        if action == "releases":
+        if action.startswith('vm/'):
+            if not self.hypervisor:
+                raise Failure(409, 'managed_hypervisor_not_configured')
+            from microvm import validate, VMError
+            try:
+                validate(action, body)
+            except VMError as error:
+                raise Failure(400, str(error))
+        elif action == "releases":
             from guest import validate_release
             try:
                 validate_release(body)
@@ -232,12 +258,19 @@ class Runner:
             guest = self.authorize(row["project"], row["owner"])
             with self.db() as db:
                 db.execute("UPDATE jobs SET status='running' WHERE id=?", (job,))
-            result = self.execute(guest, json.loads(row["payload"]))
+            payload = json.loads(row['payload'])
+            if payload['action'].startswith('vm/'):
+                result = self.hypervisor.perform(row['project'], row['owner'], payload['action'], payload['body'])
+            else:
+                if self.hypervisor:
+                    guest = self.hypervisor.guest(row['project'], row['owner'])
+                result = self.execute(guest, payload)
             status = "succeeded" if result.get("ok") is True else "failed"
         except Failure as error:
             status, result = "failed", {"error": error.code}
-        except Exception:
-            status, result = "failed", {"error": "runner_failed_state_unknown"}
+        except Exception as error:
+            from microvm import VMError
+            status, result = "failed", {"error": str(error) if isinstance(error, VMError) else "runner_failed_state_unknown"}
         with self.db() as db:
             db.execute("UPDATE jobs SET status=?,result=?,payload=NULL WHERE id=?", (status, json.dumps(result), job))
 
@@ -294,7 +327,7 @@ if __name__ == "__main__":
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8092)
     args = parser.parse_args()
-    if ipaddress.ip_address(args.bind).is_unspecified:
+    if ipaddress.ip_address(args.bind).is_unspecified and load_config(args.config).get('listen_all') is not True:
         raise SystemExit("bind to an explicit loopback/private interface, not all interfaces")
     # A single worker process must own the job journal.
     import fcntl

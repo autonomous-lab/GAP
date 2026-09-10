@@ -1,12 +1,84 @@
 # Preapproved Compose worker (experimental)
 
-This opt-in worker deploys to **operator-provisioned exclusive project VMs**.
-It is not a VM provisioner and is not enabled on `gap.geta.team`. It needs Linux,
-Python 3.10+ and OpenSSH on the worker; no Docker socket or KVM device there.
-Docker Engine and Compose run only in the guest. See the
-[architecture and acceptance gate](../../docs/private-compose-plan.md).
+This opt-in worker creates and manages **exclusive QEMU/KVM microVMs per
+project**, then runs Docker Engine and Compose inside them. It is not enabled
+on `gap.geta.team`. The worker runs as an unprivileged Linux user with access to
+`/dev/kvm`; it receives no host Docker socket. Legacy operator-provisioned guests
+remain supported as an alternative configuration.
 
-## Guest provisioning (operator prerequisite)
+## Managed microVM setup
+
+Build the guest assets and worker from the repository root:
+
+```bash
+docker build -f runtime/compose/image/Dockerfile --output type=local,dest=guest-image .
+chmod 755 guest-image
+docker build -f runtime/compose/Dockerfile -t gap-compose-runner:local .
+```
+
+The image contains Alpine, a virtio-compatible kernel/initramfs, Docker Engine,
+Compose/buildx, OpenSSH and the guest helper. Keep the exported image directory
+read-only to the worker. Each VM has its own qcow2 overlay and SSH seed disk;
+checksums are verified at creation/start. Do not replace base assets used by
+existing overlays: use a separate image directory and worker for a new version.
+Build inputs track Alpine package updates; the checksum manifest identifies the
+actual exported assets, not a reproducible package lock.
+
+Example managed runner configuration (replace the paths and node address):
+
+```json
+{
+  "approved_only": true,
+  "token_file": "/config/service.token",
+  "state_dir": "/data/jobs",
+  "node_url": "http://172.17.0.1:8080",
+  "hypervisor": {"state_dir": "/data/vm", "image_dir": "/images"}
+}
+```
+
+Use either `hypervisor` or the legacy `guests` inventory below. The VM state
+path must be absolute, contain only letters/digits/underscore/dot/slash/hyphen
+and be at most 45 characters (QMP UNIX socket length). Provision writable state
+owned by UID 10001 and a token readable only by the worker. Run the image with
+`--device /dev/kvm --group-add <kvm-gid>`, the state directory mounted at `/data`,
+config at `/config:ro`, and guest assets at `/images:ro`. Do not use privileged
+mode or mount the host Docker socket. Bind the worker to a private interface
+reachable by GAP; `listen_all: true` is required for an explicit `0.0.0.0` bind.
+Do not expose the worker API publicly. Container restarts stop its QEMU children;
+the persisted catalog permits explicit VM start after restart.
+
+### VM API
+
+All mutations return asynchronous jobs; poll `/stack/jobs/{job_id}` as for
+Compose. Every mutation requires a saved 32-lowercase-hex `request_id`.
+
+| Method and project suffix | Body besides request_id | Behavior |
+|---|---|---|
+| GET `/stack/vm` | none | Current hypervisor state or `absent` |
+| POST `/stack/vm` | optional `vcpus`, `memory_mib`, `disk_gib`, `ports`, `start` | Create exclusive VM; start defaults to true |
+| POST `/stack/vm/stop` | `vm_id`, optional `force` | Guest shutdown; explicit force uses verified QMP quit |
+| PATCH `/stack/vm` | `vm_id`, selected resource fields or `ports` | Reconfigure a stopped VM; disk growth only |
+| POST `/stack/vm/start` | `vm_id` | Start the existing VM |
+| DELETE `/stack/vm` | `vm_id`, optional `delete_data`, `confirm_data_loss` | Destroy a stopped VM, retaining its files by default |
+
+Defaults are 1 vCPU, 1024 MiB RAM and 8 GiB virtual disk. These are allocations,
+not commercial quotas. Disk growth is applied to the guest filesystem at next
+boot. `ports` contains guest TCP port numbers other than 22; GAP allocates
+loopback forwards in the **worker network namespace**, returned as `worker_port`.
+It does not allocate a public hostname/TLS endpoint. Containerized workers need
+an operator-configured proxy in the same network namespace for application access.
+
+A returned `running` state describes QEMU, not Docker readiness. Wait for the
+guest to boot before submitting a release; a failed early SSH job can be retried
+with a new request ID after inspection. Include the returned exact `vm_id` for
+subsequent mutations to prevent stale requests from touching a replacement VM.
+Deletion rejects running VMs. `delete_data: true` requires
+`confirm_data_loss: true` and removes only that generated VM directory; otherwise
+files move to the controller's `retained` directory. Automated restore/purge of
+retained volumes is not provided. Create does not implicitly deploy a stack;
+submit `/stack/releases` once the VM is ready.
+
+## Legacy guest provisioning (alternative to managed mode)
 
 Run `python3 runtime/compose/preflight.py` on the hypervisor host to check KVM.
 This opens an empty VM descriptor, not a running guest. Intel VMX or AMD SVM
@@ -17,7 +89,7 @@ with Docker namespaces/cgroups, overlay, networking and the VM's virtio devices;
 Docker Engine, Compose v2 supporting `up --wait`, Python 3 and OpenSSH. For QEMU
 microvm, provide compatible kernel/initrd assets: ordinary disk firmware boot
 is not supported. See [QEMU's boot requirements](https://www.qemu.org/docs/master/system/i386/microvm.html).
-This repository does not yet provide a tested guest-image builder.
+The managed image builder above supplies these assets for QEMU microvm.
 
 Install `guest.py` **inside that guest** as:
 
@@ -174,7 +246,7 @@ The most recently attempted update remains inspectable/stoppable.
 
 Named volumes survive stop/start/update. Release-relative bind mounts switch to
 the next release's directory; use named volumes for persistent app data unless
-that behavior is intended. No automatic disk/volume/release deletion is provided.
+that behavior is intended. Explicit whole-VM data deletion is available; individual volume/release cleanup is not automated.
 
 HTTP bodies are bounded to 5 MiB including base64/JSON (GAP/proxies can impose
 less). Returned output is bounded. Operational timeouts are 540s per guest
@@ -184,9 +256,9 @@ build contexts inside the guest; large-artifact uploads are not implemented.
 
 Revocation blocks new management and queued execution at recheck, **not already
 running VMs/apps or visitor/scoped tokens**. For incident containment, the
-operator must fence/stop the VM through the hypervisor first. Automatic VM
-lifecycle, ingress/TLS, host port forwarding, HA, backup/restore, rollback and
-volume deletion are not implemented. Guest `ports:` does not automatically
+operator must fence/stop the VM through the hypervisor first. Automatic app
+ingress/TLS, public host port forwarding, HA, backup/restore and rollback are
+not implemented. Guest `ports:` does not automatically
 publish physical-host ports. Existing Cloud service quotas stay unchanged.
 
 ## Tests and production readiness
@@ -205,3 +277,25 @@ selected execution host is required before calling this production-ready.
 The integration test requires `cargo build --bin gap` first. It starts a fresh
 GAP nodes in both public and private modes and a real HTTP worker against temporary SQLite stores, but
 simulates guest execution. It never connects to production or starts a VM.
+
+
+### Real KVM acceptance tests
+
+Run only on an execution host prepared for disposable test VMs, using a separate
+state directory writable by the test user and the read-only exported image.
+The test creates fresh identities/VMs and deletes only those test disks in cleanup:
+
+```bash
+GAP_VM_TEST_ALLOW_CREATE=1 GAP_VM_TEST_STATE_DIR=/data GAP_VM_TEST_IMAGE_DIR=/images \
+  python3 runtime/compose/real_vm_test.py
+GAP_VM_TEST_ALLOW_CREATE=1 GAP_VM_TEST_STATE_DIR=/data GAP_VM_TEST_IMAGE_DIR=/images \
+  GAP_TEST_BINARY=/test-target/debug/gap python3 runtime/compose/integration_test.py
+```
+
+The first checks actual KVM boot, Docker build/HTTP, stop/resize, controller
+reconstruction, restart and deletion. With VM opt-in, the second exercises real
+GAP and worker HTTP in both public/private modes, approval/ownership, request
+retry deduplication, VM CRUD, a Compose build, HTTP access and a random named-volume
+value surviving stop/resize/restart. Without opt-in it keeps simulated guests.
+These tests do not establish HA, adversarial hypervisor isolation or production
+load capacity. Production Compose activation remains a separate operator step.

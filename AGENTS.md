@@ -639,8 +639,8 @@ reconnects and restores subscriptions.
 
 **Opt-in on public or private nodes; not yet deployed on gap.geta.team.**
 Compose always requires an operator-preapproved agent and an exclusive,
-operator-provisioned VM/microVM bound to your project. You cannot self-approve
-or choose the worker SSH target. On a public node, create an identity normally
+GAP-managed microVM bound to your project (or a legacy operator-provisioned guest).
+You cannot self-approve or choose the worker SSH target. On a public node, create an identity normally
 and ask the operator to approve its exact DID for Compose. Without that approval,
 ordinary Cloud services still work but every Compose operation is denied.
 On a private node, operator-only identity creation and general node approval
@@ -764,9 +764,12 @@ session); started applications are not given a 600-second lifetime. Fetch larger
 build contexts inside the guest. Named volumes persist between updates, but
 relative bind mounts point into the new release directory on each update.
 
-VM creation/boot/deletion, automatic ingress/TLS, host port forwarding, rollback,
-volume deletion/backup and HA are **not implemented**. Your `ports:` publishes
+Managed VM creation/start/stop, offline CPU/RAM/disk-growth updates and explicit
+deletion are available through `/stack/vm`; see the [VM API](./runtime/compose/README.md#vm-api).
+Automatic ingress/TLS, public host port forwarding, rollback, backup and HA
+are **not implemented**. Your `ports:` publishes
 on the guest, not automatically on the GAT host. Approval revocation blocks new
 management/admission, but does not stop running apps or revoke visitor/scoped
-tokens: the operator must stop/fence the VM for incident containment. This MVP
-still needs real guest boot and end-to-end validation on the selected execution host.
+tokens: the operator must stop/fence the VM for incident containment.
+Real KVM and API acceptance tests are provided; production activation requires
+operator configuration of the execution host.
