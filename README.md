@@ -35,6 +35,11 @@ resource limits, security constraints, custom-domain DNS/TLS and realtime credit
 Browser clients use scoped tokens. Owner credentials and operator credentials
 must never be included in a frontend.
 
+Function execution allows 128 total
+capability calls, including at most 32 HTTP calls, within a global 30-second
+budget (storage/network waits included, queue wait separate). Completed writes
+are not rolled back on timeout or quota exhaustion.
+
 Function security reviews run outside the shared node lock, keeping sites and
 API reads responsive during publication. Publications are serialized per node;
 concurrent attempts receive `429 publication_busy` and should retry with

@@ -10,7 +10,8 @@ const timeoutMs = Number(process.env.SANDBOX_TIMEOUT_MS || "30000");
 const vmTimeoutMs = Number(process.env.SANDBOX_VM_TIMEOUT_MS || "30000");
 const capabilityTimeoutMs = Number(process.env.SANDBOX_CAPABILITY_TIMEOUT_MS || "35000");
 const capabilityUrl = process.env.CAPABILITY_URL || "http://gap-node:8080/internal/functions/capability";
-const maxCapabilities = Number(process.env.SANDBOX_MAX_CAPABILITIES || "32");
+const maxCapabilities = Number(process.env.SANDBOX_MAX_CAPABILITIES || "128");
+const maxHttpCapabilities = Number(process.env.SANDBOX_MAX_HTTP_CAPABILITIES || "32");
 const maxGlobalConcurrency = Number(process.env.SANDBOX_MAX_GLOBAL_CONCURRENCY || "16");
 const maxProjectConcurrency = Number(process.env.SANDBOX_MAX_PROJECT_CONCURRENCY || "4");
 const maxQueue = Number(process.env.SANDBOX_MAX_QUEUE || "32");
@@ -90,16 +91,24 @@ function reply(res, status, body) {
   res.end(data);
 }
 
-function runWorker(payload) {
+function remainingTime(deadline) {
+  const remaining = Math.floor(deadline - performance.now());
+  if (remaining <= 0) throw new Error("function timed out");
+  return remaining;
+}
+
+function runWorker(payload, deadline) {
+  const remaining = remainingTime(deadline);
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [workerPath, String(vmTimeoutMs)], {
+    const child = spawn(process.execPath, [workerPath, String(Math.min(vmTimeoutMs, remaining))], {
       env: {},
       stdio: ["pipe", "pipe", "pipe"],
     });
+    let timedOut = false;
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGKILL");
-      reject(new Error("function timed out"));
-    }, timeoutMs);
+    }, remaining);
     let stdout = "";
     child.stdout.on("data", chunk => {
       stdout += chunk;
@@ -109,6 +118,7 @@ function runWorker(payload) {
     child.on("error", reject);
     child.on("close", code => {
       clearTimeout(timer);
+      if (timedOut) return reject(new Error("function timed out"));
       if (code !== 0) return reject(new Error("function failed"));
       try { resolve(JSON.parse(stdout)); }
       catch { reject(new Error("function returned an invalid result")); }
@@ -117,12 +127,12 @@ function runWorker(payload) {
   });
 }
 
-async function callCapability(projectId, request) {
+async function callCapability(projectId, request, deadline) {
   const response = await fetch(capabilityUrl, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ project_id: projectId, request }),
-    signal: AbortSignal.timeout(capabilityTimeoutMs),
+    signal: AbortSignal.timeout(Math.min(capabilityTimeoutMs, remainingTime(deadline))),
   });
   const body = await response.json();
   if (!response.ok) throw new Error(body?.error?.message || body?.error || "capability failed");
@@ -130,21 +140,34 @@ async function callCapability(projectId, request) {
 }
 
 async function invoke(payload) {
+  const deadline = performance.now() + timeoutMs;
   const capabilityResults = [];
-  for (let count = 0; count <= maxCapabilities; count++) {
-    const output = await runWorker({ ...payload, capability_results: capabilityResults });
+  let httpCalls = 0;
+  for (;;) {
+    const output = await runWorker({ ...payload, capability_results: capabilityResults }, deadline);
+    remainingTime(deadline);
     if (!output.capability_request) return output;
     if (!payload.project_id) throw new Error("missing capability project");
     if (output.capability_request.index !== capabilityResults.length) {
       throw new Error("invalid capability sequence");
     }
+    // Check before dispatch: the final replay is permitted, but the next
+    // operation must never execute a side effect beyond either budget.
+    if (capabilityResults.length >= maxCapabilities) {
+      throw new Error(`too many capability calls: maximum ${maxCapabilities} per invocation`);
+    }
+    if (output.capability_request.kind === "http.request") {
+      if (httpCalls >= maxHttpCapabilities) {
+        throw new Error(`too many HTTP capability calls: maximum ${maxHttpCapabilities} per invocation`);
+      }
+      httpCalls++;
+    }
     try {
-      capabilityResults.push({ ok: true, value: await callCapability(payload.project_id, output.capability_request) });
+      capabilityResults.push({ ok: true, value: await callCapability(payload.project_id, output.capability_request, deadline) });
     } catch (error) {
       capabilityResults.push({ ok: false, error: String(error.message || error) });
     }
   }
-  throw new Error("too many capability calls");
 }
 
 const server = http.createServer((req, res) => {

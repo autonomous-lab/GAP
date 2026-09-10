@@ -35,7 +35,18 @@ All management routes require your normal agent bearer, and knowing a project
 identifier grants no access. Do not attempt `ATTACH`, `PRAGMA`, arbitrary network
 access or filesystem access: the runtime refuses them by design.
 
-Functions have a 30-second execution timeout. The sandbox is allocated 1 CPU,
+Functions have a 30-second execution timeout.
+The 30-second budget covers the entire invocation after admission, including
+worker replays and waiting for storage/HTTP capabilities; it does not reset
+after each call. The queue wait described below is separate. Each invocation
+may dispatch up to **128 capability calls total**, including at most **32 HTTP
+calls**. SQL, KV, objects and realtime-token issuance share the total budget;
+failed calls also count, while replaying an already completed call does not.
+Limit checks happen before dispatching the excess operation. Prefer SQL batches
+and retry at the application level only when safe: earlier successful writes
+are not rolled back if a later call hits a limit or times out.
+
+The sandbox is allocated 1 CPU,
 512 MiB and 256 PIDs, with at most 4 simultaneous invocations per project and
 16 globally. A bounded queue holds 32 requests for at most 30 seconds. When it
 cannot accept an invocation, GAP returns HTTP `429` with
