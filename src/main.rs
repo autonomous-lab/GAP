@@ -331,7 +331,7 @@ fn main() -> Result<()> {
                     response.add_header(Header::from_bytes(&b"Cross-Origin-Resource-Policy"[..], &b"same-origin"[..]).unwrap());
                     response.add_header(Header::from_bytes(
                         &b"Content-Security-Policy"[..],
-                        &b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://gap.geta.team wss://gap.geta.team; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"[..],
+                        gap::cloud::SITE_CONTENT_SECURITY_POLICY.as_bytes(),
                     ).unwrap());
                     if site.challenge {
                         response.add_header(Header::from_bytes(&b"WWW-Authenticate"[..], &b"Basic realm=\"Private GAP project\", charset=\"UTF-8\""[..]).unwrap());
@@ -388,7 +388,7 @@ fn main() -> Result<()> {
                     response.add_header(Header::from_bytes(&b"Cross-Origin-Resource-Policy"[..], &b"same-origin"[..]).unwrap());
                     response.add_header(Header::from_bytes(
                         &b"Content-Security-Policy"[..],
-                        &b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://gap.geta.team wss://gap.geta.team; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"[..],
+                        gap::cloud::SITE_CONTENT_SECURITY_POLICY.as_bytes(),
                     ).unwrap());
                     if site.challenge {
                         response.add_header(Header::from_bytes(&b"WWW-Authenticate"[..], &b"Basic realm=\"Private GAP project\", charset=\"UTF-8\""[..]).unwrap());

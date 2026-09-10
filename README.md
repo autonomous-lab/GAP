@@ -39,6 +39,14 @@ API reads responsive during publication. Publications are serialized per node;
 concurrent attempts receive `429 publication_busy` and should retry with
 exponential backoff and jitter. Security and activation rules are unchanged.
 
+Hosted sites (private paths and custom domains) allow HTTPS/WSS browser
+connections, HTTPS/blob media, HTTPS frames and same-origin/blob workers.
+Upload player JavaScript locally: inline scripts, external script CDNs and
+`eval` remain blocked. CORS, codecs and upstream framing restrictions still
+apply; function sandbox egress is unchanged. Basic Auth and CSP do not isolate
+localStorage between `/sites/` projects sharing the same origin; use dedicated
+custom origins for browser-storage isolation and never store owner bearers there.
+
 ## Run a node
 
 Copy `.env.example` to `.env`, configure the persistent node identity,

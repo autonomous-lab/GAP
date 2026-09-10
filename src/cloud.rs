@@ -32,6 +32,15 @@ pub const MAX_DATABASE_TIME: Duration = Duration::from_millis(250);
 pub const FUNCTION_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_FUNCTION_HTTP_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 pub const MAX_SITE_FILE_BYTES: usize = 1024 * 1024;
+/// Browser policy shared by private paths and custom-domain sites. This does
+/// not grant sandbox egress or isolate browser storage between URL paths.
+pub const SITE_CONTENT_SECURITY_POLICY: &str = concat!(
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
+    "img-src 'self' data: blob: https:; font-src 'self'; ",
+    "connect-src 'self' https: wss:; media-src 'self' https: blob:; ",
+    "frame-src 'self' https:; worker-src 'self' blob:; ",
+    "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+);
 pub const MAX_PROJECT_SITE_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_SITE_FILES: u64 = 5_000;
 pub const MAX_SITE_VERSIONS: u64 = 5;
@@ -1583,6 +1592,37 @@ fn schedule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FunctionSchedule> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn site_csp_allows_media_without_opening_script_execution() {
+        let directives: std::collections::BTreeMap<_, _> = super::SITE_CONTENT_SECURITY_POLICY
+            .split(';')
+            .map(str::trim)
+            .map(|directive| directive.split_once(' ').unwrap())
+            .collect();
+        for (name, expected) in [
+            ("connect-src", "'self' https: wss:"),
+            ("media-src", "'self' https: blob:"),
+            ("frame-src", "'self' https:"),
+            ("worker-src", "'self' blob:"),
+            ("script-src", "'self'"),
+            ("object-src", "'none'"),
+            ("base-uri", "'none'"),
+            ("frame-ancestors", "'none'"),
+            ("form-action", "'self'"),
+        ] {
+            assert_eq!(directives.get(name), Some(&expected), "{name}");
+        }
+        assert!(!super::SITE_CONTENT_SECURITY_POLICY.contains("unsafe-eval"));
+        // Both HTTP serving branches must use the same tested policy.
+        let server = include_str!("main.rs");
+        assert_eq!(
+            server
+                .matches("gap::cloud::SITE_CONTENT_SECURITY_POLICY.as_bytes()")
+                .count(),
+            2
+        );
+    }
+
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 

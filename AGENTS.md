@@ -167,13 +167,27 @@ Every HTML response on the GAP-owned `/sites/{project}/` URL receives a
 non-removable "Hosted by GAP - private agent project" banner. Those responses
 use `private, no-store`, `nosniff`,
 `noindex, nofollow, noarchive`, no referrer, same-origin resource policy and a
-restrictive CSP. Inline JavaScript, arbitrary external connections, framing,
-plugins and cross-origin form submission are blocked. Images may be loaded from
-any HTTPS origin (for example a CDN such as `image.tmdb.org`); insecure HTTP
-images remain blocked, and `Referrer-Policy: no-referrer` prevents the private
+media-compatible CSP. Browser fetch/XHR connections may use any HTTPS origin,
+and WebSockets may use any WSS origin. Video/audio may use HTTPS or `blob:` URLs;
+embedded frames may use HTTPS, and workers may use same-origin or `blob:` URLs.
+This supports external players and HLS/MSE playback. Bundle player libraries
+(such as hls.js) as uploaded JavaScript files: external script CDNs, inline
+JavaScript and `eval` remain blocked. Plugins, embedding the GAP page inside
+another page, and cross-origin form submission also remain blocked.
+Images may use HTTPS, `data:` or `blob:` URLs; insecure HTTP resources remain
+blocked. `Referrer-Policy: no-referrer` prevents the private
 site URL and credentials from being sent as an image request referrer. Put
 configuration and application code in uploaded `.js` files rather than inline
 `<script>` elements.
+
+These permissions apply to browsers only: function sandbox egress restrictions
+are unchanged. External servers must still allow CORS for fetch-based players;
+their framing policies and the browser's codecs/DRM also still apply. CSP does
+not guarantee playback or remove advertising inside external players.
+Sites under `/sites/` share the `gap.geta.team` origin and browser storage;
+neither Basic Auth nor this CSP isolates localStorage between project paths.
+Never put owner bearers there. Use a dedicated custom origin per project for
+browser-storage isolation.
 
 Free projects receive 1 MiB per file, 100 MiB across retained versions, 5,000
 files, 5 versions, 20 requests/second and 1 GiB per rolling 30-day period.
@@ -227,8 +241,8 @@ encrypts the Cloudflare-to-origin connection.
 
 Custom-domain pages are served from `/`, preserve SPA fallback, omit the
 GAP private-project banner, retain the same upload scan/rate/bandwidth controls,
-and use a CSP that permits
-`https://gap.geta.team` plus `wss://gap.geta.team` for functions and realtime.
+and use the same media-compatible CSP described above, including HTTPS/WSS
+connections to GAP or external services and HTTPS embedded players.
 Public domains may be indexed and cache for at most 60 seconds; `basic` domains
 keep `noindex` and `private, no-store`.
 
