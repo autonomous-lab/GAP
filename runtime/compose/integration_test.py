@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import socket
+import ssl
+from unittest.mock import patch
 import subprocess
 import tempfile
 import threading
@@ -57,6 +59,7 @@ class Integration(unittest.TestCase):
             process = subprocess.Popen([str(Path(os.environ["GAP_TEST_BINARY"]).resolve())], env=env,
                                        cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             server = None
+            caddy_process = None
             try:
                 def request(method, path, token=None, body=None):
                     headers = {"Content-Type": "application/json"}
@@ -102,6 +105,25 @@ class Integration(unittest.TestCase):
                     config.pop("guests")
                     config["hypervisor"] = {"state_dir": os.environ["GAP_VM_TEST_STATE_DIR"],
                                             "image_dir": os.environ["GAP_VM_TEST_IMAGE_DIR"]}
+                if managed and os.environ.get('GAP_TEST_CADDY_BINARY'):
+                    config['ingress'] = {'dedicated_caddy': True, 'base_domain': 'apps.test',
+                        'admin_socket': str(root / 'caddy-admin.sock'),
+                        'http_port': free_port(), 'https_port': free_port(), 'internal_tls': True}
+                    bootstrap = root / 'caddy.json'
+                    bootstrap.write_text(json.dumps({'admin': {'listen': 'unix/' + config['ingress']['admin_socket']}}))
+                    caddy_process = subprocess.Popen([os.environ['GAP_TEST_CADDY_BINARY'], 'run', '--config', str(bootstrap)],
+                        env={'PATH': os.environ['PATH'], 'XDG_DATA_HOME': str(root / 'caddy-data'),
+                             'XDG_CONFIG_HOME': str(root / 'caddy-config'), 'HOME': str(root)},
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    for _ in range(100):
+                        try:
+                            with socket.socket(socket.AF_UNIX) as probe:
+                                probe.connect(config['ingress']['admin_socket'])
+                            break
+                        except OSError:
+                            if caddy_process.poll() is not None:
+                                self.fail('test Caddy exited')
+                            time.sleep(.05)
                 config_path = root / "runner.json"
                 config_path.write_text(json.dumps(config))
                 executions = []
@@ -122,7 +144,7 @@ class Integration(unittest.TestCase):
                 self.assertFalse(executions)
                 compose_approval.write_text(json.dumps({"agents": [owner]}))
                 if managed:
-                    self.exercise_managed(request, prefix, token, other["token"], runner, project_id, owner, compose_approval)
+                    self.exercise_managed(request, prefix, token, other["token"], runner, project_id, owner, compose_approval, root)
                     return
                 status, job = request("POST", prefix + "/releases", token, bundle)
                 self.assertEqual(status, 202, job)
@@ -151,6 +173,9 @@ class Integration(unittest.TestCase):
                 approval.write_text('{"agents":[]}')
                 self.assertEqual(request("GET", "/v1/cloud/projects", token)[0], 401 if private else 200)
             finally:
+                if caddy_process:
+                    caddy_process.terminate()
+                    caddy_process.wait(timeout=10)
                 if server:
                     server.shutdown()
                     server.server_close()
@@ -161,7 +186,7 @@ class Integration(unittest.TestCase):
                     process.kill()
                     process.wait()
 
-    def exercise_managed(self, request, prefix, token, other_token, runner, project, owner, approval):
+    def exercise_managed(self, request, prefix, token, other_token, runner, project, owner, approval, root):
         def operation(method, path, body=None):
             body = {"request_id": uuid.uuid4().hex, **(body or {})}
             status, job = request(method, prefix + path, token, body)
@@ -205,19 +230,57 @@ class Integration(unittest.TestCase):
                 with urllib.request.urlopen(url, timeout=10) as response:
                     return response.read().strip()
             persisted = page()
+            if runner.ingress:
+                ingress = operation('PUT', '/ingress', {**identity, 'enabled': True, 'guest_port': 8000})['ingress']
+                self.assertTrue(ingress['routed'])
+                ca = root / 'caddy-data/caddy/pki/authorities/local/root.crt'
+                original_resolve = socket.getaddrinfo
+                def resolve(host, *args, **kwargs):
+                    return original_resolve('127.0.0.1' if host == ingress['hostname'] else host, *args, **kwargs)
+                def https_page():
+                    context = ssl.create_default_context(cafile=str(ca))
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
+                    with patch('socket.getaddrinfo', side_effect=resolve):
+                        with opener.open(ingress['url'], timeout=5) as response:
+                            return response.read().strip()
+                for attempt in range(60):
+                    try:
+                        self.assertEqual(https_page(), persisted)
+                        break
+                    except (OSError, urllib.error.URLError):
+                        if attempt == 59:
+                            raise
+                        time.sleep(.5)
+                print('REAL CADDY HTTPS: certificate chain + hostname verified', flush=True)
+                operation('PUT', '/ingress', {**identity, 'enabled': False})
+                self.assertFalse(request('GET', prefix + '/ingress', token)[1]['routed'])
+                with patch('socket.getaddrinfo', side_effect=resolve):
+                    try:
+                        https_page()
+                    except (OSError, urllib.error.URLError):
+                        pass
+                    else:
+                        self.fail('disabled route still serves application')
+                operation('PUT', '/ingress', {**identity, 'enabled': True, 'guest_port': 8000})
             self.assertEqual(len(persisted), 36)
             operation("POST", "/vm/stop", identity)
+            if runner.ingress:
+                self.assertFalse(request('GET', prefix + '/ingress', token)[1]['routed'])
             operation("PATCH", "/vm", {**identity, "vcpus": 2, "memory_mib": 1280, "disk_gib": 5})
             operation("POST", "/vm/start", identity)
             ready()
             operation("POST", "/start")
             self.assertEqual(page(), persisted, "named volume must survive VM stop/resize/restart")
+            if runner.ingress:
+                self.assertEqual(https_page(), persisted)
             operation("POST", "/status")
             operation("POST", "/logs")
             operation("POST", "/vm/stop", identity)
             operation("DELETE", "/vm", {**identity, "delete_data": True, "confirm_data_loss": True})
             self.assertEqual(request("GET", prefix + "/vm", token)[1]["state"], "destroyed")
             self.assertFalse(manager.folder(manager.read(project, owner)).exists())
+            if runner.ingress:
+                self.assertFalse(request('GET', prefix + '/ingress', token)[1]['routed'])
             approval.write_text('{"agents":[]}')
             self.assertEqual(request("POST", prefix + "/vm", token, {"request_id": uuid.uuid4().hex})[0], 401)
             print("REAL GAP HTTP + APPROVAL + KVM + COMPOSE BUILD + HTTP + PERSISTENCE + RESIZE + DELETE: OK", flush=True)

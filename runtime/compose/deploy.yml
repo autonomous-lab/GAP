@@ -1,0 +1,43 @@
+# Standalone opt-in deployment; run with --project-directory at the repo root.
+# Requires an operator-selected available IP and prepared UID 10001 directories.
+services:
+  compose-edge:
+    image: caddy:2.10.2-alpine
+    user: "10001:10001"
+    command: ["caddy", "run", "--config", "/etc/caddy/bootstrap.json", "--resume"]
+    ports:
+      - "${GAP_COMPOSE_PUBLIC_IP:?Set a dedicated available listener IP}:80:80"
+      - "${GAP_COMPOSE_PUBLIC_IP:?Set a dedicated available listener IP}:443:443"
+      - "172.17.0.1:8092:8092"
+    volumes:
+      - ./runtime/compose/caddy-bootstrap.json:/etc/caddy/bootstrap.json:ro
+      - ./data/gap-compose/caddy-data:/data
+      - ./data/gap-compose/caddy-config:/config
+      - ./data/gap-compose/admin:/run/caddy-admin
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/caddy-admin/admin.sock"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
+  compose-runner:
+    build:
+      context: .
+      dockerfile: runtime/compose/Dockerfile
+    network_mode: service:compose-edge
+    devices: [/dev/kvm:/dev/kvm]
+    group_add: ["${GAP_COMPOSE_KVM_GID:?Set the numeric group owning /dev/kvm}"]
+    volumes:
+      - ./data/gap-compose/config:/config:ro
+      - ./data/gap-compose/worker:/data
+      - ./data/gap-compose/admin:/run/caddy-admin
+      - ./data/gap-compose/guest-image:/images:ro
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on:
+      compose-edge:
+        condition: service_healthy

@@ -7,7 +7,9 @@ FILES = ["docker-compose.yml", "docker-compose.scale.yml", ".env.example",
          "runtime/realtime/Dockerfile", "runtime/realtime/server.mjs",
          "runtime/realtime/package.json", "runtime/realtime/package-lock.json",
          "runtime/realtime/entrypoint.sh", "runtime/edge/Dockerfile",
-         "runtime/edge/nginx.conf"]
+         "runtime/edge/nginx.conf", "runtime/compose/Dockerfile",
+         "runtime/compose/image/Dockerfile", "runtime/compose/deploy.yml",
+         "runtime/compose/caddy-bootstrap.json", "runtime/compose/runner.example.json"]
 bad = []
 for f in FILES:
     p = pathlib.Path(f)
@@ -58,7 +60,11 @@ if yaml:
                 print(f"{f}: service {name} pins container_name")
                 sys.exit(1)
             for port in svc.get("ports", []):
-                if not str(port).startswith("172.17.0.1:"):
+                managed_public = (f == "runtime/compose/deploy.yml" and name == "compose-edge"
+                    and str(port) in (
+                        "${GAP_COMPOSE_PUBLIC_IP:?Set a dedicated available listener IP}:80:80",
+                        "${GAP_COMPOSE_PUBLIC_IP:?Set a dedicated available listener IP}:443:443"))
+                if not managed_public and not str(port).startswith("172.17.0.1:"):
                     print(f"{f}: service {name} publishes {port} outside the bridge")
                     sys.exit(1)
 

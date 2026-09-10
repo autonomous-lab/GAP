@@ -26,7 +26,7 @@ MAX_OUTPUT = 1024 * 1024
 PROJECT = re.compile(r"prj_[0-9a-f]{24}\Z")
 REQUEST = re.compile(r"[0-9a-f]{32}\Z")
 ACTION = {"releases", "start", "stop", "status", "logs",
-          "vm/create", "vm/start", "vm/stop", "vm/update", "vm/destroy"}
+          "vm/create", "vm/start", "vm/stop", "vm/update", "vm/destroy", "ingress"}
 
 
 class Failure(Exception):
@@ -144,6 +144,11 @@ class Runner:
         if config.get('hypervisor'):
             from microvm import MicroVMs
             self.hypervisor = MicroVMs(config['hypervisor'], execute)
+        self.ingress = None
+        self.ingress_config = config.get('ingress')
+        if self.ingress_config:
+            from ingress import Ingress
+            self.ingress = Ingress(self.ingress_config, self.hypervisor)
         with self.db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs(
                 id TEXT PRIMARY KEY, project TEXT NOT NULL, owner TEXT NOT NULL,
@@ -166,6 +171,8 @@ class Runner:
 
     def authorize(self, project, owner):
         config = load_config(self.path)  # reload approvals before each operation
+        if config.get('ingress') != self.ingress_config:
+            raise Failure(503, 'ingress_config_changed_restart_worker')
         guest = config.get("guests", {}).get(project)
         if self.hypervisor:
             if config.get('hypervisor') != self.hypervisor_config:
@@ -196,6 +203,14 @@ class Runner:
             raise Failure(400, "invalid_project")
         self.authorize(project, owner)
         method, action, body = rpc.get("method"), rpc.get("action"), rpc.get("body")
+        if action == 'ingress':
+            if not self.ingress:
+                raise Failure(409, 'ingress_not_configured')
+            if method == 'GET':
+                return 200, self.ingress.public(self.hypervisor.read(project, owner))
+            if method != 'PUT':
+                raise Failure(400, 'invalid_ingress_method')
+            method = 'POST'
         if action == 'vm':
             if method == 'GET':
                 if not self.hypervisor:
@@ -225,6 +240,12 @@ class Runner:
             from microvm import validate, VMError
             try:
                 validate(action, body)
+            except VMError as error:
+                raise Failure(400, str(error))
+        elif action == 'ingress':
+            from microvm import VMError
+            try:
+                self.ingress.validate(body)
             except VMError as error:
                 raise Failure(400, str(error))
         elif action == "releases":
@@ -260,7 +281,10 @@ class Runner:
                 db.execute("UPDATE jobs SET status='running' WHERE id=?", (job,))
             payload = json.loads(row['payload'])
             if payload['action'].startswith('vm/'):
-                result = self.hypervisor.perform(row['project'], row['owner'], payload['action'], payload['body'])
+                operation = self.ingress.vm_operation if self.ingress else self.hypervisor.perform
+                result = operation(row['project'], row['owner'], payload['action'], payload['body'])
+            elif payload['action'] == 'ingress':
+                result = self.ingress.perform(row['project'], row['owner'], payload['body'])
             else:
                 if self.hypervisor:
                     guest = self.hypervisor.guest(row['project'], row['owner'])

@@ -47,8 +47,9 @@ change on update. Inspect state before retrying after timeout or disconnection.
 
 - Multi-host scheduling and live migration. The managed worker now builds guest
   assets and creates, starts, stops, resizes offline and destroys QEMU/KVM VMs.
-- Application ingress, domain/TLS integration or public host port forwarding.
-  Managed VMs have optional worker-loopback TCP forwards.
+- Custom customer domains and arbitrary public TCP/UDP forwarding. Managed VMs
+  support optional generated project HTTPS ingress using a dedicated Caddy;
+  the operator configures its base domain, DNS and public listeners.
 - HA, migration, automatic rollback and volume backup/restore. Explicit whole-VM
   deletion is supported, with retention by default and data-loss confirmation for purge.
 - Automatic VM fencing on revocation. Revocation blocks new management and
@@ -64,6 +65,9 @@ KVM probing and simulated worker tests do not prove real guest boot.
 Automated disposable tests cover KVM boot, Compose build/HTTP, offline resize,
 controller reconstruction and deletion. The HTTP integration test also supports
 real guests with public/private node approval and persistent volume verification.
+With a Caddy executable it also checks TLS chain/hostname against an internal CA,
+route disable/enable and VM stop/start/delete reconciliation. Public ACME issuance
+still requires operator DNS and reachable public listeners.
 Before production activation on a selected execution host:
 Test real multi-service builds, persistent volumes, partial updates, controller
 restart, SSH failure and revocation. Check no host secrets/control sockets are

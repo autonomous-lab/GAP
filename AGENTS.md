@@ -766,8 +766,10 @@ relative bind mounts point into the new release directory on each update.
 
 Managed VM creation/start/stop, offline CPU/RAM/disk-growth updates and explicit
 deletion are available through `/stack/vm`; see the [VM API](./runtime/compose/README.md#vm-api).
-Automatic ingress/TLS, public host port forwarding, rollback, backup and HA
-are **not implemented**. Your `ports:` publishes
+Optional generated project HTTPS URLs are available through `GET/PUT /stack/ingress`;
+see [setup and API](./runtime/compose/README.md#project-https-ingress-opt-in).
+Custom customer domains, arbitrary public TCP/UDP forwarding, rollback, backup
+and HA are **not implemented**. Your `ports:` publishes
 on the guest, not automatically on the GAT host. Approval revocation blocks new
 management/admission, but does not stop running apps or revoke visitor/scoped
 tokens: the operator must stop/fence the VM for incident containment.

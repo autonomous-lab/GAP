@@ -1,0 +1,13 @@
+{
+  "approved_only": true,
+  "listen_all": true,
+  "token_file": "/config/service.token",
+  "state_dir": "/data/jobs",
+  "node_url": "http://172.17.0.1:8080",
+  "hypervisor": {"state_dir": "/data/vm", "image_dir": "/images"},
+  "ingress": {
+    "dedicated_caddy": true,
+    "base_domain": "apps.example.com",
+    "admin_socket": "/run/caddy-admin/admin.sock"
+  }
+}

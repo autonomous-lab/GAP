@@ -65,8 +65,8 @@ Defaults are 1 vCPU, 1024 MiB RAM and 8 GiB virtual disk. These are allocations,
 not commercial quotas. Disk growth is applied to the guest filesystem at next
 boot. `ports` contains guest TCP port numbers other than 22; GAP allocates
 loopback forwards in the **worker network namespace**, returned as `worker_port`.
-It does not allocate a public hostname/TLS endpoint. Containerized workers need
-an operator-configured proxy in the same network namespace for application access.
+Optional ingress publishes this forward under a generated project HTTPS hostname;
+otherwise it remains worker-local.
 
 A returned `running` state describes QEMU, not Docker readiness. Wait for the
 guest to boot before submitting a release; a failed early SSH job can be retried
@@ -256,9 +256,9 @@ build contexts inside the guest; large-artifact uploads are not implemented.
 
 Revocation blocks new management and queued execution at recheck, **not already
 running VMs/apps or visitor/scoped tokens**. For incident containment, the
-operator must fence/stop the VM through the hypervisor first. Automatic app
-ingress/TLS, public host port forwarding, HA, backup/restore and rollback are
-not implemented. Guest `ports:` does not automatically
+operator must fence/stop the VM through the hypervisor first. Custom customer
+domains, arbitrary public TCP/UDP forwarding, HA, backup/restore and rollback
+are not implemented. Generated project HTTPS ingress is available below. Guest `ports:` does not automatically
 publish physical-host ports. Existing Cloud service quotas stay unchanged.
 
 ## Tests and production readiness
@@ -299,3 +299,101 @@ retry deduplication, VM CRUD, a Compose build, HTTP access and a random named-vo
 value surviving stop/resize/restart. Without opt-in it keeps simulated guests.
 These tests do not establish HA, adversarial hypervisor isolation or production
 load capacity. Production Compose activation remains a separate operator step.
+
+## Project HTTPS ingress (opt-in)
+
+A managed VM may expose one HTTP application through a **dedicated Caddy** in
+the worker's network namespace. The agent selects a guest port already in the
+VM's `ports`; it cannot choose an upstream IP, host port, certificate or domain.
+GAP generates `prj-<24-hex-project-id>.<base_domain>`. Custom customer domains
+and arbitrary TCP/UDP services are outside this API.
+
+Add this operator configuration to the runner:
+
+```json
+"ingress": {
+  "dedicated_caddy": true,
+  "base_domain": "apps.example.com",
+  "admin_socket": "/run/caddy-admin/admin.sock"
+}
+```
+
+The operator controls the base domain, points wildcard DNS at the dedicated
+edge, and makes ports 80/443 reachable for ACME validation. The worker replaces
+the **entire dedicated Caddy configuration** through `/load`. Never point it at
+GAP's shared edge or a Caddy serving unrelated sites. Its administrator endpoint
+uses a Unix socket shared only with the worker, never TCP or guest mounts.
+QEMU guest networking can reach worker loopback services, so TCP localhost
+is insufficient protection for the Caddy administration API. Persist certificate data.
+Caddy's [automatic HTTPS](https://caddyserver.com/docs/automatic-https) obtains and
+renews certificates; a configured route does not prove DNS, certificate issuance
+or application health has succeeded.
+
+After deploying the application in a VM that forwards port 8000:
+
+```bash
+curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/stack/ingress" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"request_id":"0123456789abcdef0123456789abcdef","vm_id":"vm_<32-hex-id>","enabled":true,"guest_port":8000}'
+
+curl -s "$NODE/v1/cloud/projects/$PROJECT/stack/ingress" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+PUT returns an asynchronous job with normal request-id deduplication. GET returns
+`enabled`, `routed`, `vm_id`, `guest_port`, `hostname` and `url`. `enabled` is saved
+intent; `routed` describes the last accepted Caddy configuration, not health.
+To disable, PUT a new request ID, the exact VM ID and `enabled: false`, omitting
+`guest_port`. Publishing is explicit and public; visitor authentication belongs
+to the application. Compose approval controls management, not visitor access.
+
+Before VM mutations, the worker withdraws the route, then reconciles catalog
+state afterward. Stop/delete removes it; starting the same VM restores an
+enabled route. Removing the selected forwarded port leaves it enabled but
+unrouted. A replacement VM does not inherit the deleted VM's publication.
+Controller startup reconciles saved intent. A Caddy reload error fails the job;
+inspect state and retry with a new request ID. If route withdrawal fails, VM
+mutation is not attempted, preventing stale routes to reassigned ports.
+An operator can still stop the exact VM outside the API for incident containment.
+Approval revocation does not automatically stop a running app or remove its
+visitor route. Updates may interrupt existing connections.
+
+### Standalone deployment
+
+`runtime/compose/deploy.yml` is separate from the node's production stack. Its
+dedicated edge and non-root worker share a network namespace. Select an available
+listener IP that does not conflict with the existing edge on ports 80/443.
+The worker management API binds only to `172.17.0.1:8092`.
+
+1. Create `data/gap-compose/{config,worker,caddy-data,caddy-config,guest-image,admin}`.
+   Writable worker/Caddy directories must belong to UID/GID 10001; set the
+   shared admin directory to mode 700.
+2. Build guest assets into `data/gap-compose/guest-image` with the earlier image
+   build command. Directory mode 755 and image files 644 allow read-only use.
+3. Copy `runtime/compose/runner.example.json` to
+   `data/gap-compose/config/runner.json`; replace `base_domain` and `node_url`.
+   Put the matching node/worker service token in `config/service.token`.
+   Protect the config directory with ownership 10001 and mode 700, files 600.
+4. Set `GAP_COMPOSE_PUBLIC_IP` to the available IP and `GAP_COMPOSE_KVM_GID` to
+   the numeric group returned by `stat -c %g /dev/kvm`. Configure node Compose
+   approval and worker settings, DNS, and public routing to ports 80/443.
+5. From the repository root, validate and start:
+
+```bash
+docker compose --project-directory . -f runtime/compose/deploy.yml config
+docker compose --project-directory . -f runtime/compose/deploy.yml up -d --build
+```
+
+The edge resumes persisted configuration. If recreating the edge container
+changes its network namespace, recreate the worker with it. Neither service
+mounts the host Docker socket or the node's secrets.
+
+### Real TLS validation
+
+Set `GAP_TEST_CADDY_BINARY` to a Caddy executable alongside the real KVM test
+environment variables. The integration test starts an isolated Caddy using high
+ports and an internal CA, and verifies the HTTPS certificate chain **and hostname**,
+route disable/re-enable, removal on VM stop/delete and restoration after restart.
+It does not request a public certificate or change production DNS. Operator-only
+`internal_tls: true`, `http_port` and `https_port` support this isolated test;
+leave internal TLS disabled for browser-trusted public certificates.
