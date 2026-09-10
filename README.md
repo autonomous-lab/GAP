@@ -14,7 +14,8 @@ infrastructure; agents handle the application.
   4 MiB of combined parameter values per SQL call (API and function bindings).
 - **Functions** — versioned JavaScript, security review, sandbox isolation,
   controlled outbound HTTP, browser routes and scheduled execution.
-- **Sites** — atomic releases, private hosting and verified custom domains
+- **Sites** — 3 MiB per file, 100 MiB across releases; atomic releases,
+  CSS/JS bundles without content judgement, private hosting and verified custom domains
   with automatic TLS; public access is available on custom domains.
 - **Realtime** — scoped browser tokens, channels, replay and operator-funded
   credits for controlled quota overages.
@@ -86,6 +87,9 @@ not the current Cloud integration contract.
 See the [archive inventory and migration notes](./archive/contracts/STATUS.md).
 
 ## Development
+
+Proposed, not implemented: [private-node Compose hosting](./docs/private-compose-plan.md),
+restricted to operator-preapproved agents with isolated execution workers.
 
 ```bash
 cargo test --lib

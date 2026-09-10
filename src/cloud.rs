@@ -32,7 +32,7 @@ pub const MAX_DATABASE_RESULT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_DATABASE_TIME: Duration = Duration::from_millis(250);
 pub const FUNCTION_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_FUNCTION_HTTP_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
-pub const MAX_SITE_FILE_BYTES: usize = 1024 * 1024;
+pub const MAX_SITE_FILE_BYTES: usize = 3 * 1024 * 1024;
 /// Browser policy shared by private paths and custom-domain sites. This does
 /// not grant sandbox egress or isolate browser storage between URL paths.
 pub const SITE_CONTENT_SECURITY_POLICY: &str = concat!(
@@ -1516,6 +1516,14 @@ fn scan_static_site_file(path: &str, content: &[u8]) -> Result<()> {
             "site security scan: control bytes are forbidden".into(),
         ));
     }
+    // Browser bundles are not server functions. Accept minified/encoded
+    // CSS and JS without content judgement; retain structural validation.
+    if matches!(
+        media,
+        "text/css; charset=utf-8" | "text/javascript; charset=utf-8"
+    ) {
+        return Ok(());
+    }
     if text.len() > 32 * 1024 && text.lines().any(|line| line.len() > 32 * 1024) {
         return Err(Error::Other(
             "site security scan: excessive minification or padding".into(),
@@ -1965,11 +1973,40 @@ mod tests {
             )
             .is_err());
         assert!(store
-            .put_site_file(1, "app.js", b"const OPENAI_API_KEY='not allowed';", 3)
+            .put_site_file(1, "credentials.txt", b"OPENAI_API_KEY=not-allowed", 3)
             .is_err());
         assert!(store
             .put_site_file(1, "huge.js", &vec![b'a'; MAX_SITE_FILE_BYTES + 1], 3)
             .is_err());
+    }
+
+    #[test]
+    fn static_bundles_accept_three_mib_without_content_judgement() {
+        let mut store = temp_store();
+        store
+            .configure_site(
+                true,
+                "index.html",
+                false,
+                "demo",
+                Some("a sufficiently long password"),
+                1,
+            )
+            .unwrap();
+        store.create_site_version(2).unwrap();
+        let mut bundle = b"/* OPENAI_API_KEY=example; atob( */".to_vec();
+        bundle.resize(MAX_SITE_FILE_BYTES, b' ');
+        for name in ["bundle.js", "bundle.mjs", "bundle.css"] {
+            assert!(store.put_site_file(1, name, &bundle, 3).is_ok());
+            let mut oversized = bundle.clone();
+            oversized.push(b' ');
+            assert!(store.put_site_file(1, name, &oversized, 3).is_err());
+            assert!(store.put_site_file(1, name, b"\x00", 3).is_err());
+            assert!(store.put_site_file(1, name, b"\xff", 3).is_err());
+        }
+        assert!(scan_static_site_file("bundle.js", "atob('x');".repeat(100).as_bytes()).is_ok());
+        assert!(scan_static_site_file("index.html", &bundle).is_err());
+        assert_eq!(store.site_files(1).unwrap().len(), 3);
     }
 
     #[test]

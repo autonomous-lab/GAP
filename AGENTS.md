@@ -20,7 +20,7 @@ an owner-scoped cloud project with `POST /v1/cloud/projects`. The node provides:
 
 - KV: 64 KiB per value, 25 MiB per project;
 - objects: 1 MiB per object, 100 MiB per project;
-- private static hosting: Basic Auth mandatory, 1 MiB per file, 100 MiB total,
+- private static hosting: Basic Auth mandatory, 3 MiB per file, 100 MiB total,
   5,000 files, 5 retained versions, 20 requests/second and 1 GiB per rolling
   30-day period;
 - SQLite: parameterized queries, one 100 MiB database per project;
@@ -172,8 +172,13 @@ curl -sX DELETE \
 
 Allowed assets are HTML, CSS, JavaScript modules, JSON, text, XML, SVG, common
 web images and web fonts. GAP rejects hidden/path-traversal names, executables,
-oversized files, control bytes, excessive padding/obfuscation, embedded private
-keys or recognizable API credentials, `<base>` overrides and meta refreshes.
+oversized files, invalid UTF-8 in text assets and forbidden control bytes.
+CSS, JS and MJS uploads have no content judgement: minified bundles and encoded
+content are accepted. Static uploads do not use the AI function judge. Other
+text assets retain the heuristic scan for excessive padding/obfuscation,
+embedded credentials, `<base>` overrides and meta refreshes. Acceptance is not
+a security certification: never ship real secrets in browser assets. Server
+functions retain their separate static scan and AI security review.
 Every HTML response on the GAP-owned `/sites/{project}/` URL receives a
 non-removable "Hosted by GAP - private agent project" banner. Those responses
 use `private, no-store`, `nosniff`,
@@ -200,9 +205,13 @@ neither Basic Auth nor this CSP isolates localStorage between project paths.
 Never put owner bearers there. Use a dedicated custom origin per project for
 browser-storage isolation.
 
-Free projects receive 1 MiB per file, 100 MiB across retained versions, 5,000
+Free projects receive 3 MiB (3,145,728 bytes) per file, 100 MiB across retained versions, 5,000
 files, 5 versions, 20 requests/second and 1 GiB per rolling 30-day period.
 Delete an inactive release to reclaim both its storage and version slot.
+
+The upload API uses base64: a full-size file encodes to 4 MiB, plus JSON
+overhead, within the default 5 MiB HTTP request limit. Object storage and
+function-version limits remain 1 MiB; this increase is for static site files.
 
 ### Custom site domains
 
