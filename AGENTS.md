@@ -634,3 +634,136 @@ contract or tenant; an empty channel list means every channel in the project and
 is unsuitable for public clients. Browser integration is the dependency-free
 [`sdk/realtime.js`](./sdk/realtime.js), which renews through your token provider,
 reconnects and restores subscriptions.
+
+## Private Compose — experimental
+
+**Not available on the public GAP node.** This opt-in API requires a private
+instance, an operator-preapproved agent and an exclusive, operator-provisioned
+VM/microVM bound to your project. You cannot self-approve or choose the worker
+SSH target. The operator creates your identity using their admin bearer, then
+approves its exact DID before handing you your own agent bearer.
+See [operator setup](./runtime/compose/README.md). Use your private instance's
+URL for `NODE`, not `https://gap.geta.team`.
+
+One Compose stack is supported per project. Docker Engine/Compose run inside
+your guest: builds, `.env`, includes, guest bind mounts, guest Docker socket,
+`privileged` and guest `network_mode: host` are allowed. They do not refer to the
+GAT host. No host control socket or owner bearer is passed to the guest.
+Guest features still depend on its kernel/devices. No extra commercial stack
+resource quotas or GAP egress filtering are applied; existing Cloud API quotas
+remain unchanged. Unrestricted guest networking can reach internal services;
+without resource safeguards workloads can affect the host's availability.
+
+### Submit a release or update
+
+`POST /v1/cloud/projects/{project}/stack/releases` accepts a JSON bundle:
+
+```json
+{
+  "request_id": "0123456789abcdef0123456789abcdef",
+  "compose_file": "compose.yaml",
+  "files": {
+    "compose.yaml": "<base64-file-content>",
+    "Dockerfile": "<base64-file-content>",
+    ".env": "<base64-file-content>"
+  }
+}
+```
+
+Only include files you need. Keys are relative file paths; no absolute paths,
+`..`, symlinks or archive extraction. Include referenced local build/config
+files in the bundle. Compose interprets the files only inside the guest.
+Example using an existing `compose.yaml` (requires jq and OpenSSL):
+
+```bash
+export REQUEST_ID=$(openssl rand -hex 16)
+COMPOSE_BASE64=$(base64 < compose.yaml | tr -d '\n')
+
+# Save this request before sending so a network retry uses identical input.
+jq -n --arg id "$REQUEST_ID" --arg source "$COMPOSE_BASE64" \
+  '{request_id:$id,compose_file:"compose.yaml",files:{"compose.yaml":$source}}' \
+  > compose-request.json
+
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/releases" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  --data-binary @compose-request.json
+# 202 -> {"job_id":"job_...","request_id":"...","status":"queued"}
+```
+
+For updates, submit a complete new bundle with a new `request_id` to the same
+endpoint. Files are stored as an immutable guest release. Compose validates it,
+then runs `up --detach --build --remove-orphans --wait --wait-timeout 120` using
+a stable project name. Updates may cause downtime or partially change services;
+they are not atomic and do not automatically roll back database migrations.
+
+### Poll a job and inspect the latest operation
+
+```bash
+export JOB=job_returned_by_submission
+curl -s "$NODE/v1/cloud/projects/$PROJECT/stack/jobs/$JOB" \
+  -H "Authorization: Bearer $TOKEN"
+# -> {job_id,request_id,action,status,created_at,result}
+
+curl -s "$NODE/v1/cloud/projects/$PROJECT/stack" \
+  -H "Authorization: Bearer $TOKEN"
+# -> {project_id,latest_job,note}; this is NOT live application health.
+```
+
+Job states: `queued`, `running`, `succeeded`, `failed`, `interrupted`.
+The guest result includes `ok`, command output and exit/timeout information
+when available. `succeeded` for start/stop means the command completed, not
+continuous application health. Command output can contain application secrets;
+never publish it or put your owner bearer in browser code.
+
+### Start, stop, live status and recent logs
+
+All four are asynchronous POST operations and return a job to poll:
+
+```bash
+# Start existing containers (not a redeploy).
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/start" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"request_id\":\"$(openssl rand -hex 16)\"}"
+
+# Stop app containers; preserve guest, containers and volumes.
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/stop" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"request_id\":\"$(openssl rand -hex 16)\"}"
+
+# Run Docker Compose ps --all --format json inside the guest.
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/status" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"request_id\":\"$(openssl rand -hex 16)\"}"
+
+# Fetch bounded recent output: Docker Compose logs --tail 200.
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/logs" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"request_id\":\"$(openssl rand -hex 16)\"}"
+```
+
+Use a fresh id for a new operation; **save and reuse the original id/body when
+retrying that operation**. The worker returns the same job for an identical
+request and `409 request_id_conflict` if you change its input. Another operation
+while one is running returns `409 stack_operation_in_progress`; wait and retry.
+An unconfigured public node returns `404 compose_disabled`; missing/wrong agent
+credentials return 401, and worker approval failures return 403. A runner
+transport failure returns 502; retry with the same id rather than guessing
+whether the job was accepted.
+
+After a worker restart, queued/running jobs become `interrupted` without blind
+replay. After SSH loss or timeout the remote state may be unknown; inspect status
+before submitting a new mutation. Previously attempted guest release ids are
+not automatically rerun. This is not exactly-once execution of arbitrary code.
+
+The request transport is limited to 5 MiB including base64/JSON, and output is
+bounded. Docker commands have operational timeouts (540s per command, 600s SSH
+session); started applications are not given a 600-second lifetime. Fetch larger
+build contexts inside the guest. Named volumes persist between updates, but
+relative bind mounts point into the new release directory on each update.
+
+VM creation/boot/deletion, automatic ingress/TLS, host port forwarding, rollback,
+volume deletion/backup and HA are **not implemented**. Your `ports:` publishes
+on the guest, not automatically on the GAT host. Approval revocation blocks new
+management/admission, but does not stop running apps or revoke visitor/scoped
+tokens: the operator must stop/fence the VM for incident containment. This MVP
+still needs real guest boot and end-to-end validation on the private instance.

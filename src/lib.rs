@@ -51,6 +51,7 @@ pub mod onramp;
 pub mod payment;
 pub mod policy;
 pub mod principal;
+pub mod private_node;
 pub mod receipt_chain;
 pub mod relayer;
 pub mod runtime;

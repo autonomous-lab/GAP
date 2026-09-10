@@ -487,6 +487,7 @@ pub struct NodeState {
     /// GAP Runtime's global project projection. The durable copy uses
     /// the existing ClickHouse-backed generic state table.
     cloud_projects: HashMap<String, crate::cloud::ProjectRecord>,
+    pub private_node: Option<crate::private_node::PrivateNode>,
     /// Verified custom hostname -> project mapping. Kept globally so a TLS
     /// handshake and a Host-routed request are O(1), not a scan of tenant DBs.
     custom_domains: HashMap<String, crate::cloud::SiteDomain>,
@@ -932,6 +933,7 @@ impl NodeState {
             credited_deposits,
             deposit_chain: None,
             cloud_projects,
+            private_node: None,
             custom_domains,
             realtime_credits,
             realtime_credit_topups,
@@ -1241,9 +1243,14 @@ impl NodeState {
 
     /// Look up an agent by bearer token.
     pub fn agent_by_token(&self, token: &str) -> Result<&RegisteredAgent> {
-        self.agents
+        let agent = self
+            .agents
             .get(token)
-            .ok_or_else(|| Error::Unauthorized("invalid bearer token".into()))
+            .ok_or_else(|| Error::Unauthorized("invalid bearer token".into()))?;
+        if let Some(policy) = &self.private_node {
+            policy.authorize(&agent.identity.did().to_string())?;
+        }
+        Ok(agent)
     }
 
     /// Announce capabilities for the authenticated agent.
@@ -7516,6 +7523,51 @@ pub fn route_with_ip(
 
     let token = auth.and_then(|h| h.strip_prefix("Bearer "));
 
+    if method == "POST" && path == "/internal/compose/authorize" {
+        let allowed = guard.private_node.as_ref().is_some_and(|policy| {
+            policy
+                .runner
+                .as_ref()
+                .is_some_and(|(_, secret)| token == Some(secret.as_str()))
+                && body["project_id"]
+                    .as_str()
+                    .and_then(|id| guard.cloud_projects.get(id))
+                    .is_some_and(|project| {
+                        project.status == "active"
+                            && body["owner_did"].as_str() == Some(project.owner_did.as_str())
+                            && policy.authorize(&project.owner_did).is_ok()
+                    })
+        });
+        return (if allowed { 200 } else { 403 }, json!({"allowed": allowed}));
+    }
+
+    if let Some((project_id, action)) = crate::private_node::stack_route(path) {
+        let runner = match guard.private_node.as_ref().and_then(|p| p.runner.clone()) {
+            Some(runner) => runner,
+            None => {
+                return (
+                    404,
+                    json!({"error":{"code":"compose_disabled","message":"Compose is not enabled on this node"}}),
+                )
+            }
+        };
+        let project = match guard.cloud_owned_project(token.unwrap_or(""), project_id) {
+            Ok(project) => project,
+            Err(error) => return error_response(&error),
+        };
+        // Only submit/poll here: guest execution happens asynchronously on the
+        // runner. No network call or Compose operation under the state lock.
+        drop(guard);
+        return crate::private_node::forward(
+            &runner,
+            project_id,
+            &project.owner_did,
+            method,
+            action,
+            body,
+        );
+    }
+
     // Caddy calls this over the bridge address before issuing an on-demand
     // certificate. A shared secret is still required so accidentally exposing
     // the route through another proxy does not turn it into a hostname oracle.
@@ -8323,6 +8375,13 @@ pub fn route_with_ip(
 
         // ---- identity ----
         ("POST", "/v1/identity") => {
+            if guard.private_node.is_some()
+                && (token.is_none() || guard.admin_token.as_deref() != token)
+            {
+                return error_response(&Error::Unauthorized(
+                    "private identity creation requires the operator token".into(),
+                ));
+            }
             let (did, tok) = guard.create_identity();
             Ok(json!({ "did": did, "token": tok }))
         }
@@ -9855,6 +9914,125 @@ mod tests {
         Arc::new(Mutex::new(NodeState::new(Box::new(
             SqliteStorage::open(":memory:").unwrap(),
         ))))
+    }
+
+    #[test]
+    fn private_management_requires_operator_bootstrap_and_live_approval() {
+        let arc = state();
+        let path =
+            std::env::temp_dir().join(format!("gap-private-route-{}", rand::random::<u64>()));
+        std::fs::write(&path, r#"{"agents":[]}"#).unwrap();
+        {
+            let mut state = arc.lock().unwrap();
+            state.set_admin_token("operator-only");
+            state.private_node = Some(crate::private_node::PrivateNode {
+                approvals: path.clone(),
+                runner: None,
+            });
+        }
+        assert_eq!(
+            route_with_ip(&arc, "POST", "/v1/identity", b"", None, None).0,
+            401
+        );
+        let (status, identity) = route_with_ip(
+            &arc,
+            "POST",
+            "/v1/identity",
+            b"",
+            Some("Bearer operator-only"),
+            None,
+        );
+        assert_eq!(status, 200);
+        let token = identity["token"].as_str().unwrap();
+        let auth = format!("Bearer {token}");
+        assert_eq!(
+            route_with_ip(&arc, "GET", "/v1/cloud/projects", b"", Some(&auth), None).0,
+            401
+        );
+        std::fs::write(&path, json!({"agents":[identity["did"]]}).to_string()).unwrap();
+        assert_eq!(
+            route_with_ip(&arc, "GET", "/v1/cloud/projects", b"", Some(&auth), None).0,
+            200
+        );
+        std::fs::write(&path, r#"{"agents":[]}"#).unwrap();
+        assert_eq!(
+            route_with_ip(&arc, "GET", "/v1/cloud/projects", b"", Some(&auth), None).0,
+            401
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn compose_is_disabled_on_public_nodes_and_callback_fails_closed() {
+        let arc = state();
+        let path = "/v1/cloud/projects/prj_0123456789abcdef01234567/stack/releases";
+        let (status, body) = route_with_ip(&arc, "POST", path, b"{}", None, None);
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "compose_disabled");
+        assert_eq!(
+            route_with_ip(
+                &arc,
+                "POST",
+                "/internal/compose/authorize",
+                b"{}",
+                None,
+                None
+            )
+            .0,
+            403
+        );
+    }
+
+    #[test]
+    fn compose_callback_requires_secret_owner_active_project_and_approval() {
+        let arc = state();
+        let path =
+            std::env::temp_dir().join(format!("gap-compose-callback-{}", rand::random::<u64>()));
+        let (did, _) = arc.lock().unwrap().create_identity();
+        let did = did.to_string();
+        let project = "prj_0123456789abcdef01234567";
+        std::fs::write(&path, json!({"agents":[did]}).to_string()).unwrap();
+        {
+            let mut state = arc.lock().unwrap();
+            state.private_node = Some(crate::private_node::PrivateNode {
+                approvals: path.clone(),
+                runner: Some(("http://127.0.0.1:9".into(), "runner-secret".into())),
+            });
+            state.cloud_projects.insert(
+                project.into(),
+                crate::cloud::ProjectRecord {
+                    project_id: project.into(),
+                    owner_did: did.clone(),
+                    status: "active".into(),
+                    plan: "free".into(),
+                    created_at: 1,
+                    updated_at: 1,
+                },
+            );
+        }
+        let payload = json!({"project_id":project,"owner_did":did}).to_string();
+        let invoke = |auth| {
+            route_with_ip(
+                &arc,
+                "POST",
+                "/internal/compose/authorize",
+                payload.as_bytes(),
+                auth,
+                None,
+            )
+            .0
+        };
+        assert_eq!(invoke(None), 403);
+        assert_eq!(invoke(Some("Bearer wrong-secret")), 403);
+        assert_eq!(invoke(Some("Bearer runner-secret")), 200);
+        arc.lock()
+            .unwrap()
+            .cloud_projects
+            .get_mut(project)
+            .unwrap()
+            .status = "suspended".into();
+        assert_eq!(invoke(Some("Bearer runner-secret")), 403);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -89,6 +89,7 @@ fn build_storage() -> Result<Box<dyn Storage>> {
 }
 
 fn main() -> Result<()> {
+    let private_node = gap::private_node::PrivateNode::from_env()?;
     let addr = env::var("GAP_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let storage = build_storage()?;
 
@@ -123,6 +124,7 @@ fn main() -> Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(600);
     let mut state = NodeState::cloud_with_rate_limits(storage, seed, token_cap, ip_cap);
+    state.private_node = private_node;
     if let Ok(admin_token) = env::var("GAP_ADMIN_TOKEN") {
         state.set_admin_token(admin_token);
         println!("[gap-cloud] operator token configured");
