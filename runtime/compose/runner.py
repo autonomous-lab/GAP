@@ -307,6 +307,8 @@ class Runner:
             else:
                 if self.hypervisor:
                     guest = self.hypervisor.guest(row['project'], row['owner'])
+                    meta = self.hypervisor.read(row['project'], row['owner'])
+                    self.hypervisor.sync_environment(meta)
                 result = self.execute(guest, payload)
             status = "succeeded" if result.get("ok") is True else "failed"
         except Failure as error:

@@ -156,4 +156,5 @@ class Network:
                 self.apply(meta)
             meta['network_pending'] = False
             self.manager.save(meta)
+            self.manager.sync_environment(meta)
             return {'ok': True, 'ports': self.public(meta)}

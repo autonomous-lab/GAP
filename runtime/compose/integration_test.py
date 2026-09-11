@@ -226,6 +226,19 @@ class Integration(unittest.TestCase):
             key = root/'agent-key'
             subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(key)], check=True)
             operation('PUT', '/ssh', {**identity, 'authorized_keys': [Path(str(key)+'.pub').read_text().strip()]})
+            def guest_env(command='env'):
+                meta = manager.read(project, owner)
+                result = subprocess.run(['ssh','-F','/dev/null','-o','BatchMode=yes',
+                    '-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes',
+                    '-o','UserKnownHostsFile='+str(manager.folder(meta)/'known_hosts'),
+                    '-o','HostKeyAlias='+meta['vm_id'],'-i',str(key),'-p',str(meta['ssh_port']),
+                    'root@127.0.0.1', command], capture_output=True, text=True, check=True, timeout=15)
+                return dict(line.split('=',1) for line in result.stdout.splitlines() if line.startswith('GAP_'))
+            initial_env = guest_env()
+            self.assertEqual(initial_env['GAP_HTTP_PORT'], '')
+            self.assertEqual(initial_env['GAP_PUBLIC_PORTS'], ','.join(str(p['public_port']) for p in public_ports))
+            self.assertEqual(initial_env, guest_env('gap-env env'))
+            self.assertEqual(initial_env['GAP_VM_ID'], guest_env("su nobody -s /bin/sh -c 'gap-env env'")['GAP_VM_ID'])
             ssh_info = request('GET', prefix+'/ssh', token)[1]
             self.assertTrue(ssh_info['host_key_fingerprint'].startswith('SHA256:'))
             self.assertEqual(len(ssh_info['authorized_keys']), 1)
@@ -235,8 +248,11 @@ class Integration(unittest.TestCase):
             operation('PUT', '/ports', {**identity, 'mappings': []})
             self.assertFalse(request('GET', prefix+'/ports', token)[1]['ports'][0]['routed'])
             print('REAL GAP HTTP: PORT RESERVATION + HOT MAPPINGS + SSH KEYS + OWNER ISOLATION OK', flush=True)
+            if runner.ingress:
+                operation('PUT', '/ingress', {**identity, 'enabled': True, 'guest_port': 8000})
+                self.assertEqual(guest_env()['GAP_HTTP_PORT'], '8000')
             sources = {
-                "compose.yaml": 'services:\n  web:\n    build: .\n    ports: ["8000:8000"]\n    volumes: ["data:/persist"]\nvolumes:\n  data: {}\n',
+                "compose.yaml": 'services:\n  web:\n    build: .\n    ports: ["8000:8000"]\n    env_file:\n      - path: /etc/gap/runtime.env\n        format: raw\n    environment:\n      TEST_INTERPOLATED_HTTP_PORT: ${GAP_HTTP_PORT}\n    volumes: ["data:/persist"]\nvolumes:\n  data: {}\n',
                 "Dockerfile": 'FROM alpine:3.23\nRUN apk add --no-cache python3\nCOPY http_fixture.py /app.py\nCMD ["python3", "/app.py"]\n',
                 "http_fixture.py": (Path(__file__).parent / 'http_fixture.py').read_text()}
             operation("POST", "/releases", {"compose_file": "compose.yaml", "files": {
@@ -255,6 +271,13 @@ class Integration(unittest.TestCase):
                         self.assertIsNone(response.headers.get('Service-Worker-Allowed'))
                         return response.read().strip()
                 self.assertEqual(app_request(), persisted)
+                app_env = json.loads(app_request('runtime-environment'))
+                self.assertEqual(app_env['GAP_HTTP_PORT'], '8000')
+                self.assertEqual(app_env['TEST_INTERPOLATED_HTTP_PORT'], '8000')
+                self.assertEqual(app_env['GAP_PUBLIC_URL'], ingress['url'])
+                self.assertEqual(app_env['GAP_PUBLIC_HOST'], 'sites.gap.geta.team')
+                self.assertEqual(len(json.loads(app_env['GAP_PORTS_JSON'])), 5)
+                print('REAL GUEST -> COMPOSE INTERPOLATION + CONTAINER ENVIRONMENT OK', flush=True)
                 echo = json.loads(app_request('echo?value=a%2Fb&x=1', 'POST', b'hello-world'))
                 self.assertEqual(echo['path'], '/echo?value=a%2Fb&x=1')
                 self.assertEqual(echo['method'], 'POST')
@@ -286,6 +309,8 @@ class Integration(unittest.TestCase):
                     wire.close()
                 print('REAL SHARED-ORIGIN PATH: GET + POST + QUERY + ASSET + REDIRECT + WEBSOCKET OK', flush=True)
                 operation('PUT', '/ingress', {**identity, 'enabled': False})
+                self.assertEqual(guest_env()['GAP_INGRESS_ENABLED'], '0')
+                self.assertEqual(guest_env()['GAP_HTTP_PORT'], '')
                 self.assertFalse(request('GET', prefix + '/ingress', token)[1]['routed'])
                 with self.assertRaises(urllib.error.HTTPError) as disabled:
                     app_request()
@@ -298,6 +323,8 @@ class Integration(unittest.TestCase):
             operation("PATCH", "/vm", {**identity, "vcpus": 2, "memory_mib": 1280, "disk_gib": 5})
             operation("POST", "/vm/start", identity)
             ready()
+            if runner.ingress:
+                self.assertEqual(guest_env()['GAP_HTTP_PORT'], '8000')
             operation("POST", "/start")
             # Compose start reports process start, not HTTP readiness. The Python
             # test service needs a moment to bind its listener after restart.

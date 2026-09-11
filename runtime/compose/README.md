@@ -134,6 +134,28 @@ The normal agent bearer authorizes GET/PUT `/stack/ports` and `/stack/ssh`.
 continues to use `scripts/compose-access.py grant|revoke|list` without reboot.
 See [the complete agent guide](../../AGENTS.md#direct-ssh-and-five-public-tcpudp-ports).
 
+## Guest runtime environment
+
+The image installs `environment.py`, `gap-env`, a login profile hook and
+`PermitUserEnvironment GAP_*` for root SSH. The guest seed includes a generated
+`runtime.json` with only public networking metadata. The boot service installs
+it under `/etc/gap/` before sshd and Docker; the root SSH environment file is
+managed by GAP. Port/ingress mutations refresh the guest via the restricted
+helper, and managed Compose commands synchronize the snapshot before execution.
+The helper loads only validated `GAP_*` variables, never the host environment.
+
+`runtime.json`, `runtime.sh` and `runtime.env` are individually replaced
+atomically. `GAP_ENV_REVISION` identifies their content; use a single format per
+reader. Running process environments cannot be changed externally. Use
+`gap-env` for new processes and recreate Compose containers after changes, or
+have the app reread the JSON file. Mapping-job failure can mean routing changed
+but metadata could not be delivered; `/stack/vm` reports
+`environment_sync_pending` for guest update failures. Retry once SSH is ready.
+
+This requires the updated guest image/helper. Do not replace a backing image
+under existing overlays: older VMs require a separate image/worker migration.
+See [the app integration guide](../../AGENTS.md#runtime-environment-inside-the-microvm).
+
 ## Legacy guest provisioning (alternative to managed mode)
 
 Run `python3 runtime/compose/preflight.py` on the hypervisor host to check KVM.

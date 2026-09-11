@@ -62,6 +62,10 @@ def compose(release, filename, *arguments):
     env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
            "HOME": "/root", "DOCKER_HOST": "unix:///var/run/docker.sock",
            "COMPOSE_ANSI": "never", "DOCKER_BUILDKIT": "1"}
+    environment_path = Path('/etc/gap/runtime.json')
+    if environment_path.exists():
+        from environment import validate
+        env.update(validate(json.loads(environment_path.read_text())))
     with tempfile.TemporaryFile() as output:
         process = subprocess.Popen(command, cwd=release, env=env, stdin=subprocess.DEVNULL,
                                    stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
@@ -81,6 +85,10 @@ def compose(release, filename, *arguments):
 
 def run(payload, root=ROOT, execute=compose):
     action, body = payload["action"], payload["body"]
+    if action == 'runtime_environment' and set(body) == {'variables'}:
+        from environment import install
+        install(body['variables'], ssh_dir=Path('/root/.ssh'))
+        return {'ok': True}
     if action == 'ssh_keys' and set(body) == {'content'}:
         content = body['content']
         if not isinstance(content, str) or len(content) > 32768:

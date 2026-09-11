@@ -16,6 +16,7 @@ write('etc/modules', 'virtio_net\noverlay\nbr_netfilter\n')
 write('etc/ssh/sshd_config', '''Port 22
 HostKey /etc/ssh/ssh_host_ed25519_key
 PermitRootLogin prohibit-password
+PermitUserEnvironment GAP_*
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 AllowAgentForwarding no
@@ -25,6 +26,9 @@ PermitTunnel no
 PrintMotd no
 Subsystem sftp internal-sftp
 ''')
+write('usr/local/bin/gap-env', '#!/usr/bin/python3\nimport sys\nsys.path.insert(0, "/usr/local/lib")\nfrom environment import launch\nlaunch(sys.argv[1:])\n')
+os.chmod(root / 'usr/local/bin/gap-env', 0o755)
+write('etc/profile.d/gap-runtime.sh', '[ ! -r /etc/gap/runtime.sh ] || . /etc/gap/runtime.sh\n')
 write('etc/docker/daemon.json', '{"log-driver":"local"}\n')
 subprocess.run(['chroot', '/guest', '/usr/bin/passwd', '-d', 'root'], check=True)
 subprocess.run(['chroot', '/guest', '/usr/sbin/addgroup', '-S', 'docker'], check=True)

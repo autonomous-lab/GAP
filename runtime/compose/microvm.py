@@ -93,6 +93,7 @@ class MicroVMs:
         self.execute_guest = execute_guest
         self.diagnostic_serial = config.get('diagnostic_serial', False)
         self.children = {}
+        self.ingress_origin = ''
         self.network = None
         if config.get('public_network'):
             from network import Network
@@ -202,6 +203,7 @@ class MicroVMs:
         result['public_ports'] = meta.get('public_ports', [])
         if self.network:
             result['public_hostname'] = self.network.host
+        result['environment_sync_pending'] = meta.get('environment_sync_pending', False)
         if meta.get('retained'):
             result['retained_volume_id'] = meta['vm_id']
         return result
@@ -244,10 +246,38 @@ class MicroVMs:
         run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(seed / 'ssh_host_ed25519_key')])
         (seed / 'authorized_keys').write_text(self.authorized_keys(meta, meta.get('ssh_keys', [])))
         (folder / 'known_hosts').write_text(meta['vm_id'] + ' ' + (seed / 'ssh_host_ed25519_key.pub').read_text())
+        (seed / 'runtime.json').write_text(json.dumps(self.environment(meta)))
         with (folder / 'seed.ext4').open('wb') as image:
             image.truncate(4 * 1024 * 1024)
         run(['mkfs.ext4', '-q', '-F', '-d', str(seed), str(folder / 'seed.ext4')])
         # Seed contains this guest's identity, never the client's private key.
+
+    def environment(self, meta):
+        from environment import variables
+        return variables(meta, self.network.host if self.network else '', self.ingress_origin)
+
+    def sync_environment(self, meta):
+        values = self.environment(meta)
+        meta['environment_sync_pending'] = True
+        self.save(meta)
+        (self.folder(meta) / 'seed' / 'runtime.json').write_text(json.dumps(values))
+        if self.alive(meta):
+            result = self.execute_guest(self.guest(meta['project_id'], meta['owner_did']),
+                {'action': 'runtime_environment', 'body': {'variables': values}}, timeout=15)
+            if result.get('ok') is not True:
+                raise VMError('guest_environment_update_failed')
+        meta['environment_sync_pending'] = False
+        self.save(meta)
+
+    def refresh_seed(self, meta):
+        folder = self.folder(meta)
+        (folder / 'seed' / 'authorized_keys').write_text(self.authorized_keys(meta, meta.get('ssh_keys', [])))
+        (folder / 'seed' / 'runtime.json').write_text(json.dumps(self.environment(meta)))
+        temporary = folder / 'seed-next.ext4'
+        with temporary.open('wb') as image:
+            image.truncate(4 * 1024 * 1024)
+        run(['mkfs.ext4', '-q', '-F', '-d', str(folder / 'seed'), str(temporary)])
+        temporary.replace(folder / 'seed.ext4')
 
     def authorized_keys(self, meta, keys):
         return ('restrict,command="python3 /usr/local/lib/gap-compose-guest.py" ' +
@@ -302,6 +332,7 @@ class MicroVMs:
         if self.image_version() != meta['image_version']:
             raise VMError('guest_base_image_changed')
         folder = self.folder(meta)
+        self.refresh_seed(meta)
         error_log = folder / 'hypervisor.log'
         with (error_log.open('wb') if self.diagnostic_serial else open(os.devnull, 'wb')) as log:
             process = subprocess.Popen(self.command(meta), stdin=subprocess.DEVNULL,
@@ -326,6 +357,7 @@ class MicroVMs:
             raise VMError('hypervisor_start_timeout')
         meta['state'] = 'running'
         meta['network_pending'] = False
+        meta['environment_sync_pending'] = False
         self.save(meta)
 
     def stop(self, meta, force):

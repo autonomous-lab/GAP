@@ -40,6 +40,7 @@ class Ingress:
         if type(self.http_port) is not int or not 1 <= self.http_port <= 65535:
             raise ValueError('invalid ingress http_port')
         self.manager = manager
+        manager.ingress_origin = self.public_url
         self.lock = threading.Lock()
         self.applied = set()
         self.sync()  # remove stale routes before accepting VM operations
@@ -136,6 +137,7 @@ class Ingress:
                 meta['ingress']['guest_port'] = body['guest_port']
             self.manager.save(meta)
             self.sync()
+            self.manager.sync_environment(meta)
             return {'ok': True, 'ingress': self.public(meta)}
 
     def vm_operation(self, project, owner, action, body):

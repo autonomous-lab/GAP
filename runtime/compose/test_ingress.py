@@ -21,6 +21,9 @@ class IngressTests(unittest.TestCase):
         self.meta = {'vm_id': VM, 'project_id': PROJECT, 'owner_did': OWNER, 'state': 'running',
                      'ports': [{'guest_port': 8000, 'worker_port': 23000}], 'vcpus': 1,
                      'memory_mib': 1024, 'disk_gib': 4}
+        sync = patch.object(self.manager, 'sync_environment')
+        sync.start()
+        self.addCleanup(sync.stop)
         self.manager.save(self.meta)
         self.config = {'dedicated_caddy': True, 'public_url': 'https://gap.geta.team'}
         self.opener = patch('ingress.AdminConnection').start()

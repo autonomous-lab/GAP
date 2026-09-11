@@ -13,6 +13,9 @@ start() {
     cp /run/gap-seed/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub
     chmod 700 /root/.ssh
     chmod 600 /root/.ssh/authorized_keys /etc/ssh/ssh_host_ed25519_key
+    if [ -f /run/gap-seed/runtime.json ]; then
+        python3 /usr/local/lib/environment.py /run/gap-seed/runtime.json || return 1
+    fi
     umount /run/gap-seed
     resize2fs /dev/vda
     eend $?

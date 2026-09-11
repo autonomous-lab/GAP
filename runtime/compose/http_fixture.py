@@ -3,6 +3,7 @@ import base64
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import uuid
 
@@ -42,6 +43,8 @@ class App(BaseHTTPRequestHandler):
             data = self.rfile.read(int(self.headers.get('Content-Length', 0)))
             body = json.dumps({'path': self.path, 'method': self.command,
                                'body': data.decode(), 'prefix': self.headers.get('X-Forwarded-Prefix')}).encode()
+        elif self.path == '/runtime-environment':
+            body = json.dumps({k:v for k,v in os.environ.items() if k.startswith(('GAP_', 'TEST_INTERPOLATED_'))}).encode()
         elif self.path == '/asset.txt':
             body = b'nested-asset'
         else:

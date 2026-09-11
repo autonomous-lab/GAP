@@ -21,6 +21,9 @@ class NetworkTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.manager = MicroVMs({'state_dir': self.temp.name, 'image_dir': self.temp.name,
             'public_network': {'hostname': 'sites.gap.geta.team', 'first_port': 24000, 'last_port': 24009}}, None)
+        sync = patch.object(self.manager, 'sync_environment')
+        sync.start()
+        self.addCleanup(sync.stop)
         self.net = self.manager.network
         self.meta = dict(project_id=P, owner_did=O, vm_id=V, state='stopped', vcpus=1,
                          memory_mib=1024, disk_gib=8, ports=[], ssh_port=33000)
@@ -96,6 +99,9 @@ class NetworkTests(unittest.TestCase):
             'hypervisor': {'state_dir': self.temp.name, 'image_dir': self.temp.name,
                 'public_network': {'hostname': 'sites.gap.geta.team', 'first_port': 24000, 'last_port': 24009}}}))
         runner = Runner(path)
+        sync = patch.object(runner.hypervisor, 'sync_environment')
+        sync.start()
+        self.addCleanup(sync.stop)
         self.reserve(self.meta)
         rpc = dict(project_id=P, owner_did=O, method='PUT', action='ports',
                    body=dict(request_id='a'*32, vm_id=V, mappings=[dict(slot=1, guest_port=22, protocol='tcp')]))

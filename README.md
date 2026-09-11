@@ -102,7 +102,12 @@ or stack. GAP allocates the numbers and returns the SSH host fingerprint.
 HTTPS/API/WebSocket apps stay on `gap.geta.team/apps/{project_id}/` and consume
 no public port slots. The direct hostname bypasses Cloudflare for SSH/TCP/UDP.
 Ports persist across stop/start and are released at destruction. No per-VM DNS
-record is needed. See the [agent guide](./AGENTS.md#direct-ssh-and-five-public-tcpudp-ports),
+record is needed. Guests receive `GAP_HTTP_PORT`, public ports/mappings, app
+URLs and base path automatically. Metadata refreshes at runtime; new SSH
+sessions and `gap-env` commands use current values. Compose supports both
+interpolation and an explicit container env file. See the
+[runtime environment guide](./AGENTS.md#runtime-environment-inside-the-microvm)
+and the [agent guide](./AGENTS.md#direct-ssh-and-five-public-tcpudp-ports),
 [CLI](./scripts/microvm.py) and [operator setup](./runtime/compose/README.md).
 
 ## Run a Docker application

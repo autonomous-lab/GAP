@@ -808,6 +808,73 @@ services: configure those in your application. HTTP-only guest `ports` from
 `POST/PATCH /stack/vm` remain separate internal forwards; public mappings can
 target any guest port without changing that list or rebooting the VM.
 
+### Runtime environment inside the microVM
+
+GAP injects non-secret networking metadata before SSH and Docker start. Root
+SSH sessions and login shells receive these variables automatically. Use
+`gap-env COMMAND [ARGS...]` to load the latest values for a service or command,
+or source `/etc/gap/runtime.sh` in its startup script. `/etc/gap/runtime.json`
+is the machine-readable snapshot; `/etc/gap/runtime.env` is a raw env file.
+
+| Variable | Meaning |
+|---|---|
+| `GAP_PROJECT_ID`, `GAP_VM_ID` | This guest's project and VM generation |
+| `GAP_PUBLIC_HOST` | Direct TCP/UDP hostname, e.g. `sites.gap.geta.team` |
+| `GAP_PUBLIC_PORTS` | Comma-separated list of the five allocated public numbers |
+| `GAP_PORTS_JSON` | JSON array of slots with `public_port`, `guest_port`, `protocol`; unmapped targets are null |
+| `GAP_PORT_1_PUBLIC`, `GAP_PORT_1_GUEST`, `GAP_PORT_1_PROTOCOL` | Per-slot values, also available for slots 2–5; unmapped fields are empty |
+| `GAP_HTTP_PORT` | Main **guest listening port** routed for HTTPS/API/WS; empty when ingress is disabled or unconfigured |
+| `GAP_INGRESS_ENABLED` | `1` when the HTTP route is configured, otherwise `0`; not a health check |
+| `GAP_PUBLIC_URL`, `GAP_WS_URL` | Full public app URL and corresponding WS/WSS base URL; empty when disabled |
+| `GAP_BASE_PATH` | App prefix such as `/apps/prj_.../` on the shared origin |
+| `GAP_ENV_REVISION` | Digest identifying the current metadata snapshot |
+
+Applications bind to the **guest** port, usually on `0.0.0.0`, not to the
+allocated public port. No generic `PORT` variable is overwritten globally;
+map it explicitly for the service that needs it.
+
+For correct first startup, configure `/stack/ingress` **before deploying the
+application**. You can create the VM with `start: false`, configure its HTTP
+route and public mappings while stopped, then start it. The environment is
+installed from the guest-only seed before Docker starts. Configuring a route
+does not imply that an application already listens there.
+
+GAP's Compose helper automatically loads these variables for `${GAP_HTTP_PORT}`
+and other Compose interpolation. To pass the values into a container:
+
+```yaml
+services:
+  app:
+    image: your-app
+    env_file:
+      - path: /etc/gap/runtime.env
+        format: raw
+    environment:
+      PORT: "${GAP_HTTP_PORT}"
+    ports:
+      - "${GAP_HTTP_PORT}:${GAP_HTTP_PORT}"
+```
+
+`format: raw` preserves the JSON values literally and is supported by the
+managed guest's Compose version. For Compose run manually over SSH, use
+`gap-env docker compose up -d`. For another process, use `gap-env ./your-app`.
+
+Mapping and ingress changes refresh the files and future SSH sessions at
+runtime, without restarting the VM. **Existing processes keep their old
+environment.** An application can reread `runtime.json`; otherwise relaunch it
+with `gap-env`. Existing Compose containers must be **recreated**, not merely
+restarted, to receive new environment values (redeploy the bundle or use
+`gap-env docker compose up -d --force-recreate`). To watch updates from a
+container, mount `/etc/gap` read-only as a directory; individual file mounts
+can retain the old inode when GAP atomically replaces the file.
+
+A failed guest update fails the management job and exposes
+`environment_sync_pending: true` in `/stack/vm`; routing may already have
+changed. Inspect and retry the operation with a new request ID. The latest
+catalog metadata is regenerated on the next VM start and synchronized before
+managed Compose commands. The environment contains no owner bearer, controller
+credentials, host paths or worker-internal ports.
+
 ### Submit a release or update
 
 `POST /v1/cloud/projects/{project}/stack/releases` accepts a JSON bundle:

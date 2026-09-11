@@ -5,6 +5,7 @@ RUN mkdir /guest /out && apk --root /guest --initdb --no-scripts \
     alpine-base linux-virt mkinitfs docker docker-cli-compose docker-cli-buildx docker-openrc \
     openssh openssh-server-common-openrc python3 e2fsprogs-extra
 RUN chroot /guest /bin/busybox --install -s
+COPY runtime/compose/environment.py /guest/usr/local/lib/environment.py
 COPY runtime/compose/guest.py /guest/usr/local/lib/gap-compose-guest.py
 COPY runtime/compose/image/seed.init /guest/etc/init.d/gap-seed
 COPY runtime/compose/image/configure.py /configure.py
