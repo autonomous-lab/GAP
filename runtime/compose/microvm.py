@@ -54,7 +54,7 @@ def free_port():
 
 def validate(action, body):
     fields = {
-        'vm/create': {'request_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports', 'start'},
+        'vm/create': {'request_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports', 'start', 'ssh_keys'},
         'vm/update': {'request_id', 'vm_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports'},
         'vm/start': {'request_id', 'vm_id'},
         'vm/stop': {'request_id', 'vm_id', 'force'},
@@ -70,6 +70,9 @@ def validate(action, body):
     for key in ('start', 'force', 'delete_data', 'confirm_data_loss'):
         if key in body and type(body[key]) is not bool:
             raise VMError('invalid_' + key)
+    if 'ssh_keys' in body:
+        from network import keys
+        keys(body['ssh_keys'])
     ports = body.get('ports', [])
     if (not isinstance(ports, list) or any(type(p) is not int or not 1 <= p <= 65535 or p == 22 for p in ports)
             or len(set(ports)) != len(ports)):
@@ -90,6 +93,10 @@ class MicroVMs:
         self.execute_guest = execute_guest
         self.diagnostic_serial = config.get('diagnostic_serial', False)
         self.children = {}
+        self.network = None
+        if config.get('public_network'):
+            from network import Network
+            self.network = Network(self, config['public_network'])
         for folder in ('catalog', 'vms', 'retained', 'locks'):
             (self.root / folder).mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -102,6 +109,12 @@ class MicroVMs:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise VMError('vm_operation_in_progress')
+            yield
+
+    @contextmanager
+    def allocation_lock(self):
+        with (self.root / 'locks' / 'port-allocation').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
     def catalog(self, project):
@@ -130,8 +143,8 @@ class MicroVMs:
     def save(self, meta):
         atomic_json(self.catalog(meta['project_id']), meta)
 
-    def qmp(self, meta, command):
-        if command not in ('query-status', 'quit'):
+    def qmp(self, meta, command, arguments=None):
+        if command not in ('query-status', 'quit', 'human-monitor-command'):
             raise VMError('invalid_qmp_command')
         with socket.socket(socket.AF_UNIX) as sock:
             sock.settimeout(3)
@@ -144,8 +157,11 @@ class MicroVMs:
                     return json.loads(raw)
                 if 'QMP' not in read():
                     raise VMError('invalid_qmp_greeting')
-                def call(name, identity):
-                    io.write((json.dumps({'execute': name, 'id': identity}) + '\n').encode())
+                def call(name, identity, args=None):
+                    message = {'execute': name, 'id': identity}
+                    if args is not None:
+                        message['arguments'] = args
+                    io.write((json.dumps(message) + '\n').encode())
                     io.flush()
                     for _ in range(64):
                         response = read()
@@ -157,7 +173,7 @@ class MicroVMs:
                 call('qmp_capabilities', 1)
                 if call('query-name', 2).get('name') != meta['vm_id']:
                     raise VMError('qmp_vm_identity_mismatch')
-                return call(command, 3)
+                return call(command, 3, arguments)
 
     def alive(self, meta):
         # This probe is only for deciding whether deletion/start is safe.
@@ -183,6 +199,9 @@ class MicroVMs:
                 result['state'] = self.qmp(meta, 'query-status')['status']
             except (OSError, VMError):
                 result['state'] = 'unknown' if self.alive(meta) else 'stopped'
+        result['public_ports'] = meta.get('public_ports', [])
+        if self.network:
+            result['public_hostname'] = self.network.host
         if meta.get('retained'):
             result['retained_volume_id'] = meta['vm_id']
         return result
@@ -223,17 +242,40 @@ class MicroVMs:
         seed.mkdir(mode=0o700)
         run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(folder / 'client_key')])
         run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(seed / 'ssh_host_ed25519_key')])
-        (seed / 'authorized_keys').write_text('restrict,command="python3 /usr/local/lib/gap-compose-guest.py" ' + (folder / 'client_key.pub').read_text())
+        (seed / 'authorized_keys').write_text(self.authorized_keys(meta, meta.get('ssh_keys', [])))
         (folder / 'known_hosts').write_text(meta['vm_id'] + ' ' + (seed / 'ssh_host_ed25519_key.pub').read_text())
         with (folder / 'seed.ext4').open('wb') as image:
             image.truncate(4 * 1024 * 1024)
         run(['mkfs.ext4', '-q', '-F', '-d', str(seed), str(folder / 'seed.ext4')])
         # Seed contains this guest's identity, never the client's private key.
 
+    def authorized_keys(self, meta, keys):
+        return ('restrict,command="python3 /usr/local/lib/gap-compose-guest.py" ' +
+                (self.folder(meta) / 'client_key.pub').read_text().strip() + '\n' +
+                ''.join('no-agent-forwarding,no-X11-forwarding ' + key + '\n' for key in keys))
+
+    def write_keys(self, meta, keys):
+        folder = self.folder(meta)
+        content = self.authorized_keys(meta, keys)
+        # Prepare a replacement seed; never modify a mounted seed image in place.
+        (folder / 'seed' / 'authorized_keys').write_text(content)
+        temporary = folder / 'seed-next.ext4'
+        with temporary.open('wb') as image:
+            image.truncate(4 * 1024 * 1024)
+        run(['mkfs.ext4', '-q', '-F', '-d', str(folder / 'seed'), str(temporary)])
+        if self.alive(meta):
+            result = self.execute_guest(self.guest(meta['project_id'], meta['owner_did']),
+                                        {'action': 'ssh_keys', 'body': {'content': content}}, timeout=15)
+            if result.get('ok') is not True:
+                raise VMError('ssh_keys_update_failed')
+        temporary.replace(folder / 'seed.ext4')
+
     def command(self, meta):
         folder = self.folder(meta)
         forwards = [f'hostfwd=tcp:127.0.0.1:{meta["ssh_port"]}-:22']
         forwards += [f'hostfwd=tcp:127.0.0.1:{port["worker_port"]}-:{port["guest_port"]}' for port in meta['ports']]
+        if self.network:
+            forwards += ['hostfwd=' + rule for rule in self.network.rules(meta)]
         return ['qemu-system-x86_64', '-machine', 'microvm,accel=kvm', '-cpu', 'host',
                 '-name', meta['vm_id'], '-m', str(meta['memory_mib']), '-smp', str(meta['vcpus']),
                 '-kernel', str(self.images / 'vmlinuz'), '-initrd', str(self.images / 'initramfs'),
@@ -283,6 +325,7 @@ class MicroVMs:
             process.wait(timeout=10)
             raise VMError('hypervisor_start_timeout')
         meta['state'] = 'running'
+        meta['network_pending'] = False
         self.save(meta)
 
     def stop(self, meta, force):
@@ -316,7 +359,8 @@ class MicroVMs:
                 meta = {'vm_id': 'vm_' + uuid.uuid4().hex, 'project_id': project, 'owner_did': owner,
                         'state': 'creating', 'vcpus': body.get('vcpus', 1),
                         'memory_mib': body.get('memory_mib', 1024), 'disk_gib': body.get('disk_gib', 8),
-                        'ssh_port': free_port(), 'ports': [], 'retained': False}
+                        'ssh_port': free_port(), 'ports': [], 'retained': False,
+                        'ssh_keys': __import__('network').keys(body.get('ssh_keys', []))}
                 used = {meta['ssh_port']}
                 for port in body.get('ports', []):
                     candidate = free_port()
@@ -324,7 +368,10 @@ class MicroVMs:
                         candidate = free_port()
                     used.add(candidate)
                     meta['ports'].append({'guest_port': port, 'worker_port': candidate})
-                self.save(meta)  # durable intent before creating disks/processes
+                with self.allocation_lock():
+                    if self.network:
+                        self.network.allocate(meta)
+                    self.save(meta)  # durable reservation before creating disks/processes
                 self.prepare(meta)
                 meta['state'] = 'stopped'
                 self.save(meta)

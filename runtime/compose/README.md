@@ -79,6 +79,61 @@ files move to the controller's `retained` directory. Automated restore/purge of
 retained volumes is not provided. Create does not implicitly deploy a stack;
 submit `/stack/releases` once the VM is ready.
 
+## Direct public ports and owner SSH
+
+`runner.example.json` enables `hypervisor.public_network` with hostname
+`sites.gap.geta.team` and pool `24000..24099`. `deploy.yml` publishes exactly
+that range in TCP and UDP in the shared worker/edge network namespace. This
+initial pool can reserve five numbers for up to 20 VMs; it is pool capacity,
+not a new per-agent quota. Only configured slots listen. Reserve this range
+exclusively for GAP and allow it in provider/host firewalls. The hostname must
+resolve directly to the server, without the Cloudflare HTTP proxy. Keep the
+private worker RPC and Caddy admin socket private.
+
+To expand capacity, coordinate the configured pool, published Docker range and
+firewall; existing allocations must remain in the range. Infrastructure range
+changes require redeploying the worker/edge and stop its VMs; ordinary mapping
+and SSH-key changes use the API at runtime and require no restart. The controller
+uses a durable catalog and a global allocation lock, reserving both protocols
+for each of the five numbers. Stop keeps reservations, destruction releases them.
+Port exhaustion fails VM creation before disks/processes are created.
+
+VMs created before public networking was configured can acquire their five
+slots with their first PUT `/stack/ports`. Owner-key rotation and SFTP require
+the current guest helper/image; never replace an image backing existing VM
+overlays. Deploy a separate worker/image version if older guests exist.
+
+On a host with a restrictive `DOCKER-USER` chain, run as operator:
+
+```bash
+python3 scripts/compose-ports-firewall.py --public-ip YOUR_DIRECT_IPV4
+```
+
+This idempotently accepts only TCP/UDP connections DNATed from the specified
+public IPv4 and reserved range. It does not flush firewall rules or expose the
+RPC port. To persist across boots and Docker restarts, install
+`runtime/compose/gap-compose-ports.service` in `/etc/systemd/system/`, set
+`GAP_PUBLIC_IPV4=YOUR_DIRECT_IPV4` in `/etc/gap-compose-ports.env`, then run
+`systemctl daemon-reload && systemctl enable --now gap-compose-ports.service`.
+Adapt the checkout path in the unit for other installations. Reapply after an
+external firewall tool replaces the Docker user chain. The default deployment
+provides IPv4 access; IPv6 publication is not configured.
+
+The controller uses typed `hostfwd_add`/`hostfwd_remove` via identity-checked QMP.
+Agents cannot choose a host address, public port or arbitrary monitor command.
+Duplicate UDP guest targets are rejected because libslirp cannot reliably
+demultiplex replies across multiple forwards to the same guest UDP port.
+No host network-admin capability or host Docker socket is needed. A failed
+apply keeps a durable `pending` flag; inspect and reapply with a fresh request
+ID. Stopping then starting also rebuilds the desired forwards. Removal closes
+listeners but may retain established sessions until VM stop. Raw services must
+provide their own authentication/encryption. Guest root remains unrestricted.
+
+The normal agent bearer authorizes GET/PUT `/stack/ports` and `/stack/ssh`.
+`python3 scripts/microvm.py --help` lists the agent commands; operator approval
+continues to use `scripts/compose-access.py grant|revoke|list` without reboot.
+See [the complete agent guide](../../AGENTS.md#direct-ssh-and-five-public-tcpudp-ports).
+
 ## Legacy guest provisioning (alternative to managed mode)
 
 Run `python3 runtime/compose/preflight.py` on the hypervisor host to check KVM.

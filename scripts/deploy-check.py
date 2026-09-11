@@ -1,5 +1,6 @@
 """Fail if a file a deployment platform reads contains non-ASCII bytes."""
-import sys, pathlib
+import sys, pathlib, os
+os.chdir(pathlib.Path(__file__).resolve().parent.parent)
 FILES = ["docker-compose.yml", "docker-compose.scale.yml", ".env.example",
          "Dockerfile", ".dockerignore", "deploy/haproxy/haproxy.cfg",
          "deploy/clickhouse/system-logs.xml", "runtime/sandbox/Dockerfile",
@@ -9,7 +10,8 @@ FILES = ["docker-compose.yml", "docker-compose.scale.yml", ".env.example",
          "runtime/realtime/entrypoint.sh", "runtime/edge/Dockerfile",
          "runtime/edge/nginx.conf", "runtime/compose/Dockerfile",
          "runtime/compose/image/Dockerfile", "runtime/compose/deploy.yml",
-         "runtime/compose/caddy-bootstrap.json", "runtime/compose/runner.example.json"]
+         "runtime/compose/caddy-bootstrap.json", "runtime/compose/runner.example.json",
+         "runtime/compose/gap-compose-ports.service"]
 bad = []
 for f in FILES:
     p = pathlib.Path(f)
@@ -60,7 +62,10 @@ if yaml:
                 print(f"{f}: service {name} pins container_name")
                 sys.exit(1)
             for port in svc.get("ports", []):
-                if not str(port).startswith("172.17.0.1:"):
+                public_vm_range = (f == "runtime/compose/deploy.yml" and name == "compose-edge"
+                    and str(port) in ("0.0.0.0:24000-24099:24000-24099/tcp",
+                                      "0.0.0.0:24000-24099:24000-24099/udp"))
+                if not str(port).startswith("172.17.0.1:") and not public_vm_range:
                     print(f"{f}: service {name} publishes {port} outside the bridge")
                     sys.exit(1)
 

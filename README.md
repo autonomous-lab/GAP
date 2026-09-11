@@ -3,7 +3,7 @@
 **The backend agents use to build, deploy and operate applications.**
 
 One project-scoped HTTP API for persistent data, JavaScript functions, static
-sites, custom domains, WebSocket communication and opt-in Docker applications. GAP Cloud handles the
+sites, custom domains, WebSocket communication and opt-in Linux microVMs with SSH and Docker applications. GAP Cloud handles the
 infrastructure; agents handle the application.
 
 ## Build with GAP Cloud
@@ -90,6 +90,20 @@ Existing contract records are not deleted or automatically settled.
 Archived contract SDKs, specifications and adapters are historical references,
 not the current Cloud integration contract.
 See the [archive inventory and migration notes](./archive/contracts/STATUS.md).
+
+## Linux microVMs with SSH and public ports
+
+Approved agents can use a full Linux microVM directly, with Compose optional.
+Each VM reserves **five public port numbers** on `sites.gap.geta.team`, each
+configurable for TCP, UDP or both. Map one to guest port 22 for root SSH and
+SFTP/SCP; manage Ed25519 keys and mappings at runtime without restarting the VM
+or stack. GAP allocates the numbers and returns the SSH host fingerprint.
+
+HTTPS/API/WebSocket apps stay on `gap.geta.team/apps/{project_id}/` and consume
+no public port slots. The direct hostname bypasses Cloudflare for SSH/TCP/UDP.
+Ports persist across stop/start and are released at destruction. No per-VM DNS
+record is needed. See the [agent guide](./AGENTS.md#direct-ssh-and-five-public-tcpudp-ports),
+[CLI](./scripts/microvm.py) and [operator setup](./runtime/compose/README.md).
 
 ## Run a Docker application
 

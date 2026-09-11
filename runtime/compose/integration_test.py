@@ -103,7 +103,8 @@ class Integration(unittest.TestCase):
                 if managed:
                     config.pop("guests")
                     config["hypervisor"] = {"state_dir": os.environ["GAP_VM_TEST_STATE_DIR"],
-                                            "image_dir": os.environ["GAP_VM_TEST_IMAGE_DIR"]}
+                                            "image_dir": os.environ["GAP_VM_TEST_IMAGE_DIR"],
+                                            "public_network": {"hostname": "sites.gap.geta.team", "first_port": 24100, "last_port": 24109}}
                 if managed and os.environ.get('GAP_TEST_CADDY_BINARY'):
                     config['ingress'] = {'dedicated_caddy': True, 'public_url': os.environ.get('GAP_TEST_APP_ORIGIN', 'http://127.0.0.1:8093'),
                         'admin_socket': str(root / 'caddy-admin.sock'),
@@ -219,6 +220,21 @@ class Integration(unittest.TestCase):
                     time.sleep(1)
                 self.fail("guest Docker unavailable")
             ready()
+            public_ports = request('GET', prefix+'/ports', token)[1]['ports']
+            self.assertEqual(len(public_ports), 5)
+            self.assertEqual(request('GET', prefix+'/ports', other_token)[0], 401)
+            key = root/'agent-key'
+            subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(key)], check=True)
+            operation('PUT', '/ssh', {**identity, 'authorized_keys': [Path(str(key)+'.pub').read_text().strip()]})
+            ssh_info = request('GET', prefix+'/ssh', token)[1]
+            self.assertTrue(ssh_info['host_key_fingerprint'].startswith('SHA256:'))
+            self.assertEqual(len(ssh_info['authorized_keys']), 1)
+            operation('PUT', '/ports', {**identity, 'mappings': [{'slot':1,'guest_port':22,'protocol':'tcp'}]})
+            self.assertTrue(request('GET', prefix+'/ports', token)[1]['ports'][0]['routed'])
+            self.assertEqual(request('GET', prefix+'/ssh', other_token)[0], 401)
+            operation('PUT', '/ports', {**identity, 'mappings': []})
+            self.assertFalse(request('GET', prefix+'/ports', token)[1]['ports'][0]['routed'])
+            print('REAL GAP HTTP: PORT RESERVATION + HOT MAPPINGS + SSH KEYS + OWNER ISOLATION OK', flush=True)
             sources = {
                 "compose.yaml": 'services:\n  web:\n    build: .\n    ports: ["8000:8000"]\n    volumes: ["data:/persist"]\nvolumes:\n  data: {}\n',
                 "Dockerfile": 'FROM alpine:3.23\nRUN apk add --no-cache python3\nCOPY http_fixture.py /app.py\nCMD ["python3", "/app.py"]\n',
@@ -306,6 +322,8 @@ class Integration(unittest.TestCase):
                 self.assertFalse(request('GET', prefix + '/ingress', token)[1]['routed'])
             approval.write_text('{"agents":[]}')
             self.assertEqual(request("POST", prefix + "/vm", token, {"request_id": uuid.uuid4().hex})[0], 401)
+            self.assertEqual(request('GET', prefix+'/ports', token)[0], 401)
+            self.assertEqual(request('GET', prefix+'/ssh', token)[0], 401)
             print("REAL GAP HTTP + APPROVAL + KVM + COMPOSE BUILD + HTTP + PERSISTENCE + RESIZE + DELETE: OK", flush=True)
         finally:
             meta = manager.read(project, owner)

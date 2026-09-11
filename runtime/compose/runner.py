@@ -26,7 +26,7 @@ MAX_OUTPUT = 1024 * 1024
 PROJECT = re.compile(r"prj_[0-9a-f]{24}\Z")
 REQUEST = re.compile(r"[0-9a-f]{32}\Z")
 ACTION = {"releases", "start", "stop", "status", "logs",
-          "vm/create", "vm/start", "vm/stop", "vm/update", "vm/destroy", "ingress"}
+          "vm/create", "vm/start", "vm/stop", "vm/update", "vm/destroy", "ingress", "ports", "ssh"}
 
 
 class Failure(Exception):
@@ -203,6 +203,16 @@ class Runner:
             raise Failure(400, "invalid_project")
         self.authorize(project, owner)
         method, action, body = rpc.get("method"), rpc.get("action"), rpc.get("body")
+        if action in ('ports', 'ssh'):
+            if not self.hypervisor or not self.hypervisor.network:
+                raise Failure(409, 'public_network_not_configured')
+            if method == 'GET':
+                meta = self.hypervisor.read(project, owner)
+                view = self.hypervisor.network.public if action == 'ports' else self.hypervisor.network.ssh_public
+                return 200, view(meta)
+            if method != 'PUT':
+                raise Failure(400, 'invalid_network_method')
+            method = 'POST'
         if action == 'ingress':
             if not self.ingress:
                 raise Failure(409, 'ingress_not_configured')
@@ -238,6 +248,13 @@ class Runner:
             if not self.hypervisor:
                 raise Failure(409, 'managed_hypervisor_not_configured')
             from microvm import validate, VMError
+            try:
+                validate(action, body)
+            except VMError as error:
+                raise Failure(400, str(error))
+        elif action in ('ports', 'ssh'):
+            from network import validate
+            from microvm import VMError
             try:
                 validate(action, body)
             except VMError as error:
@@ -283,6 +300,8 @@ class Runner:
             if payload['action'].startswith('vm/'):
                 operation = self.ingress.vm_operation if self.ingress else self.hypervisor.perform
                 result = operation(row['project'], row['owner'], payload['action'], payload['body'])
+            elif payload['action'] in ('ports', 'ssh'):
+                result = self.hypervisor.network.perform(row['project'], row['owner'], payload['action'], payload['body'])
             elif payload['action'] == 'ingress':
                 result = self.ingress.perform(row['project'], row['owner'], payload['body'])
             else:

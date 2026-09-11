@@ -10,6 +10,8 @@ services:
     ports:
       - "172.17.0.1:8093:8093"
       - "172.17.0.1:8092:8092"
+      - "0.0.0.0:24000-24099:24000-24099/tcp"
+      - "0.0.0.0:24000-24099:24000-24099/udp"
     volumes:
       - ./runtime/compose/caddy-bootstrap.json:/etc/caddy/bootstrap.json:ro
       - ./data/gap-compose/caddy-data:/data

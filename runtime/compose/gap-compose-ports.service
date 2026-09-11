@@ -1,0 +1,15 @@
+[Unit]
+Description=GAP microVM public TCP/UDP firewall rules
+Requires=docker.service
+After=docker.service ufw.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/gap-compose-ports.env
+WorkingDirectory=/opt/app/gap-node-01
+ExecStart=/usr/bin/python3 scripts/compose-ports-firewall.py --public-ip ${GAP_PUBLIC_IPV4}
+
+[Install]
+WantedBy=multi-user.target docker.service

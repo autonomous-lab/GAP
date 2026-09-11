@@ -4,7 +4,15 @@
   "token_file": "/config/service.token",
   "state_dir": "/data/jobs",
   "node_url": "http://172.17.0.1:8080",
-  "hypervisor": {"state_dir": "/data/vm", "image_dir": "/images"},
+  "hypervisor": {
+    "state_dir": "/data/vm",
+    "image_dir": "/images",
+    "public_network": {
+      "hostname": "sites.gap.geta.team",
+      "first_port": 24000,
+      "last_port": 24099
+    }
+  },
   "ingress": {
     "dedicated_caddy": true,
     "public_url": "https://gap.geta.team",

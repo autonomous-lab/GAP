@@ -19,10 +19,11 @@ PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 AllowAgentForwarding no
-AllowTcpForwarding no
+AllowTcpForwarding yes
 X11Forwarding no
 PermitTunnel no
 PrintMotd no
+Subsystem sftp internal-sftp
 ''')
 write('etc/docker/daemon.json', '{"log-driver":"local"}\n')
 subprocess.run(['chroot', '/guest', '/usr/bin/passwd', '-d', 'root'], check=True)

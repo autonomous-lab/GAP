@@ -724,7 +724,7 @@ releases. A stale VM ID cannot mutate a replacement VM.
 | Method and project suffix | Additional body fields | Result |
 |---|---|---|
 | GET `/stack/vm` | none | Inspect VM state and allocated resources |
-| POST `/stack/vm` | optional `vcpus`, `memory_mib`, `disk_gib`, `ports`, `start` | Create; starts by default |
+| POST `/stack/vm` | optional `vcpus`, `memory_mib`, `disk_gib`, `ports`, `start`, `ssh_keys` | Create; starts by default |
 | POST `/stack/vm/stop` | optional `force: true` | Shut down VM; force explicitly quits it |
 | PATCH `/stack/vm` | selected `vcpus`, `memory_mib`, `disk_gib`, `ports` | Reconfigure while stopped; disk growth only |
 | POST `/stack/vm/start` | none | Restart the same VM with its data |
@@ -739,6 +739,74 @@ an enabled route. Named volumes survive stops, updates and VM resizing.
 Explicit data deletion is irreversible. Retained disks do not have an automated
 restore API. Approval revocation blocks management but does not stop running
 apps or remove visitor routes; operator containment is still required.
+
+### Direct SSH and five public TCP/UDP ports
+
+A managed microVM is a full Linux environment: Compose is optional. Approved
+agents can use root SSH, SFTP/SCP, install tools and run services directly.
+When public networking is configured, creation reserves **five public port
+numbers per VM**. Each slot supports TCP, UDP or both using the same number.
+No listener is enabled until you configure a mapping. HTTPS/API/WebSocket
+publication under `/apps/{project_id}/` is separate and consumes no slots.
+
+Use **`sites.gap.geta.team`** for direct SSH/TCP/UDP. `gap.geta.team` is behind
+Cloudflare and remains the HTTPS management/application origin. GAP chooses
+public ports; agents choose only a slot (1–5), guest port and protocol.
+Two slots cannot both forward UDP to the same guest port; use distinct guest
+ports so replies return through the correct public endpoint. A TCP
+mapping to guest port 22 consumes one slot and provides direct SSH with no
+bastion. The other four remain available. Do not use example port numbers as
+allocations: read the API response.
+
+| Method and project suffix | Body besides request_id and vm_id | Behavior |
+|---|---|---|
+| GET `/stack/ports` | none; no body needed | Five allocated numbers, mappings and routing state |
+| PUT `/stack/ports` | `mappings: [{"slot":1,"guest_port":22,"protocol":"tcp"}]` | Replace all mappings at once, live |
+| GET `/stack/ssh` | none; no body needed | Managed public keys, host key/fingerprint and SSH commands |
+| PUT `/stack/ssh` | `authorized_keys: ["ssh-ed25519 AAAA..."]` | Replace managed owner SSH keys, live |
+
+Writes return asynchronous jobs, use the exact VM generation, and require the
+same agent approval as Compose. Retry a lost response with the same request ID
+and body; after a failed job inspect its result before using a new ID. A
+`pending` network state means application failed or was interrupted: inspect
+and resubmit the intended complete mappings. `routed` is configuration status,
+not a guest-service health check.
+
+Use the agent CLI from the repository (Python standard library only):
+
+```bash
+export GAP_TOKEN="$TOKEN"
+python3 scripts/microvm.py --project "$PROJECT" ports
+python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" set-ssh-keys --key ~/.ssh/id_ed25519.pub
+# Poll each returned job before submitting another mutation.
+python3 scripts/microvm.py --project "$PROJECT" job job_returned_above
+python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" set-ports --map 1:22:tcp --map 2:7000:both
+python3 scripts/microvm.py --project "$PROJECT" ssh
+# Run the returned ssh command; verify the returned host fingerprint.
+```
+
+The CLI prints the request ID before submitting; use `--request-id` to retry
+that exact operation. `set-ports` without `--map` disables all mappings.
+`set-ssh-keys` without `--key` removes all managed owner keys. Only unadorned
+Ed25519 public keys are accepted; never upload private keys. Optional
+`ssh_keys: [...]` on VM creation installs initial owner keys before first boot.
+SSH passwords are disabled. GAP's restricted internal control key remains
+separate and is never returned to the agent. Wait for SSH to boot before a live
+key update. The guest supports interactive SSH, SFTP/SCP and TCP tunnels.
+
+Numbers and mappings survive VM stop/start; stop closes listeners and active
+VM connections, while start restores configured mappings. Destruction frees the
+numbers even when the disk is retained; a replacement VM receives a new host
+identity and does not inherit the old mappings or keys. Disabling a mapping or
+removing a key blocks new access but may leave established sessions alive.
+Guest root can independently modify sshd/keys; this API manages the supplied
+keys and is not a boundary against that VM's root. Revoking agent approval
+blocks management, not already published services or SSH sessions.
+
+The direct endpoints do not add TLS or visitor authentication to TCP/UDP
+services: configure those in your application. HTTP-only guest `ports` from
+`POST/PATCH /stack/vm` remain separate internal forwards; public mappings can
+target any guest port without changing that list or rebooting the VM.
 
 ### Submit a release or update
 

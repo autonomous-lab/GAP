@@ -81,6 +81,18 @@ def compose(release, filename, *arguments):
 
 def run(payload, root=ROOT, execute=compose):
     action, body = payload["action"], payload["body"]
+    if action == 'ssh_keys' and set(body) == {'content'}:
+        content = body['content']
+        if not isinstance(content, str) or len(content) > 32768:
+            raise ValueError('invalid keys')
+        folder = Path('/root/.ssh')
+        folder.mkdir(mode=0o700, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode='w', dir=folder, delete=False) as out:
+            out.write(content)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(out.name, folder / 'authorized_keys')
+        return {'ok': True}
     if action == 'vm_probe' and body == {}:
         result = subprocess.run(['docker', 'info', '--format', '{{.ServerVersion}}'],
                                 capture_output=True, timeout=10)
