@@ -1327,3 +1327,30 @@ Suspension itself does not debit the wallet, delete data or start the 72-hour
 zero-credit timer. Existing storage charges and credit-exhaustion retention rules
 still apply; a separate legal/abuse retention hold is not implemented. This is a
 node-local agent decision, not yet a customer-wide or federated suspension.
+
+### Creation settings and remaining allocation
+
+The `/microvms` creation form defaults to **Start machine** and **Serverless**.
+CPU and RAM inputs are limited to the agent's remaining allocation across all
+projects on this node. VM slots include stopped and hibernated machines. The
+optional disk quota includes provisioned capacity of retained volumes, not only
+currently running VMs. When no disk quota is configured, the UI states this
+explicitly. Disk capacity must also fit the base guest image.
+
+Configure a disk quota live with:
+
+```sh
+python3 scripts/microvm-access.py set-quota did:gap:AGENT_ID --disk-gib 32
+```
+
+This optional quota preserves existing approvals: omitting `disk_gib` means no
+operator disk quota. It does not reserve physical host storage or change storage
+billing. Use the full desired quota when approving a replacement request; the
+administrator review displays whether a disk quota was requested.
+
+`POST /v1/cloud/projects/{project}/vms` accepts `execution_mode` (`serverless`,
+the default, or `always_on`) along with existing creation fields. Always-on must
+be separately approved and is checked before any disk allocation. The choice is
+saved before first start, without a second configuration call. `start: false`
+keeps either mode stopped until an explicit start. Server-side allocation checks
+remain authoritative if another request consumes quota while the form is open.

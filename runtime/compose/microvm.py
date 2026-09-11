@@ -55,7 +55,7 @@ def free_port():
 
 def validate(action, body):
     fields = {
-        'vm/create': {'request_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports', 'start', 'ssh_keys', 'new_vm'},
+        'vm/create': {'request_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports', 'start', 'ssh_keys', 'new_vm', 'execution_mode'},
         'vm/update': {'request_id', 'vm_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports'},
         'vm/start': {'request_id', 'vm_id'},
         'vm/hibernate': {'request_id', 'vm_id'},
@@ -76,6 +76,8 @@ def validate(action, body):
     if 'ssh_keys' in body:
         from network import keys
         keys(body['ssh_keys'])
+    if 'execution_mode' in body and body['execution_mode'] not in ('serverless','always_on'):
+        raise VMError('invalid_execution_mode')
     ports = body.get('ports', [])
     if (not isinstance(ports, list) or any(type(p) is not int or not 1 <= p <= 65535 or p == 22 for p in ports)
             or len(set(ports)) != len(ports)):
@@ -552,10 +554,13 @@ class MicroVMs:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
-    def quota_usage(self, owner):
+    def quota_usage(self, owner, include_disk=False):
         usage = {'vcpus': 0, 'memory_mib': 0}
+        if include_disk: usage['disk_gib']=0
         for path in (self.root / 'catalog').glob('*.json'):
             meta = json.loads(path.read_text())
+            if include_disk and meta['owner_did']==owner and meta['state']=='destroyed' and meta.get('retained'):
+                usage['disk_gib']+=meta['disk_gib']
             if meta['owner_did'] == owner and meta['state'] != 'destroyed':
                 for key in usage:
                     value = meta[key]
@@ -571,7 +576,10 @@ class MicroVMs:
 
     def quota_view(self, project, owner):
         with self.owner_lock(owner):
-            return {'limits': self.quota_provider(project, owner), 'allocated': dict(self.quota_usage(owner), max_vms=self.vm_count(owner))}
+            limits=self.quota_provider(project, owner)
+            return {'limits': limits, 'allocated': dict(self.quota_usage(owner,include_disk=True), max_vms=self.vm_count(owner)),
+                    'always_on_allowed': bool(self.runtime and self.runtime.runner.authorize(project,owner).get('always_on_allowed')),
+                    'minimum_disk_gib': max(1,((self.images/'rootfs.ext4').stat().st_size+1024**3-1)//1024**3)}
 
     def perform(self, project, owner, action, body):
         validate(action, body)
@@ -579,13 +587,14 @@ class MicroVMs:
         # Read live approval/quota after acquiring it, before reserving resources.
         with self.owner_lock(owner):
             limits = self.quota_provider(project, owner)
-            if (not isinstance(limits, dict) or not {'vcpus', 'memory_mib'} <= set(limits) <= {'vcpus', 'memory_mib', 'max_vms'}
+            if (not isinstance(limits, dict) or not {'vcpus', 'memory_mib'} <= set(limits) <= {'vcpus', 'memory_mib', 'max_vms', 'disk_gib'}
                     or any(type(v) is not int or not 0 < v < 2**31 for v in limits.values())):
                 raise VMError('invalid_agent_quota')
             meta = None if action=='vm/create' and body.get('new_vm') else self.read(project, owner, body.get('vm_id'))
             if action in ('vm/create', 'vm/update', 'vm/start', 'vm/resume'):
-                usage = self.quota_usage(owner)
-                for key, default in (('vcpus', 1), ('memory_mib', 1024)):
+                usage = self.quota_usage(owner,include_disk=True)
+                for key, default in (('vcpus', 1), ('memory_mib', 1024), ('disk_gib',8)):
+                    if key not in limits:continue
                     if action == 'vm/create':
                         requested, previous = body.get(key, default), 0
                     elif meta and meta['state'] != 'destroyed':
@@ -597,6 +606,11 @@ class MicroVMs:
                     # After a quota reduction, allow releases and reductions, never growth.
                     if total > limits[key] and (action != 'vm/update' or requested > previous):
                         raise VMError('agent_quota_exceeded_' + key)
+            if action=='vm/create':
+                if body.get('execution_mode')=='always_on' and not (self.runtime and self.runtime.runner.authorize(project,owner).get('always_on_allowed')):
+                    raise VMError('always_on_not_approved')
+                minimum=max(1,((self.images/'rootfs.ext4').stat().st_size+1024**3-1)//1024**3)
+                if body.get('disk_gib',8)<minimum:raise VMError('disk_smaller_than_guest_image')
             if (action == 'vm/create' and (not meta or meta['state'] == 'destroyed')
                     and self.vm_count(owner) >= limits.get('max_vms', 1)):
                 raise VMError('agent_quota_exceeded_max_vms')
@@ -619,6 +633,7 @@ class MicroVMs:
                         self.save(previous)
                     meta = {'vm_id': 'vm_' + uuid.uuid4().hex, 'project_id': project, 'owner_did': owner,
                             'state': 'creating', 'vcpus': body.get('vcpus', 1),
+                            'execution_mode': body.get('execution_mode','serverless'),
                             'memory_mib': body.get('memory_mib', 1024), 'disk_gib': body.get('disk_gib', 8),
                             'ssh_port': self.reserved_port(), 'ports': [], 'retained': False,
                             'ssh_keys': __import__('network').keys(body.get('ssh_keys', []))}

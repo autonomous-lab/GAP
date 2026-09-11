@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from microvm import MicroVMs, VMError, validate
 
@@ -108,6 +109,43 @@ class MicroVMTests(unittest.TestCase):
         self.manager.quota_provider = lambda project, owner: None
         with self.assertRaisesRegex(VMError, 'invalid_agent_quota'):
             self.manager.perform(PROJECT, OWNER, 'vm/start', {'vm_id': VM})
+
+    def test_disk_quota_includes_other_projects_and_retained_volumes(self):
+        self.manager.quota_provider=lambda *_:{'vcpus':2,'memory_mib':4096,'max_vms':2,'disk_gib':10}
+        with patch.object(self.manager,'_perform') as execute:
+            with self.assertRaisesRegex(VMError,'agent_quota_exceeded_disk_gib'):
+                self.manager.perform('prj_'+'d'*24,OWNER,'vm/create',{'disk_gib':7})
+            execute.assert_not_called()
+            self.manager.perform('prj_'+'d'*24,OWNER,'vm/create',{'disk_gib':6})
+        self.manager.perform(PROJECT,OWNER,'vm/destroy',{'vm_id':VM})
+        self.assertEqual(self.manager.quota_usage(OWNER,include_disk=True),{'vcpus':0,'memory_mib':0,'disk_gib':4})
+        with patch.object(self.manager,'_perform') as execute:
+            with self.assertRaisesRegex(VMError,'agent_quota_exceeded_disk_gib'):
+                self.manager.perform(PROJECT,OWNER,'vm/create',{'disk_gib':7})
+            execute.assert_not_called()
+
+    def test_creation_mode_requires_live_approval_before_disk_allocation(self):
+        self.manager.quota_provider=lambda *_:{'vcpus':2,'memory_mib':4096,'max_vms':2}
+        approval={'always_on_allowed':False}
+        self.manager.runtime=SimpleNamespace(runner=SimpleNamespace(authorize=lambda *_:approval))
+        body={'new_vm':True,'execution_mode':'always_on','start':False}
+        with patch.object(self.manager,'prepare') as prepare:
+            with self.assertRaisesRegex(VMError,'always_on_not_approved'):
+                self.manager.perform(PROJECT,OWNER,'vm/create',body)
+            prepare.assert_not_called()
+            approval['always_on_allowed']=True
+            result=self.manager.perform(PROJECT,OWNER,'vm/create',body)
+            created=self.manager.read(PROJECT,OWNER,result['vm']['vm_id'])
+            self.assertEqual(created['execution_mode'],'always_on')
+            self.assertEqual(created['state'],'stopped')
+
+    def test_creation_disk_cannot_be_smaller_than_base_image(self):
+        with (self.images/'rootfs.ext4').open('wb') as image:image.truncate(2*1024**3)
+        self.manager.quota_provider=lambda *_:{'vcpus':2,'memory_mib':4096,'max_vms':2}
+        with patch.object(self.manager,'_perform') as execute:
+            with self.assertRaisesRegex(VMError,'disk_smaller_than_guest_image'):
+                self.manager.perform(PROJECT,OWNER,'vm/create',{'new_vm':True,'disk_gib':1})
+            execute.assert_not_called()
 
     def test_parallel_projects_cannot_overallocate_one_owner(self):
         self.manager.quota_provider = lambda *_: {'vcpus':2,'memory_mib':4096,'max_vms':3}

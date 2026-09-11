@@ -74,8 +74,25 @@ class Serverless(Integration):
                 '-o','HostKeyAlias='+meta['vm_id'],'-i',str(key),'-p',str(meta['public_ports'][2] if public else meta['ssh_port']),
                 'root@127.0.0.1',command],input=input,text=True,capture_output=True,check=True,timeout=20).stdout
         try:
-            vm=op('POST','',{'ports':[8000],'ssh_keys':[Path(str(key)+'.pub').read_text().strip()]})['vm']
+            creation={'ports':[8000],'ssh_keys':[Path(str(key)+'.pub').read_text().strip()]}
+            if os.environ.get('GAP_TEST_CREATION_SETTINGS')=='1':
+                original_creation_approval=approval.read_text()
+                approvals=json.loads(approval.read_text());approvals['always_on_agents']=[owner]
+                approvals.setdefault('quotas',{})[owner]={'vcpus':2,'memory_mib':4096,'max_vms':1,'disk_gib':16}
+                approval.write_text(json.dumps(approvals))
+                creation.update(execution_mode='always_on',start=False)
+            vm=op('POST','',creation)['vm']
             meta=manager.read(project,owner); identity={'vm_id':vm['vm_id']}
+            if os.environ.get('GAP_TEST_CREATION_SETTINGS')=='1':
+                self.assertEqual(meta['execution_mode'],'always_on');self.assertTrue(meta['manual_stop'])
+                runtime.tick();self.assertEqual(manager.read(project,owner)['state'],'stopped')
+                quota=request('GET',prefix,token)[1]['agent_quota']
+                self.assertEqual(quota['limits']['disk_gib'],16);self.assertEqual(quota['allocated']['disk_gib'],8)
+                self.assertTrue(quota['always_on_allowed'])
+                op('POST','/start',identity)
+                op('PUT','/runtime',{**identity,'mode':'serverless'})
+                approval.write_text(original_creation_approval)
+                print('CREATION: OPTIONAL DISK QUOTA, ALWAYS-ON APPROVAL AND EXPLICIT STOPPED CHOICE OK',flush=True)
             for _ in range(100):
                 try: ssh('true');break
                 except subprocess.SubprocessError: time.sleep(.2)

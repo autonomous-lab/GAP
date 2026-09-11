@@ -181,12 +181,14 @@ Cloud services remain open; only listed owners can use microVMs, with or without
 also require the separate general node approval. Each agent defaults to **1 VM and 2 vCPUs /
 4096 MiB RAM total across its microVMs**, including stopped VMs. Allocate the minimum
 needed; the operator can change limits live with `scripts/microvm-access.py set-quota
-<DID> --vcpus 2 --memory-mib 4096 --max-vms 1`. No per-agent disk quota or GAP egress ACL is applied;
+<DID> --vcpus 2 --memory-mib 4096 --max-vms 1`. Optional per-agent disk quotas include retained volumes; no GAP egress ACL is applied;
 existing Cloud service quotas are unchanged. CPU/RAM/disk resize requires stopping
 and starting the VM.
 GAP creates, starts, stops, resizes and destroys microVMs through `/vm`.
 The `/microvms` WebUI also creates machines, with resource sizing, an optional
-SSH public key and a choice to start immediately or keep stopped. Multiple machines can share a project: select, create or delete them in the console.
+SSH public key and a choice to start immediately (the default) or keep stopped.
+Choose serverless or approved always-on at creation; inputs follow the remaining
+agent allocation, including an optional disk quota. Multiple machines can share a project: select, create or delete them in the console.
 The default quota remains one VM per agent on this node, adjustable live by the
 operator. Shared customer quotas across nodes are planned.
 Billing activity accumulates one row per VM state/allocation/pricing period;

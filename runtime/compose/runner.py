@@ -224,7 +224,7 @@ class Runner:
             raise Failure(403, "compose_approval_unavailable_or_revoked")
         if self.hypervisor:
             quota = approval.get("quota")
-            if (not isinstance(quota, dict) or not {"vcpus", "memory_mib"} <= set(quota) <= {"vcpus", "memory_mib", "max_vms"}
+            if (not isinstance(quota, dict) or not {"vcpus", "memory_mib"} <= set(quota) <= {"vcpus", "memory_mib", "max_vms", "disk_gib"}
                     or any(type(v) is not int or not 0 < v < 2**31 for v in quota.values())):
                 raise Failure(403, "microvm_quota_unavailable")
             guest["quota"] = quota
@@ -404,7 +404,8 @@ class Runner:
                     if current:
                         if payload['action'] in ('vm/stop','vm/hibernate'): current['manual_stop']=True
                         elif payload['action'] in ('vm/start','vm/resume','vm/create'):
-                            current['manual_stop']=False; current.pop('runtime_error',None)
+                            current['manual_stop']=payload['action']=='vm/create' and not payload['body'].get('start',True)
+                            current.pop('runtime_error',None)
                         self.hypervisor.save(current)
                         self.runtime.sample(current)
                     self.runtime.gateway.reconcile()

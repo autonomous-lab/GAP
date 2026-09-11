@@ -161,7 +161,7 @@ impl Admin {
         let request=input["request_id"].as_str().unwrap_or("");
         if request.len()!=32 || !request.bytes().all(|b|b.is_ascii_hexdigit()) {return Err(Failure(400,"invalid_request_id"))}
         let quota:crate::private_node::MicroVMQuota=serde_json::from_value(input["quota"].clone()).map_err(|_|Failure(400,"invalid_quota"))?;
-        if [quota.vcpus,quota.memory_mib,quota.max_vms].iter().any(|n|*n==0 || *n>=2_u32.pow(31)) {return Err(Failure(400,"invalid_quota"))}
+        if [quota.vcpus,quota.memory_mib,quota.max_vms].iter().any(|n|*n==0 || *n>=2_u32.pow(31)) || quota.disk_gib.is_some_and(|n|n==0 || n>=2_u32.pow(31)) {return Err(Failure(400,"invalid_quota"))}
         let reason=input["reason"].as_str().filter(|s|!s.trim().is_empty() && s.len()<=2000).ok_or(Failure(400,"reason_required"))?;
         let always=input["always_on"].as_bool().ok_or(Failure(400,"always_on_flag_required"))?;
         let payload=json!({"quota":quota,"reason":reason,"always_on":always}).to_string();
