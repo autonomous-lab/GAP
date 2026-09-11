@@ -144,6 +144,7 @@ class Runner:
         if config.get('hypervisor'):
             from microvm import MicroVMs
             self.hypervisor = MicroVMs(config['hypervisor'], execute)
+            self.hypervisor.quota_provider = lambda project, owner: self.authorize(project, owner)['quota']
         self.ingress = None
         self.ingress_config = config.get('ingress')
         if self.ingress_config:
@@ -185,10 +186,17 @@ class Runner:
             headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"})
         try:
             with urllib.request.build_opener(NoRedirect).open(request, timeout=5) as response:
-                if response.status != 200 or json.loads(response.read(4096)).get("allowed") is not True:
+                approval = json.loads(response.read(4096))
+                if response.status != 200 or approval.get("allowed") is not True:
                     raise ValueError()
         except Exception:
             raise Failure(403, "compose_approval_unavailable_or_revoked")
+        if self.hypervisor:
+            quota = approval.get("quota")
+            if (not isinstance(quota, dict) or set(quota) != {"vcpus", "memory_mib"}
+                    or any(type(v) is not int or not 0 < v < 2**31 for v in quota.values())):
+                raise Failure(403, "microvm_quota_unavailable")
+            guest["quota"] = quota
         return guest
 
     @staticmethod
@@ -225,7 +233,9 @@ class Runner:
             if method == 'GET':
                 if not self.hypervisor:
                     raise Failure(409, 'managed_hypervisor_not_configured')
-                return 200, self.hypervisor.public(self.hypervisor.read(project, owner))
+                view = self.hypervisor.public(self.hypervisor.read(project, owner))
+                view["agent_quota"] = self.hypervisor.quota_view(project, owner)
+                return 200, view
             action = {'POST': 'vm/create', 'PATCH': 'vm/update', 'DELETE': 'vm/destroy'}.get(method)
             method = 'POST'
         if method == "GET" and isinstance(action, str):

@@ -94,6 +94,7 @@ class MicroVMs:
         self.diagnostic_serial = config.get('diagnostic_serial', False)
         self.children = {}
         self.ingress_origin = ''
+        self.quota_provider = lambda project, owner: {"vcpus": 2, "memory_mib": 4096}
         self.network = None
         if config.get('public_network'):
             from network import Network
@@ -381,7 +382,57 @@ class MicroVMs:
         if child:
             child.wait(timeout=5)
 
+    @contextmanager
+    def owner_lock(self, owner):
+        if not re.fullmatch(r'did:gap:[0-9a-f]{64}', owner):
+            raise VMError('invalid_owner_identity')
+        with (self.root / 'locks' / ('owner-' + owner[8:])).open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
+    def quota_usage(self, owner):
+        usage = {'vcpus': 0, 'memory_mib': 0}
+        for path in (self.root / 'catalog').glob('*.json'):
+            meta = json.loads(path.read_text())
+            if meta['owner_did'] == owner and meta['state'] != 'destroyed':
+                for key in usage:
+                    value = meta[key]
+                    if type(value) is not int or value <= 0:
+                        raise VMError('invalid_resource_catalog')
+                    usage[key] += value
+        return usage
+
+    def quota_view(self, project, owner):
+        with self.owner_lock(owner):
+            return {'limits': self.quota_provider(project, owner), 'allocated': self.quota_usage(owner)}
+
     def perform(self, project, owner, action, body):
+        validate(action, body)
+        # All lifecycle changes share an owner lock across projects and processes.
+        # Read live approval/quota after acquiring it, before reserving resources.
+        with self.owner_lock(owner):
+            limits = self.quota_provider(project, owner)
+            if (not isinstance(limits, dict) or set(limits) != {'vcpus', 'memory_mib'}
+                    or any(type(v) is not int or not 0 < v < 2**31 for v in limits.values())):
+                raise VMError('invalid_agent_quota')
+            meta = self.read(project, owner)
+            if action in ('vm/create', 'vm/update', 'vm/start'):
+                usage = self.quota_usage(owner)
+                for key, default in (('vcpus', 1), ('memory_mib', 1024)):
+                    if action == 'vm/create':
+                        requested, previous = body.get(key, default), 0
+                    elif meta and meta['state'] != 'destroyed':
+                        previous = meta[key]
+                        requested = body.get(key, previous) if action == 'vm/update' else previous
+                    else:
+                        continue
+                    total = usage[key] - previous + requested
+                    # After a quota reduction, allow releases and reductions, never growth.
+                    if total > limits[key] and (action != 'vm/update' or requested > previous):
+                        raise VMError('agent_quota_exceeded_' + key)
+            return self._perform(project, owner, action, body)
+
+    def _perform(self, project, owner, action, body):
         validate(action, body)
         with self.lock(project):
             meta = self.read(project, owner)

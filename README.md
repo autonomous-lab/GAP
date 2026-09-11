@@ -150,8 +150,12 @@ the guest; no GAT host Docker socket is given to GAP or workloads.
 Enable on public or private nodes with `GAP_COMPOSE_ENABLED=1` and the mandatory
 operator-owned `GAP_COMPOSE_APPROVALS_FILE`. Public registration and ordinary
 Cloud services remain open; only listed owners can use microVMs, with or without Compose. Private nodes
-also require the separate general node approval. Classic guest Compose is accepted without additional commercial
-resource quotas or GAP egress ACLs; existing Cloud service quotas are unchanged.
+also require the separate general node approval. Each agent defaults to **2 vCPUs /
+4096 MiB RAM total across its microVMs**, including stopped VMs. Allocate the minimum
+needed; the operator can change limits live with `scripts/microvm-access.py set-quota
+<DID> --vcpus 2 --memory-mib 4096`. No per-agent disk quota or GAP egress ACL is applied;
+existing Cloud service quotas are unchanged. CPU/RAM/disk resize requires stopping
+and starting the VM.
 GAP creates, starts, stops, resizes and destroys microVMs through `/vm`.
 The repository includes the guest-image builder and real KVM/API acceptance tests.
 Optional ingress publishes a selected guest HTTP port at `/apps/{project_id}/`

@@ -47,6 +47,25 @@ class AccessTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 access.change(path, 'grant', 'all')
 
+    def test_quotas_default_update_preserve_revoke_and_validate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'approved.json'
+            access.change(path, 'grant', A)
+            self.assertEqual(access.change(path, 'list')['quotas'][A], {'vcpus': 2, 'memory_mib': 4096})
+            access.change(path, 'set-quota', A, vcpus=4)
+            access.change(path, 'grant', B, memory_mib=2048)
+            self.assertEqual(access.change(path, 'list')['quotas'][A], {'vcpus': 4, 'memory_mib': 4096})
+            self.assertFalse(access.change(path, 'grant', A)['changed'])
+            before = path.read_bytes()
+            for args in [('set-quota', A, 0, None), ('set-quota', A, None, None),
+                         ('set-quota', 'did:gap:' + 'c'*64, 1, None), ('revoke', A, 1, None)]:
+                with self.assertRaises(ValueError):
+                    access.change(path, *args)
+                self.assertEqual(path.read_bytes(), before)
+            access.change(path, 'revoke', A)
+            self.assertNotIn(A, json.loads(path.read_text())['quotas'])
+            self.assertEqual(access.change(path, 'list')['quotas'][B]['memory_mib'], 2048)
+
     def test_symlink_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / 'target'

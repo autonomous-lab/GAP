@@ -1,9 +1,9 @@
 //! Independent private management admission and preapproved microVM transport (with optional Compose).
 //! The runner, never this process, talks to operator-provisioned guests.
 use crate::{Error, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{io::Read, path::PathBuf};
+use std::{collections::BTreeMap, io::Read, path::PathBuf};
 
 #[derive(Clone)]
 pub struct PrivateNode {
@@ -17,6 +17,24 @@ pub struct PrivateNode {
 #[serde(deny_unknown_fields)]
 struct Approvals {
     agents: Vec<String>,
+    #[serde(default)]
+    quotas: BTreeMap<String, MicroVMQuota>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MicroVMQuota {
+    pub vcpus: u32,
+    pub memory_mib: u32,
+}
+
+impl Default for MicroVMQuota {
+    fn default() -> Self {
+        Self {
+            vcpus: 2,
+            memory_mib: 4096,
+        }
+    }
 }
 
 impl PrivateNode {
@@ -100,6 +118,15 @@ impl PrivateNode {
                 "invalid approved agent identity".into(),
             ));
         }
+        if approvals.quotas.iter().any(|(did, quota)| {
+            !approvals.agents.contains(did)
+                || quota.vcpus == 0
+                || quota.memory_mib == 0
+                || quota.vcpus >= 2_u32.pow(31)
+                || quota.memory_mib >= 2_u32.pow(31)
+        }) {
+            return Err(Error::Unauthorized("invalid microVM quota".into()));
+        }
         Ok(approvals)
     }
 
@@ -111,12 +138,22 @@ impl PrivateNode {
     }
 
     pub fn authorize_compose(&self, did: &str) -> Result<()> {
+        self.microvm_quota(did).map(|_| ())
+    }
+
+    pub fn microvm_quota(&self, did: &str) -> Result<MicroVMQuota> {
         self.authorize(did)?;
         let path = self
             .compose_approvals
             .as_ref()
             .ok_or_else(|| Error::Unauthorized("MicroVM approval is not configured".into()))?;
-        Self::authorize_file(path, did)
+        let approvals = Self::read_approvals(path)?;
+        if !approvals.agents.iter().any(|candidate| candidate == did) {
+            return Err(Error::Unauthorized(
+                "agent is not preapproved for this operation".into(),
+            ));
+        }
+        Ok(approvals.quotas.get(did).cloned().unwrap_or_default())
     }
 
     fn authorize_file(path: &std::path::Path, did: &str) -> Result<()> {
@@ -259,6 +296,41 @@ mod tests {
         ] {
             assert!(runtime_route(&format!("/v1/cloud/projects/{project}/{suffix}")).is_none());
         }
+    }
+
+    #[test]
+    fn microvm_quotas_default_reload_and_validate() {
+        let path = std::env::temp_dir().join(format!("gap-quota-{}.json", std::process::id()));
+        let did = format!("did:gap:{}", "a".repeat(64));
+        let policy = PrivateNode {
+            private: false,
+            approvals: path.clone(),
+            compose_approvals: Some(path.clone()),
+            runner: None,
+        };
+        std::fs::write(&path, json!({"agents": [&did]}).to_string()).unwrap();
+        assert_eq!(policy.microvm_quota(&did).unwrap().vcpus, 2);
+        assert_eq!(policy.microvm_quota(&did).unwrap().memory_mib, 4096);
+        std::fs::write(
+            &path,
+            json!({"agents": [&did], "quotas": {&did: {"vcpus": 4, "memory_mib": 8192}}})
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(policy.microvm_quota(&did).unwrap().vcpus, 4);
+        for quota in [
+            json!({"vcpus": 0, "memory_mib": 4096}),
+            json!({"vcpus": 2}),
+            json!({"vcpus": 2, "memory_mib": 4096, "extra": 1}),
+        ] {
+            std::fs::write(
+                &path,
+                json!({"agents": [&did], "quotas": {&did: quota}}).to_string(),
+            )
+            .unwrap();
+            assert!(policy.authorize_compose(&did).is_err());
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

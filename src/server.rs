@@ -7524,21 +7524,17 @@ pub fn route_with_ip(
     let token = auth.and_then(|h| h.strip_prefix("Bearer "));
 
     if method == "POST" && path == "/internal/compose/authorize" {
-        let allowed = guard.private_node.as_ref().is_some_and(|policy| {
-            policy
-                .runner
-                .as_ref()
-                .is_some_and(|(_, secret)| token == Some(secret.as_str()))
-                && body["project_id"]
-                    .as_str()
-                    .and_then(|id| guard.cloud_projects.get(id))
-                    .is_some_and(|project| {
-                        project.status == "active"
-                            && body["owner_did"].as_str() == Some(project.owner_did.as_str())
-                            && policy.authorize_compose(&project.owner_did).is_ok()
-                    })
+        let quota = guard.private_node.as_ref().and_then(|policy| {
+            if !policy.runner.as_ref().is_some_and(|(_, secret)| token == Some(secret.as_str())) {
+                return None;
+            }
+            let project = body["project_id"].as_str().and_then(|id| guard.cloud_projects.get(id))?;
+            if project.status != "active" || body["owner_did"].as_str() != Some(project.owner_did.as_str()) {
+                return None;
+            }
+            policy.microvm_quota(&project.owner_did).ok()
         });
-        return (if allowed { 200 } else { 403 }, json!({"allowed": allowed}));
+        return (if quota.is_some() { 200 } else { 403 }, json!({"allowed": quota.is_some(), "quota": quota}));
     }
 
     if let Some((project_id, action)) = crate::private_node::runtime_route(path) {

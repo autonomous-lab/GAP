@@ -63,8 +63,7 @@ Compose. Every mutation requires a saved 32-lowercase-hex `request_id`.
 | POST `/vm/start` | `vm_id` | Start the existing VM |
 | DELETE `/vm` | `vm_id`, optional `delete_data`, `confirm_data_loss` | Destroy a stopped VM, retaining its files by default |
 
-Defaults are 1 vCPU, 1024 MiB RAM and 8 GiB virtual disk. These are allocations,
-not commercial quotas. Disk growth is applied to the guest filesystem at next
+Defaults are 1 vCPU, 1024 MiB RAM and 8 GiB virtual disk. The default cumulative quota per approved agent is 2 vCPUs and 4096 MiB RAM. Disk growth is applied to the guest filesystem at next
 boot. `ports` contains guest TCP port numbers other than 22; GAP allocates
 loopback forwards in the **worker network namespace**, returned as `worker_port`.
 Optional ingress publishes this forward under the existing node /apps/ path;
@@ -198,7 +197,7 @@ The owner can become guest root and change the helper; its status is not a
 security attestation. Keep the hypervisor patched and confined independently.
 
 The operator allocates physical RAM/vCPU/disk. The worker adds no commercial
-resource quotas or egress ACLs. Existing routing/firewalls still apply, and
+per-container quotas or egress ACLs; agent CPU/RAM quotas still apply. Existing routing/firewalls still apply, and
 unrestricted access can reach internal services or saturate the host.
 
 ## GAP configuration: public or private
@@ -368,6 +367,37 @@ domains, HA, backup/restore and rollback are not implemented. Each VM supports
 five public port slots with TCP/UDP forwarding, configured independently of
 Compose. Shared-origin application path routing is available below. Guest
 Compose `ports:` does not automatically publish physical-host ports. Existing Cloud service quotas stay unchanged.
+
+## Live per-agent allocation quotas
+
+Each approved agent has a cumulative allocation quota of **2 vCPUs and 4096 MiB
+RAM by default**, shared across all its projects. Running, stopped and partially
+created VMs count; destroying a VM releases its CPU/RAM allocation. Disk capacity
+has no agent quota in this version. Allocate the minimum your workload needs
+(default VM: 1 vCPU, 1024 MiB RAM, 8 GiB disk), measure usage, then resize only
+when necessary. Do not reserve the full quota for every project.
+
+`GET /v1/cloud/projects/{project}/vm` includes `agent_quota.limits` and
+`agent_quota.allocated`, even when that project has no VM. Creation, growth and
+start check the live quota; jobs report `agent_quota_exceeded_vcpus` or
+`agent_quota_exceeded_memory_mib` when blocked. Lowering a quota does not kill
+existing workloads; reductions, stop and destroy remain available. CPU/RAM
+quotas are allocations per agent, not a host-wide capacity reservation.
+
+CPU/RAM resize and disk growth require **stop → PATCH /vm → start**. There is no
+hot resource resize. Public port mappings and SSH keys can change while running.
+
+On the operator host, use `python3 scripts/microvm-access.py set-quota <DID>
+--vcpus 2 --memory-mib 4096` (one shell command). Either flag may be omitted to
+preserve that limit. `grant` accepts the same flags. `list` shows effective quotas.
+The optional `quotas` map in the approval JSON is keyed by an approved DID and
+contains `{ "vcpus": 2, "memory_mib": 4096 }`. Legacy agents-only stores receive
+the defaults automatically. Granting again preserves overrides; revoking removes
+the override. Changes use the existing atomic approval store and require no restart.
+The worker obtains the current limits through the authenticated node callback
+and serializes resource mutations across projects belonging to the same owner.
+Malformed or unavailable quota policy fails closed. Deploy the updated node
+before updating the worker; old nodes do not return the required quota callback.
 
 ## Tests and production readiness
 

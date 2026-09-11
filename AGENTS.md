@@ -658,20 +658,38 @@ supervisor. A running VM does not imply that a Compose stack exists.
 
 The VM provides guest root, not host root. Guest Docker bind mounts, privileged
 containers and host networking refer to the guest only. No host control socket
-or owner bearer is injected. No additional commercial resource quotas or GAP
-egress filtering are applied; existing Cloud API quotas remain unchanged.
+or owner bearer is injected. Agent CPU/RAM allocation quotas apply below; no GAP
+egress filtering is applied. Existing Cloud API quotas remain unchanged.
 Unrestricted guest networking can reach internal services, and workloads can
 affect host availability without resource safeguards.
+
+Each approved agent has a cumulative allocation quota of **2 vCPUs and 4096 MiB
+RAM by default**, shared across all its projects. Running, stopped and partially
+created VMs count; destroying a VM releases its CPU/RAM allocation. Disk capacity
+has no agent quota in this version. Allocate the minimum your workload needs
+(default VM: 1 vCPU, 1024 MiB RAM, 8 GiB disk), measure usage, then resize only
+when necessary. Do not reserve the full quota for every project.
+
+`GET /v1/cloud/projects/{project}/vm` includes `agent_quota.limits` and
+`agent_quota.allocated`, even when that project has no VM. Creation, growth and
+start check the live quota; jobs report `agent_quota_exceeded_vcpus` or
+`agent_quota_exceeded_memory_mib` when blocked. Lowering a quota does not kill
+existing workloads; reductions, stop and destroy remain available. CPU/RAM
+quotas are allocations per agent, not a host-wide capacity reservation.
+
+CPU/RAM resize and disk growth require **stop → PATCH /vm → start**. There is no
+hot resource resize. Public port mappings and SSH keys can change while running.
 
 Operator command (on the node host):
 
 ```bash
 python3 scripts/microvm-access.py grant did:gap:<64-hex-agent-identity>
+python3 scripts/microvm-access.py set-quota did:gap:<64-hex-agent-identity> --vcpus 2 --memory-mib 4096
 python3 scripts/microvm-access.py revoke did:gap:<64-hex-agent-identity>
 python3 scripts/microvm-access.py list
 ```
 
-Agent approvals take effect immediately without restarting the node or worker.
+Agent approvals and quota updates take effect immediately without restarting the node or worker.
 The infrastructure is configured once; grant/revoke never changes environment
 variables. Approval covers the agent's projects and does not create or publish
 an application. Only the operator can run these host commands.

@@ -80,6 +80,54 @@ class MicroVMTests(unittest.TestCase):
             with self.assertRaises(VMError):
                 validate('vm/create', body)
 
+    def test_cumulative_quota_counts_stopped_vms_and_releases_destroyed(self):
+        other = 'prj_' + 'd' * 24
+        with patch.object(self.manager, '_perform') as execute:
+            with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_vcpus'):
+                self.manager.perform(other, OWNER, 'vm/create', {'vcpus': 2})
+            with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_memory_mib'):
+                self.manager.perform(other, OWNER, 'vm/create', {'memory_mib': 4096})
+            execute.assert_not_called()
+            self.manager.perform(other, OWNER, 'vm/create', {'vcpus': 1, 'memory_mib': 3072})
+            self.manager.perform(other, 'did:gap:' + 'e'*64, 'vm/create', {'vcpus': 2})
+        self.manager.perform(PROJECT, OWNER, 'vm/destroy', {'vm_id': VM})
+        self.assertEqual(self.manager.quota_usage(OWNER), {'vcpus': 0, 'memory_mib': 0})
+
+    def test_live_quota_changes_resize_and_fail_closed(self):
+        limit = {'vcpus': 1, 'memory_mib': 512}
+        self.manager.quota_provider = lambda project, owner: limit
+        with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_memory_mib'):
+            self.manager.perform(PROJECT, OWNER, 'vm/start', {'vm_id': VM})
+        self.manager.perform(PROJECT, OWNER, 'vm/update', {'vm_id': VM, 'memory_mib': 512})
+        with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_vcpus'):
+            self.manager.perform(PROJECT, OWNER, 'vm/update', {'vm_id': VM, 'vcpus': 2})
+        limit['vcpus'] = 2
+        self.manager.perform(PROJECT, OWNER, 'vm/update', {'vm_id': VM, 'vcpus': 2})
+        self.assertEqual(self.manager.quota_usage(OWNER), {'vcpus': 2, 'memory_mib': 512})
+        self.manager.quota_provider = lambda project, owner: None
+        with self.assertRaisesRegex(VMError, 'invalid_agent_quota'):
+            self.manager.perform(PROJECT, OWNER, 'vm/start', {'vm_id': VM})
+
+    def test_parallel_projects_cannot_overallocate_one_owner(self):
+        import concurrent.futures
+        import threading
+        barrier = threading.Barrier(2)
+        # One CPU is already allocated. Both contenders request the last CPU.
+        def reserve(project, owner, action, body):
+            self.manager.save(dict(self.meta, project_id=project))
+            return True
+        def attempt(project):
+            barrier.wait(timeout=5)
+            try:
+                return self.manager.perform(project, OWNER, 'vm/create', {})
+            except VMError as error:
+                return str(error)
+        with patch.object(self.manager, '_perform', side_effect=reserve):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(attempt, ['prj_'+'d'*24, 'prj_'+'e'*24]))
+        self.assertCountEqual(results, [True, 'agent_quota_exceeded_vcpus'])
+        self.assertEqual(self.manager.quota_usage(OWNER)['vcpus'], 2)
+
     def test_lock_prevents_concurrent_controller_mutation(self):
         with self.manager.lock(PROJECT):
             with self.assertRaisesRegex(VMError, 'vm_operation_in_progress'):

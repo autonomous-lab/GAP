@@ -130,6 +130,20 @@ class RunnerTests(unittest.TestCase):
                 runner.authorize(PROJECT, OWNER)
             self.assertEqual(failure.exception.code, "compose_approval_unavailable_or_revoked")
 
+    def test_managed_quota_callback_requires_valid_policy(self):
+        runner = Runner(self.path)
+        runner.hypervisor = object()
+        with patch('urllib.request.build_opener') as opener:
+            response = opener.return_value.open.return_value.__enter__.return_value
+            response.status = 200
+            for quota in (None, {}, {'vcpus': True, 'memory_mib': 4096}, {'vcpus': 2, 'memory_mib': 0}):
+                response.read.return_value = json.dumps({'allowed': True, 'quota': quota}).encode()
+                with self.assertRaises(Failure) as failure:
+                    runner.authorize(PROJECT, OWNER)
+                self.assertEqual(failure.exception.code, 'microvm_quota_unavailable')
+            response.read.return_value = b'{"allowed":true,"quota":{"vcpus":2,"memory_mib":4096}}'
+            self.assertEqual(runner.authorize(PROJECT, OWNER)['quota']['memory_mib'], 4096)
+
     def test_idempotency_busy_jobs_scoping_and_payload_erasure(self):
         gate, started = threading.Event(), threading.Event()
         executions = []

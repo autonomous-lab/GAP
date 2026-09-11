@@ -10,7 +10,7 @@ import stat
 import tempfile
 
 
-def change(path, action, agent=None):
+def change(path, action, agent=None, vcpus=None, memory_mib=None):
     if agent is not None and not re.fullmatch(r'did:gap:[0-9a-f]{64}', agent):
         raise ValueError('agent must be an exact did:gap:<64 lowercase hex> identity')
     path = Path(path).absolute()
@@ -31,18 +31,45 @@ def change(path, action, agent=None):
         if len(raw) > 65536:
             raise ValueError('approval file exceeds node limit')
         data = json.loads(raw)
-        if (not isinstance(data, dict) or set(data) != {'agents'} or not isinstance(data['agents'], list)
+        if (not isinstance(data, dict) or not {'agents'} <= set(data) <= {'agents', 'quotas'} or not isinstance(data['agents'], list)
                 or any(not isinstance(did, str) or not re.fullmatch(r'did:gap:[0-9a-f]{64}', did) for did in data['agents'])):
             raise ValueError('invalid approval file; refusing to overwrite it')
+        quotas = data.get('quotas', {})
+        def valid_quota(q):
+            return (isinstance(q, dict) and set(q) == {'vcpus', 'memory_mib'}
+                    and all(type(v) is int and 0 < v < 2**31 for v in q.values()))
+        if not isinstance(quotas, dict) or any(did not in data['agents'] or not valid_quota(q) for did, q in quotas.items()):
+            raise ValueError('invalid quota store')
+        if action not in ('grant', 'revoke', 'list', 'set-quota'):
+            raise ValueError('invalid action')
+        if any(v is not None and (type(v) is not int or not 0 < v < 2**31) for v in (vcpus, memory_mib)):
+            raise ValueError('quotas must be positive integers below 2**31')
+        if action in ('list', 'revoke') and (vcpus is not None or memory_mib is not None):
+            raise ValueError('quota flags require grant or set-quota')
+        if action == 'set-quota' and (agent not in data['agents'] or (vcpus is None and memory_mib is None)):
+            raise ValueError('set-quota requires an approved agent and at least one quota flag')
         agents = set(data['agents'])
+        original = json.dumps(data, sort_keys=True)
         if action == 'list':
-            return {'agents': sorted(agents)}
+            return {'agents': sorted(agents), 'quotas': {did: quotas.get(did, {'vcpus': 2, 'memory_mib': 4096}) for did in sorted(agents)}}
         before = set(agents)
         if action == 'grant':
             agents.add(agent)
-        else:
+        elif action == 'revoke':
             agents.discard(agent)
-        encoded = (json.dumps({'agents': sorted(agents)}) + '\n').encode()
+            quotas.pop(agent, None)
+        if vcpus is not None or memory_mib is not None:
+            q = dict(quotas.get(agent, {'vcpus': 2, 'memory_mib': 4096}))
+            if vcpus is not None:
+                q['vcpus'] = vcpus
+            if memory_mib is not None:
+                q['memory_mib'] = memory_mib
+            quotas[agent] = q
+        updated = {'agents': sorted(agents)}
+        if quotas:
+            updated['quotas'] = quotas
+        changed = json.dumps(updated, sort_keys=True) != original
+        encoded = (json.dumps(updated) + '\n').encode()
         if len(encoded) > 65536:
             raise ValueError('approval file would exceed node limit')
         fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
@@ -64,19 +91,21 @@ def change(path, action, agent=None):
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        return {'agent': agent, 'approved': agent in agents, 'changed': agents != before, 'restart_required': False}
+        return {'agent': agent, 'approved': agent in agents, 'changed': changed, 'quota': quotas.get(agent, {'vcpus': 2, 'memory_mib': 4096}) if agent in agents else None, 'restart_required': False}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--file', default='data/gap-node/compose-agents.json', help='shared microVM approval store (legacy GAP_COMPOSE_APPROVALS_FILE)')
-    parser.add_argument('action', choices=('grant', 'revoke', 'list'))
+    parser.add_argument('action', choices=('grant', 'revoke', 'list', 'set-quota'))
     parser.add_argument('agent', nargs='?')
+    parser.add_argument('--vcpus', type=int, help='Total allocated vCPUs across this agent’s VMs')
+    parser.add_argument('--memory-mib', type=int, help='Total allocated RAM in MiB across this agent’s VMs')
     args = parser.parse_args()
     if (args.action == 'list') != (args.agent is None):
-        parser.error('grant/revoke require one agent DID; list takes none')
+        parser.error('grant/revoke/set-quota require one agent DID; list takes none')
     try:
-        print(json.dumps(change(args.file, args.action, args.agent)))
+        print(json.dumps(change(args.file, args.action, args.agent, args.vcpus, args.memory_mib)))
     except (OSError, ValueError) as error:
         parser.exit(1, str(error) + '\n')
 

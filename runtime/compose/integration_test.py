@@ -197,7 +197,7 @@ class Integration(unittest.TestCase):
                     path = prefix[:-len('/stack')] + '/vm' + suffix
             return legacy_request(method, path, token, body)
 
-        def operation(method, path, body=None):
+        def operation(method, path, body=None, expected_error=None):
             body = {"request_id": uuid.uuid4().hex, **(body or {})}
             status, job = request(method, prefix + path, token, body)
             self.assertEqual(status, 202, job)
@@ -208,7 +208,9 @@ class Integration(unittest.TestCase):
             while time.monotonic() < deadline:
                 _, result = request("GET", prefix + "/jobs/" + job["job_id"], token)
                 if result["status"] not in ("queued", "running"):
-                    self.assertEqual(result["status"], "succeeded", result)
+                    self.assertEqual(result["status"], "failed" if expected_error else "succeeded", result)
+                    if expected_error:
+                        self.assertEqual(result["result"]["error"], expected_error)
                     return result["result"]
                 time.sleep(.2)
             self.fail("managed job timeout")
@@ -216,6 +218,13 @@ class Integration(unittest.TestCase):
         try:
             self.assertEqual(request("GET", prefix + "/vm", token)[1]["state"], "absent")
             self.assertEqual(request("POST", prefix + "/vm", other_token, {"request_id": uuid.uuid4().hex})[0], 401)
+            initial = request("GET", prefix + "/vm", token)[1]['agent_quota']
+            self.assertEqual(initial, {'limits': {'vcpus': 2, 'memory_mib': 4096}, 'allocated': {'vcpus': 0, 'memory_mib': 0}})
+            operation('POST', '/vm', {'vcpus': 3}, expected_error='agent_quota_exceeded_vcpus')
+            approval.write_text(json.dumps({'agents': [owner], 'quotas': {owner: {'vcpus': 1, 'memory_mib': 512}}}))
+            operation('POST', '/vm', {}, expected_error='agent_quota_exceeded_memory_mib')
+            approval.write_text(json.dumps({'agents': [owner]}))
+            print('LIVE AGENT QUOTA DEFAULTS + OVERRIDES + REJECTION BEFORE CREATE OK', flush=True)
             vm = operation("POST", "/vm", {"vcpus": 1, "memory_mib": 1024, "disk_gib": 4, "ports": [8000]})["vm"]
             identity = {"vm_id": vm["vm_id"]}
             from runner import execute_guest
@@ -347,6 +356,10 @@ class Integration(unittest.TestCase):
             operation("POST", "/vm/stop", identity)
             if runner.ingress:
                 self.assertFalse(request('GET', prefix + '/ingress', token)[1]['routed'])
+            self.assertEqual(request('GET', prefix+'/vm', token)[1]['agent_quota']['allocated'], {'vcpus': 1, 'memory_mib': 1024})
+            approval.write_text(json.dumps({'agents': [owner], 'quotas': {owner: {'vcpus': 1, 'memory_mib': 4096}}}))
+            operation('PATCH', '/vm', {**identity, 'vcpus': 2}, expected_error='agent_quota_exceeded_vcpus')
+            approval.write_text(json.dumps({'agents': [owner], 'quotas': {owner: {'vcpus': 2, 'memory_mib': 4096}}}))
             operation("PATCH", "/vm", {**identity, "vcpus": 2, "memory_mib": 1280, "disk_gib": 5})
             operation("POST", "/vm/start", identity)
             ready()
