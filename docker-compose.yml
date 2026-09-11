@@ -40,6 +40,9 @@ services:
       GAP_SMTP_HOST: "${GAP_SMTP_HOST:-172.17.0.1}"
       GAP_SMTP_PORT: "${GAP_SMTP_PORT:-25}"
       GAP_SMTP_FROM: "${GAP_SMTP_FROM:-}"
+      GAP_CLOUD_ADMIN_ENABLED: "${GAP_CLOUD_ADMIN_ENABLED:-0}"
+      GAP_ADMIN_EMAILS: "${GAP_ADMIN_EMAILS:-}"
+      GAP_ADMIN_ORIGIN: "${GAP_ADMIN_ORIGIN:-}"
       GAP_WORKERS: "${GAP_WORKERS:-24}"
       # Rate limiting is a SECURITY control, not a tuning knob: the
       # defaults (120 per token, 600 per IP, per minute) are what stops
@@ -132,6 +135,8 @@ services:
 
   gap-edge:
     build: ./runtime/edge
+    environment:
+      GAP_ADMIN_ORIGIN: "${GAP_ADMIN_ORIGIN:-}"
     ports:
       - "172.17.0.1:8080:8080"
     depends_on:

@@ -127,6 +127,8 @@ fn main() -> Result<()> {
     state.private_node = private_node;
     state.registration = gap::registration::Registration::from_env()
         .map_err(gap::Error::Other)?.map(Arc::new);
+    state.cloud_admin = gap::cloud_admin::Admin::from_env()
+        .map_err(gap::Error::Other)?.map(Arc::new);
     if let Ok(admin_token) = env::var("GAP_ADMIN_TOKEN") {
         state.set_admin_token(admin_token);
         println!("[gap-cloud] operator token configured");
@@ -295,6 +297,33 @@ fn main() -> Result<()> {
 
             // Cloud-only boundary before archived protocol dispatch.
             let clean_path = path.split('?').next().unwrap_or(&path);
+            // A dedicated admin origin must never serve tenant applications.
+            // Path-only cookie isolation would allow tenant JavaScript to read
+            // an administrator's session on the same origin.
+            let admin_origin=env::var("GAP_ADMIN_ORIGIN").unwrap_or_default();
+            let admin_host=admin_origin.trim_end_matches('/').strip_prefix("https://").unwrap_or("");
+            let on_admin_host=!admin_host.is_empty() && host.eq_ignore_ascii_case(admin_host);
+            let admin_api=clean_path.starts_with("/v1/admin/console/");
+            if on_admin_host || clean_path=="/admin" || admin_api {
+                let header=|name:&'static str|request.headers().iter().find(|h|h.field.equiv(name)).map(|h|h.value.as_str().to_string()).unwrap_or_default();
+                let mut response=if custom_domain_request {
+                    Response::from_string("Not found").with_status_code(404)
+                } else if !on_admin_host {
+                    if clean_path=="/admin" && !admin_host.is_empty() {
+                        Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{}/admin",admin_origin.trim_end_matches('/'))).unwrap())
+                    } else {Response::from_string("Administrator origin required").with_status_code(403)}
+                } else if clean_path=="/admin" && method=="GET" {
+                    Response::from_string(if head_only {""} else {include_str!("ui/cloud_admin.html")}).with_header(Header::from_bytes("Content-Type","text/html; charset=utf-8").unwrap())
+                } else if admin_api {
+                    let out=gap::cloud_admin::handle(&state,&method,&path,&body,&header("Cookie"),&header("X-CSRF-Token"),&header("Origin"),client_ip.as_deref().unwrap_or("unknown"));
+                    let mut r=Response::from_string(if head_only {String::new()} else {out.body.to_string()}).with_status_code(out.status).with_header(Header::from_bytes("Content-Type","application/json").unwrap());
+                    if let Some(cookie)=out.cookie {r.add_header(Header::from_bytes("Set-Cookie",cookie).unwrap())}r
+                } else if clean_path=="/health" && method=="GET" {
+                    Response::from_string("{\"status\":\"ok\"}").with_header(Header::from_bytes("Content-Type","application/json").unwrap())
+                } else {Response::from_string("Not found").with_status_code(404)};
+                for (name,value) in [("Cache-Control","no-store"),("X-Content-Type-Options","nosniff"),("Referrer-Policy","no-referrer"),("X-Frame-Options","DENY"),("Content-Security-Policy","default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),("X-Robots-Tag","noindex, nofollow")] {response.add_header(Header::from_bytes(name,value).unwrap())}
+                let _=request.respond(response);continue;
+            }
             if !custom_domain_request
                 && !gap::cloud_surface::allowed_api(clean_path)
                 && !clean_path.starts_with("/sites/")

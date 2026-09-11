@@ -83,3 +83,20 @@ Keep node-01 project storage and its prepaid wallet authoritative until an expli
 cluster design and migration implement shared ownership, routing, fencing and
 storage movement. Never copy a live ledger independently to both nodes and charge
 against both copies.
+
+## Individual administrator origin
+
+Node 01 reserves `https://gap-node-01-u3.vm.elestio.app/admin` for the Cloud
+operator console. The client origin remains `https://gap.geta.team`.
+Both Rust and nginx exclude tenant application, static-site and realtime routes
+from the administrator origin. The administrator allowlist is configured in the
+host `.env`; no password or browser session belongs in this repository.
+
+Node 02 currently uses its Elestio hostname as its client origin. Do not assign
+that same origin to the administrator console: a separate origin is required.
+The initial console inventory is node-local, not a completed fleet aggregate.
+
+Validation: `GAP_TEST_BINARY=/absolute/path/to/gap python3 scripts/test_admin_http.py`
+starts a disposable node and a loopback-only SMTP sink. It tests first enrollment,
+password/code authentication, one-use challenges, origin isolation, CSRF,
+logout, resource inventory and live approval application. No external email is sent.

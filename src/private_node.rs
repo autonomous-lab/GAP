@@ -13,7 +13,7 @@ pub struct PrivateNode {
     pub runner: Option<(String, String)>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Approvals {
     agents: Vec<String>,
@@ -45,6 +45,32 @@ impl Default for MicroVMQuota {
 }
 
 impl PrivateNode {
+    pub fn grant_microvm(&self,did:&str,quota:MicroVMQuota,always_on:bool) -> Result<()> {
+        use std::io::Write;
+        if !valid_did(did) || [quota.vcpus,quota.memory_mib,quota.max_vms].iter().any(|n|*n==0 || *n>=2_u32.pow(31)) {return Err(Error::Other("invalid microVM approval".into()))}
+        let path=self.compose_approvals.as_ref().ok_or_else(||Error::Other("microVM hosting is not configured".into()))?;
+        let lock_path=PathBuf::from(format!("{}.lock",path.display()));
+        let lock=std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(lock_path).map_err(|_|Error::Other("approval lock unavailable".into()))?;
+        lock.lock().map_err(|_|Error::Other("approval lock failed".into()))?;
+        let mut data=Self::read_approvals(path)?;
+        if !data.agents.iter().any(|v|v==did) {data.agents.push(did.into())}
+        data.quotas.insert(did.into(),quota);
+        data.always_on_agents.retain(|v|v!=did);
+        if always_on {data.always_on_agents.push(did.into())}
+        let bytes=serde_json::to_vec(&data).map_err(|_|Error::Other("approval encoding failed".into()))?;
+        if bytes.len()>65536 {return Err(Error::Other("approval file too large".into()))}
+        let temporary=path.with_extension(format!("{}.tmp",rand::random::<u64>()));
+        let result=(||{
+            let mut options=std::fs::OpenOptions::new();options.create_new(true).write(true);
+            #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
+            let mut file=options.open(&temporary).map_err(|_|Error::Other("approval file unavailable".into()))?;
+            file.write_all(&bytes).and_then(|_|file.sync_all()).map_err(|_|Error::Other("approval write failed".into()))?;
+            std::fs::rename(&temporary,path).map_err(|_|Error::Other("approval replacement failed".into()))?;
+            std::fs::File::open(path.parent().unwrap_or(PathBuf::from(".").as_path())).and_then(|f|f.sync_all()).map_err(|_|Error::Other("approval sync failed".into()))?;
+            Ok(())
+        })();
+        if result.is_err() {let _=std::fs::remove_file(temporary);}result
+    }
     pub fn from_env() -> Result<Option<Self>> {
         let flag = |key: &str| -> Result<bool> {
             match std::env::var(key).as_deref() {

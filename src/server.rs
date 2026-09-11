@@ -489,6 +489,7 @@ pub struct NodeState {
     cloud_projects: HashMap<String, crate::cloud::ProjectRecord>,
     pub private_node: Option<crate::private_node::PrivateNode>,
     pub registration: Option<Arc<crate::registration::Registration>>,
+    pub cloud_admin: Option<Arc<crate::cloud_admin::Admin>>,
     /// Verified custom hostname -> project mapping. Kept globally so a TLS
     /// handshake and a Host-routed request are O(1), not a scan of tenant DBs.
     custom_domains: HashMap<String, crate::cloud::SiteDomain>,
@@ -936,6 +937,7 @@ impl NodeState {
             cloud_projects,
             private_node: None,
             registration: None,
+            cloud_admin: None,
             custom_domains,
             realtime_credits,
             realtime_credit_topups,
@@ -2523,6 +2525,32 @@ the content inline"
             .collect();
         projects.sort_by_key(|p| p.created_at);
         Ok(projects)
+    }
+
+    /// Called only after an individual administrator session has been verified.
+    pub fn admin_cloud_inventory(&self,path:&str,offset:u64) -> Result<Value> {
+        match path {
+            "/v1/admin/console/overview" => Ok(json!({"node_did":self.node_did().to_string(),"agents":self.agents.len(),"projects":self.cloud_projects.len(),"microvm_worker":self.private_node.as_ref().is_some_and(|p|p.runner.is_some()),"scope":"this_node"})),
+            "/v1/admin/console/agents" => {
+                let mut dids:Vec<_>=self.agents_by_did.keys().collect();dids.sort();
+                let mut agents=Vec::new();
+                for did in dids.into_iter().skip(offset as usize).take(100) {
+                    let verified=self.storage.get_state("cloud_verified_agent_emails",did)?.and_then(|r|serde_json::from_str::<Value>(&r.value).ok());
+                    agents.push(json!({"did":did,"email":verified.as_ref().and_then(|v|v.get("email")),"email_verified":verified.is_some(),"project_count":self.cloud_projects.values().filter(|p|&p.owner_did==did).count(),"microvm_quota":self.private_node.as_ref().and_then(|p|p.microvm_quota(did).ok())}));
+                }
+                Ok(json!({"agents":agents,"total":self.agents.len(),"offset":offset,"limit":100}))
+            }
+            "/v1/admin/console/projects" => {
+                let mut projects:Vec<_>=self.cloud_projects.values().collect();projects.sort_by(|a,b|a.project_id.cmp(&b.project_id));
+                Ok(json!({"projects":projects.into_iter().skip(offset as usize).take(100).collect::<Vec<_>>(),"total":self.cloud_projects.len(),"offset":offset,"limit":100}))
+            }
+            _ => {
+                let id=path.strip_prefix("/v1/admin/console/projects/").ok_or_else(||Error::Other("unknown admin resource".into()))?;
+                let project=self.cloud_projects.get(id).ok_or_else(||Error::Other("unknown project".into()))?;
+                let store=crate::cloud::ProjectStore::open(&self.cloud_root,id)?;
+                Ok(json!({"project":project,"resources":store.admin_inventory()?}))
+            }
+        }
     }
 
     pub fn cloud_create_site_domain(
@@ -7576,6 +7604,17 @@ pub fn route_with_ip(
         if path == "/v1/identity/verify" { return (404,json!({"error":{"code":"not_found"}})); }
     }
 
+    if let Some(project_id)=path.strip_prefix("/v1/cloud/projects/").and_then(|p|p.strip_suffix("/access-requests")) {
+        let project=match guard.cloud_owned_project(token.unwrap_or(""),project_id) {Ok(p)=>p,Err(e)=>return error_response(&e)};
+        let Some(admin)=guard.cloud_admin.clone() else {return (409,json!({"error":{"code":"approval_requests_not_configured"}}))};
+        if let Err(e)=guard.check_rate_limit(token,client_ip) {return error_response(&e)}
+        drop(guard);
+        return match method {
+            "POST"=>match admin.request_access(&project.owner_did,project_id,&body,now_unix()) {Ok(v)=>(202,v),Err(e)=>e.response()},
+            "GET"=>match admin.access_requests(Some(&project.owner_did),0) {Ok(v)=>(200,v),Err(e)=>e.response()},
+            _=>(405,json!({"error":{"code":"method_not_allowed"}})),
+        };
+    }
     if method == "POST" && path == "/internal/compose/authorize" {
         let quota = guard.private_node.as_ref().and_then(|policy| {
             if !policy.runner.as_ref().is_some_and(|(_, secret)| token == Some(secret.as_str())) {

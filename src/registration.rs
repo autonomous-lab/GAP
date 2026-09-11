@@ -31,10 +31,16 @@ pub struct Registration {
 }
 impl Registration {
     pub fn from_env() -> std::result::Result<Option<Self>, String> {
-        match std::env::var("GAP_EMAIL_VERIFICATION_REQUIRED").as_deref() {
+        Self::configured("GAP_EMAIL_VERIFICATION_REQUIRED", "GAP_REGISTRATION_DB", "/data/registration.sqlite", false)
+    }
+    pub fn admin_from_env() -> std::result::Result<Option<Self>, String> {
+        Self::configured("GAP_CLOUD_ADMIN_ENABLED", "GAP_ADMIN_CHALLENGES_DB", "/data/admin-challenges.sqlite", true)
+    }
+    fn configured(flag: &str, db_var: &str, default_path: &str, admin: bool) -> std::result::Result<Option<Self>, String> {
+        match std::env::var(flag).as_deref() {
             Err(_) | Ok("") | Ok("0") => return Ok(None),
             Ok("1") => (),
-            _ => return Err("GAP_EMAIL_VERIFICATION_REQUIRED must be 0 or 1".into()),
+            _ => return Err(format!("{flag} must be 0 or 1")),
         }
         // Identity and verified-email writes must be acknowledged by storage.
         // ClickHouse's optional fire-and-forget projection mode is incompatible.
@@ -45,7 +51,7 @@ impl Registration {
             return Err("email registration requires GAP_CLICKHOUSE_ASYNC_INSERT=0".into());
         }
         let get = |name| std::env::var(name).map_err(|_| format!("missing {name}"));
-        let key: [u8; 32] = hex::decode(get("GAP_MASTER_KEY")?)
+        let mut key: [u8; 32] = hex::decode(get("GAP_MASTER_KEY")?)
             .map_err(|_| "invalid master key")?
             .try_into()
             .map_err(|_| "invalid master key")?;
@@ -65,12 +71,17 @@ impl Registration {
             return Err("invalid SMTP port".into());
         }
         let from = get("GAP_SMTP_FROM")?;
-        let origin = get("GAP_PUBLIC_URL")?;
+        if admin {
+            let mut mac=Hmac::<Sha256>::new_from_slice(&key).expect("HMAC key");
+            mac.update(b"gap-admin-email-key-v1");
+            key=mac.finalize().into_bytes().into();
+        }
+        let mut origin = get(if admin {"GAP_ADMIN_ORIGIN"} else {"GAP_PUBLIC_URL"})?;
         if !origin.starts_with("https://") || origin.contains(['\r', '\n']) {
             return Err("registration requires an HTTPS GAP_PUBLIC_URL".into());
         }
-        let path = std::env::var("GAP_REGISTRATION_DB")
-            .unwrap_or_else(|_| "/data/registration.sqlite".into());
+        if admin { origin=format!("{}/admin (administrator authentication)",origin.trim_end_matches('/')); }
+        let path = std::env::var(db_var).unwrap_or_else(|_| default_path.into());
         Self::open(Path::new(&path), key, &host, port, &from, &origin)
             .map(Some)
             .map_err(|_| "cannot initialize email verification".into())

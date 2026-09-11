@@ -135,10 +135,10 @@ class Runtime:
                            self.storage_bytes(meta),incoming,outgoing,self.incarnation)
         state['last_sample']=time.monotonic()
 
-    def view(self,meta):
+    def view(self,meta,include_entries=True):
         if not meta: return {}
         state=self.state(meta)
-        account=self.ledger.view(meta['project_id'],meta['owner_did'])
+        account=self.ledger.view(meta['project_id'],meta['owner_did'],include_entries=include_entries)
         tariff=account['tariff']
         return {'mode':meta.get('execution_mode','serverless'),'idle_timeout_seconds':meta.get('idle_timeout_seconds',900),
                 'last_incoming_at':state['last_incoming'],'active_http_requests':state['active_http'],'runtime_error':meta.get('runtime_error'),

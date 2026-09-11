@@ -35,9 +35,16 @@ Implemented, tested and deployed to both node web servers in the first delivery
   relay connectivity and envelope acceptance were checked from both node network
   namespaces. Actual recipient-inbox delivery has not been confirmed.
 
+Individual administrator authentication is now deployed on node 01 at its
+dedicated Elestio HTTPS origin: passwords, isolated email codes, revocable
+sessions, origin isolation, CSRF and audit entries. The initial console provides
+node-local agents/projects/VM inventory and project resource metadata. Owners
+can submit access/quota requests; administrator approval changes node-local
+quotas without restarting. Shared customer and fleet scope remain to implement.
+
 Still to implement: customer/operator account authority and shared wallets;
-customer-wide and fleet-wide quotas; admin
-sessions and dashboard; approval requests; complete workload suspension; finance
+customer-wide and fleet-wide quotas; complete fleet dashboard and
+customer-wide approval application; complete workload suspension; finance
 reporting; per-node provider cost configuration and public tariff discovery; federation explorer; verified
 operator badges; encrypted volumes, snapshots and backups with external keys.
 Stripe remains a later phase. Do not present the local email registry or

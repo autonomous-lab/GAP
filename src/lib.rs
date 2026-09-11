@@ -30,6 +30,7 @@ pub mod agentcard;
 pub mod amount;
 pub mod artifact;
 pub mod cloud;
+pub mod cloud_admin;
 pub mod cloud_surface;
 pub mod compliance;
 pub mod conformance;

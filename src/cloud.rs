@@ -322,6 +322,14 @@ impl ProjectStore {
     pub fn project_id(&self) -> &str {
         &self.project_id
     }
+
+    /// Bounded operator metadata; never include function source or site passwords.
+    pub fn admin_inventory(&self) -> Result<Value> {
+        let mut stmt=self.control.prepare("SELECT f.name,f.active_version,f.created_at,count(v.version) FROM functions f LEFT JOIN function_versions v ON v.name=f.name GROUP BY f.name ORDER BY f.name LIMIT 100").map_err(db_error)?;
+        let functions=stmt.query_map([],|r|Ok(json!({"name":r.get::<_,String>(0)?,"active_version":r.get::<_,Option<i64>>(1)?,"created_at":r.get::<_,i64>(2)?,"versions":r.get::<_,i64>(3)?}))).map_err(db_error)?.collect::<std::result::Result<Vec<_>,_>>().map_err(db_error)?;
+        let schema=self.database_query("SELECT name,type,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 100",&[])?;
+        Ok(json!({"functions":functions,"site":self.site_config()?,"site_versions":self.site_versions()?,"database_schema":schema,"limit":100}))
+    }
     pub fn user_database_path(&self) -> PathBuf {
         self.root.join("database.sqlite")
     }

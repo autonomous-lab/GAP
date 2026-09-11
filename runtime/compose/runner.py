@@ -219,6 +219,22 @@ class Runner:
                 "result": json.loads(row["result"]) if row["result"] else None}
 
     def rpc(self, rpc):
+        # Internal service credential required by /rpc. The public project
+        # route allowlist never forwards this operator-only inventory action.
+        if rpc.get('action')=='admin/inventory' and rpc.get('method')=='GET':
+            if not self.hypervisor:return 200,{'vms':[],'available':False}
+            body=rpc.get('body') or {};offset=body.get('offset',0)
+            if type(offset) is not int or not 0<=offset<=1000000:raise Failure(400,'invalid_offset')
+            paths=sorted((self.hypervisor.root/'catalog').glob('*.json'))
+            values=[]
+            for path in paths[offset:offset+100]:
+                meta=json.loads(path.read_text())
+                view=self.hypervisor.public(meta)
+                view['owner_did']=meta['owner_did']
+                if self.runtime:view['runtime']=self.runtime.view(meta,include_entries=False)
+                if self.ingress:view['ingress']=self.ingress.public(meta)
+                values.append(view)
+            return 200,{'vms':values,'total':len(paths),'offset':offset,'limit':100,'available':True}
         project, owner = rpc.get("project_id", ""), rpc.get("owner_did", "")
         if not isinstance(project, str) or not PROJECT.fullmatch(project) or not isinstance(owner, str):
             raise Failure(400, "invalid_project")

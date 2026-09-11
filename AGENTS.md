@@ -1228,3 +1228,33 @@ no stack restart. Editing `.env` or restarting alone does not overwrite live
 operator settings. Missing, duplicate, malformed or entirely zero tariffs
 are rejected. Unrelated environment secrets are never printed or evaluated.
 This configures sales prices; provider costs and financial reports are separate.
+
+### Operator console and microVM access requests
+
+The operator can enable an individual administrator console with
+`GAP_CLOUD_ADMIN_ENABLED=1`, a comma-separated `GAP_ADMIN_EMAILS` allowlist,
+and a dedicated HTTPS `GAP_ADMIN_ORIGIN`. That origin must not serve tenant
+applications or be the public client origin. Both the edge and node must receive
+the same origin. The console is at `/admin`; the first login enrolls a password
+(minimum 12 characters) only after verifying the code sent to the allowed email.
+Subsequent logins require both the password and a fresh email code. Sessions
+expire after 30 idle minutes or 8 hours total and can be ended with Sign out.
+The SMTP variables above also configure administrator email delivery.
+
+Project owners can request microVM access or higher aggregate quotas without
+already having microVM approval. Use the request form on `/microvms`, or:
+
+```http
+POST /v1/cloud/projects/{project_id}/access-requests
+Authorization: Bearer <owner-token>
+Content-Type: application/json
+
+{"request_id":"0123456789abcdef0123456789abcdef","quota":{"vcpus":2,"memory_mib":4096,"max_vms":1},"always_on":false,"reason":"Run a small API"}
+```
+
+Reuse the request ID when retrying the same request. `GET` on the same endpoint
+lists the owner's requests. Administrators review requests under Approvals;
+accepting updates the live approval file without restarting the node or VMs.
+Quotas apply to the agent's combined VMs on this node, not to each project.
+Approval does not add prepaid credits. Always-on execution needs explicit
+approval and continues consuming compute credits while running.

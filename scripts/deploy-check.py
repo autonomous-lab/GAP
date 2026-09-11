@@ -8,7 +8,7 @@ FILES = ["docker-compose.yml", "docker-compose.scale.yml", ".env.example",
          "runtime/realtime/Dockerfile", "runtime/realtime/server.mjs",
          "runtime/realtime/package.json", "runtime/realtime/package-lock.json",
          "runtime/realtime/entrypoint.sh", "runtime/edge/Dockerfile",
-         "runtime/edge/nginx.conf", "runtime/compose/Dockerfile",
+         "runtime/edge/nginx.conf", "runtime/edge/entrypoint.sh", "runtime/compose/Dockerfile",
          "runtime/compose/image/Dockerfile", "runtime/compose/deploy.yml",
          "runtime/compose/caddy-bootstrap.json", "runtime/compose/runner.example.json",
          "runtime/compose/gap-compose-ports.service"]
