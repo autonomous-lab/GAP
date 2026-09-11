@@ -10,7 +10,7 @@ import stat
 import tempfile
 
 
-def change(path, action, agent=None, vcpus=None, memory_mib=None):
+def change(path, action, agent=None, vcpus=None, memory_mib=None, always_on=None):
     if agent is not None and not re.fullmatch(r'did:gap:[0-9a-f]{64}', agent):
         raise ValueError('agent must be an exact did:gap:<64 lowercase hex> identity')
     path = Path(path).absolute()
@@ -31,16 +31,22 @@ def change(path, action, agent=None, vcpus=None, memory_mib=None):
         if len(raw) > 65536:
             raise ValueError('approval file exceeds node limit')
         data = json.loads(raw)
-        if (not isinstance(data, dict) or not {'agents'} <= set(data) <= {'agents', 'quotas'} or not isinstance(data['agents'], list)
+        if (not isinstance(data, dict) or not {'agents'} <= set(data) <= {'agents', 'quotas', 'always_on_agents'} or not isinstance(data['agents'], list)
                 or any(not isinstance(did, str) or not re.fullmatch(r'did:gap:[0-9a-f]{64}', did) for did in data['agents'])):
             raise ValueError('invalid approval file; refusing to overwrite it')
+        always = data.get('always_on_agents', [])
+        if not isinstance(always,list) or any(did not in data['agents'] for did in always):
+            raise ValueError('invalid always-on approval')
+        if always_on is not None and type(always_on) is not bool: raise ValueError('invalid always-on flag')
+        if always_on is not None and action not in ('grant','set-always-on'): raise ValueError('always-on flag requires grant or set-always-on')
+        if action=='set-always-on' and (agent not in data['agents'] or always_on is None): raise ValueError('set-always-on requires approved agent and --always-on yes|no')
         quotas = data.get('quotas', {})
         def valid_quota(q):
             return (isinstance(q, dict) and set(q) == {'vcpus', 'memory_mib'}
                     and all(type(v) is int and 0 < v < 2**31 for v in q.values()))
         if not isinstance(quotas, dict) or any(did not in data['agents'] or not valid_quota(q) for did, q in quotas.items()):
             raise ValueError('invalid quota store')
-        if action not in ('grant', 'revoke', 'list', 'set-quota'):
+        if action not in ('grant', 'revoke', 'list', 'set-quota', 'set-always-on'):
             raise ValueError('invalid action')
         if any(v is not None and (type(v) is not int or not 0 < v < 2**31) for v in (vcpus, memory_mib)):
             raise ValueError('quotas must be positive integers below 2**31')
@@ -51,7 +57,7 @@ def change(path, action, agent=None, vcpus=None, memory_mib=None):
         agents = set(data['agents'])
         original = json.dumps(data, sort_keys=True)
         if action == 'list':
-            return {'agents': sorted(agents), 'quotas': {did: quotas.get(did, {'vcpus': 2, 'memory_mib': 4096}) for did in sorted(agents)}}
+            return {'agents': sorted(agents), 'quotas': {did: quotas.get(did, {'vcpus': 2, 'memory_mib': 4096}) for did in sorted(agents)}, 'always_on_agents': sorted(always)}
         before = set(agents)
         if action == 'grant':
             agents.add(agent)
@@ -65,7 +71,11 @@ def change(path, action, agent=None, vcpus=None, memory_mib=None):
             if memory_mib is not None:
                 q['memory_mib'] = memory_mib
             quotas[agent] = q
+        if action=='revoke': always=[did for did in always if did!=agent]
+        if always_on is True and agent not in always: always.append(agent)
+        if always_on is False: always=[did for did in always if did!=agent]
         updated = {'agents': sorted(agents)}
+        if always: updated['always_on_agents']=sorted(always)
         if quotas:
             updated['quotas'] = quotas
         changed = json.dumps(updated, sort_keys=True) != original
@@ -97,15 +107,16 @@ def change(path, action, agent=None, vcpus=None, memory_mib=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--file', default='data/gap-node/compose-agents.json', help='shared microVM approval store (legacy GAP_COMPOSE_APPROVALS_FILE)')
-    parser.add_argument('action', choices=('grant', 'revoke', 'list', 'set-quota'))
+    parser.add_argument('action', choices=('grant', 'revoke', 'list', 'set-quota', 'set-always-on'))
     parser.add_argument('agent', nargs='?')
     parser.add_argument('--vcpus', type=int, help='Total allocated vCPUs across this agent’s VMs')
     parser.add_argument('--memory-mib', type=int, help='Total allocated RAM in MiB across this agent’s VMs')
+    parser.add_argument('--always-on', choices=('yes','no'))
     args = parser.parse_args()
     if (args.action == 'list') != (args.agent is None):
         parser.error('grant/revoke/set-quota require one agent DID; list takes none')
     try:
-        print(json.dumps(change(args.file, args.action, args.agent, args.vcpus, args.memory_mib)))
+        print(json.dumps(change(args.file, args.action, args.agent, args.vcpus, args.memory_mib, None if args.always_on is None else args.always_on=='yes')))
     except (OSError, ValueError) as error:
         parser.exit(1, str(error) + '\n')
 

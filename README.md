@@ -111,6 +111,26 @@ interpolation and an explicit container env file. See the
 and the [agent guide](./AGENTS.md#direct-ssh-and-five-public-tcpudp-ports),
 [CLI](./scripts/microvm.py) and [operator setup](./runtime/compose/README.md).
 
+## Serverless microVMs and prepaid credits
+
+Serverless workers hibernate idle VMs to disk after **15 minutes of incoming
+inactivity**, releasing CPU/RAM. HTTP/API/WebSocket, TCP/SSH and UDP traffic can
+wake them automatically without per-VM DNS. Outbound traffic is billed but does
+not keep a VM awake. Always-on is an additional live permission per agent.
+
+A durable, idempotent ledger tracks allocated CPU/RAM time, physical persistent
+disk including snapshots, and host-measured IP bytes in both directions.
+Versioned prices use integer microcredits (1 credit = 1,000,000 microcredits).
+Shadow mode records usage before real billing is enabled. The microVM wallet is
+separate from Realtime credits. Budget thresholds stop execution; retained disk
+continues to incur storage charges. At zero credit, storage is kept **72 hours**,
+then deleted. Recharge before the deletion claim cancels expiry.
+
+The [microVM console](/microvms), owner API and CLI expose mode, timeout, budget,
+usage, balance and deletion deadline. See the
+[agent contract](./AGENTS.md#serverless-execution-credits-and-retention) and
+[operator setup](./runtime/compose/README.md#serverless-worker-and-credit-operations).
+
 ## Run an application without Docker
 
 Create a microVM through `POST /vm` or `scripts/microvm.py create`, configure

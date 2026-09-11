@@ -66,6 +66,16 @@ class AccessTests(unittest.TestCase):
             self.assertNotIn(A, json.loads(path.read_text())['quotas'])
             self.assertEqual(access.change(path, 'list')['quotas'][B]['memory_mib'], 2048)
 
+    def test_always_on_requires_approval_and_revoke_removes_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'approved.json'
+            access.change(path,'grant',A)
+            with self.assertRaises(ValueError): access.change(path,'set-always-on',B,always_on=True)
+            access.change(path,'set-always-on',A,always_on=True)
+            self.assertEqual(access.change(path,'list')['always_on_agents'],[A])
+            access.change(path,'revoke',A)
+            self.assertEqual(access.change(path,'list')['always_on_agents'],[])
+
     def test_symlink_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / 'target'

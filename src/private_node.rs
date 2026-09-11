@@ -19,6 +19,8 @@ struct Approvals {
     agents: Vec<String>,
     #[serde(default)]
     quotas: BTreeMap<String, MicroVMQuota>,
+    #[serde(default)]
+    always_on_agents: Vec<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -127,6 +129,13 @@ impl PrivateNode {
         }) {
             return Err(Error::Unauthorized("invalid microVM quota".into()));
         }
+        if approvals
+            .always_on_agents
+            .iter()
+            .any(|did| !approvals.agents.contains(did))
+        {
+            return Err(Error::Unauthorized("invalid always-on approval".into()));
+        }
         Ok(approvals)
     }
 
@@ -135,6 +144,15 @@ impl PrivateNode {
             return Ok(());
         }
         Self::authorize_file(&self.approvals, did)
+    }
+
+    pub fn always_on_allowed(&self, did: &str) -> bool {
+        self.microvm_quota(did).is_ok()
+            && self
+                .compose_approvals
+                .as_ref()
+                .and_then(|path| Self::read_approvals(path).ok())
+                .is_some_and(|approval| approval.always_on_agents.iter().any(|value| value == did))
     }
 
     pub fn authorize_compose(&self, did: &str) -> Result<()> {
@@ -189,6 +207,11 @@ pub fn runtime_route(path: &str) -> Option<(&str, &str)> {
         "vm" => return Some((project, "vm")),
         "vm/start" => return Some((project, "vm/start")),
         "vm/stop" => return Some((project, "vm/stop")),
+        "vm/hibernate" => return Some((project, "vm/hibernate")),
+        "vm/resume" => return Some((project, "vm/resume")),
+        "vm/runtime" => return Some((project, "runtime")),
+        "vm/credits" => return Some((project, "credits")),
+        "vm/budget" => return Some((project, "budget")),
         "vm/ports" => return Some((project, "ports")),
         "vm/ssh" => return Some((project, "ssh")),
         "vm/ingress" => return Some((project, "ingress")),
@@ -282,6 +305,18 @@ mod tests {
                 );
             }
         }
+        for (suffix, action) in [
+            ("hibernate", "vm/hibernate"),
+            ("resume", "vm/resume"),
+            ("runtime", "runtime"),
+            ("credits", "credits"),
+            ("budget", "budget"),
+        ] {
+            assert_eq!(
+                runtime_route(&format!("/v1/cloud/projects/{project}/vm/{suffix}")),
+                Some((project, action))
+            );
+        }
         let action = "jobs/job_0123456789abcdef0123456789abcdef";
         assert_eq!(
             runtime_route(&format!("/v1/cloud/projects/{project}/vm/{action}")),
@@ -311,6 +346,20 @@ mod tests {
         std::fs::write(&path, json!({"agents": [&did]}).to_string()).unwrap();
         assert_eq!(policy.microvm_quota(&did).unwrap().vcpus, 2);
         assert_eq!(policy.microvm_quota(&did).unwrap().memory_mib, 4096);
+        assert!(!policy.always_on_allowed(&did));
+        std::fs::write(
+            &path,
+            json!({"agents": [&did], "always_on_agents": [&did]}).to_string(),
+        )
+        .unwrap();
+        assert!(policy.always_on_allowed(&did));
+        std::fs::write(
+            &path,
+            json!({"agents": [], "always_on_agents": [&did]}).to_string(),
+        )
+        .unwrap();
+        assert!(!policy.always_on_allowed(&did));
+
         std::fs::write(
             &path,
             json!({"agents": [&did], "quotas": {&did: {"vcpus": 4, "memory_mib": 8192}}})

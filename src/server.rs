@@ -7534,7 +7534,9 @@ pub fn route_with_ip(
             }
             policy.microvm_quota(&project.owner_did).ok()
         });
-        return (if quota.is_some() { 200 } else { 403 }, json!({"allowed": quota.is_some(), "quota": quota}));
+        let always_on_allowed = quota.is_some() && guard.private_node.as_ref().is_some_and(|policy|
+            body["owner_did"].as_str().is_some_and(|did| policy.always_on_allowed(did)));
+        return (if quota.is_some() { 200 } else { 403 }, json!({"allowed": quota.is_some(), "quota": quota, "always_on_allowed": always_on_allowed}));
     }
 
     if let Some((project_id, action)) = crate::private_node::runtime_route(path) {

@@ -57,6 +57,8 @@ def validate(action, body):
         'vm/create': {'request_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports', 'start', 'ssh_keys'},
         'vm/update': {'request_id', 'vm_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports'},
         'vm/start': {'request_id', 'vm_id'},
+        'vm/hibernate': {'request_id', 'vm_id'},
+        'vm/resume': {'request_id', 'vm_id'},
         'vm/stop': {'request_id', 'vm_id', 'force'},
         'vm/destroy': {'request_id', 'vm_id', 'delete_data', 'confirm_data_loss'},
     }
@@ -95,6 +97,8 @@ class MicroVMs:
         self.children = {}
         self.ingress_origin = ''
         self.quota_provider = lambda project, owner: {"vcpus": 2, "memory_mib": 4096}
+        self.runtime = None
+        self.meters = {}
         self.network = None
         if config.get('public_network'):
             from network import Network
@@ -118,6 +122,22 @@ class MicroVMs:
         with (self.root / 'locks' / 'port-allocation').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
+
+    def reserved_port(self, used=()):
+        # Called under allocation_lock before publishing metadata. Include
+        # hibernated guests: their unbound endpoints must never be reassigned.
+        occupied=set(used)
+        for path in (self.root/'catalog').glob('prj_*.json'):
+            other=json.loads(path.read_text())
+            if other['state']=='destroyed': continue
+            occupied.add(other['ssh_port'])
+            occupied.update(p['worker_port'] for p in other.get('ports',[]))
+            occupied.update(other.get('public_targets',{}).values())
+            occupied.update(other.get('public_ports',[]))
+        for _ in range(1000):
+            port=free_port()
+            if port not in occupied: return port
+        raise VMError('internal_port_pool_exhausted')
 
     def catalog(self, project):
         if not re.fullmatch(r'prj_[0-9a-f]{24}', project):
@@ -146,10 +166,10 @@ class MicroVMs:
         atomic_json(self.catalog(meta['project_id']), meta)
 
     def qmp(self, meta, command, arguments=None):
-        if command not in ('query-status', 'quit', 'human-monitor-command'):
+        if command not in ('query-status', 'quit', 'human-monitor-command', 'stop', 'cont'):
             raise VMError('invalid_qmp_command')
         with socket.socket(socket.AF_UNIX) as sock:
-            sock.settimeout(3)
+            sock.settimeout(120 if command == 'human-monitor-command' else 3)
             sock.connect(str(self.folder(meta) / 'qmp.sock'))
             with sock.makefile('rwb') as io:
                 def read():
@@ -196,7 +216,7 @@ class MicroVMs:
         if not meta:
             return {'state': 'absent'}
         result = {key: meta[key] for key in ('vm_id', 'project_id', 'state', 'vcpus', 'memory_mib', 'disk_gib', 'ports')}
-        if meta['state'] not in ('destroyed', 'creating'):
+        if meta['state'] not in ('destroyed', 'creating', 'hibernated', 'hibernating', 'resuming'):
             try:
                 result['state'] = self.qmp(meta, 'query-status')['status']
             except (OSError, VMError):
@@ -307,7 +327,7 @@ class MicroVMs:
         forwards += [f'hostfwd=tcp:127.0.0.1:{port["worker_port"]}-:{port["guest_port"]}' for port in meta['ports']]
         if self.network:
             forwards += ['hostfwd=' + rule for rule in self.network.rules(meta)]
-        return ['qemu-system-x86_64', '-machine', 'microvm,accel=kvm', '-cpu', 'host',
+        command = ['qemu-system-x86_64', '-machine', 'microvm,accel=kvm', '-cpu', 'host',
                 '-name', meta['vm_id'], '-m', str(meta['memory_mib']), '-smp', str(meta['vcpus']),
                 '-kernel', str(self.images / 'vmlinuz'), '-initrd', str(self.images / 'initramfs'),
                 '-append', 'console=ttyS0 root=/dev/vda rootfstype=ext4 modules=virtio_mmio,virtio_blk,ext4 rootwait rw reboot=t net.ifnames=0',
@@ -319,9 +339,97 @@ class MicroVMs:
                 '-drive', f'id=seed,file={folder}/seed.ext4,format=raw,if=none,readonly=on',
                 '-device', 'virtio-blk-device,drive=seed',
                 '-device', 'virtio-rng-device',
-                '-netdev', 'user,id=net0,' + ','.join(forwards), '-device', 'virtio-net-device,netdev=net0',
+                '-netdev', 'user,id=net0,' + ','.join(forwards), '-device', 'virtio-net-device,netdev=net0,mac=' + self.guest_mac(meta),
                 '-qmp', f'unix:{folder}/qmp.sock,server=on,wait=off',
                 '-pidfile', str(folder / 'qemu.pid')]
+        if self.runtime:
+            command += ['-object', f'filter-dump,id=meterin,netdev=net0,queue=tx,file={folder}/meter-in.fifo,maxlen=96',
+                        '-object', f'filter-dump,id=meterout,netdev=net0,queue=rx,file={folder}/meter-out.fifo,maxlen=96']
+        return command
+
+    @staticmethod
+    def guest_mac(meta):
+        return '52:54:' + ':'.join(meta['vm_id'][3+i:5+i] for i in (0,2,4,6))
+
+    def capture_start(self, meta):
+        if self.runtime:
+            from meter import PacketMeter
+            self.capture_stop(meta)
+            self.meters[meta['vm_id']] = PacketMeter(self.folder(meta), self.guest_mac(meta))
+
+    def capture_stop(self, meta):
+        meter = self.meters.pop(meta['vm_id'], None)
+        if meter: meter.close()
+
+    def hibernate(self, meta):
+        if meta['state'] == 'hibernated': return
+        if self.public(meta)['state'] != 'running':
+            raise VMError('hibernate_requires_running_vm')
+        if shutil.disk_usage(self.folder(meta)).free < meta['memory_mib']*1024**2+512*1024**2:
+            raise VMError('insufficient_disk_for_hibernation')
+        meta['snapshot_qemu_version']=subprocess.check_output(['qemu-system-x86_64','--version'],text=True).splitlines()[0]
+        tag='idle_' + uuid.uuid4().hex
+        meta.update(state='hibernating', snapshot_tag=tag)
+        self.save(meta)
+        try:
+            self.qmp(meta,'stop')
+            response=self.qmp(meta,'human-monitor-command',{'command-line':'savevm '+tag})
+            if response.strip(): raise VMError('snapshot_save_failed')
+            self.qmp(meta,'quit')
+            child=self.children.pop(meta['vm_id'],None)
+            if child: child.wait(timeout=15)
+            deadline=time.monotonic()+15
+            while self.alive(meta) and time.monotonic()<deadline: time.sleep(.05)
+            if self.alive(meta): raise VMError('hibernate_process_still_alive')
+            self.capture_stop(meta)
+            meta.update(state='hibernated',hibernated_at=int(time.time()))
+            self.save(meta)
+        except Exception:
+            if self.alive(meta):
+                self.qmp(meta,'cont')
+                meta['state']='running'; self.save(meta)
+            raise
+
+    def resume(self, meta):
+        if meta['state'] != 'hibernated':
+            return self.start(meta)
+        tag=meta.get('snapshot_tag','')
+        if not re.fullmatch(r'idle_[0-9a-f]{32}',tag): raise VMError('invalid_snapshot_identity')
+        if self.image_version()!=meta['image_version']: raise VMError('guest_base_image_changed')
+        if meta.get('snapshot_qemu_version')!=subprocess.check_output(['qemu-system-x86_64','--version'],text=True).splitlines()[0]:
+            raise VMError('snapshot_requires_original_qemu_version')
+        meta['state']='resuming'; self.save(meta)
+        self.capture_start(meta)
+        log=self.folder(meta)/'restore.log'
+        with log.open('wb') as error:
+            process=subprocess.Popen(self.command(meta)+['-loadvm',tag,'-S'],stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,stderr=error,env={'PATH':'/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'})
+        self.children[meta['vm_id']]=process
+        deadline=time.monotonic()+90
+        try:
+            while time.monotonic()<deadline:
+                if process.poll() is not None: raise VMError('snapshot_restore_failed')
+                try:
+                    if self.qmp(meta,'query-status')['status'] in ('paused','prelaunch'): break
+                except OSError: pass
+                time.sleep(.01)
+            else: raise VMError('snapshot_restore_timeout')
+            # Mark resumed before executing guest instructions: never replay an old
+            # memory snapshot after a crash following an externally visible write.
+            meta['state']='running'; self.save(meta)
+            self.qmp(meta,'cont')
+            response=self.qmp(meta,'human-monitor-command',{'command-line':'delvm '+tag})
+            if response.strip(): meta['snapshot_cleanup_pending']=True
+            else: meta.pop('snapshot_tag',None)
+            self.save(meta)
+        except Exception:
+            if process.poll() is None:
+                process.terminate(); process.wait(timeout=10)
+            self.capture_stop(meta)
+            if meta['state']=='resuming': meta['state']='hibernated'
+            else: meta['state']='stopped'
+            self.save(meta)
+            raise
 
     def start(self, meta):
         if meta['state'] == 'creating':
@@ -334,6 +442,7 @@ class MicroVMs:
             raise VMError('guest_base_image_changed')
         folder = self.folder(meta)
         self.refresh_seed(meta)
+        self.capture_start(meta)
         error_log = folder / 'hypervisor.log'
         with (error_log.open('wb') if self.diagnostic_serial else open(os.devnull, 'wb')) as log:
             process = subprocess.Popen(self.command(meta), stdin=subprocess.DEVNULL,
@@ -367,7 +476,13 @@ class MicroVMs:
             self.save(meta)
             return
         if force:
-            self.qmp(meta, 'quit')
+            try: self.qmp(meta, 'quit')
+            except (OSError,VMError):
+                # Only signal an unreaped child owned by this worker. Never
+                # trust an arbitrary/reused PID read from disk.
+                child=self.children.get(meta['vm_id'])
+                if child is None or child.poll() is not None: raise
+                child.kill(); child.wait(timeout=10)
         else:
             self.execute_guest(self.guest(meta['project_id'], meta['owner_did']),
                                {'action': 'vm_shutdown', 'body': {}}, timeout=15)
@@ -376,6 +491,7 @@ class MicroVMs:
             time.sleep(.1)
         if self.alive(meta):
             raise VMError('vm_still_running_use_explicit_force_stop')
+        self.capture_stop(meta)
         meta['state'] = 'stopped'
         self.save(meta)
         child = self.children.pop(meta['vm_id'], None)
@@ -416,7 +532,7 @@ class MicroVMs:
                     or any(type(v) is not int or not 0 < v < 2**31 for v in limits.values())):
                 raise VMError('invalid_agent_quota')
             meta = self.read(project, owner)
-            if action in ('vm/create', 'vm/update', 'vm/start'):
+            if action in ('vm/create', 'vm/update', 'vm/start', 'vm/resume'):
                 usage = self.quota_usage(owner)
                 for key, default in (('vcpus', 1), ('memory_mib', 1024)):
                     if action == 'vm/create':
@@ -439,19 +555,19 @@ class MicroVMs:
             if action == 'vm/create':
                 if meta and meta['state'] != 'destroyed':
                     raise VMError('vm_already_exists')
-                meta = {'vm_id': 'vm_' + uuid.uuid4().hex, 'project_id': project, 'owner_did': owner,
-                        'state': 'creating', 'vcpus': body.get('vcpus', 1),
-                        'memory_mib': body.get('memory_mib', 1024), 'disk_gib': body.get('disk_gib', 8),
-                        'ssh_port': free_port(), 'ports': [], 'retained': False,
-                        'ssh_keys': __import__('network').keys(body.get('ssh_keys', []))}
-                used = {meta['ssh_port']}
-                for port in body.get('ports', []):
-                    candidate = free_port()
-                    while candidate in used:
-                        candidate = free_port()
-                    used.add(candidate)
-                    meta['ports'].append({'guest_port': port, 'worker_port': candidate})
                 with self.allocation_lock():
+                    meta = {'vm_id': 'vm_' + uuid.uuid4().hex, 'project_id': project, 'owner_did': owner,
+                            'state': 'creating', 'vcpus': body.get('vcpus', 1),
+                            'memory_mib': body.get('memory_mib', 1024), 'disk_gib': body.get('disk_gib', 8),
+                            'ssh_port': self.reserved_port(), 'ports': [], 'retained': False,
+                            'ssh_keys': __import__('network').keys(body.get('ssh_keys', []))}
+                    used = {meta['ssh_port']}
+                    for port in body.get('ports', []):
+                        candidate = self.reserved_port(used)
+                        while candidate in used:
+                            candidate = self.reserved_port(used)
+                        used.add(candidate)
+                        meta['ports'].append({'guest_port': port, 'worker_port': candidate})
                     if self.network:
                         self.network.allocate(meta)
                     self.save(meta)  # durable reservation before creating disks/processes
@@ -465,11 +581,14 @@ class MicroVMs:
                     raise VMError('vm_not_found')
                 if body['vm_id'] != meta['vm_id']:
                     raise VMError('vm_generation_mismatch')
-                if action == 'vm/start':
-                    self.start(meta)
+                if action in ('vm/start','vm/resume'):
+                    self.resume(meta) if meta['state']=='hibernated' else self.start(meta)
+                elif action == 'vm/hibernate':
+                    self.hibernate(meta)
                 elif action == 'vm/stop':
                     self.stop(meta, body.get('force', False))
                 elif action == 'vm/update':
+                    if meta['state']=='hibernated': raise VMError('resume_then_stop_before_resize')
                     if self.alive(meta):
                         raise VMError('stop_vm_before_reconfiguration')
                     if body.get('disk_gib', meta['disk_gib']) < meta['disk_gib']:
@@ -478,16 +597,17 @@ class MicroVMs:
                         run(['qemu-img', 'resize', str(self.folder(meta) / 'disk.qcow2'), str(body['disk_gib']) + 'G'])
                     for key in ('vcpus', 'memory_mib', 'disk_gib'):
                         meta[key] = body.get(key, meta[key])
-                    if 'ports' in body:
-                        used = {meta['ssh_port']}
-                        meta['ports'] = []
-                        for port in body['ports']:
-                            candidate = free_port()
-                            while candidate in used:
-                                candidate = free_port()
-                            used.add(candidate)
-                            meta['ports'].append({'guest_port': port, 'worker_port': candidate})
-                    self.save(meta)
+                    with self.allocation_lock():
+                        if 'ports' in body:
+                            used = {meta['ssh_port']}
+                            meta['ports'] = []
+                            for port in body['ports']:
+                                candidate = self.reserved_port(used)
+                                while candidate in used:
+                                    candidate = self.reserved_port(used)
+                                used.add(candidate)
+                                meta['ports'].append({'guest_port': port, 'worker_port': candidate})
+                        self.save(meta)
                 elif action == 'vm/destroy':
                     if self.alive(meta):
                         raise VMError('stop_vm_before_destruction')
@@ -497,6 +617,7 @@ class MicroVMs:
                             # Exact generated ID under a validated controller root.
                             shutil.rmtree(folder)
                         else:
+                            atomic_json(folder/'retention.json',{'project_id':project,'owner_did':owner,'vm_id':meta['vm_id']})
                             folder.rename(self.root / 'retained' / meta['vm_id'])
                     meta['state'] = 'destroyed'
                     meta['retained'] = not body.get('delete_data', False)

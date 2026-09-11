@@ -80,7 +80,8 @@ class Ingress:
             if meta['project_id'] == exclude or meta['state'] in ('creating', 'destroyed'):
                 continue
             settings = meta.get('ingress', {})
-            if settings.get('enabled') is not True or self.manager.public(meta)['state'] != 'running':
+            state=self.manager.public(meta)['state']
+            if settings.get('enabled') is not True or (state != 'running' and not (self.manager.runtime and state in ('hibernated','hibernating','resuming'))):
                 continue
             port = next((p['worker_port'] for p in meta['ports'] if p['guest_port'] == settings['guest_port']), None)
             if port is None:
@@ -92,8 +93,9 @@ class Ingress:
             }], 'terminal': True})
             routes.append({'match': [{'path': [prefix + '/*']}], 'handle': [
                 {'handler': 'rewrite', 'strip_path_prefix': prefix},
-                {'handler': 'reverse_proxy', 'upstreams': [{'dial': '127.0.0.1:' + str(port)}],
+                {'handler': 'reverse_proxy', 'upstreams': [{'dial': '127.0.0.1:' + str(self.manager.runtime.gateway.port if self.manager.runtime and self.manager.runtime.gateway else port)}],
                  'headers': {'request': {'set': {
+                     **({'X-GAP-Project': [meta['project_id']]} if self.manager.runtime else {}),
                      'X-Forwarded-Prefix': [prefix],
                      'X-Forwarded-Proto': [urlsplit(self.public_url).scheme]
                  }}, 'response': {'delete': ['Service-Worker-Allowed']}}}
@@ -144,7 +146,7 @@ class Ingress:
         with self.lock:
             # Withdraw routes before any operation can release/reassign a port.
             # A Caddy outage prevents VM mutation rather than leaving stale routes.
-            self.sync(exclude=project)
+            self.sync(exclude=None if self.manager.runtime and action in ('vm/hibernate','vm/resume') else project)
             try:
                 return self.manager.perform(project, owner, action, body)
             finally:

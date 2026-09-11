@@ -41,6 +41,19 @@ class CLITests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.request('destroy','--delete-data')
 
+    def test_serverless_routes_and_budget_validation(self):
+        for action in ('hibernate','resume'):
+            method,url,body=self.request(action)
+            self.assertEqual(method,'POST');self.assertTrue(url.endswith('/vm/'+action))
+            self.assertEqual(body['vm_id'],V)
+        _,_,body=self.request('set-runtime','--mode','serverless','--idle-minutes','15')
+        self.assertEqual(body['idle_timeout_seconds'],900)
+        _,url,body=self.request('set-budget','--unlimited')
+        self.assertTrue(url.endswith('/vm/budget'));self.assertIsNone(body['budget_microcredits'])
+        self.assertNotIn('vm_id',body)
+        with self.assertRaises(SystemExit): self.request('set-budget')
+        with self.assertRaises(SystemExit): self.request('set-budget','--unlimited','--microcredits','10')
+
     def test_network_routes_and_invalid_ingress(self):
         _,url,body=self.request('set-ingress','--guest-port','8000')
         self.assertTrue(url.endswith('/vm/ingress'));self.assertEqual(body['guest_port'],8000)

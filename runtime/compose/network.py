@@ -83,6 +83,12 @@ class Network:
             if len(available) == 5:
                 meta['public_ports'] = available
                 meta['public_mappings'] = []
+                if self.manager.runtime:
+                    used={meta['ssh_port'],*(p['worker_port'] for p in meta.get('ports',[])),*available}
+                    meta['public_targets']={}
+                    for i in range(1,6):
+                        target=self.manager.reserved_port(used);used.add(target)
+                        meta['public_targets'][str(i)]=target
                 return
         raise VMError('public_port_pool_exhausted')
 
@@ -91,11 +97,12 @@ class Network:
             return {'hostname': self.host, 'ports': [], 'state': 'absent'}
         configured = {p['slot']: p for p in meta.get('public_mappings', [])}
         running = self.manager.public(meta)['state'] == 'running'
+        reachable = running or bool(self.manager.runtime and meta['state']=='hibernated')
         return {'vm_id': meta['vm_id'], 'hostname': self.host,
                 'state': 'pending' if meta.get('network_pending') else ('running' if running else 'stopped'),
                 'ports': [dict(slot=i, public_port=p, guest_port=configured.get(i, {}).get('guest_port'),
                                protocol=configured.get(i, {}).get('protocol'),
-                               routed=running and not meta.get('network_pending', False) and i in configured)
+                               routed=reachable and not meta.get('network_pending', False) and i in configured)
                           for i, p in enumerate(meta.get('public_ports', []), 1)]}
 
     def ssh_public(self, meta):
@@ -112,18 +119,21 @@ class Network:
 
     def rules(self, meta):
         for mapping in meta.get('public_mappings', []):
-            port = meta['public_ports'][mapping['slot'] - 1]
+            port = meta['public_targets'][str(mapping['slot'])] if self.manager.runtime else meta['public_ports'][mapping['slot'] - 1]
+            host = '127.0.0.1' if self.manager.runtime else '0.0.0.0'
             for protocol in (('tcp', 'udp') if mapping['protocol'] == 'both' else (mapping['protocol'],)):
-                yield f'{protocol}:0.0.0.0:{port}-:{mapping["guest_port"]}'
+                yield f'{protocol}:{host}:{port}-:{mapping["guest_port"]}'
 
     def apply(self, meta):
         # Remove every reserved listener first, including a previous partial apply.
         # Existing sessions may survive removal; stopping the VM terminates them.
-        for port in meta['public_ports']:
+        host = '127.0.0.1' if self.manager.runtime else '0.0.0.0'
+        targets = list(meta.get('public_targets',{}).values()) if self.manager.runtime else meta['public_ports']
+        for port in targets:
             for protocol in ('tcp', 'udp'):
                 response = self.manager.qmp(meta, 'human-monitor-command',
-                    {'command-line': f'hostfwd_remove net0 {protocol}:0.0.0.0:{port}'})
-                expected = f'host forwarding rule for {protocol}:0.0.0.0:{port} '
+                    {'command-line': f'hostfwd_remove net0 {protocol}:{host}:{port}'})
+                expected = f'host forwarding rule for {protocol}:{host}:{port} '
                 if response.strip() not in (expected + 'removed', expected + 'not found'):
                     raise VMError('public_port_remove_failed')
         for rule in self.rules(meta):

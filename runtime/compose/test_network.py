@@ -47,6 +47,12 @@ class NetworkTests(unittest.TestCase):
         self.net.allocate(third)
         self.assertEqual(third['public_ports'], self.meta['public_ports'])
 
+    def test_hibernated_internal_ports_remain_reserved(self):
+        self.meta.update(state='hibernated',public_targets={'1':33001},ports=[{'guest_port':8000,'worker_port':33002}])
+        self.manager.save(self.meta)
+        with patch('microvm.free_port',side_effect=[33000,33001,33002,33003]):
+            self.assertEqual(self.manager.reserved_port(),33003)
+
     def test_slots_only_no_arbitrary_host_public_port_or_qmp(self):
         good = dict(request_id='a'*32, vm_id=V, mappings=[dict(slot=1, guest_port=22, protocol='tcp')])
         validate('ports', good)

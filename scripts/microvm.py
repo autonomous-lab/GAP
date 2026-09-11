@@ -26,7 +26,17 @@ def main():
     create.add_argument('--guest-port', type=int, action='append', default=[])
     create.add_argument('--key', action='append', default=[], help='Initial owner Ed25519 public key file')
     create.add_argument('--stopped', action='store_true')
-    sub.add_parser('start', help='Start the entire VM')
+    sub.add_parser('start', help='Start or resume the VM')
+    sub.add_parser('hibernate', help='Save execution state to disk and release QEMU RAM')
+    sub.add_parser('resume', help='Resume a hibernated VM')
+    sub.add_parser('runtime', help='Inspect execution mode and billing')
+    sub.add_parser('credits', help='Inspect prepaid microVM credits, usage and deletion deadline')
+    mode=sub.add_parser('set-runtime', help='Change execution mode; always_on requires operator approval')
+    mode.add_argument('--mode', choices=('serverless','always_on'), required=True)
+    mode.add_argument('--idle-minutes', type=int, choices=range(1,61))
+    budget=sub.add_parser('set-budget', help='Set/reset the total microcredit budget from this operation')
+    budget.add_argument('--microcredits', type=int)
+    budget.add_argument('--unlimited', action='store_true')
     stop = sub.add_parser('stop', help='Stop the entire VM')
     stop.add_argument('--force', action='store_true')
     resize = sub.add_parser('resize', help='Resize a stopped VM; disks only grow')
@@ -54,13 +64,20 @@ def main():
     if not re.fullmatch(r'prj_[0-9a-f]{24}', args.project):
         parser.error('invalid project identity')
     resource, body, method = args.action, None, 'GET'
-    if args.action.startswith('set-') or args.action in ('create','start','stop','resize','destroy'):
-        if args.action != 'create' and (not args.vm or not re.fullmatch(r'vm_[0-9a-f]{32}', args.vm)):
+    if args.action.startswith('set-') or args.action in ('create','start','stop','resize','destroy','hibernate','resume'):
+        if args.action not in ('create','set-budget') and (not args.vm or not re.fullmatch(r'vm_[0-9a-f]{32}', args.vm)):
             parser.error('--vm is required for writes')
         method = 'PUT'
-        resource = {'set-ports':'ports', 'set-ssh-keys':'ssh', 'set-ingress':'ingress'}.get(args.action, args.action)
+        resource = {'set-ports':'ports', 'set-ssh-keys':'ssh', 'set-ingress':'ingress','set-runtime':'runtime','set-budget':'budget'}.get(args.action, args.action)
         body = {'vm_id': args.vm, 'request_id': args.request_id or uuid.uuid4().hex}
-        if resource == 'ports':
+        if resource == 'runtime':
+            body['mode']=args.mode
+            if args.idle_minutes is not None: body['idle_timeout_seconds']=args.idle_minutes*60
+        elif resource == 'budget':
+            if (args.microcredits is None)==(not args.unlimited): parser.error('choose --microcredits or --unlimited')
+            body.pop('vm_id')
+            body['budget_microcredits']=args.microcredits
+        elif resource == 'ports':
             try:
                 body['mappings'] = [dict(slot=int(s), guest_port=int(p), protocol=t)
                                     for s, p, t in (item.split(':') for item in args.map)]
@@ -80,7 +97,7 @@ def main():
             body.update(vcpus=args.vcpus, memory_mib=args.memory_mib, disk_gib=args.disk_gib,
                         ports=args.guest_port, start=not args.stopped,
                         ssh_keys=[Path(p).read_text().strip() for p in args.key])
-        elif resource in ('start','stop'):
+        elif resource in ('start','stop','hibernate','resume'):
             method = 'POST'
             if resource == 'stop':
                 body['force'] = args.force

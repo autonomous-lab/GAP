@@ -3,7 +3,7 @@
 Managed QEMU/KVM microVMs or legacy operator-provisioned guests are supported.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext, ExitStack
 import hashlib
 import hmac
 import ipaddress
@@ -26,7 +26,7 @@ MAX_OUTPUT = 1024 * 1024
 PROJECT = re.compile(r"prj_[0-9a-f]{24}\Z")
 REQUEST = re.compile(r"[0-9a-f]{32}\Z")
 ACTION = {"releases", "start", "stop", "status", "logs",
-          "vm/create", "vm/start", "vm/stop", "vm/update", "vm/destroy", "ingress", "ports", "ssh"}
+          "vm/create", "vm/start", "vm/stop", "vm/update", "vm/destroy", "vm/hibernate", "vm/resume", "runtime", "ingress", "ports", "ssh"}
 
 
 class Failure(Exception):
@@ -145,6 +145,16 @@ class Runner:
             from microvm import MicroVMs
             self.hypervisor = MicroVMs(config['hypervisor'], execute)
             self.hypervisor.quota_provider = lambda project, owner: self.authorize(project, owner)['quota']
+        self.runtime = None
+        self.operator_token = None
+        if config.get('serverless'):
+            if not self.hypervisor: raise ValueError('serverless_requires_managed_microvms')
+            self.operator_token=Path(config['operator_token_file']).read_text().strip()
+            if len(self.operator_token)<32 or self.operator_token==self.token: raise ValueError('distinct_operator_token_required')
+            from lifecycle import Runtime
+            from gateway import Gateway
+            self.runtime=Runtime(self,config)
+            Gateway(self.runtime,config.get('wake_gateway_port',8094))
         self.ingress = None
         self.ingress_config = config.get('ingress')
         if self.ingress_config:
@@ -159,6 +169,8 @@ class Runner:
             # Never replay potentially executed remote mutations automatically.
             db.execute("UPDATE jobs SET status='interrupted', payload=NULL WHERE status IN ('queued','running')")
         os.chmod(self.db_path, 0o600)
+        if self.runtime:
+            threading.Thread(target=self.runtime.run,daemon=True).start()
 
     @contextmanager
     def db(self):
@@ -197,6 +209,7 @@ class Runner:
                     or any(type(v) is not int or not 0 < v < 2**31 for v in quota.values())):
                 raise Failure(403, "microvm_quota_unavailable")
             guest["quota"] = quota
+            guest["always_on_allowed"] = approval.get("always_on_allowed") is True
         return guest
 
     @staticmethod
@@ -211,6 +224,17 @@ class Runner:
             raise Failure(400, "invalid_project")
         self.authorize(project, owner)
         method, action, body = rpc.get("method"), rpc.get("action"), rpc.get("body")
+        if action in ('runtime','credits','budget'):
+            if not self.runtime: raise Failure(409,'serverless_not_configured')
+            if method=='GET':
+                if action=='runtime': return 200,self.runtime.view(self.hypervisor.read(project,owner))
+                return 200,self.runtime.ledger.view(project,owner)
+            if action=='budget' and method=='PUT':
+                if not isinstance(body,dict) or set(body)!={'request_id','budget_microcredits'}:
+                    raise Failure(400,'invalid_budget')
+                return 200,self.runtime.ledger.set_budget(project,owner,body['budget_microcredits'],body['request_id'])
+            if action!='runtime' or method!='PUT': raise Failure(400,'invalid_runtime_method')
+            method='POST'
         if action in ('ports', 'ssh'):
             if not self.hypervisor or not self.hypervisor.network:
                 raise Failure(409, 'public_network_not_configured')
@@ -235,6 +259,7 @@ class Runner:
                     raise Failure(409, 'managed_hypervisor_not_configured')
                 view = self.hypervisor.public(self.hypervisor.read(project, owner))
                 view["agent_quota"] = self.hypervisor.quota_view(project, owner)
+                if self.runtime: view["runtime"] = self.runtime.view(self.hypervisor.read(project,owner))
                 return 200, view
             action = {'POST': 'vm/create', 'PATCH': 'vm/update', 'DELETE': 'vm/destroy'}.get(method)
             method = 'POST'
@@ -275,6 +300,8 @@ class Runner:
                 self.ingress.validate(body)
             except VMError as error:
                 raise Failure(400, str(error))
+        elif action == "runtime":
+            if not {"request_id","vm_id","mode"} <= set(body) <= {"request_id","vm_id","mode","idle_timeout_seconds"}: raise Failure(400,"invalid_runtime_fields")
         elif action == "releases":
             from guest import validate_release
             try:
@@ -307,27 +334,74 @@ class Runner:
             with self.db() as db:
                 db.execute("UPDATE jobs SET status='running' WHERE id=?", (job,))
             payload = json.loads(row['payload'])
-            if payload['action'].startswith('vm/'):
-                operation = self.ingress.vm_operation if self.ingress else self.hypervisor.perform
-                result = operation(row['project'], row['owner'], payload['action'], payload['body'])
-            elif payload['action'] in ('ports', 'ssh'):
-                result = self.hypervisor.network.perform(row['project'], row['owner'], payload['action'], payload['body'])
-            elif payload['action'] == 'ingress':
-                result = self.ingress.perform(row['project'], row['owner'], payload['body'])
-            else:
-                if self.hypervisor:
-                    guest = self.hypervisor.guest(row['project'], row['owner'])
-                    meta = self.hypervisor.read(row['project'], row['owner'])
-                    self.hypervisor.sync_environment(meta)
-                result = self.execute(guest, payload)
+            with self.runtime.lock(row['project']) if self.runtime else nullcontext():
+                if self.runtime:
+                    current=self.hypervisor.read(row['project'],row['owner'])
+                    if current: self.runtime.sample(current)
+                    if payload['action'] in ('vm/create','vm/start','vm/resume'):
+                        self.runtime.check_credit({'project_id':row['project'],'owner_did':row['owner']})
+                    if current and current['state']=='hibernated' and payload['action'] not in ('vm/start','vm/resume','vm/stop','vm/hibernate','vm/destroy','vm/update','runtime'):
+                        self.runtime.ensure_awake(row['project'])
+                admission=nullcontext()
+                if self.runtime and payload['action'] in ('vm/create','vm/start','vm/resume'):
+                    resources=payload['body'] if payload['action']=='vm/create' else current
+                    admission=self.runtime.admission(row['project'],resources.get('vcpus',1),resources.get('memory_mib',1024))
+                with admission: result=self.dispatch_job(row,guest,payload)
+                if self.runtime:
+                    current=self.hypervisor.read(row['project'],row['owner'])
+                    if current:
+                        if payload['action'] in ('vm/stop','vm/hibernate'): current['manual_stop']=True
+                        elif payload['action'] in ('vm/start','vm/resume','vm/create'):
+                            current['manual_stop']=False; current.pop('runtime_error',None)
+                        self.hypervisor.save(current)
+                        self.runtime.sample(current)
+                    self.runtime.gateway.reconcile()
+                    if self.ingress: self.ingress.sync()
             status = "succeeded" if result.get("ok") is True else "failed"
         except Failure as error:
             status, result = "failed", {"error": error.code}
         except Exception as error:
             from microvm import VMError
-            status, result = "failed", {"error": str(error) if isinstance(error, VMError) else "runner_failed_state_unknown"}
+            from billing import BillingError
+            status, result = "failed", {"error": str(error) if isinstance(error, (VMError,BillingError)) else "runner_failed_state_unknown"}
         with self.db() as db:
             db.execute("UPDATE jobs SET status=?,result=?,payload=NULL WHERE id=?", (status, json.dumps(result), job))
+
+    def dispatch_job(self,row,guest,payload):
+        if payload['action']=='runtime':
+            return self.runtime.configure(row['project'],row['owner'],payload['body'])
+        if payload['action'].startswith('vm/'):
+            operation = self.ingress.vm_operation if self.ingress else self.hypervisor.perform
+            result = operation(row['project'], row['owner'], payload['action'], payload['body'])
+        elif payload['action'] in ('ports', 'ssh'):
+            result = self.hypervisor.network.perform(row['project'], row['owner'], payload['action'], payload['body'])
+        elif payload['action'] == 'ingress':
+            result = self.ingress.perform(row['project'], row['owner'], payload['body'])
+        else:
+            if self.hypervisor:
+                guest = self.hypervisor.guest(row['project'], row['owner'])
+                meta = self.hypervisor.read(row['project'], row['owner'])
+                self.hypervisor.sync_environment(meta)
+            result = self.execute(guest, payload)
+        return result
+
+    def operator(self,body):
+        if not self.runtime: raise Failure(409,'serverless_not_configured')
+        ledger=self.runtime.ledger
+        action=body.get('action')
+        if action=='pricing': return ledger.pricing()
+        if action=='set-pricing':
+            # Flush all current allocation intervals before changing the price.
+            metas=[json.loads(p.read_text()) for p in sorted((self.hypervisor.root/'catalog').glob('prj_*.json'))]
+            with ExitStack() as locks:
+                for meta in metas: locks.enter_context(self.runtime.lock(meta['project_id']))
+                for meta in metas: self.runtime.sample(self.hypervisor.read(meta['project_id'],meta['owner_did']))
+                return ledger.set_pricing(body['mode'],body.get('tariff'))
+        if action=='topup':
+            self.authorize(body['project_id'],body['owner_did'])
+            return ledger.topup(body['project_id'],body['owner_did'],body['amount_microcredits'],body['request_id'])
+        if action=='account': return ledger.view(body['project_id'],body['owner_did'])
+        raise Failure(400,'invalid_operator_action')
 
 
 def handler_for(runner):
@@ -348,10 +422,11 @@ def handler_for(runner):
         def do_POST(self):
             self.connection.settimeout(10)
             try:
-                if self.path != "/rpc":
+                if self.path not in ("/rpc","/operator"):
                     raise Failure(404, "unknown_route")
                 supplied = self.headers.get("Authorization", "").encode()
-                if not hmac.compare_digest(supplied, ("Bearer " + runner.token).encode()):
+                secret=runner.operator_token if self.path=="/operator" else runner.token
+                if not secret or not hmac.compare_digest(supplied, ("Bearer " + secret).encode()):
                     raise Failure(401, "unauthorized")
                 if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) != 1:
                     raise Failure(400, "content_length_required")
@@ -364,7 +439,7 @@ def handler_for(runner):
                 rpc = json.loads(raw)
                 if not isinstance(rpc, dict):
                     raise Failure(400, "invalid_request")
-                status, value = runner.rpc(rpc)
+                status, value = (200,runner.operator(rpc)) if self.path=="/operator" else runner.rpc(rpc)
             except Failure as error:
                 status, value = error.status, {"error": {"code": error.code}}
             except (ValueError, UnicodeError, TimeoutError, RecursionError):

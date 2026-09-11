@@ -570,3 +570,109 @@ Historical `GAP_COMPOSE_*` configuration variables, the `compose-agents.json`
 filename and this runtime directory are infrastructure compatibility names;
 they authorize native microVM use too. Granting access does not deploy Docker
 containers. The bundled Docker daemon may be stopped for native-only workloads.
+
+
+## Serverless worker and credit operations
+
+This optional worker feature uses QEMU internal disk snapshots, a loopback HTTP
+wake gateway and persistent TCP/UDP listeners. It supports native applications
+and optional Compose equally. It does not introduce q35 or hot resource resize.
+The API and worker must be upgraded together. The worker compose project is
+separate from the main node CI deployment; rebuild/recreate it explicitly.
+
+Before enabling, back up the worker state and stop existing running VMs cleanly.
+An unexpected worker restart stops orphaned/unmetered QEMU processes; existing
+hibernation snapshots are recovered, while previously running VMs become stopped.
+It never replays an old snapshot after a VM has already served writes.
+
+Add these fields to the operator-owned runner JSON (container paths):
+
+```json
+{
+  "serverless": true,
+  "operator_token_file": "/config/billing-admin.token",
+  "wake_gateway_port": 8094,
+  "host_reserve_memory_mib": 2048,
+  "host_reserve_vcpus": 1
+}
+```
+
+Create `billing-admin.token` with a cryptographically random secret of at least
+32 characters, distinct from `service.token`. Restrict it to the worker UID 10001
+(mode 0600), mount it with the existing private config directory, and never put
+it in Git or the guest. `/operator` requires this separate credential. Keep the
+worker RPC private; agents cannot choose prices, recharge themselves, or grant
+always-on permission. The wake HTTP port binds loopback in the worker/edge
+shared network namespace; do not expose it publicly or bypass Caddy's project
+header overwrite. Existing published TCP/UDP slots and DNS remain unchanged.
+
+Grant optional continuous execution without reboot (on the node host):
+
+```bash
+python3 scripts/microvm-access.py set-always-on did:gap:<64-hex> --always-on yes
+python3 scripts/microvm-access.py set-always-on did:gap:<64-hex> --always-on no
+```
+
+The worker starts in **shadow mode with no tariff**, which records raw usage but
+neither debits credits nor deletes zero-balance storage. Set real rates only after
+choosing the credit conversion, host cost allocation, network/storage costs and
+margin. The tariff JSON must have exactly `version`, `vcpu_hour`, `gib_ram_hour`,
+`gib_disk_hour`, `gib_in`, `gib_out`. Rates are nonnegative integer microcredits per
+unit; enforced mode requires at least one nonzero rate. Versions are immutable.
+No illustrative tariff is automatically activated.
+
+```bash
+python3 scripts/microvm-billing.py pricing
+python3 scripts/microvm-billing.py set-pricing --mode shadow --tariff-file /secure/pricing.json
+python3 scripts/microvm-billing.py topup --project "$PROJECT" --owner "$OWNER_DID" --amount-microcredits 10000000 --request-id payment-reference-unique
+python3 scripts/microvm-billing.py account --project "$PROJECT" --owner "$OWNER_DID"
+python3 scripts/microvm-billing.py set-pricing --mode enforced
+```
+
+The top-up amount above is an example, not a production grant. Reuse its request
+ID and identical amount after a lost response. Load balances before enforcement:
+zero-balance accounts become blocked and enter 72-hour retention when it is enabled.
+There is no payment processor integration; the operator records authorized top-ups.
+Changing prices checkpoints current usage first and applies the new version to
+future intervals. Switching back to shadow pauses automatic unpaid deletion;
+a deletion already claimed must complete and cannot be reversed by a mode change.
+
+Back up `microvm-credits.sqlite` using SQLite's online backup API, alongside the
+catalog and disks; copying the live main DB alone can omit WAL transactions.
+The ledger uses WAL/FULL transactions, atomic checkpoints, integer fractional
+carry and unique operation IDs. It retains usage records; monitor ledger growth
+and free disk. The API returns the latest 100 entries plus cumulative totals.
+Network counters are atomically persisted each second, usage each five seconds
+and lifecycle edge. A crash can lose the most recent unflushed counters; it does
+not fabricate CPU/RAM time for an unknown outage interval. This is an operational
+meter, not a claim of lossless accounting across arbitrary host failures.
+
+Metering observes IP packet sizes at the QEMU network backend, including control
+SSH and both incoming/outgoing traffic. A FIFO exposes only packet headers to the
+host counter; application payloads are not archived. ARP is not billed. Disk
+usage is physical allocated file blocks, excluding the shared read-only base
+image; hibernation snapshots and retained disks count. Budget is an execution
+threshold and does not waive persistent storage costs. The 72-hour grace period
+at zero balance has no hidden debt carried into a later recharge.
+
+Inbound application data resets idle time; internal management/health checks do
+not. HTTP in flight delays idle hibernation. Silent SSH/TCP/WS sessions can close.
+Public scans or client keepalives can keep execution active: expose only necessary
+ports and set a budget. Wake checks current approval, cumulative allocation quota,
+prepaid balance/budget and host capacity. Always-on permission is refreshed within
+30 seconds. Meter or policy failures suspend execution, falling back to a stop if
+hibernation fails. Snapshot creation requires available disk space for guest RAM
+plus a 512 MiB reserve; keep extra host disk headroom.
+
+Retention cleanup is a durable deletion claim serialized with top-ups, followed
+by actual VM and attributable retained-volume removal. A recharge before the
+claim cancels expiry; after it, recharge is rejected until deletion finishes.
+A worker restart retries incomplete deletion. Do not delete the ledger to reset
+credits or copy snapshots between QEMU/image versions.
+
+Validation: `python3 -m unittest discover -s runtime/compose -p 'test_*.py'`.
+`serverless_test.py Serverless` is an opt-in real KVM test using the isolated
+`integration_test.py` fixture with `GAP_TEST_SERVERLESS=1` and the documented
+fixture variables. It exercises public/private owner authorization, protocol
+wake, concurrent restore, outgoing-only inactivity, host metering, real test
+credits, recharge cancellation and an accelerated 72-hour deletion deadline.

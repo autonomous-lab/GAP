@@ -101,8 +101,11 @@ class Integration(unittest.TestCase):
                               "known_hosts": str(root / "unused-host-key")}}}
                 managed = os.environ.get("GAP_VM_TEST_ALLOW_CREATE") == "1"
                 if managed:
+                    if os.environ.get('GAP_TEST_SERVERLESS')=='1':
+                        (root/'operator-token').write_text('o'*64)
+                        config.update(serverless=True,operator_token_file=str(root/'operator-token'),wake_gateway_port=free_port())
                     config.pop("guests")
-                    config["hypervisor"] = {"state_dir": os.environ["GAP_VM_TEST_STATE_DIR"],
+                    config["hypervisor"] = {"state_dir": str(Path(os.environ["GAP_VM_TEST_STATE_DIR"])/project_id),
                                             "image_dir": os.environ["GAP_VM_TEST_IMAGE_DIR"],
                                             "public_network": {"hostname": "sites.gap.geta.team", "first_port": 24100, "last_port": 24109}}
                 if managed and os.environ.get('GAP_TEST_CADDY_BINARY'):
@@ -173,6 +176,11 @@ class Integration(unittest.TestCase):
                 approval.write_text('{"agents":[]}')
                 self.assertEqual(request("GET", "/v1/cloud/projects", token)[0], 401 if private else 200)
             finally:
+                if 'runner' in locals() and runner.runtime:
+                    runner.runtime.closed=True
+                    runner.runtime.gateway.http_server.shutdown()
+                    runner.runtime.gateway.http_server.server_close()
+                    for project in list(runner.runtime.locks): runner.runtime.gateway.withdraw(project)
                 if caddy_process:
                     caddy_process.terminate()
                     caddy_process.wait(timeout=10)

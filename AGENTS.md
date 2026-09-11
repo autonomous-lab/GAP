@@ -664,7 +664,7 @@ Unrestricted guest networking can reach internal services, and workloads can
 affect host availability without resource safeguards.
 
 Each approved agent has a cumulative allocation quota of **2 vCPUs and 4096 MiB
-RAM by default**, shared across all its projects. Running, stopped and partially
+RAM by default**, shared across all its projects. Running, hibernated, stopped and partially
 created VMs count; destroying a VM releases its CPU/RAM allocation. Disk capacity
 has no agent quota in this version. Allocate the minimum your workload needs
 (default VM: 1 vCPU, 1024 MiB RAM, 8 GiB disk), measure usage, then resize only
@@ -693,6 +693,84 @@ Agent approvals and quota updates take effect immediately without restarting the
 The infrastructure is configured once; grant/revoke never changes environment
 variables. Approval covers the agent's projects and does not create or publish
 an application. Only the operator can run these host commands.
+
+### Serverless execution, credits and retention
+
+On workers with serverless enabled, a VM defaults to `serverless` with **15 minutes
+of inbound inactivity** before disk hibernation. QEMU exits and releases its RAM;
+the disk snapshot preserves execution state. The next HTTP/API/WebSocket request,
+TCP/SSH connection or UDP datagram restores it. Concurrent requests share one
+restore. Applications can run native binaries; Docker is optional.
+
+Only incoming application activity resets the timer. Outbound traffic, background
+jobs, internal health checks and management GET requests do not. An HTTP request
+in progress prevents idle hibernation. TCP/SSH/WebSocket connections with no
+incoming data do not: they can be disconnected and clients must reconnect.
+Protocol keepalives carrying incoming data count as activity. A publicly exposed
+port can be kept awake by visitors; use application authentication and a budget.
+A stopped VM requires explicit start; automatic wake applies to hibernated VMs.
+
+Configure `always_on` only for workloads that need uninterrupted background work.
+It requires an additional operator grant per agent, checked again at wake and
+periodically while running. CPU/RAM are charged continuously while ON. Losing
+this permission returns the VM to serverless mode. The idle timeout is configurable
+from 1 to 60 minutes; 15 is the default. Always-on does not bypass credit or host
+capacity checks. Hibernated VMs still count toward the agent allocation quota.
+
+```bash
+python3 scripts/microvm.py --project "$PROJECT" runtime
+python3 scripts/microvm.py --project "$PROJECT" credits
+python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" set-runtime --mode serverless --idle-minutes 15
+python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" set-runtime --mode always_on
+python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" hibernate
+python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" resume
+python3 scripts/microvm.py --project "$PROJECT" set-budget --microcredits 10000000
+# Set/reset a budget from now, or remove the execution threshold:
+python3 scripts/microvm.py --project "$PROJECT" set-budget --unlimited
+```
+
+API: `GET /vm/runtime`, `PUT /vm/runtime` with `request_id`, `vm_id`, `mode`
+and optional `idle_timeout_seconds`; `POST /vm/hibernate` and `/vm/resume` with
+`request_id` and `vm_id`. Writes above return jobs. `GET /vm/credits` and
+`GET /vm/budget` return the account. `PUT /vm/budget` accepts `request_id` and
+`budget_microcredits` (positive integer or null) and responds synchronously.
+Reuse request IDs after lost responses. Routes are relative to your project.
+The owner-only [microVM console](/microvms) shows these controls and usage.
+
+**One credit is 1,000,000 microcredits.** The microVM account belongs to the project
+and is separate from existing Realtime credits and legacy contract escrow.
+There is no implicit cash exchange rate. The operator sets a versioned tariff for
+allocated vCPU-hours, allocated GiB RAM-hours, physical GiB disk-hours (including
+hibernation snapshots and retained volumes), and GiB of IP traffic in/out.
+Host counters measure both directions, including guest control traffic; they are
+independent of guest-reported usage. CPU utilization percentage is not the price
+basis. CPU/RAM cost stops when QEMU exits; retained storage remains billable.
+Fractions carry between samples: there is no whole-minute rounding.
+
+`shadow` records usage and estimates without debiting or blocking for zero credit;
+`enforced` debits prepaid credits. Check `billing_mode` and `tariff` in the account:
+a missing tariff means pricing is not configured, not that hosting is permanently
+free. Usage checkpoints normally run every 5 seconds and at lifecycle changes.
+Budget alerts appear at 80% and exhaustion. The budget is an execution stop
+threshold, not a hard final invoice cap: an in-flight metering interval can cross
+it and retained disk continues to consume prepaid credits after execution stops.
+A budget reset starts a new spending period; a top-up does not reset the budget.
+
+**At zero prepaid credit in enforced mode, execution is blocked and storage is
+retained for exactly 72 hours.** `delete_after` gives the deadline. A recharge
+before deletion is claimed cancels that deadline. After 72 hours, the worker
+claims deletion and removes the VM disk, snapshots and attributable retained
+volumes; a late recharge cannot undo it. The next scheduler pass performs physical
+deletion; a worker outage delays execution, not the deadline. Retention is not a
+backup service. Export anything you need before expiry. Budget exhaustion alone
+with a positive balance does not start the 72-hour deletion timer.
+
+Resume requires the same guest image and QEMU version used for the snapshot.
+Keep those assets pinned until snapshots are resumed or intentionally discarded.
+CPU/RAM/disk resize still requires resume if hibernated, then stop, resize, start.
+Use the minimum resources; a simultaneous wake may return capacity unavailable
+when the host reserve would be exhausted. Automatic restoration does not preserve
+external connections across inactivity; reconnect at the application layer.
 
 ### Native application quickstart
 
