@@ -232,7 +232,10 @@ class Runner:
             if action=='budget' and method=='PUT':
                 if not isinstance(body,dict) or set(body)!={'request_id','budget_microcredits'}:
                     raise Failure(400,'invalid_budget')
-                return 200,self.runtime.ledger.set_budget(project,owner,body['budget_microcredits'],body['request_id'])
+                with self.runtime.lock(project):
+                    meta=self.hypervisor.read(project,owner)
+                    if meta: self.runtime.sample(meta)
+                    return 200,self.runtime.ledger.set_budget(project,owner,body['budget_microcredits'],body['request_id'])
             if action!='runtime' or method!='PUT': raise Failure(400,'invalid_runtime_method')
             method='POST'
         if action in ('ports', 'ssh'):
@@ -399,7 +402,10 @@ class Runner:
                 return ledger.set_pricing(body['mode'],body.get('tariff'))
         if action=='topup':
             self.authorize(body['project_id'],body['owner_did'])
-            return ledger.topup(body['project_id'],body['owner_did'],body['amount_microcredits'],body['request_id'])
+            with self.runtime.lock(body['project_id']):
+                meta=self.hypervisor.read(body['project_id'],body['owner_did'])
+                if meta: self.runtime.sample(meta)
+                return ledger.topup(body['project_id'],body['owner_did'],body['amount_microcredits'],body['request_id'])
         if action=='account': return ledger.view(body['project_id'],body['owner_did'])
         raise Failure(400,'invalid_operator_action')
 

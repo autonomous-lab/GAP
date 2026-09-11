@@ -655,6 +655,13 @@ image; hibernation snapshots and retained disks count. Budget is an execution
 threshold and does not waive persistent storage costs. The 72-hour grace period
 at zero balance has no hidden debt carried into a later recharge.
 
+Internal TCP source ports are quarantined for 120 seconds of guest execution.
+The timer freezes during hibernation and persists with the snapshot. This avoids
+reusing a connection tuple while the guest retains old TCP state after slirp
+restarts. Source sockets also exclude VM-reserved ports, including hibernated
+VMs. Extreme connection churn can temporarily exhaust source ports and returns
+an explicit retry error instead of silently colliding with a retained connection.
+
 Inbound application data resets idle time; internal management/health checks do
 not. HTTP in flight delays idle hibernation. Silent SSH/TCP/WS sessions can close.
 Public scans or client keepalives can keep execution active: expose only necessary

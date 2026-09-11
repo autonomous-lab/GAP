@@ -82,6 +82,10 @@ class Serverless(Integration):
             else:self.fail('SSH unavailable')
             ssh('rc-service docker stop >/dev/null 2>&1; cat > /root/test-app.py',APP)
             ssh('nohup python3 /root/test-app.py >/tmp/test-app.log 2>&1 </dev/null &')
+            for _ in range(30):
+                try: json.loads(ssh('wget -T 2 -qO- http://127.0.0.1:8000/'));break
+                except (subprocess.SubprocessError,ValueError):time.sleep(.1)
+            else:self.fail('test HTTP application not ready')
             op('PUT','/ingress',{**identity,'enabled':True,'guest_port':8000})
             url=request('GET',prefix+'/ingress',token)[1]['url']
             def get(path=''):
@@ -89,7 +93,7 @@ class Serverless(Integration):
                     with urllib.request.urlopen(url+path,timeout=90) as response:return json.load(response)
                 except urllib.error.HTTPError as error:
                     if error.code!=402:
-                        print('WAKE ERROR',error.read().decode(),runtime.last_error,manager.read(project,owner)['state'],flush=True)
+                        print('WAKE ERROR',error.read().decode(),runtime.last_error,manager.read(project,owner)['state'],getattr(runtime.gateway,'last_error_type',None),flush=True)
                     raise
             baseline=get()
             # A request in progress must survive an artificially expired idle timer.
@@ -119,11 +123,17 @@ class Serverless(Integration):
                 responses=list(pool.map(lambda _:get(),range(8)))
             self.assertTrue(all(x==baseline for x in responses))
             print('AUTO HIBERNATE + 8 HTTP WAKE REQUESTS + PRESERVED STATE OK',round(time.monotonic()-started,3),flush=True)
-            for repeat in range(3):
+            cycles=int(os.environ.get('GAP_TEST_WAKE_CYCLES','3'))
+            if not 1<=cycles<=100:raise ValueError('test wake cycles must be 1..100')
+            wake_times=[]
+            for repeat in range(cycles):
                 op('POST','/hibernate',identity)
+                started=time.monotonic()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
                     self.assertTrue(all(x==baseline for x in pool.map(lambda _:get(),range(8))))
-            print('THREE ADDITIONAL CONCURRENT WAKE CYCLES OK',flush=True)
+                if (repeat+1)%10==0:print('CONCURRENT WAKE CYCLES COMPLETED',repeat+1,flush=True)
+                wake_times.append(time.monotonic()-started)
+            print('REPEATED CONCURRENT WAKE CYCLES OK',cycles,'min/max seconds',round(min(wake_times),3),round(max(wake_times),3),flush=True)
             op('POST','/hibernate',identity)
             body=b'POST-body-must-arrive-once'
             with urllib.request.urlopen(urllib.request.Request(url,data=body),timeout=90) as response:self.assertEqual(response.read(),body)

@@ -91,5 +91,35 @@ class LedgerTests(unittest.TestCase):
         self.ledger.set_budget(P,O,10,'budget-two')
         self.assertTrue(self.ledger.view(P,O)['execution_allowed'])
 
+    def test_operator_recharge_checkpoints_grace_usage_before_new_balance(self):
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from runner import Runner
+        self.ledger.set_pricing('enforced',self.price)
+        self.sample(1000,on=False)
+        runner=Runner.__new__(Runner)
+        runner.authorize=lambda *_: {}
+        runner.hypervisor=SimpleNamespace(read=lambda *_:self.meta)
+        runner.runtime=SimpleNamespace(ledger=self.ledger,lock=lambda _:nullcontext(),sample=lambda _:self.sample(6000,on=False))
+        runner.operator({'action':'topup','project_id':P,'owner_did':O,'amount_microcredits':100,'request_id':'paid'})
+        self.assertEqual(self.ledger.view(P,O)['balance_microcredits'],100)
+        self.sample(7000,on=False)
+        self.assertEqual(self.ledger.view(P,O)['spent_microcredits'],1)
+
+    def test_budget_reset_checkpoints_previous_spending_period(self):
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from runner import Runner
+        self.ledger.set_pricing('enforced',self.price);self.ledger.topup(P,O,100,'paid')
+        self.sample(1000)
+        runner=Runner.__new__(Runner)
+        runner.authorize=lambda *_:{}
+        runner.hypervisor=SimpleNamespace(read=lambda *_:self.meta)
+        runner.runtime=SimpleNamespace(ledger=self.ledger,lock=lambda _:nullcontext(),sample=lambda _:self.sample(2000))
+        runner.rpc({'project_id':P,'owner_did':O,'action':'budget','method':'PUT','body':{'request_id':'new-period','budget_microcredits':10}})
+        self.assertEqual(self.ledger.view(P,O)['budget_spent_microcredits'],0)
+        self.sample(3000)
+        self.assertEqual(self.ledger.view(P,O)['budget_spent_microcredits'],3)
+
 
 if __name__=='__main__': unittest.main()

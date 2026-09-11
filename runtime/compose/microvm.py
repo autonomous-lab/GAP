@@ -123,10 +123,8 @@ class MicroVMs:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
-    def reserved_port(self, used=()):
-        # Called under allocation_lock before publishing metadata. Include
-        # hibernated guests: their unbound endpoints must never be reassigned.
-        occupied=set(used)
+    def reserved_ports(self):
+        occupied=set()
         for path in (self.root/'catalog').glob('prj_*.json'):
             other=json.loads(path.read_text())
             if other['state']=='destroyed': continue
@@ -134,6 +132,11 @@ class MicroVMs:
             occupied.update(p['worker_port'] for p in other.get('ports',[]))
             occupied.update(other.get('public_targets',{}).values())
             occupied.update(other.get('public_ports',[]))
+        return occupied
+
+    def reserved_port(self, used=()):
+        # Called under allocation_lock, including hibernated unbound endpoints.
+        occupied=self.reserved_ports()|set(used)
         for _ in range(1000):
             port=free_port()
             if port not in occupied: return port
@@ -370,6 +373,7 @@ class MicroVMs:
         meta['snapshot_qemu_version']=subprocess.check_output(['qemu-system-x86_64','--version'],text=True).splitlines()[0]
         tag='idle_' + uuid.uuid4().hex
         meta.update(state='hibernating', snapshot_tag=tag)
+        if self.runtime:self.runtime.execution_stopping(meta)
         self.save(meta)
         try:
             self.qmp(meta,'stop')
@@ -387,6 +391,7 @@ class MicroVMs:
         except Exception:
             if self.alive(meta):
                 self.qmp(meta,'cont')
+                if self.runtime:self.runtime.execution_started(meta)
                 meta['state']='running'; self.save(meta)
             raise
 
@@ -418,6 +423,7 @@ class MicroVMs:
             # memory snapshot after a crash following an externally visible write.
             meta['state']='running'; self.save(meta)
             self.qmp(meta,'cont')
+            if self.runtime: self.runtime.execution_started(meta)
             response=self.qmp(meta,'human-monitor-command',{'command-line':'delvm '+tag})
             if response.strip(): meta['snapshot_cleanup_pending']=True
             else: meta.pop('snapshot_tag',None)
@@ -465,6 +471,7 @@ class MicroVMs:
             process.terminate()
             process.wait(timeout=10)
             raise VMError('hypervisor_start_timeout')
+        if self.runtime: self.runtime.execution_started(meta,cold=True)
         meta['state'] = 'running'
         meta['network_pending'] = False
         meta['environment_sync_pending'] = False

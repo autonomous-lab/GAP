@@ -70,13 +70,29 @@ class Gateway:
             if not mapping: raise VMError('public_mapping_unavailable')
             return meta,meta['public_targets'][str(slot)]
 
-    def connect(self,port):
+    def connect(self,port,meta):
         deadline=time.monotonic()+30
-        while True:
-            try: return socket.create_connection(('127.0.0.1',port),timeout=2)
-            except OSError:
-                if time.monotonic()>=deadline: raise VMError('application_not_ready')
+        with self.runtime.lock(meta['project_id']):
+            current=self.manager.read(meta['project_id'],meta['owner_did'])
+            if not current or current['vm_id']!=meta['vm_id'] or current['state']!='running':
+                raise VMError('application_changed_retry_request')
+            while time.monotonic()<deadline:
+                with self.manager.allocation_lock():
+                    reserved=self.manager.reserved_ports()
+                    for _ in range(1000):
+                        connection=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+                        connection.settimeout(2)
+                        connection.bind(('127.0.0.1',0))
+                        source=connection.getsockname()[1]
+                        if source not in reserved and self.runtime.reserve_tcp_source(meta,source): break
+                        connection.close()
+                    else:raise VMError('tcp_source_ports_busy_retry_later')
+                    try:
+                        connection.connect(('127.0.0.1',port))
+                        return connection
+                    except OSError:connection.close()
                 time.sleep(.025)
+        raise VMError('application_not_ready')
 
     def tunnel(self,meta,client,upstream):
         state=self.runtime.state(meta)
@@ -103,7 +119,7 @@ class Gateway:
             def handle(self):
                 try:
                     meta,port=outer.destination(project,slot,'tcp')
-                    outer.tunnel(meta,self.request,outer.connect(port))
+                    outer.tunnel(meta,self.request,outer.connect(port,meta))
                 except (VMError,OSError): pass
         return Handler
 
@@ -207,8 +223,12 @@ class Gateway:
             if not initial.get('ingress',{}).get('enabled'): raise VMError('unknown_application')
             upgrade=h.headers.get('Upgrade','').lower()=='websocket'
             with self.runtime.http_request(project) as meta:
-                port=next(p['worker_port'] for p in meta['ports'] if p['guest_port']==meta['ingress']['guest_port'])
-                upstream=self.connect(port)
+                with self.runtime.lock(project):
+                    current=self.manager.read(project,meta['owner_did'])
+                    if not current or current['vm_id']!=meta['vm_id'] or current['state']!='running' or not current.get('ingress',{}).get('enabled'):
+                        raise VMError('application_changed_retry_request')
+                    port=next(p['worker_port'] for p in current['ports'] if p['guest_port']==current['ingress']['guest_port'])
+                    upstream=self.connect(port,meta)
                 upstream.settimeout(120)
                 if upgrade:
                     header=f'{h.command} {h.path} HTTP/1.1\r\n'
@@ -247,6 +267,7 @@ class Gateway:
                 # WebSocket silence counts towards idle, unlike an active HTTP response.
                 self.tunnel(meta,h.connection,upstream); h.close_connection=True
         except Exception as error:
+            self.last_error_type=type(error).__name__
             if not sent:
                 code=402 if str(error)=='microvm_credits_or_budget_exhausted' else 503
                 if str(error)=='unknown_application': code=404

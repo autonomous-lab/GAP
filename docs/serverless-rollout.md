@@ -7,9 +7,9 @@ the same VM, network and billing paths.
 
 ## Validation
 
-- 46 worker unit tests: lifecycle validation, quota and port isolation, immutable
+- 50 worker unit tests: lifecycle validation, quota and port isolation, immutable
   tariffs, atomic/idempotent charges, fractional carry, budget behavior,
-  recharge/deletion boundary and host queue counters independent of guest MAC.
+  recharge/deletion and budget-period boundaries, and host queue counters independent of guest MAC.
 - 6 access CLI tests and 3 agent CLI tests.
 - Rust private-node policy and Cloud surface tests, plus a real node build.
 - Browser console checked in Chromium with simulated owner API responses:
@@ -23,10 +23,17 @@ the same VM, network and billing paths.
   quotas, ports/SSH keys, native applications without Docker, Compose environment,
   HTTP/POST/query/assets/redirect/WebSocket, persistence, resize and destruction.
 
-The first eight-request batches completed in approximately 1.3–1.7 seconds in
-isolated runs. One batch took 7.6 seconds while other KVM/Compose tests were building
-on the same host. These are acceptance results, not a latency SLA or a substitute
-for representative workload benchmarks. HTTP retains its response timeout after
+A final stress run completed 50 successive restore cycles with eight concurrent
+HTTP requests per cycle. Each batch completed in 1.252–1.582 seconds; the initial
+automatic idle wake completed in 1.429 seconds. This used the small native test
+application and is not a latency SLA for larger memory working sets or host load.
+The final worker quarantines recently used TCP source ports for 120 seconds of
+guest execution, persisting that clock and history across hibernation. Packet
+header traces identified new SYNs colliding with guest-retained TCP state after
+slirp restarted. Merely binding a random source port was insufficient; the
+quarantine prevents that reuse. Queued requests recheck the VM generation and
+active ingress before connecting to prevent forwarding to a reassigned port.
+HTTP retains its response timeout after
 connection establishment; initial short connect timeouts no longer truncate
 slow responses. Test workers use separate catalog directories and wake ports.
 

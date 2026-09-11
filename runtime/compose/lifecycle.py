@@ -1,5 +1,6 @@
 """Inbound-idle lifecycle, persistent metering and credit retention policy."""
 from contextlib import contextmanager
+from collections import deque
 import json
 import os
 from pathlib import Path
@@ -30,7 +31,37 @@ class Runtime:
 
     def state(self,meta):
         return self.states.setdefault(meta['vm_id'],{'last_incoming':meta.get('last_incoming_at',time.time()),
-            'active_http':0,'last_sample':0,'connections':set()})
+            'active_http':0,'last_sample':0,'connections':set(),
+            'guest_clock':meta.get('guest_clock_seconds',0),'running_since':None,
+            'tcp_ports':dict(meta.get('tcp_recent_ports',{})),
+            'tcp_port_order':deque(sorted(meta.get('tcp_recent_ports',{}).items(),key=lambda item:item[1]))})
+
+    def execution_started(self,meta,cold=False):
+        state=self.state(meta)
+        if cold:
+            state['guest_clock']=0; state['tcp_ports'].clear();state['tcp_port_order'].clear()
+            meta.pop('tcp_recent_ports',None);meta.pop('guest_clock_seconds',None)
+        state['running_since']=time.monotonic()
+
+    def guest_clock(self,state):
+        return state['guest_clock']+(time.monotonic()-state['running_since'] if state['running_since'] is not None else 0)
+
+    def reserve_tcp_source(self,meta,port):
+        # Guest TCP TIME_WAIT survives snapshots while the host slirp process
+        # loses its matching state. Quarantine by guest ON time, not wall time.
+        state=self.state(meta); clock=self.guest_clock(state); cutoff=clock-120
+        while state['tcp_port_order'] and state['tcp_port_order'][0][1]<=cutoff:
+            old,stamp=state['tcp_port_order'].popleft()
+            if state['tcp_ports'].get(old)==stamp:state['tcp_ports'].pop(old,None)
+        key=str(port)
+        if key in state['tcp_ports']: return False
+        state['tcp_ports'][key]=clock;state['tcp_port_order'].append((key,clock))
+        return True
+
+    def execution_stopping(self,meta):
+        state=self.state(meta);state['guest_clock']=self.guest_clock(state);state['running_since']=None
+        meta['guest_clock_seconds']=state['guest_clock']
+        meta['tcp_recent_ports']={p:t for p,t in state['tcp_ports'].items() if t>state['guest_clock']-120}
 
     def recover(self):
         for path in (self.manager.root/'catalog').glob('prj_*.json'):
