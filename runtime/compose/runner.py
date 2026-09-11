@@ -205,7 +205,7 @@ class Runner:
             raise Failure(403, "compose_approval_unavailable_or_revoked")
         if self.hypervisor:
             quota = approval.get("quota")
-            if (not isinstance(quota, dict) or set(quota) != {"vcpus", "memory_mib"}
+            if (not isinstance(quota, dict) or not {"vcpus", "memory_mib"} <= set(quota) <= {"vcpus", "memory_mib", "max_vms"}
                     or any(type(v) is not int or not 0 < v < 2**31 for v in quota.values())):
                 raise Failure(403, "microvm_quota_unavailable")
             guest["quota"] = quota

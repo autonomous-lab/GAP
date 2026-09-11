@@ -10,7 +10,7 @@ import stat
 import tempfile
 
 
-def change(path, action, agent=None, vcpus=None, memory_mib=None, always_on=None):
+def change(path, action, agent=None, vcpus=None, memory_mib=None, always_on=None, max_vms=None):
     if agent is not None and not re.fullmatch(r'did:gap:[0-9a-f]{64}', agent):
         raise ValueError('agent must be an exact did:gap:<64 lowercase hex> identity')
     path = Path(path).absolute()
@@ -42,34 +42,36 @@ def change(path, action, agent=None, vcpus=None, memory_mib=None, always_on=None
         if action=='set-always-on' and (agent not in data['agents'] or always_on is None): raise ValueError('set-always-on requires approved agent and --always-on yes|no')
         quotas = data.get('quotas', {})
         def valid_quota(q):
-            return (isinstance(q, dict) and set(q) == {'vcpus', 'memory_mib'}
+            return (isinstance(q, dict) and {'vcpus', 'memory_mib'} <= set(q) <= {'vcpus', 'memory_mib', 'max_vms'}
                     and all(type(v) is int and 0 < v < 2**31 for v in q.values()))
         if not isinstance(quotas, dict) or any(did not in data['agents'] or not valid_quota(q) for did, q in quotas.items()):
             raise ValueError('invalid quota store')
         if action not in ('grant', 'revoke', 'list', 'set-quota', 'set-always-on'):
             raise ValueError('invalid action')
-        if any(v is not None and (type(v) is not int or not 0 < v < 2**31) for v in (vcpus, memory_mib)):
+        if any(v is not None and (type(v) is not int or not 0 < v < 2**31) for v in (vcpus, memory_mib, max_vms)):
             raise ValueError('quotas must be positive integers below 2**31')
-        if action in ('list', 'revoke') and (vcpus is not None or memory_mib is not None):
+        if action in ('list', 'revoke') and (vcpus is not None or memory_mib is not None or max_vms is not None):
             raise ValueError('quota flags require grant or set-quota')
-        if action == 'set-quota' and (agent not in data['agents'] or (vcpus is None and memory_mib is None)):
+        if action == 'set-quota' and (agent not in data['agents'] or (vcpus is None and memory_mib is None and max_vms is None)):
             raise ValueError('set-quota requires an approved agent and at least one quota flag')
         agents = set(data['agents'])
         original = json.dumps(data, sort_keys=True)
         if action == 'list':
-            return {'agents': sorted(agents), 'quotas': {did: quotas.get(did, {'vcpus': 2, 'memory_mib': 4096}) for did in sorted(agents)}, 'always_on_agents': sorted(always)}
+            return {'agents': sorted(agents), 'quotas': {did: dict({'vcpus': 2, 'memory_mib': 4096, 'max_vms': 1}, **quotas.get(did, {})) for did in sorted(agents)}, 'always_on_agents': sorted(always)}
         before = set(agents)
         if action == 'grant':
             agents.add(agent)
         elif action == 'revoke':
             agents.discard(agent)
             quotas.pop(agent, None)
-        if vcpus is not None or memory_mib is not None:
+        if vcpus is not None or memory_mib is not None or max_vms is not None:
             q = dict(quotas.get(agent, {'vcpus': 2, 'memory_mib': 4096}))
             if vcpus is not None:
                 q['vcpus'] = vcpus
             if memory_mib is not None:
                 q['memory_mib'] = memory_mib
+            if max_vms is not None:
+                q['max_vms'] = max_vms
             quotas[agent] = q
         if action=='revoke': always=[did for did in always if did!=agent]
         if always_on is True and agent not in always: always.append(agent)
@@ -101,7 +103,7 @@ def change(path, action, agent=None, vcpus=None, memory_mib=None, always_on=None
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        return {'agent': agent, 'approved': agent in agents, 'changed': changed, 'quota': quotas.get(agent, {'vcpus': 2, 'memory_mib': 4096}) if agent in agents else None, 'restart_required': False}
+        return {'agent': agent, 'approved': agent in agents, 'changed': changed, 'quota': dict({'vcpus': 2, 'memory_mib': 4096, 'max_vms': 1}, **quotas.get(agent, {})) if agent in agents else None, 'restart_required': False}
 
 
 def main():
@@ -111,12 +113,13 @@ def main():
     parser.add_argument('agent', nargs='?')
     parser.add_argument('--vcpus', type=int, help='Total allocated vCPUs across this agent’s VMs')
     parser.add_argument('--memory-mib', type=int, help='Total allocated RAM in MiB across this agent’s VMs')
+    parser.add_argument('--max-vms', type=int, help='Maximum number of non-destroyed VMs, default 1')
     parser.add_argument('--always-on', choices=('yes','no'))
     args = parser.parse_args()
     if (args.action == 'list') != (args.agent is None):
         parser.error('grant/revoke/set-quota require one agent DID; list takes none')
     try:
-        print(json.dumps(change(args.file, args.action, args.agent, args.vcpus, args.memory_mib, None if args.always_on is None else args.always_on=='yes')))
+        print(json.dumps(change(args.file, args.action, args.agent, args.vcpus, args.memory_mib, None if args.always_on is None else args.always_on=='yes', args.max_vms)))
     except (OSError, ValueError) as error:
         parser.exit(1, str(error) + '\n')
 

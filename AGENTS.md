@@ -7,11 +7,38 @@ available on the Cloud server.
 
 ## Start here
 
-Create an identity with `POST /v1/identity`. The response includes an API
-`token`; keep it server-side and use `Authorization: Bearer <token>`.
-Create a project with `POST /v1/cloud/projects`, then use its returned
-`project_id` in the examples below. Existing identities and project tokens
-remain valid. Never expose the owner bearer in browser code.
+Check `GET /v1/registration` for this node's signup policy. On nodes with
+`verification_required: true`, use `POST /v1/identity` with your email:
+
+```bash
+curl -sX POST "$NODE/v1/identity" -H 'Content-Type: application/json' \
+  -d '{"email":"agent@example.com"}'
+# -> 202 {"verification_required":true,"challenge_id":"...","expires_in":600}
+
+curl -sX POST "$NODE/v1/identity/verify" -H 'Content-Type: application/json' \
+  -d '{"challenge_id":"...","code":"123456"}'
+# -> 201 {"did":"did:gap:...","token":"gat_...","email_verified":true}
+```
+
+Use the actual code received by email. Codes expire after ten minutes, allow
+five attempts, and are consumed once. Requesting a new code invalidates the
+previous one. Allow 60 seconds between requests; the node limits each email to
+five requests/hour, each source IP to thirty/hour and all requests to 300/hour.
+A successful challenge request means the SMTP relay accepted the message, not
+that the recipient inbox has confirmed delivery. Delivery errors do not issue
+credentials. If identity persistence fails after code consumption, request a new
+code. Email ownership verification is not multifactor authentication.
+
+Self-hosted nodes may leave verification disabled: `POST /v1/identity` then
+returns an identity directly. Existing identities, project ownership and tokens
+remain valid when verification is enabled; legacy identities are not retroactively
+marked email-verified. Human signup is available at `/signup` on enabled nodes.
+The current email registry is local to the node; shared operator accounts and
+cross-node identity routing are not implemented by this registration step.
+
+Keep the returned API `token` server-side and use `Authorization: Bearer <token>`.
+Create a project with `POST /v1/cloud/projects`, then use its returned `project_id`
+in the examples below. Never expose the owner bearer in deployed browser code.
 
 ## Runtime services — use GAP as your backend
 
@@ -663,7 +690,7 @@ egress filtering is applied. Existing Cloud API quotas remain unchanged.
 Unrestricted guest networking can reach internal services, and workloads can
 affect host availability without resource safeguards.
 
-Each approved agent has a cumulative allocation quota of **2 vCPUs and 4096 MiB
+Each approved agent has a cumulative allocation quota of **1 VM, 2 vCPUs and 4096 MiB
 RAM by default**, shared across all its projects. Running, hibernated, stopped and partially
 created VMs count; destroying a VM releases its CPU/RAM allocation. Disk capacity
 has no agent quota in this version. Allocate the minimum your workload needs
@@ -673,18 +700,24 @@ when necessary. Do not reserve the full quota for every project.
 `GET /v1/cloud/projects/{project}/vm` includes `agent_quota.limits` and
 `agent_quota.allocated`, even when that project has no VM. Creation, growth and
 start check the live quota; jobs report `agent_quota_exceeded_vcpus` or
-`agent_quota_exceeded_memory_mib` when blocked. Lowering a quota does not kill
+`agent_quota_exceeded_memory_mib` or `agent_quota_exceeded_max_vms` when blocked. Lowering a quota does not kill
 existing workloads; reductions, stop and destroy remain available. CPU/RAM
 quotas are allocations per agent, not a host-wide capacity reservation.
 
 CPU/RAM resize and disk growth require **stop → PATCH /vm → start**. There is no
 hot resource resize. Public port mappings and SSH keys can change while running.
 
+Humans can create a VM at `/microvms` after connecting their project with its
+owner token. The form defaults to 1 vCPU, 1024 MiB RAM, 8 GiB disk and stopped
+state, with an optional SSH public key. There is currently one VM per project;
+raising `--max-vms` allows additional VMs across that agent's projects on this node.
+This is not yet a fleet-wide customer quota.
+
 Operator command (on the node host):
 
 ```bash
 python3 scripts/microvm-access.py grant did:gap:<64-hex-agent-identity>
-python3 scripts/microvm-access.py set-quota did:gap:<64-hex-agent-identity> --vcpus 2 --memory-mib 4096
+python3 scripts/microvm-access.py set-quota did:gap:<64-hex-agent-identity> --vcpus 2 --memory-mib 4096 --max-vms 1
 python3 scripts/microvm-access.py revoke did:gap:<64-hex-agent-identity>
 python3 scripts/microvm-access.py list
 ```

@@ -81,6 +81,7 @@ class MicroVMTests(unittest.TestCase):
                 validate('vm/create', body)
 
     def test_cumulative_quota_counts_stopped_vms_and_releases_destroyed(self):
+        self.manager.quota_provider = lambda *_: {'vcpus':2,'memory_mib':4096,'max_vms':2}
         other = 'prj_' + 'd' * 24
         with patch.object(self.manager, '_perform') as execute:
             with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_vcpus'):
@@ -109,6 +110,7 @@ class MicroVMTests(unittest.TestCase):
             self.manager.perform(PROJECT, OWNER, 'vm/start', {'vm_id': VM})
 
     def test_parallel_projects_cannot_overallocate_one_owner(self):
+        self.manager.quota_provider = lambda *_: {'vcpus':2,'memory_mib':4096,'max_vms':3}
         import concurrent.futures
         import threading
         barrier = threading.Barrier(2)
@@ -127,6 +129,19 @@ class MicroVMTests(unittest.TestCase):
                 results = list(pool.map(attempt, ['prj_'+'d'*24, 'prj_'+'e'*24]))
         self.assertCountEqual(results, [True, 'agent_quota_exceeded_vcpus'])
         self.assertEqual(self.manager.quota_usage(OWNER)['vcpus'], 2)
+
+    def test_vm_count_limit_includes_hibernated_and_stopped(self):
+        other = 'prj_' + 'd' * 24
+        for state in ('stopped', 'hibernated'):
+            self.manager.save(dict(self.meta, state=state))
+            with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_max_vms'):
+                self.manager.perform(other, OWNER, 'vm/create', {})
+        self.manager.quota_provider = lambda *_: {'vcpus':2,'memory_mib':4096,'max_vms':2}
+        with patch.object(self.manager, '_perform') as execute:
+            self.manager.perform(other, OWNER, 'vm/create', {})
+            execute.assert_called_once()
+        self.manager.save(dict(self.meta, state='destroyed'))
+        self.assertEqual(self.manager.vm_count(OWNER), 0)
 
     def test_lock_prevents_concurrent_controller_mutation(self):
         with self.manager.lock(PROJECT):

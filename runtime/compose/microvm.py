@@ -96,7 +96,7 @@ class MicroVMs:
         self.diagnostic_serial = config.get('diagnostic_serial', False)
         self.children = {}
         self.ingress_origin = ''
-        self.quota_provider = lambda project, owner: {"vcpus": 2, "memory_mib": 4096}
+        self.quota_provider = lambda project, owner: {"vcpus": 2, "memory_mib": 4096, "max_vms": 1}
         self.runtime = None
         self.meters = {}
         self.network = None
@@ -525,9 +525,14 @@ class MicroVMs:
                     usage[key] += value
         return usage
 
+    def vm_count(self, owner):
+        return sum(1 for path in (self.root / 'catalog').glob('*.json')
+                   if (meta := json.loads(path.read_text()))['owner_did'] == owner
+                   and meta['state'] != 'destroyed')
+
     def quota_view(self, project, owner):
         with self.owner_lock(owner):
-            return {'limits': self.quota_provider(project, owner), 'allocated': self.quota_usage(owner)}
+            return {'limits': self.quota_provider(project, owner), 'allocated': dict(self.quota_usage(owner), max_vms=self.vm_count(owner))}
 
     def perform(self, project, owner, action, body):
         validate(action, body)
@@ -535,7 +540,7 @@ class MicroVMs:
         # Read live approval/quota after acquiring it, before reserving resources.
         with self.owner_lock(owner):
             limits = self.quota_provider(project, owner)
-            if (not isinstance(limits, dict) or set(limits) != {'vcpus', 'memory_mib'}
+            if (not isinstance(limits, dict) or not {'vcpus', 'memory_mib'} <= set(limits) <= {'vcpus', 'memory_mib', 'max_vms'}
                     or any(type(v) is not int or not 0 < v < 2**31 for v in limits.values())):
                 raise VMError('invalid_agent_quota')
             meta = self.read(project, owner)
@@ -553,6 +558,9 @@ class MicroVMs:
                     # After a quota reduction, allow releases and reductions, never growth.
                     if total > limits[key] and (action != 'vm/update' or requested > previous):
                         raise VMError('agent_quota_exceeded_' + key)
+            if (action == 'vm/create' and (not meta or meta['state'] == 'destroyed')
+                    and self.vm_count(owner) >= limits.get('max_vms', 1)):
+                raise VMError('agent_quota_exceeded_max_vms')
             return self._perform(project, owner, action, body)
 
     def _perform(self, project, owner, action, body):

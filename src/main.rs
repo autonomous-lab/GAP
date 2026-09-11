@@ -125,6 +125,8 @@ fn main() -> Result<()> {
         .unwrap_or(600);
     let mut state = NodeState::cloud_with_rate_limits(storage, seed, token_cap, ip_cap);
     state.private_node = private_node;
+    state.registration = gap::registration::Registration::from_env()
+        .map_err(gap::Error::Other)?.map(Arc::new);
     if let Ok(admin_token) = env::var("GAP_ADMIN_TOKEN") {
         state.set_admin_token(admin_token);
         println!("[gap-cloud] operator token configured");

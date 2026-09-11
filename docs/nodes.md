@@ -24,6 +24,30 @@ Both nodes are configured in CI/CD against the same GAP repository. Every push
 can rebuild and redeploy both stacks. Validate changes on the target host before
 pushing, and check the health of both nodes after the automatic deployments.
 
+## Verification email transport
+
+Both hosts run the existing `elestio-postfix` container. The provisioning script
+is `/opt/elestio/startPostfix.sh` (case-sensitive). Use its
+`RELAYHOST_USERNAME` as the node's authorized envelope and From address:
+
+| Node | Sender |
+|---|---|
+| gap-node-01 | cicd-gap-u3.vm.elestio.app@vm.elestio.app |
+| gap-node-02 | cicd-gap-2-u3.vm.elestio.app@vm.elestio.app |
+
+The local relay is published at `172.17.0.1:25`, forwarding to container port
+587. SMTP EHLO succeeded on both hosts; neither advertised STARTTLS on this
+local endpoint. GAP should use the local relay, leaving upstream authentication
+inside Postfix. Never copy the script's relay password into source, logs or public
+node metadata. Do not expose this local SMTP listener publicly. Container access
+and actual message delivery still require integration testing; EHLO alone does
+not establish recipient delivery. Both deployed nodes now enable `GAP_EMAIL_VERIFICATION_REQUIRED=1`; their
+`/v1/registration` policy and `/signup` page have been checked publicly.
+Run `python3 scripts/configure-elestio-smtp.py` from the checkout to configure
+the sender, host and port without exposing upstream credentials. This command
+does not activate registration or restart the node. Validate delivery and retain
+`data/gap-node/registration.sqlite` with the node backup before enabling.
+
 ## Fresh-node initialization and recovery
 
 The initial node-02 deployment failed at service startup: the function sandbox

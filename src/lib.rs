@@ -54,6 +54,7 @@ pub mod principal;
 pub mod private_node;
 pub mod receipt_chain;
 pub mod relayer;
+pub mod registration;
 pub mod runtime;
 pub mod sealed;
 pub mod server;

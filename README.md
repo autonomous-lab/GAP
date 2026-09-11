@@ -178,13 +178,17 @@ the guest; no GAT host Docker socket is given to GAP or workloads.
 Enable on public or private nodes with `GAP_COMPOSE_ENABLED=1` and the mandatory
 operator-owned `GAP_COMPOSE_APPROVALS_FILE`. Public registration and ordinary
 Cloud services remain open; only listed owners can use microVMs, with or without Compose. Private nodes
-also require the separate general node approval. Each agent defaults to **2 vCPUs /
+also require the separate general node approval. Each agent defaults to **1 VM and 2 vCPUs /
 4096 MiB RAM total across its microVMs**, including stopped VMs. Allocate the minimum
 needed; the operator can change limits live with `scripts/microvm-access.py set-quota
-<DID> --vcpus 2 --memory-mib 4096`. No per-agent disk quota or GAP egress ACL is applied;
+<DID> --vcpus 2 --memory-mib 4096 --max-vms 1`. No per-agent disk quota or GAP egress ACL is applied;
 existing Cloud service quotas are unchanged. CPU/RAM/disk resize requires stopping
 and starting the VM.
 GAP creates, starts, stops, resizes and destroys microVMs through `/vm`.
+The `/microvms` WebUI also creates machines, with resource sizing, an optional
+SSH public key and a choice to start immediately or keep stopped. The current
+limit is one VM per project; the adjustable count quota spans an agent's
+projects on this node. Shared customer quotas across nodes are planned.
 The repository includes the guest-image builder and real KVM/API acceptance tests.
 Optional ingress publishes a selected guest HTTP port at `/apps/{project_id}/`
 on the existing node origin, reusing its DNS and TLS certificate. No additional
@@ -205,3 +209,21 @@ Project storage lives in `src/cloud.rs`; function and realtime sidecars live
 under `runtime/`. Cloud request examples are maintained in `AGENTS.md`.
 
 Operational node inventory and fresh-node recovery: [nodes](docs/nodes.md).
+
+### Email verification and human signup
+
+`/signup` provides email-code verification, an API credential and first-project
+creation. Enable it with `GAP_EMAIL_VERIFICATION_REQUIRED=1`, a configured
+`GAP_MASTER_KEY`, synchronous ClickHouse inserts (the default), and the local SMTP settings in `.env.example`. On Elestio, run
+`python3 scripts/configure-elestio-smtp.py` to read the authorized sender from
+`/opt/elestio/startPostfix.sh`; upstream relay credentials stay inside Postfix.
+The transport supports a private or loopback IPv4 SMTP endpoint without TLS,
+intended only for the local relay. Use Postfix for authenticated upstream TLS.
+
+Challenges live in `/data/registration.sqlite`, survive restarts, expire after
+ten minutes, allow five guesses, and cannot be replayed. Codes are stored as
+keyed HMAC digests; they are never returned by the API or logged. New credentials
+are issued only after successful verification and storage writes. Existing
+identities remain usable without being falsely labelled verified. This is a
+node-local registration foundation, not shared fleet authentication or admin MFA.
+See [agent instructions](AGENTS.md) for endpoints, rate limits and error handling.

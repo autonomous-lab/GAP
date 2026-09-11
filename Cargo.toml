@@ -29,6 +29,8 @@ base64 = "0.22.1"
 argon2 = "0.5.3"
 pulldown-cmark = { version = "=0.13.4", default-features = false, features = ["html"] }
 
+lettre = { version = "=0.11.23", default-features = false, features = ["builder", "smtp-transport"] }
+
 [dev-dependencies]
 criterion = "0.8.2"
 proptest = "1.6.0"

@@ -35,6 +35,11 @@ services:
       # the spine, so more threads than cores is the right shape. The
       # default of four was a hard ceiling of roughly twenty writes a
       # second once the spine started waiting for its batch.
+      GAP_EMAIL_VERIFICATION_REQUIRED: "${GAP_EMAIL_VERIFICATION_REQUIRED:-0}"
+      GAP_REGISTRATION_DB: /data/registration.sqlite
+      GAP_SMTP_HOST: "${GAP_SMTP_HOST:-172.17.0.1}"
+      GAP_SMTP_PORT: "${GAP_SMTP_PORT:-25}"
+      GAP_SMTP_FROM: "${GAP_SMTP_FROM:-}"
       GAP_WORKERS: "${GAP_WORKERS:-24}"
       # Rate limiting is a SECURITY control, not a tuning knob: the
       # defaults (120 per token, 600 per IP, per minute) are what stops

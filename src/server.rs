@@ -488,6 +488,7 @@ pub struct NodeState {
     /// the existing ClickHouse-backed generic state table.
     cloud_projects: HashMap<String, crate::cloud::ProjectRecord>,
     pub private_node: Option<crate::private_node::PrivateNode>,
+    pub registration: Option<Arc<crate::registration::Registration>>,
     /// Verified custom hostname -> project mapping. Kept globally so a TLS
     /// handshake and a Host-routed request are O(1), not a scan of tenant DBs.
     custom_domains: HashMap<String, crate::cloud::SiteDomain>,
@@ -934,6 +935,7 @@ impl NodeState {
             deposit_chain: None,
             cloud_projects,
             private_node: None,
+            registration: None,
             custom_domains,
             realtime_credits,
             realtime_credit_topups,
@@ -1230,6 +1232,26 @@ impl NodeState {
         // and its history at the next restart. Worth a line in the log.
         self.note_persist(r, "identity", &did.clone());
         (did, token)
+    }
+
+    /// Email verification has already been consumed. Persist before exposing credentials.
+    fn create_verified_identity(&mut self, email: &str) -> Result<(String, String)> {
+        let identity = AgentIdentity::generate();
+        let did = identity.did().to_string();
+        let token = self.issue_token();
+        let vault = self.vault.as_ref().ok_or_else(|| Error::Other("registration requires seed encryption".into()))?;
+        let seed_hex = vault.seal(&identity.seed_hex());
+        self.storage.upsert_state(&crate::storage::StateRecord {
+            scope: "cloud_verified_agent_emails".into(), key: did.clone(),
+            value: json!({"email":email,"verified_at":now_unix()}).to_string(),
+            updated_at: now_unix(),
+        })?;
+        self.storage.upsert_identity(&IdentityRecord {
+            token: token.clone(), did: did.clone(), seed_hex, created_at: now_unix(),
+        })?;
+        self.agents.insert(token.clone(), RegisteredAgent { identity, announcement: None });
+        self.agents_by_did.insert(did.clone(), token.clone());
+        Ok((did, token))
     }
 
     /// The custodied identity behind a DID, when this node holds it.
@@ -7523,6 +7545,37 @@ pub fn route_with_ip(
 
     let token = auth.and_then(|h| h.strip_prefix("Bearer "));
 
+    if method == "GET" && path == "/v1/registration" {
+        return (200,json!({"verification_required":guard.registration.is_some()}));
+    }
+
+    if method == "POST" && matches!(path, "/v1/identity" | "/v1/identity/verify") {
+        if let Some(registration) = guard.registration.clone() {
+            if guard.private_node.as_ref().is_some_and(|policy| policy.private)
+                && (token.is_none() || guard.admin_token.as_deref() != token) {
+                return error_response(&Error::Unauthorized("private identity creation requires the operator token".into()));
+            }
+            if let Err(e) = guard.check_rate_limit(token, client_ip) { return error_response(&e); }
+            drop(guard);
+            if path == "/v1/identity" {
+                return match registration.request(body["email"].as_str().unwrap_or(""), client_ip.unwrap_or("unknown"), now_unix()) {
+                    Ok(value) => (202, value), Err(e) => e.response(),
+                };
+            }
+            let email = match registration.verify(body["challenge_id"].as_str().unwrap_or(""), body["code"].as_str().unwrap_or(""), now_unix()) {
+                Ok(email) => email, Err(e) => return e.response(),
+            };
+            // Consumption precedes identity creation: a persistence failure requires
+            // a fresh challenge, never permits a replay or an unverified credential.
+            let mut guard = match state.lock() { Ok(g) => g, Err(_) => return (503,json!({"error":{"code":"registration_unavailable"}})) };
+            return match guard.create_verified_identity(&email) {
+                Ok((did, token)) => (201,json!({"did":did,"token":token,"email_verified":true})),
+                Err(_) => (503,json!({"error":{"code":"registration_unavailable","message":"Request a new verification code and retry."}})),
+            };
+        }
+        if path == "/v1/identity/verify" { return (404,json!({"error":{"code":"not_found"}})); }
+    }
+
     if method == "POST" && path == "/internal/compose/authorize" {
         let quota = guard.private_node.as_ref().and_then(|policy| {
             if !policy.runner.as_ref().is_some_and(|(_, secret)| token == Some(secret.as_str())) {
@@ -9923,6 +9976,22 @@ mod tests {
         Arc::new(Mutex::new(NodeState::new(Box::new(
             SqliteStorage::open(":memory:").unwrap(),
         ))))
+    }
+
+    #[test]
+    fn verified_identity_requires_encryption_and_persists_email_before_credentials() {
+        let arc=state(); let mut state=arc.lock().unwrap();
+        state.vault=None;
+        let count=state.agents.len();
+        assert!(state.create_verified_identity("agent@example.com").is_err());
+        assert_eq!(state.agents.len(),count);
+        state.vault=Some(crate::vault::Vault::new(&[9;32]));
+        let (did,token)=state.create_verified_identity("agent@example.com").unwrap();
+        let stored=state.storage.get_identity_by_token(&token).unwrap().unwrap();
+        assert!(stored.seed_hex.starts_with("enc:v1:"));
+        let email=state.storage.get_state("cloud_verified_agent_emails",&did).unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&email.value).unwrap()["email"],"agent@example.com");
+        assert!(state.agent_by_token(&token).is_ok());
     }
 
     #[test]

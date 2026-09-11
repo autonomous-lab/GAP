@@ -51,10 +51,10 @@ class AccessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'approved.json'
             access.change(path, 'grant', A)
-            self.assertEqual(access.change(path, 'list')['quotas'][A], {'vcpus': 2, 'memory_mib': 4096})
+            self.assertEqual(access.change(path, 'list')['quotas'][A], {'vcpus': 2, 'memory_mib': 4096, 'max_vms': 1})
             access.change(path, 'set-quota', A, vcpus=4)
             access.change(path, 'grant', B, memory_mib=2048)
-            self.assertEqual(access.change(path, 'list')['quotas'][A], {'vcpus': 4, 'memory_mib': 4096})
+            self.assertEqual(access.change(path, 'list')['quotas'][A], {'vcpus': 4, 'memory_mib': 4096, 'max_vms': 1})
             self.assertFalse(access.change(path, 'grant', A)['changed'])
             before = path.read_bytes()
             for args in [('set-quota', A, 0, None), ('set-quota', A, None, None),
@@ -65,6 +65,20 @@ class AccessTests(unittest.TestCase):
             access.change(path, 'revoke', A)
             self.assertNotIn(A, json.loads(path.read_text())['quotas'])
             self.assertEqual(access.change(path, 'list')['quotas'][B]['memory_mib'], 2048)
+
+    def test_vm_count_quota_can_be_raised_live_and_invalid_values_preserve_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'approved.json'
+            access.change(path, 'grant', A)
+            result = access.change(path, 'set-quota', A, max_vms=3)
+            self.assertEqual(result['quota']['max_vms'], 3)
+            self.assertFalse(result['restart_required'])
+            self.assertEqual(access.change(path, 'list')['quotas'][A]['max_vms'], 3)
+            before = path.read_bytes()
+            for value in [0, -1, True, 2**31, '2']:
+                with self.assertRaises(ValueError):
+                    access.change(path, 'set-quota', A, max_vms=value)
+                self.assertEqual(path.read_bytes(), before)
 
     def test_always_on_requires_approval_and_revoke_removes_permission(self):
         with tempfile.TemporaryDirectory() as directory:

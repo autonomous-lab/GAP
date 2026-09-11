@@ -2,7 +2,7 @@
 
 pub fn allowed_api(path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
-    matches!(path, "/health" | "/v1/identity" | "/v1/cloud/projects")
+    matches!(path, "/health" | "/v1/registration" | "/v1/identity" | "/v1/identity/verify" | "/v1/cloud/projects")
         || path.starts_with("/v1/cloud/projects/")
         || path.starts_with("/v1/admin/cloud/projects/")
         || path.starts_with("/functions/")
@@ -27,6 +27,7 @@ pub fn page(path: &str) -> Option<(&'static str, String)> {
         "/agents.md" | "/AGENTS.md" | "/llms.txt" => Some(("text/plain; charset=utf-8", include_str!("../AGENTS.md").into())),
         "/robots.txt" => Some(("text/plain", "User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /internal/\nDisallow: /sites/\n".into())),
         "/" => Some(("text/html; charset=utf-8", HOME.into())),
+        "/signup" => Some(("text/html; charset=utf-8", include_str!("ui/cloud_signup.html").into())),
         "/microvms" => Some(("text/html; charset=utf-8", include_str!("ui/cloud_microvms.html").into())),
         "/docs" | "/for-agents" | "/for-humans" | "/how-it-works" => Some(("text/html; charset=utf-8", documentation().to_string())),
         "/.well-known/gap-agent.json" => Some(("application/json", "{\"name\":\"GAP Cloud\",\"description\":\"Application infrastructure for AI agents\",\"documentation\":\"/agents.md\",\"projects\":\"/v1/cloud/projects\"}".into())),

@@ -28,13 +28,18 @@ struct Approvals {
 pub struct MicroVMQuota {
     pub vcpus: u32,
     pub memory_mib: u32,
+    #[serde(default = "default_vm_limit")]
+    pub max_vms: u32,
 }
+
+fn default_vm_limit() -> u32 { 1 }
 
 impl Default for MicroVMQuota {
     fn default() -> Self {
         Self {
             vcpus: 2,
             memory_mib: 4096,
+            max_vms: 1,
         }
     }
 }
@@ -124,6 +129,8 @@ impl PrivateNode {
             !approvals.agents.contains(did)
                 || quota.vcpus == 0
                 || quota.memory_mib == 0
+                || quota.max_vms == 0
+                || quota.max_vms >= 2_u32.pow(31)
                 || quota.vcpus >= 2_u32.pow(31)
                 || quota.memory_mib >= 2_u32.pow(31)
         }) {
@@ -346,6 +353,7 @@ mod tests {
         std::fs::write(&path, json!({"agents": [&did]}).to_string()).unwrap();
         assert_eq!(policy.microvm_quota(&did).unwrap().vcpus, 2);
         assert_eq!(policy.microvm_quota(&did).unwrap().memory_mib, 4096);
+        assert_eq!(policy.microvm_quota(&did).unwrap().max_vms, 1);
         assert!(!policy.always_on_allowed(&did));
         std::fs::write(
             &path,
@@ -369,6 +377,8 @@ mod tests {
         assert_eq!(policy.microvm_quota(&did).unwrap().vcpus, 4);
         for quota in [
             json!({"vcpus": 0, "memory_mib": 4096}),
+            json!({"vcpus": 2, "memory_mib": 4096, "max_vms": 0}),
+            json!({"vcpus": 2, "memory_mib": 4096, "max_vms": 2147483648_u32}),
             json!({"vcpus": 2}),
             json!({"vcpus": 2, "memory_mib": 4096, "extra": 1}),
         ] {
