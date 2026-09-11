@@ -20,6 +20,10 @@ repository. Each node keeps its own live secrets in its checkout's `.env`.
 Node 02 uses Elestio nginx with its assigned HTTPS hostname, forwarding to
 `172.17.0.1:8080`. Its `GAP_PUBLIC_URL` must name node 02, not node 01's origin.
 
+Both nodes are configured in CI/CD against the same GAP repository. Every push
+can rebuild and redeploy both stacks. Validate changes on the target host before
+pushing, and check the health of both nodes after the automatic deployments.
+
 ## Fresh-node initialization and recovery
 
 The initial node-02 deployment failed at service startup: the function sandbox
