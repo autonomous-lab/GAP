@@ -142,9 +142,66 @@ class Runtime:
         tariff=account['tariff']
         return {'mode':meta.get('execution_mode','serverless'),'idle_timeout_seconds':meta.get('idle_timeout_seconds',900),
                 'last_incoming_at':state['last_incoming'],'active_http_requests':state['active_http'],'runtime_error':meta.get('runtime_error'),
+                'policy_blocked':meta.get('policy_blocked',False),'operator_suspended':meta.get('operator_suspended',False),
                 'estimated_on_hour_microcredits':(meta['vcpus']*tariff['vcpu_hour']+
                     meta['memory_mib']*tariff['gib_ram_hour']//1024) if tariff else None,
                 'billing':account}
+
+    def accept_policy(self,meta,policy):
+        state=self.state(meta)
+        known=max(meta.get('policy_generation',0),state.get('policy_generation',0))
+        valid=(policy.get('owner_did')==meta['owner_did'] and type(policy.get('generation')) is int
+               and type(policy.get('allowed')) is bool and policy['generation']>=known)
+        state['policy_allowed']=valid and policy['allowed'] and meta.get('state')!='destroyed'
+        state['policy_expires']=time.monotonic()+5
+        if valid:
+            state['policy_generation']=policy['generation'];meta['policy_generation']=policy['generation']
+            state['operator_suspended']=bool(policy.get('suspended'));meta['operator_suspended']=state['operator_suspended']
+            if state['policy_allowed']:state['policy_preempted']=False
+        meta['policy_blocked']=not state['policy_allowed']
+        return state['policy_allowed']
+
+    def check_policy(self,meta,force=False):
+        state=self.state(meta)
+        if force or time.monotonic()>=state.get('policy_expires',0):
+            return self.accept_policy(meta,self.runner.workload_policy(meta['project_id'],meta['owner_did']))
+        meta['policy_blocked']=not state.get('policy_allowed',False)
+        meta['policy_generation']=state.get('policy_generation',meta.get('policy_generation',0))
+        meta['operator_suspended']=state.get('operator_suspended',meta.get('operator_suspended',False))
+        return state.get('policy_allowed',False)
+
+    def policy_watchdog(self):
+        # Independent of project/job locks: a long SSH deployment must not keep
+        # an abusive workload running after its admission lease is revoked.
+        while not self.closed:
+            try:
+                metas=[json.loads(p.read_text()) for p in (self.manager.root/'catalog').glob('*.json')]
+                metas=[m for m in metas if self.manager.alive(m)]
+                if metas:
+                    policies=self.runner.workload_policies({m['project_id'] for m in metas})
+                    blocked=[m for m in metas if not self.accept_policy(m,policies.get(m['project_id'],{}))]
+                    for meta in blocked:self.disconnect(meta)
+                    for meta in blocked:
+                        state=self.state(meta)
+                        if meta['state'] in ('hibernating','resuming') or state.get('policy_preempted'):continue
+                        if self.manager.alive(meta):
+                            try:
+                                self.manager.qmp(meta,'stop');self.execution_stopping(meta);state['policy_preempted']=True
+                            except Exception:
+                                child=self.manager.children.get(meta['vm_id'])
+                                if child and child.poll() is None:child.terminate()
+            except Exception as error:
+                self.last_error='policy_watchdog:'+str(error)
+                # Corrupt catalog/config must not disable the enforcement loop.
+                for state in list(self.states.values()):
+                    state['policy_allowed']=False;state['policy_expires']=0
+                    for sock in list(state['connections']):
+                        try:sock.shutdown(2);sock.close()
+                        except OSError:pass
+                    state['connections'].clear()
+                for child in list(self.manager.children.values()):
+                    if child.poll() is None:child.terminate()
+            time.sleep(1)
 
     def check_credit(self,meta):
         view=self.ledger.view(meta['project_id'],meta['owner_did'],include_entries=False)
@@ -192,6 +249,7 @@ class Runtime:
         if meta['project_id']!=project or (vm_id and meta['vm_id']!=vm_id): raise VMError('vm_generation_mismatch')
         if meta['state'] not in ('running','hibernated'):
             raise VMError('vm_not_available_for_automatic_wake')
+        if not self.check_policy(meta):raise VMError('microvm_suspended_or_policy_unavailable')
         self.sample(meta,force=meta['state']=='hibernated'); self.check_credit(meta)
         if meta['state']=='hibernated':
             self.runner.authorize(project,meta['owner_did'])
@@ -257,13 +315,13 @@ class Runtime:
         account=self.ledger.view(project,meta['owner_did'],include_entries=False)
         if account['deletion_committed'] or (account['billing_mode']=='enforced' and account['delete_after'] is not None and time.time()>=account['delete_after']):
             self.expire(meta); return
-        blocked=not account['execution_allowed']
+        blocked=not account['execution_allowed'] or not self.check_policy(meta)
         if not blocked and meta.get('execution_mode')=='always_on' and time.time()-state.get('policy_checked',0)>=30:
             try: approved=self.runner.authorize(project,meta['owner_did']).get('always_on_allowed')
             except Exception: approved=False
             state['policy_checked']=time.time()
             if not approved: meta['execution_mode']='serverless'; self.manager.save(meta)
-        blocked=not account['execution_allowed']
+        blocked=not account['execution_allowed'] or not self.check_policy(meta)
         idle=(meta.get('execution_mode','serverless')=='serverless'
               and time.time()-state['last_incoming']>=meta.get('idle_timeout_seconds',900) and not state['active_http'])
         with self.runner.db() as db:

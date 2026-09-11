@@ -171,6 +171,7 @@ class Runner:
         os.chmod(self.db_path, 0o600)
         if self.runtime:
             threading.Thread(target=self.runtime.run,daemon=True).start()
+            threading.Thread(target=self.runtime.policy_watchdog,daemon=True).start()
 
     @contextmanager
     def db(self):
@@ -181,6 +182,24 @@ class Runner:
                 yield db
         finally:
             db.close()
+
+    def workload_policies(self,projects):
+        try:
+            config=load_config(self.path)
+            request=urllib.request.Request(config['node_url'].rstrip('/')+'/internal/workload-policy',
+                data=json.dumps({'project_ids':list(projects)}).encode(),
+                headers={'Authorization':'Bearer '+self.token,'Content-Type':'application/json'})
+            with urllib.request.build_opener(NoRedirect).open(request,timeout=3) as response:
+                result=json.loads(response.read(1024*1024))
+                if response.status!=200 or not isinstance(result.get('policies'),dict):raise ValueError('invalid policy')
+                return result['policies']
+        except Exception:return {}
+
+    def workload_policy(self,project,owner):
+        policy=self.workload_policies([project]).get(project,{})
+        if policy.get('owner_did')!=owner or type(policy.get('generation')) is not int or type(policy.get('allowed')) is not bool:
+            return {'allowed':False,'unavailable':True,'generation':0}
+        return policy
 
     def authorize(self, project, owner):
         config = load_config(self.path)  # reload approvals before each operation

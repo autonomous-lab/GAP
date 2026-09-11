@@ -195,8 +195,11 @@ The repository includes the guest-image builder and real KVM/API acceptance test
 Optional ingress publishes a selected guest HTTP port at `/apps/{project_id}/`
 for the default VM and `/apps/{vm_id}/` for additional VMs
 on the existing node origin, reusing its DNS and TLS certificate. No additional
-DNS setup is needed. Rollback and automatic VM fencing on revocation remain
-unavailable; activation requires the worker and updated internal edge configuration. See the [current architecture](./docs/private-compose-plan.md)
+DNS setup is needed. Revocation now fences running VMs through short-lived
+worker authorization. Administrator agent suspension also blocks Cloud access,
+terminates active functions and disconnects realtime sessions, with durable
+decision history. Rollback remains unavailable; activation requires the worker
+and updated internal edge configuration. See the [current architecture](./docs/private-compose-plan.md)
 and [API examples](./AGENTS.md#compose--experimental).
 
 ```bash

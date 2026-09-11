@@ -360,9 +360,10 @@ runtime or commercial resource quotas: started apps keep running. Fetch larger
 build contexts inside the guest or upload files through SSH/SFTP. Large-artifact
 uploads through the Compose JSON API are not implemented.
 
-Revocation blocks new management and queued execution at recheck, **not already
-running VMs/apps or visitor/scoped tokens**. For incident containment, the
-operator must fence/stop the VM through the hypervisor first. Custom customer
+Revocation blocks management and queued execution, closes existing forwarding
+connections and pauses guest CPUs through an independent policy watchdog.
+The lifecycle controller then hibernates to disk, with a cold stop on failure.
+Authorization expires after five seconds and authority failures deny execution. Custom customer
 domains, HA, backup/restore and rollback are not implemented. Each VM supports
 five public port slots with TCP/UDP forwarding, configured independently of
 Compose. Shared-origin application path routing is available below. Guest
@@ -514,8 +515,8 @@ is not rewritten. This is path routing, not a transparent virtual hostname.
 All applications share the node's browser origin, like the existing path-based
 endpoints. Do not store owner bearers in browser storage. The gateway removes
 `Service-Worker-Allowed` responses so guest apps cannot broaden a worker scope
-beyond its normal script path. Approval revocation does not stop already running
-apps or remove their visitor routes; explicit VM containment remains necessary.
+beyond its normal script path. Approval revocation closes active forwarding and fences guest execution;
+new visitor requests are denied until approval is restored.
 
 ### Internal deployment
 

@@ -1186,9 +1186,9 @@ Apps publish at `https://gap.geta.team/apps/{project_id}/` through
 See [setup, API and base-path contract](./runtime/compose/README.md#application-paths-on-the-existing-gap-origin).
 Custom customer app domains, rollback, backup and HA are **not implemented**.
 Public TCP/UDP forwarding is available through the five microVM port slots. Your `ports:` publishes
-on the guest, not automatically on the GAT host. Approval revocation blocks new
-management/admission, but does not stop running apps or revoke visitor/scoped
-tokens: the operator must stop/fence the VM for incident containment.
+on the guest, not automatically on the GAT host. Approval revocation blocks management/admission and fences running microVMs
+through the worker policy watchdog. Agent suspension additionally blocks the
+agent's other Cloud workloads; see the suspension policy below.
 Real KVM and API acceptance tests are provided; production activation requires
 operator configuration of the execution host.
 
@@ -1298,3 +1298,32 @@ python3 scripts/microvm-billing.py classify-funding --project prj_PROJECT_ID \
 Annotations are immutable and idempotent. `--source paid` requires a positive
 cash amount and a supporting note; it records an operator assertion, not payment
 processor verification. Stripe receipts remain a later integration.
+
+### Agent suspension and reactivation
+
+Administrators can suspend or reactivate an agent under **Agents** in `/admin`.
+Every decision requires a reason and stores the administrator, timestamp and
+monotonically increasing generation in durable history. Concurrent changes are
+rejected until the administrator refreshes. The decision survives node restarts
+and disabling the administrator UI.
+
+Suspension denies the owner's management bearer, new function invocations,
+function capabilities, static pages and custom-domain routing. Realtime sessions
+are disconnected and active sandbox workers are terminated; queued invocations
+recheck policy before execution. Already completed writes are not rolled back.
+Content already downloaded or cached outside GAP cannot be recalled.
+
+Workers refresh node-local authorization using five-second leases and deny work
+when authorization is unavailable. The microVM watchdog closes HTTP/WebSocket,
+TCP and UDP forwarding and pauses guest execution independently of long guest
+jobs. The lifecycle controller then writes a disk snapshot and releases memory;
+if snapshotting fails it stops the VM. A job holding the lifecycle lock can delay
+disk hibernation, but cannot keep guest CPUs executing. Reactivation permits
+normal serverless wake-up; a failed snapshot requires a cold start instead.
+Revoking microVM approval uses the same VM fencing without suspending the
+agent's other Cloud services.
+
+Suspension itself does not debit the wallet, delete data or start the 72-hour
+zero-credit timer. Existing storage charges and credit-exhaustion retention rules
+still apply; a separate legal/abuse retention hold is not implemented. This is a
+node-local agent decision, not yet a customer-wide or federated suspension.

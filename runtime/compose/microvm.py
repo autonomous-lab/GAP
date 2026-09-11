@@ -13,6 +13,7 @@ import re
 import shutil
 import socket
 import subprocess
+import threading
 import time
 import uuid
 
@@ -95,6 +96,8 @@ class MicroVMs:
         self.execute_guest = execute_guest
         self.diagnostic_serial = config.get('diagnostic_serial', False)
         self.children = {}
+        self.qmp_locks = {}
+        self.qmp_locks_guard = threading.Lock()
         self.ingress_origin = ''
         self.quota_provider = lambda project, owner: {"vcpus": 2, "memory_mib": 4096, "max_vms": 1}
         self.runtime = None
@@ -187,6 +190,18 @@ class MicroVMs:
     def qmp(self, meta, command, arguments=None):
         if command not in ('query-status', 'quit', 'human-monitor-command', 'stop', 'cont'):
             raise VMError('invalid_qmp_command')
+        # QEMU's monitor accepts one connection at a time. Keep this mutex
+        # separate from the lifecycle lock held by long guest deployments.
+        with self.qmp_locks_guard:
+            lock = self.qmp_locks.setdefault(meta['vm_id'], threading.Lock())
+        if not lock.acquire(timeout=1 if command == 'stop' else 125):
+            raise VMError('qmp_monitor_busy')
+        try:
+            return self._qmp(meta, command, arguments)
+        finally:
+            lock.release()
+
+    def _qmp(self, meta, command, arguments=None):
         with socket.socket(socket.AF_UNIX) as sock:
             sock.settimeout(120 if command == 'human-monitor-command' else 3)
             sock.connect(str(self.folder(meta) / 'qmp.sock'))
@@ -382,7 +397,7 @@ class MicroVMs:
 
     def hibernate(self, meta):
         if meta['state'] == 'hibernated': return
-        if self.public(meta)['state'] != 'running':
+        if self.public(meta)['state'] not in ('running','paused'):
             raise VMError('hibernate_requires_running_vm')
         if shutil.disk_usage(self.folder(meta)).free < meta['memory_mib']*1024**2+512*1024**2:
             raise VMError('insufficient_disk_for_hibernation')
@@ -406,9 +421,12 @@ class MicroVMs:
             self.save(meta)
         except Exception:
             if self.alive(meta):
-                self.qmp(meta,'cont')
-                if self.runtime:self.runtime.execution_started(meta)
-                meta['state']='running'; self.save(meta)
+                if self.runtime and not self.runtime.check_policy(meta,force=True):
+                    self.stop(meta,True)
+                else:
+                    self.qmp(meta,'cont')
+                    if self.runtime:self.runtime.execution_started(meta)
+                    meta['state']='running'; self.save(meta)
             raise
 
     def resume(self, meta):
@@ -438,6 +456,7 @@ class MicroVMs:
             # Mark resumed before executing guest instructions: never replay an old
             # memory snapshot after a crash following an externally visible write.
             meta['state']='running'; self.save(meta)
+            if self.runtime and not self.runtime.check_policy(meta,force=True):raise VMError('microvm_suspended_or_policy_unavailable')
             self.qmp(meta,'cont')
             if self.runtime: self.runtime.execution_started(meta)
             response=self.qmp(meta,'human-monitor-command',{'command-line':'delvm '+tag})
@@ -454,6 +473,7 @@ class MicroVMs:
             raise
 
     def start(self, meta):
+        if self.runtime and not self.runtime.check_policy(meta,force=True):raise VMError('microvm_suspended_or_policy_unavailable')
         if meta['state'] == 'creating':
             raise VMError('vm_creation_incomplete_destroy_and_retry')
         if self.public(meta)['state'] == 'running':
@@ -487,6 +507,9 @@ class MicroVMs:
             process.terminate()
             process.wait(timeout=10)
             raise VMError('hypervisor_start_timeout')
+        if self.runtime and not self.runtime.check_policy(meta,force=True):
+            self.stop(meta,True)
+            raise VMError('microvm_suspended_or_policy_unavailable')
         if self.runtime: self.runtime.execution_started(meta,cold=True)
         meta['state'] = 'running'
         meta['network_pending'] = False

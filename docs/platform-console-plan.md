@@ -52,9 +52,18 @@ additions without modifying wallet balances. Recorded cash is an operator
 assertion, not Stripe verification. The GAP project grant is promotional.
 Customer/fleet aggregation and complete provider cost coverage are still pending.
 
+Node-local agent suspension now persists reason, administrator and generation
+history; reactivation rejects stale decisions. Cloud management, static/function
+routes and capabilities deny suspended owners. Realtime and sandbox workers
+recheck short leases and terminate active work. The VM watchdog preempts guest
+CPUs and forwarding independently of long jobs, then hibernates to disk. An
+isolated KVM test verifies open TCP/WS closure under the job lock, hibernation
+and state-preserving resume. This does not yet prevent new-account evasion or
+provide a customer-wide retention hold; existing zero-credit rules still apply.
+
 Still to implement: customer/operator account authority and shared wallets;
 customer-wide and fleet-wide quotas; complete fleet dashboard and
-customer-wide approval application; complete workload suspension; customer/fleet finance
+customer-wide approval application; customer-wide suspension and retention holds; customer/fleet finance
 aggregation; public tariff discovery; federation explorer; verified
 operator badges; encrypted volumes, snapshots and backups with external keys.
 Stripe remains a later phase. Do not present the local email registry or

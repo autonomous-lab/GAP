@@ -61,6 +61,51 @@ function parseToken(token) {
   return claims;
 }
 
+const policyGenerations = new Map();
+async function workloadPolicies(projects) {
+  try {
+    const response = await fetch(new URL("/internal/workload-policy", gapNodeInternalUrl), {
+      method: "POST", headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ project_ids: projects }), signal: AbortSignal.timeout(3000)
+    });
+    if (!response.ok) return {};
+    const data = await response.json();
+    const policies = data.policies || {};
+    for (const project of projects) {
+      const p = policies[project], known = policyGenerations.get(project) || 0;
+      if (!p || !Number.isSafeInteger(p.generation) || p.generation < known) {
+        policies[project] = { allowed: false }; continue;
+      }
+      policyGenerations.set(project, p.generation);
+    }
+    return policies;
+  } catch { return {}; }
+}
+
+setInterval(() => {
+  for (const [socket,state] of clients) {
+    if (performance.now() >= state.policyExpires || state.expiresAt <= now()) socket.terminate();
+  }
+}, 250).unref();
+
+let refreshingPolicy = false;
+setInterval(async () => {
+  if (refreshingPolicy || !clients.size) return;
+  refreshingPolicy = true;
+  try {
+    const projects = [...new Set([...clients.values()].map(s => s.projectId))];
+    for (let offset = 0; offset < projects.length; offset += 1000) {
+      const batch = projects.slice(offset, offset + 1000), policies = await workloadPolicies(batch);
+      for (const [socket, state] of clients) {
+        if (!batch.includes(state.projectId)) continue;
+        const policy = policies[state.projectId];
+        if (policy?.allowed !== true || policy.generation < (policyGenerations.get(state.projectId) || 0)) socket.terminate();
+        else state.policyExpires = performance.now() + 5000;
+      }
+    }
+  } finally { refreshingPolicy = false; }
+}, 1000).unref();
+
 async function customDomainAllows(hostname, projectId) {
   const url = new URL("/internal/realtime/custom-domain", gapNodeInternalUrl);
   url.searchParams.set("hostname", hostname);
@@ -125,6 +170,8 @@ function allowed(client, channel) {
     (client.allowedChannels.length === 0 || client.allowedChannels.includes(channel));
 }
 function send(socket, value) {
+  const state=clients.get(socket);
+  if (state && (performance.now() >= state.policyExpires || state.expiresAt <= now())) return socket.terminate();
   if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(value));
 }
 function prune() {
@@ -154,7 +201,7 @@ server.on("upgrade", (req, socket, head) => {
 websocket.on("connection", socket => {
   const state = { authenticated: false, authenticating: false, connectionRate: new Map(), channels: new Set(), renewalTimer: null, paidConnection: false };
   const timer = setTimeout(() => socket.close(4401, "authentication required"), 5_000);
-  socket.on("message", async raw => {
+  async function receive(raw) {
     try {
       const message = JSON.parse(raw.toString());
       if (!state.authenticated) {
@@ -167,14 +214,19 @@ websocket.on("connection", socket => {
           state.authenticating = false;
           if (!allowed) throw new Error("token project does not match custom domain");
         }
+        const policy = (await workloadPolicies([claims.project_id]))[claims.project_id];
+        if (policy?.allowed !== true || policy.generation < (policyGenerations.get(claims.project_id) || 0)) throw new Error("project suspended or policy unavailable");
+        const policyExpires = performance.now() + 5000;
         const connectionCount = projectConnections(claims.project_id);
         if (connectionCount >= HARD_CONNECTIONS) throw new Error("hard connection limit exceeded");
         if (connectionCount >= FREE_CONNECTIONS) {
           await spendCredits(claims.project_id, { connection_hour: 1 });
           state.paidConnection = true;
         }
+        if (socket.readyState !== 1 || performance.now() >= policyExpires || claims.exp <= now() || policy.generation < (policyGenerations.get(claims.project_id) || 0)) throw new Error("authentication lease expired");
         Object.assign(state, {
           authenticated: true,
+          policyExpires,
           projectId: claims.project_id,
           allowedChannels: claims.channels,
           permissions: claims.permissions,
@@ -198,6 +250,7 @@ websocket.on("connection", socket => {
         return send(socket, { type: "authenticated", project_id: state.projectId,
           subject: state.subject, permissions: state.permissions, expires_at: state.expiresAt });
       }
+      if (performance.now() >= state.policyExpires) return socket.terminate();
       if (state.expiresAt <= now()) return socket.close(4401, "token expired");
       const connectionRate = bucketCount(state.connectionRate, "messages");
       const projectRate = bucketCount(projectRates, state.projectId);
@@ -262,6 +315,15 @@ websocket.on("connection", socket => {
     } catch (error) {
       send(socket, { type: "error", error: String(error.message || error) });
     }
+  }
+  // Preserve frame ordering across asynchronous admission checks, with a bounded
+  // queue so unauthenticated clients cannot accumulate unlimited pending work.
+  let processing = Promise.resolve(), pending = 0, pendingBytes = 0;
+  socket.on("message", raw => {
+    pending++; pendingBytes += raw.length;
+    if (pending > 32 || pendingBytes > 1024 * 1024) return socket.terminate();
+    processing = processing.then(() => socket.readyState === 1 ? receive(raw) : undefined)
+      .catch(() => socket.terminate()).finally(() => { pending--; pendingBytes -= raw.length; });
   });
   socket.on("close", () => { clearTimeout(timer); clearInterval(state.renewalTimer); clients.delete(socket); });
   socket.on("error", () => { clearInterval(state.renewalTimer); clients.delete(socket); });

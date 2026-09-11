@@ -9,6 +9,7 @@ pub fn allowed_api(path: &str) -> bool {
         || matches!(
             path,
             "/internal/tls/ask"
+                | "/internal/workload-policy"
                 | "/internal/compose/authorize"
                 | "/internal/functions/capability"
                 | "/internal/realtime/custom-domain"

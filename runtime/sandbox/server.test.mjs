@@ -7,7 +7,14 @@ import { once } from 'node:events';
 async function fixture(overrides = {}) {
   let calls = 0;
   const backend = http.createServer(async (req, res) => {
-    for await (const chunk of req) { /* drain the synthetic capability */ }
+    const chunks=[];for await (const chunk of req) chunks.push(chunk);
+    if (req.url==='/internal/workload-policy') {
+      const body=JSON.parse(Buffer.concat(chunks).toString());
+      if(overrides.policyFail){res.writeHead(503);res.end('{}');return}
+      const allowed=!overrides.suspended;
+      res.writeHead(200,{'content-type':'application/json'});
+      res.end(JSON.stringify({policies:Object.fromEntries(body.project_ids.map(id=>[id,{allowed,generation:overrides.generation??(allowed?0:1)}]))}));return;
+    }
     calls++;
     if (overrides.delay) await new Promise(r => setTimeout(r, overrides.delay));
     res.writeHead(overrides.fail ? 400 : 200, { 'content-type': 'application/json' });
@@ -25,7 +32,8 @@ async function fixture(overrides = {}) {
       SANDBOX_PORT: String(port), CAPABILITY_URL: `http://127.0.0.1:${backend.address().port}`,
       SANDBOX_TIMEOUT_MS: String(overrides.timeout || 30000),
       SANDBOX_VM_TIMEOUT_MS: '30000', SANDBOX_CAPABILITY_TIMEOUT_MS: '35000',
-      SANDBOX_MAX_CAPABILITIES: '128', SANDBOX_MAX_HTTP_CAPABILITIES: '32' },
+      SANDBOX_MAX_CAPABILITIES: '128', SANDBOX_MAX_HTTP_CAPABILITIES: '32',
+      SANDBOX_MAX_GLOBAL_CONCURRENCY:String(overrides.concurrency||16) },
     stdio: 'ignore',
   });
   const close = async () => {
@@ -90,4 +98,23 @@ test('deadline spans all replays and capability waits', async () => {
     assert.ok(f.calls() < 10);
     assert.equal((await f.invoke('() => 42')).status, 200);
   } finally { await f.close(); }
+});
+
+
+test('suspension kills an active worker, denies queued execution and fails closed on policy outage', {timeout:15000}, async()=>{
+  const settings={concurrency:1};const f=await fixture(settings);
+  try {
+    const active=f.invoke('() => { while (true) {} }');
+    await new Promise(r=>setTimeout(r,150));
+    const queued=f.invoke("async (_,gap) => { await gap.kv.get('must-not-run');return 42; }");
+    await new Promise(r=>setTimeout(r,100));settings.suspended=true;settings.generation=1;
+    const [a,q]=await Promise.all([active,queued]);
+    assert.equal(a.status,422);assert.match(a.body.error,/suspended|policy/);
+    assert.equal(q.status,422);assert.equal(f.calls(),0);
+    settings.suspended=false;settings.generation=2;
+    assert.deepEqual(await f.invoke('() => 42'),{status:200,body:{result:42}});
+    const duringOutage=f.invoke('() => { while (true) {} }');
+    await new Promise(r=>setTimeout(r,150));settings.policyFail=true;
+    const denied=await duringOutage;assert.equal(denied.status,422);assert.match(denied.body.error,/suspended|policy/);
+  } finally {await f.close()}
 });

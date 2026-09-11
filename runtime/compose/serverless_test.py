@@ -159,6 +159,40 @@ class Serverless(Integration):
             op('POST','/hibernate',identity)
             self.assertEqual(ssh('printf ssh-wake',public=True),'ssh-wake')
             print('POST + WEBSOCKET + TCP + UDP + SSH WAKE OK',flush=True)
+            if os.environ.get('GAP_TEST_SUSPENSION')=='1':
+                saved_approval=approval.read_text()
+                from contextlib import ExitStack
+                with ExitStack() as stack:
+                    tcp=stack.enter_context(socket.create_connection(('127.0.0.1',meta['public_ports'][0]),timeout=10))
+                    held_ws=stack.enter_context(socket.create_connection((address.hostname,address.port or 80),timeout=10))
+                    held_ws.sendall(('GET '+address.path+'socket HTTP/1.1\r\nHost: '+address.netloc+'\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n').encode())
+                    stream=stack.enter_context(held_ws.makefile('rb'));self.assertIn(b'101',stream.readline())
+                    while stream.readline()!=b'\r\n':pass
+                    # Hold the same lock used by a long deployment. The independent
+                    # watchdog must still close streams and stop guest CPUs.
+                    with runtime.lock(project):
+                        approval.write_text('{"agents":[]}')
+                        deadline=time.monotonic()+10
+                        while time.monotonic()<deadline:
+                            try:
+                                if manager.public(meta)['state']=='paused':break
+                            except Exception:pass
+                            time.sleep(.05)
+                        self.assertEqual(manager.public(meta)['state'],'paused')
+                        self.assertEqual(tcp.recv(1),b'')
+                        self.assertEqual(stream.read(1),b'')
+                        self.assertIsNone(runtime.state(meta)['running_since'])
+                    deadline=time.monotonic()+60
+                    while manager.read(project,owner)['state']!='hibernated' and time.monotonic()<deadline:time.sleep(.1)
+                    self.assertEqual(manager.read(project,owner)['state'],'hibernated',runtime.last_error)
+                    self.assertFalse(manager.alive(meta));self.assertTrue(manager.folder(meta).exists())
+                    with self.assertRaises(urllib.error.HTTPError):get()
+                    self.assertIsNone(runtime.ledger.view(project,owner)['delete_after'])
+                    approval.write_text(saved_approval)
+                    with runtime.lock(project):self.assertTrue(runtime.check_policy(manager.read(project,owner),force=True))
+                    self.assertEqual(get(),baseline)
+                print('POLICY REVOCATION: OPEN TCP/WS CLOSED UNDER JOB LOCK, CPU STOPPED, DISK HIBERNATION AND RESUME OK',flush=True)
+
             ssh('touch /tmp/send-outgoing')
             time.sleep(1.2)
             with runtime.lock(project):

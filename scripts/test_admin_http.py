@@ -1,5 +1,6 @@
 """Isolated real-node admin auth tests. No message leaves the local SMTP sink."""
 import email
+import base64
 import json
 import os
 from pathlib import Path
@@ -76,9 +77,10 @@ class AdminHTTP(unittest.TestCase):
             with (root/'node.log').open('w') as log:
                 proc = subprocess.Popen([os.environ['GAP_TEST_BINARY']], env=env, cwd=root, stdout=log, stderr=log)
                 try:
-                    def request(method, path, body=None, cookie=None, csrf=None, host='admin.test', origin='https://admin.test', bearer=None):
+                    def request(method, path, body=None, cookie=None, csrf=None, host='admin.test', origin='https://admin.test', bearer=None, basic=None):
                         headers = {'Host': host, 'Origin': origin, 'Content-Type': 'application/json'}
                         if bearer: headers['Authorization'] = 'Bearer '+bearer
+                        if basic: headers['Authorization']='Basic '+base64.b64encode(basic.encode()).decode()
                         if cookie: headers['Cookie'] = cookie
                         if csrf: headers['X-CSRF-Token'] = csrf
                         req = urllib.request.Request(base+path, method=method, headers=headers,
@@ -96,6 +98,17 @@ class AdminHTTP(unittest.TestCase):
                         except OSError: pass
                         if proc.poll() is not None: self.fail('Isolated node failed: '+(root/'node.log').read_text())
                         time.sleep(.05)
+                    def restart(admin_enabled):
+                        nonlocal proc
+                        proc.terminate();proc.wait(timeout=10)
+                        proc=subprocess.Popen([os.environ['GAP_TEST_BINARY']],env={**env,'GAP_CLOUD_ADMIN_ENABLED':admin_enabled},cwd=root,stdout=log,stderr=log)
+                        for _ in range(200):
+                            try:
+                                if request('GET','/health')[0]==200:return
+                            except OSError:pass
+                            if proc.poll() is not None:self.fail('Node restart failed: '+(root/'node.log').read_text())
+                            time.sleep(.05)
+                        self.fail('Node did not restart')
                     api = '/v1/admin/console/'
                     self.assertEqual(request('GET', '/admin')[0], 200)
                     self.assertEqual(request('GET', '/apps/tenant')[0], 404)
@@ -143,6 +156,30 @@ class AdminHTTP(unittest.TestCase):
                     self.assertIn(agent['did'], json.loads((root/'approvals.json').read_text())['agents'])
                     self.assertNotIn(agent['token'], json.dumps(request('GET', api+'agents', cookie=cookie)[1]))
                     self.assertEqual(request('GET', api+'projects/'+project_id, cookie=cookie)[0], 200)
+                    site='/v1/cloud/projects/'+project_id+'/site'
+                    self.assertEqual(request('PUT',site,{'enabled':True,'entrypoint':'index.html','auth':{'mode':'basic','username':'visitor','password':'isolated site password'}},host='client.test',bearer=agent['token'])[0],200)
+                    _, release, _=request('POST',site+'/versions',{},host='client.test',bearer=agent['token'])
+                    version=str(release['version'])
+                    self.assertEqual(request('PUT',site+'/versions/'+version+'/files/index.html',{'content_base64':base64.b64encode(b'<h1>Private test site</h1>').decode()},host='client.test',bearer=agent['token'])[0],200)
+                    self.assertEqual(request('POST',site+'/versions/'+version+'/activate',{},host='client.test',bearer=agent['token'])[0],200)
+                    public='/sites/'+project_id+'/'
+                    self.assertEqual(request('GET',public,host='client.test',basic='visitor:isolated site password')[0],200)
+                    suspend=api+'agents/'+agent['did']+'/suspension'
+                    decision={'active':True,'expected_generation':0,'reason':'Isolated abuse test'}
+                    self.assertEqual(request('POST',suspend,decision,cookie=cookie)[0],403)
+                    status, recorded, _=request('POST',suspend,decision,cookie=cookie,csrf=session['csrf'])
+                    self.assertEqual(status,200);self.assertTrue(recorded['decision']['active'])
+                    restart('0')
+                    self.assertEqual(request('GET','/v1/cloud/projects',host='client.test',bearer=agent['token'])[0],401)
+                    self.assertEqual(request('GET',public,host='client.test',basic='visitor:isolated site password')[0],404)
+                    policy=request('POST','/internal/workload-policy',{'project_id':project_id},host='client.test',bearer='b'*64)[1]
+                    self.assertFalse(policy['allowed']);self.assertTrue(policy['suspended'])
+                    restart('1')
+                    self.assertEqual(request('GET',api+'session',cookie=cookie)[0],200)
+                    self.assertEqual(request('POST',suspend,decision,cookie=cookie,csrf=session['csrf'])[0],409)
+                    self.assertEqual(request('POST',suspend,{'active':False,'expected_generation':1,'reason':'Resolved in isolated test'},cookie=cookie,csrf=session['csrf'])[0],200)
+                    self.assertEqual(request('GET',public,host='client.test',basic='visitor:isolated site password')[0],200)
+
                     self.assertEqual(request('POST', api+'logout', {}, cookie=cookie)[0], 403)
                     self.assertEqual(request('POST', api+'logout', {}, cookie=cookie, csrf=session['csrf'], origin='https://client.test')[0], 403)
                     self.assertEqual(request('POST', api+'login', {**credentials,'password':'different wrong password'})[0], 401)

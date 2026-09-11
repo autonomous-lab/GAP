@@ -487,6 +487,7 @@ pub struct NodeState {
     /// GAP Runtime's global project projection. The durable copy uses
     /// the existing ClickHouse-backed generic state table.
     cloud_projects: HashMap<String, crate::cloud::ProjectRecord>,
+    cloud_suspensions: HashMap<String, crate::cloud_suspension::Record>,
     pub private_node: Option<crate::private_node::PrivateNode>,
     pub registration: Option<Arc<crate::registration::Registration>>,
     pub cloud_admin: Option<Arc<crate::cloud_admin::Admin>>,
@@ -776,6 +777,11 @@ impl NodeState {
         .collect();
         let cloud_projects: HashMap<String, crate::cloud::ProjectRecord> =
             load(&*storage, "cloud_projects", cloud_only);
+        // Security decisions must never disappear through best-effort hydration.
+        let cloud_suspensions=storage.list_state("cloud_suspensions")
+            .expect("cannot load suspension policy; refusing to serve")
+            .into_iter().map(|r| (r.key,serde_json::from_str::<crate::cloud_suspension::Record>(&r.value)
+                .expect("invalid suspension policy; refusing to serve"))).collect();
         let custom_domains: HashMap<String, crate::cloud::SiteDomain> =
             load(&*storage, "cloud_domains", cloud_only);
 
@@ -935,6 +941,7 @@ impl NodeState {
             credited_deposits,
             deposit_chain: None,
             cloud_projects,
+            cloud_suspensions,
             private_node: None,
             registration: None,
             cloud_admin: None,
@@ -1271,6 +1278,7 @@ impl NodeState {
             .agents
             .get(token)
             .ok_or_else(|| Error::Unauthorized("invalid bearer token".into()))?;
+        if self.agent_suspended(&agent.identity.did().to_string()) {return Err(Error::Unauthorized("agent_suspended".into()))}
         if let Some(policy) = &self.private_node {
             policy.authorize(&agent.identity.did().to_string())?;
         }
@@ -2527,6 +2535,30 @@ the content inline"
         Ok(projects)
     }
 
+    fn agent_suspended(&self,did:&str)->bool {
+        self.cloud_suspensions.get(did).is_some_and(|r|r.current.active)
+    }
+
+    fn active_cloud_project(&self,id:&str)->bool {
+        self.cloud_projects.get(id).is_some_and(|p|p.status=="active" && !self.agent_suspended(&p.owner_did))
+    }
+
+    fn workload_policy(&self,project_id:&str,compose:bool)->Value {
+        let Some(project)=self.cloud_projects.get(project_id) else{return json!({"allowed":false,"generation":0,"reason":"unknown_project"})};
+        let suspension=self.cloud_suspensions.get(&project.owner_did);
+        let admission=self.private_node.as_ref().is_none_or(|p|p.authorize(&project.owner_did).is_ok() && (!compose || p.microvm_quota(&project.owner_did).is_ok()));
+        json!({"allowed":self.active_cloud_project(project_id) && admission,"owner_did":project.owner_did,"generation":suspension.map_or(0,|r|r.current.generation),"suspended":self.agent_suspended(&project.owner_did),"lease_seconds":5})
+    }
+
+    pub fn admin_suspend_agent(&mut self,did:&str,expected:u64,active:bool,reason:&str,actor:&str)->Result<Value> {
+        if !self.agents_by_did.contains_key(did) {return Err(Error::Other("unknown agent".into()))}
+        let next=crate::cloud_suspension::Record::next(self.cloud_suspensions.get(did),expected,active,reason,actor,now_unix())?;
+        self.storage.upsert_state(&crate::storage::StateRecord{scope:"cloud_suspensions".into(),key:did.into(),value:serde_json::to_string(&next).map_err(|_|Error::Other("cannot encode suspension".into()))?,updated_at:now_unix()})?;
+        self.cloud_suspensions.insert(did.into(),next.clone());
+        let projects:Vec<_>=self.cloud_projects.values().filter(|p|p.owner_did==did).map(|p|p.project_id.clone()).collect();
+        Ok(json!({"agent_did":did,"decision":next.current,"projects":projects}))
+    }
+
     /// Called only after an individual administrator session has been verified.
     pub fn admin_cloud_inventory(&self,path:&str,offset:u64) -> Result<Value> {
         match path {
@@ -2536,7 +2568,7 @@ the content inline"
                 let mut agents=Vec::new();
                 for did in dids.into_iter().skip(offset as usize).take(100) {
                     let verified=self.storage.get_state("cloud_verified_agent_emails",did)?.and_then(|r|serde_json::from_str::<Value>(&r.value).ok());
-                    agents.push(json!({"did":did,"email":verified.as_ref().and_then(|v|v.get("email")),"email_verified":verified.is_some(),"project_count":self.cloud_projects.values().filter(|p|&p.owner_did==did).count(),"microvm_quota":self.private_node.as_ref().and_then(|p|p.microvm_quota(did).ok())}));
+                    agents.push(json!({"did":did,"suspension":self.cloud_suspensions.get(did),"email":verified.as_ref().and_then(|v|v.get("email")),"email_verified":verified.is_some(),"project_count":self.cloud_projects.values().filter(|p|&p.owner_did==did).count(),"microvm_quota":self.private_node.as_ref().and_then(|p|p.microvm_quota(did).ok())}));
                 }
                 Ok(json!({"agents":agents,"total":self.agents.len(),"offset":offset,"limit":100}))
             }
@@ -2705,7 +2737,7 @@ the content inline"
         let domain = self.custom_domain(hostname)?;
         self.cloud_projects
             .get(&domain.project_id)
-            .filter(|project| project.status == "active")?;
+            .filter(|project| project.status == "active" && !self.agent_suspended(&project.owner_did))?;
         let store = crate::cloud::ProjectStore::open(&self.cloud_root, &domain.project_id).ok()?;
         let site = store.site_config().ok().flatten()?;
         (site.enabled && site.active_version.is_some()).then_some(domain.project_id)
@@ -2736,7 +2768,7 @@ the content inline"
         if !self
             .cloud_projects
             .get(&domain.project_id)
-            .is_some_and(|project| project.status == "active")
+            .is_some_and(|project| project.status == "active" && !self.agent_suspended(&project.owner_did))
         {
             return false;
         }
@@ -2963,6 +2995,7 @@ the content inline"
         if self.realtime_secret.as_deref() != Some(token) || self.realtime_secret.is_none() {
             return Err(Error::Unauthorized("invalid realtime service token".into()));
         }
+        if !self.active_cloud_project(project_id) {return Err(Error::Unauthorized("project_unavailable_or_suspended".into()))}
         let amount = charges.iter().try_fold(0u64, |total, (_, amount)| {
             total
                 .checked_add(*amount)
@@ -3273,6 +3306,7 @@ the content inline"
         name: &str,
         request: Value,
     ) -> Result<(String, String, Value, u64, String)> {
+        if !self.active_cloud_project(project_id) {return Err(Error::Unauthorized("project_unavailable_or_suspended".into()))}
         let function = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?
             .active_function(name)?
             .ok_or_else(|| Error::Other("function has no active version".into()))?;
@@ -6970,7 +7004,7 @@ fn serve_site_project(
     let project_exists = guard
         .cloud_projects
         .get(project_id)
-        .is_some_and(|project| project.status == "active");
+        .is_some_and(|project| project.status == "active" && !guard.agent_suspended(&project.owner_did));
     if !project_exists {
         return Some(site_response(
             404,
@@ -7615,13 +7649,29 @@ pub fn route_with_ip(
             _=>(405,json!({"error":{"code":"method_not_allowed"}})),
         };
     }
+    if method=="POST" && path=="/internal/workload-policy" {
+        let compose=token.is_some() && guard.private_node.as_ref().and_then(|p|p.runner.as_ref()).is_some_and(|(_,secret)|Some(secret.as_str())==token);
+        let authorized=compose || (token.is_some() && (guard.function_sandbox_token.as_deref()==token || guard.realtime_secret.as_deref()==token));
+        if !authorized{return error_response(&Error::Unauthorized("service credential required".into()))}
+        if let Some(projects)=body["project_ids"].as_array() {
+            if projects.len()>1000{return (400,json!({"error":{"code":"too_many_policy_projects"}}))}
+            let mut policies=serde_json::Map::new();
+            for id in projects {
+                let Some(id)=id.as_str().filter(|s|s.len()<=64) else{return (400,json!({"error":{"code":"invalid_policy_project"}}))};
+                policies.insert(id.into(),guard.workload_policy(id,compose));
+            }
+            return (200,json!({"policies":policies,"lease_seconds":5}));
+        }
+        let project=body["project_id"].as_str().unwrap_or("");
+        return (200,guard.workload_policy(project,compose));
+    }
     if method == "POST" && path == "/internal/compose/authorize" {
         let quota = guard.private_node.as_ref().and_then(|policy| {
             if !policy.runner.as_ref().is_some_and(|(_, secret)| token == Some(secret.as_str())) {
                 return None;
             }
             let project = body["project_id"].as_str().and_then(|id| guard.cloud_projects.get(id))?;
-            if project.status != "active" || body["owner_did"].as_str() != Some(project.owner_did.as_str()) {
+            if project.status != "active" || guard.agent_suspended(&project.owner_did) || body["owner_did"].as_str() != Some(project.owner_did.as_str()) {
                 return None;
             }
             policy.microvm_quota(&project.owner_did).ok()
@@ -7741,6 +7791,7 @@ pub fn route_with_ip(
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        if !guard.active_cloud_project(&project_id) {return error_response(&Error::Unauthorized("project_unavailable_or_suspended".into()))}
         let request = body.get("request").cloned().unwrap_or(Value::Null);
         if request.get("kind").and_then(Value::as_str) == Some("realtime.token") {
             let args = request.get("args").unwrap_or(&Value::Null);
@@ -9968,7 +10019,7 @@ fn split_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn percent_decode(value: &str) -> String {
+pub(crate) fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

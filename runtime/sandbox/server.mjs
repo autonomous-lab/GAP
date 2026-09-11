@@ -97,13 +97,62 @@ function remainingTime(deadline) {
   return remaining;
 }
 
-function runWorker(payload, deadline) {
+const invocations = new Set(), policyGenerations = new Map();
+async function readPolicies(projects) {
+  try {
+    const response = await fetch(new URL("/internal/workload-policy", capabilityUrl), {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ project_ids: projects }), signal: AbortSignal.timeout(3000)
+    });
+    if (!response.ok) return {};
+    const values = (await response.json()).policies || {};
+    for (const id of projects) {
+      const p=values[id], known=policyGenerations.get(id)||0;
+      if (!p || !Number.isSafeInteger(p.generation) || p.generation<known) values[id]={allowed:false};
+      else policyGenerations.set(id,p.generation);
+    }
+    return values;
+  } catch { return {}; }
+}
+function cancelInvocation(context) {
+  context.cancelled=true;
+  for (const child of context.children) child.kill("SIGKILL");
+  for (const controller of context.controllers) controller.abort();
+}
+function applyPolicy(context,policy) {
+  if (context.cancelled || policy?.allowed!==true || policy.generation<(policyGenerations.get(context.project)||0)) {
+    cancelInvocation(context);return false;
+  }
+  context.expires=performance.now()+5000;return true;
+}
+async function ensurePolicy(context) {
+  if (context.cancelled) throw new Error("project suspended or policy unavailable");
+  if (performance.now()>=context.expires && !applyPolicy(context,(await readPolicies([context.project]))[context.project])) {
+    throw new Error("project suspended or policy unavailable");
+  }
+}
+let policyRefresh=false;
+setInterval(async()=>{
+  if (policyRefresh || !invocations.size) return;
+  policyRefresh=true;
+  try {
+    const contexts=[...invocations], projects=[...new Set(contexts.map(c=>c.project))];
+    const policies=await readPolicies(projects);
+    for (const context of contexts) applyPolicy(context,policies[context.project]);
+  } finally {policyRefresh=false;}
+},1000).unref();
+setInterval(()=>{
+  for (const context of invocations) if (performance.now()>=context.expires) cancelInvocation(context);
+},250).unref();
+
+function runWorker(payload, deadline, context) {
   const remaining = remainingTime(deadline);
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [workerPath, String(Math.min(vmTimeoutMs, remaining))], {
       env: {},
       stdio: ["pipe", "pipe", "pipe"],
     });
+    context.children.add(child);
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -117,7 +166,8 @@ function runWorker(payload, deadline) {
     child.stderr.resume();
     child.on("error", reject);
     child.on("close", code => {
-      clearTimeout(timer);
+      clearTimeout(timer);context.children.delete(child);
+      if (context.cancelled) return reject(new Error("project suspended or policy unavailable"));
       if (timedOut) return reject(new Error("function timed out"));
       if (code !== 0) return reject(new Error("function failed"));
       try { resolve(JSON.parse(stdout)); }
@@ -127,24 +177,34 @@ function runWorker(payload, deadline) {
   });
 }
 
-async function callCapability(projectId, request, deadline) {
+async function callCapability(projectId, request, deadline, context) {
+  const controller=new AbortController();context.controllers.add(controller);
+  try {
   const response = await fetch(capabilityUrl, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ project_id: projectId, request }),
-    signal: AbortSignal.timeout(Math.min(capabilityTimeoutMs, remainingTime(deadline))),
+    signal: AbortSignal.any([controller.signal,AbortSignal.timeout(Math.min(capabilityTimeoutMs, remainingTime(deadline)))]),
   });
   const body = await response.json();
   if (!response.ok) throw new Error(body?.error?.message || body?.error || "capability failed");
   return body;
+  } finally {context.controllers.delete(controller);}
 }
 
 async function invoke(payload) {
+  const context={project:payload.project_id,children:new Set(),controllers:new Set(),cancelled:false,expires:0};
+  await ensurePolicy(context);invocations.add(context);
+  try { return await invokeAdmitted(payload,context); } finally {invocations.delete(context);cancelInvocation(context);}
+}
+
+async function invokeAdmitted(payload,context) {
   const deadline = performance.now() + timeoutMs;
   const capabilityResults = [];
   let httpCalls = 0;
   for (;;) {
-    const output = await runWorker({ ...payload, capability_results: capabilityResults }, deadline);
+    await ensurePolicy(context);
+    const output = await runWorker({ ...payload, capability_results: capabilityResults }, deadline,context);
     remainingTime(deadline);
     if (!output.capability_request) return output;
     if (!payload.project_id) throw new Error("missing capability project");
@@ -163,7 +223,8 @@ async function invoke(payload) {
       httpCalls++;
     }
     try {
-      capabilityResults.push({ ok: true, value: await callCapability(payload.project_id, output.capability_request, deadline) });
+      await ensurePolicy(context);
+      capabilityResults.push({ ok: true, value: await callCapability(payload.project_id, output.capability_request, deadline,context) });
     } catch (error) {
       capabilityResults.push({ ok: false, error: String(error.message || error) });
     }

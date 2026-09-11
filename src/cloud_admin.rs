@@ -250,6 +250,24 @@ pub fn handle(state:&Arc<Mutex<crate::server::NodeState>>,method:&str,path:&str,
             return response(policy.ok_or(Failure(409,"microvm_hosting_not_configured")).and_then(|p|admin.review_access(id,decision,&session.email,&p,now)));
         }
     }
+    if let Some(did)=clean.strip_prefix("/v1/admin/console/agents/").and_then(|p|p.strip_suffix("/suspension")) {
+        if method=="POST" {
+            let (Some(active),Some(generation),Some(reason))=(input["active"].as_bool(),input["expected_generation"].as_u64(),input["reason"].as_str()) else {return response(Err(Failure(400,"suspension_decision_required")))};
+            let did=crate::server::percent_decode(did);
+            let mut result=state.lock().map_err(unavailable).and_then(|mut s|s.admin_suspend_agent(&did,generation,active,reason,&session.email).map_err(|e|{
+                let error=e.to_string();
+                if error.contains("version_changed"){Failure(409,"suspension_version_changed_refresh_before_retry")}
+                else if error.contains("reason_required") || error.contains("unknown agent"){Failure(400,"invalid_suspension_decision")}
+                else{Failure(503,"suspension_update_unavailable")}
+            }));
+            if let Ok(ref mut value)=result {
+                // Attribution/history is already atomic with the durable policy.
+                // This is a secondary index for the common audit-log view.
+                if admin.audit(&session.email,if active {"agent.suspended"} else {"agent.reactivated"},&did,value,now).is_err(){value["audit_index_pending"]=json!(true);}
+            }
+            return response(result);
+        }
+    }
     if clean=="/v1/admin/console/finance" && method=="GET" {
         let param=|name:&str|path.split_once('?').and_then(|(_,q)|q.split('&').find_map(|p|p.split_once('=').filter(|(key,_)|*key==name).map(|(_,v)|v.to_owned())));
         let end=now/3600*3600;
