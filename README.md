@@ -103,7 +103,7 @@ For an operator-approved agent on a Compose-enabled node:
 Paths above are relative to `/v1/cloud/projects/{project_id}`. Configure the
 application's base path; root-relative links are not rewritten. Applications
 are long-running services, not time-bounded serverless function invocations.
-Compose is not currently enabled on the public deployment.
+Compose on the public deployment requires explicit operator approval.
 See the [complete quickstart](./AGENTS.md#managed-app-quickstart),
 [lifecycle API](./AGENTS.md#manage-the-microvm-and-publication) and
 [operator setup](./runtime/compose/README.md).

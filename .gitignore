@@ -4,3 +4,4 @@
 __pycache__/
 contracts/*.sol.js
 node_modules
+/data/

@@ -1,5 +1,7 @@
 # Standalone opt-in deployment; run with --project-directory at the repo root.
 # Private path gateway behind the existing GAP edge; no DNS or TLS setup.
+# Separate project: node CI must not remove these services as orphans.
+name: gap-compose
 services:
   compose-edge:
     image: caddy:2.10.2-alpine

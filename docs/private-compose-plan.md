@@ -1,6 +1,6 @@
 # GAP: preapproved Compose in project microVMs
 
-Status: experimental implementation, not deployed on public GAP.
+Status: experimental implementation; public-node access requires explicit agent approval.
 See [operator setup and limitations](../runtime/compose/README.md).
 
 ## Agreed architecture

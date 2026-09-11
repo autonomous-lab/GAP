@@ -637,7 +637,7 @@ reconnects and restores subscriptions.
 
 ## Compose — experimental
 
-**Opt-in on public or private nodes; not yet deployed on gap.geta.team.**
+**Opt-in on public or private nodes; operator approval required on gap.geta.team.**
 Compose always requires an operator-preapproved agent and an exclusive,
 GAP-managed microVM bound to your project (or a legacy operator-provisioned guest).
 You cannot self-approve or choose the worker SSH target. On a public node, create an identity normally
@@ -657,12 +657,25 @@ resource quotas or GAP egress filtering are applied; existing Cloud API quotas
 remain unchanged. Unrestricted guest networking can reach internal services;
 without resource safeguards workloads can affect the host's availability.
 
+Operator command (on the node host):
+
+```bash
+python3 scripts/compose-access.py grant did:gap:<64-hex-agent-identity>
+python3 scripts/compose-access.py revoke did:gap:<64-hex-agent-identity>
+python3 scripts/compose-access.py list
+```
+
+Agent approvals take effect immediately without restarting the node or worker.
+The infrastructure is configured once; grant/revoke never changes environment
+variables. Approval covers the agent's projects and does not create or publish
+an application. Only the operator can run these host commands.
+
 ### Managed app quickstart
 
 Compose is for long-running Docker applications, including multi-service stacks
 and persistent volumes. Functions remain the lightweight, time-bounded JavaScript
 runtime. Compose is experimental and requires operator approval, even on a
-public node. It is not currently enabled on the public deployment.
+public node. On the public deployment, only explicitly approved agents can use it.
 
 The complete flow is: create a project, create its microVM, deploy a Compose
 release, then enable its application route. No additional DNS record or TLS

@@ -1,8 +1,9 @@
 # Preapproved Compose worker (experimental)
 
 This opt-in worker creates and manages **exclusive QEMU/KVM microVMs per
-project**, then runs Docker Engine and Compose inside them. It is not enabled
-on `gap.geta.team`. The worker runs as an unprivileged Linux user with access to
+project**, then runs Docker Engine and Compose inside them. The public node
+requires explicit agent approval before use. The worker runs as an unprivileged
+Linux user with access to
 `/dev/kvm`; it receives no host Docker socket. Legacy operator-provisioned guests
 remain supported as an alternative configuration.
 
@@ -146,6 +147,33 @@ DID for Compose by atomically replacing `/data/compose-agents.json`:
 ```json
 {"agents":["did:gap:<64-hex-character-identity>"]}
 ```
+
+### Authorize agents without restarting
+
+The environment enables the Compose infrastructure once. Individual permissions
+are stored in the operator-owned approval file, reloaded on every request and
+before job execution. Use this host command from the repository root:
+
+```bash
+python3 scripts/compose-access.py list
+python3 scripts/compose-access.py grant did:gap:<64-lowercase-hex-identity>
+python3 scripts/compose-access.py revoke did:gap:<64-lowercase-hex-identity>
+```
+
+The default host file is `data/gap-node/compose-agents.json`, mounted in the node
+as `/data/compose-agents.json`. Use `--file /absolute/host/path` before the action
+if the node uses another path. Commands preserve other approvals, serialize
+concurrent changes and atomically replace the file; repeat grants/revokes are
+idempotent. Run as the operator with write access to this directory. A new file
+is mode 600, so ensure the node's OS user can read it.
+
+Authorization applies to the exact agent DID, across that agent's projects.
+It neither creates a VM nor publishes an application. Revoking stops new
+management/jobs at their authorization check; it does not stop already running
+applications. No environment edit or stack reboot is needed for grant/revoke.
+The initial worker setup/node transport configuration is a one-time deployment.
+The worker Compose file uses its own `gap-compose` project so the node pipeline
+cannot remove it as an orphan during node updates.
 
 For a private node, additionally set `GAP_PRIVATE_NODE=1` and
 `GAP_PRIVATE_APPROVALS_FILE=/data/private-agents.json`. This second list controls
