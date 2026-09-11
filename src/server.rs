@@ -7614,6 +7614,14 @@ pub fn route_with_ip(
         {
             return error_response(&error);
         }
+        let body = if method == "GET" {
+            let params = parse_url_params(raw_path);
+            match params.get("vm_id") {
+                Some(vm_id) if vm_id.strip_prefix("vm_").is_some_and(|id| id.len()==32 && id.bytes().all(|b| b.is_ascii_hexdigit())) => json!({"vm_id":vm_id}),
+                Some(_) => return (400,json!({"error":{"code":"invalid_vm_identity"}})),
+                None => body,
+            }
+        } else { body };
         // Only submit/poll here: guest execution happens asynchronously on the
         // runner. No network call or Compose operation under the state lock.
         drop(guard);

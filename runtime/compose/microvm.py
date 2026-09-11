@@ -54,7 +54,7 @@ def free_port():
 
 def validate(action, body):
     fields = {
-        'vm/create': {'request_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports', 'start', 'ssh_keys'},
+        'vm/create': {'request_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports', 'start', 'ssh_keys', 'new_vm'},
         'vm/update': {'request_id', 'vm_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports'},
         'vm/start': {'request_id', 'vm_id'},
         'vm/hibernate': {'request_id', 'vm_id'},
@@ -69,7 +69,7 @@ def validate(action, body):
     for key in ('vcpus', 'memory_mib', 'disk_gib'):
         if key in body and (type(body[key]) is not int or not 0 < body[key] < 2**31):
             raise VMError('invalid_' + key)
-    for key in ('start', 'force', 'delete_data', 'confirm_data_loss'):
+    for key in ('start', 'force', 'delete_data', 'confirm_data_loss', 'new_vm'):
         if key in body and type(body[key]) is not bool:
             raise VMError('invalid_' + key)
     if 'ssh_keys' in body:
@@ -125,7 +125,7 @@ class MicroVMs:
 
     def reserved_ports(self):
         occupied=set()
-        for path in (self.root/'catalog').glob('prj_*.json'):
+        for path in (self.root/'catalog').glob('*.json'):
             other=json.loads(path.read_text())
             if other['state']=='destroyed': continue
             occupied.add(other['ssh_port'])
@@ -143,18 +143,32 @@ class MicroVMs:
         raise VMError('internal_port_pool_exhausted')
 
     def catalog(self, project):
-        if not re.fullmatch(r'prj_[0-9a-f]{24}', project):
+        if not re.fullmatch(r'(?:prj_[0-9a-f]{24}|vm_[0-9a-f]{32})', project):
             raise VMError('invalid_project')
         return self.root / 'catalog' / (project + '.json')
 
-    def read(self, project, owner):
-        path = self.catalog(project)
-        if not path.exists():
-            return None
+    def read(self, project, owner, vm_id=None):
+        if not re.fullmatch(r'prj_[0-9a-f]{24}', project): raise VMError('invalid_project')
+        if vm_id is not None and not re.fullmatch(r'vm_[0-9a-f]{32}',vm_id): raise VMError('invalid_vm_identity')
+        path = self.catalog(vm_id or project)
+        if vm_id and not path.exists():
+            path = self.catalog(project)  # legacy/default VM retains its original path
+        if not path.exists(): return None
         meta = json.loads(path.read_text())
-        if meta['owner_did'] != owner:
-            raise VMError('vm_owner_mismatch')
+        if meta['project_id'] != project: raise VMError('vm_project_mismatch')
+        if meta['owner_did'] != owner: raise VMError('vm_owner_mismatch')
+        if vm_id and meta['vm_id'] != vm_id: raise VMError('vm_generation_mismatch')
         return meta
+
+    def list(self, project, owner):
+        self.catalog(project)
+        result=[]
+        for path in (self.root/'catalog').glob('*.json'):
+            meta=json.loads(path.read_text())
+            if meta['project_id']==project:
+                if meta['owner_did']!=owner: raise VMError('vm_owner_mismatch')
+                result.append(meta)
+        return sorted(result,key=lambda m:m['vm_id'])
 
     def folder(self, meta):
         vm_id = meta['vm_id']
@@ -166,7 +180,9 @@ class MicroVMs:
         return path
 
     def save(self, meta):
-        atomic_json(self.catalog(meta['project_id']), meta)
+        key=meta.get('catalog_key',meta['project_id'])
+        if key not in (meta['project_id'],meta['vm_id']): raise VMError('invalid_catalog_key')
+        atomic_json(self.catalog(key), meta)
 
     def qmp(self, meta, command, arguments=None):
         if command not in ('query-status', 'quit', 'human-monitor-command', 'stop', 'cont'):
@@ -232,8 +248,8 @@ class MicroVMs:
             result['retained_volume_id'] = meta['vm_id']
         return result
 
-    def guest(self, project, owner):
-        meta = self.read(project, owner)
+    def guest(self, project, owner, vm_id=None):
+        meta = self.read(project, owner, vm_id)
         if not meta or self.public(meta)['state'] != 'running':
             raise VMError('vm_not_running')
         folder = self.folder(meta)
@@ -286,7 +302,7 @@ class MicroVMs:
         self.save(meta)
         (self.folder(meta) / 'seed' / 'runtime.json').write_text(json.dumps(values))
         if self.alive(meta):
-            result = self.execute_guest(self.guest(meta['project_id'], meta['owner_did']),
+            result = self.execute_guest(self.guest(meta['project_id'], meta['owner_did'], meta['vm_id']),
                 {'action': 'runtime_environment', 'body': {'variables': values}}, timeout=15)
             if result.get('ok') is not True:
                 raise VMError('guest_environment_update_failed')
@@ -318,7 +334,7 @@ class MicroVMs:
             image.truncate(4 * 1024 * 1024)
         run(['mkfs.ext4', '-q', '-F', '-d', str(folder / 'seed'), str(temporary)])
         if self.alive(meta):
-            result = self.execute_guest(self.guest(meta['project_id'], meta['owner_did']),
+            result = self.execute_guest(self.guest(meta['project_id'], meta['owner_did'], meta['vm_id']),
                                         {'action': 'ssh_keys', 'body': {'content': content}}, timeout=15)
             if result.get('ok') is not True:
                 raise VMError('ssh_keys_update_failed')
@@ -491,7 +507,7 @@ class MicroVMs:
                 if child is None or child.poll() is not None: raise
                 child.kill(); child.wait(timeout=10)
         else:
-            self.execute_guest(self.guest(meta['project_id'], meta['owner_did']),
+            self.execute_guest(self.guest(meta['project_id'], meta['owner_did'], meta['vm_id']),
                                {'action': 'vm_shutdown', 'body': {}}, timeout=15)
         deadline = time.monotonic() + 30
         while self.alive(meta) and time.monotonic() < deadline:
@@ -543,7 +559,7 @@ class MicroVMs:
             if (not isinstance(limits, dict) or not {'vcpus', 'memory_mib'} <= set(limits) <= {'vcpus', 'memory_mib', 'max_vms'}
                     or any(type(v) is not int or not 0 < v < 2**31 for v in limits.values())):
                 raise VMError('invalid_agent_quota')
-            meta = self.read(project, owner)
+            meta = None if action=='vm/create' and body.get('new_vm') else self.read(project, owner, body.get('vm_id'))
             if action in ('vm/create', 'vm/update', 'vm/start', 'vm/resume'):
                 usage = self.quota_usage(owner)
                 for key, default in (('vcpus', 1), ('memory_mib', 1024)):
@@ -566,16 +582,24 @@ class MicroVMs:
     def _perform(self, project, owner, action, body):
         validate(action, body)
         with self.lock(project):
-            meta = self.read(project, owner)
+            meta = None if action=='vm/create' and body.get('new_vm') else self.read(project, owner, body.get('vm_id'))
             if action == 'vm/create':
                 if meta and meta['state'] != 'destroyed':
                     raise VMError('vm_already_exists')
                 with self.allocation_lock():
+                    previous=self.read(project,owner)
+                    additional=previous is not None and previous['state']!='destroyed'
+                    if previous and previous['state']=='destroyed':
+                        # Preserve retained generations and their billing checkpoints.
+                        previous['catalog_key']=previous['vm_id']
+                        self.catalog(project).replace(self.catalog(previous['vm_id']))
+                        self.save(previous)
                     meta = {'vm_id': 'vm_' + uuid.uuid4().hex, 'project_id': project, 'owner_did': owner,
                             'state': 'creating', 'vcpus': body.get('vcpus', 1),
                             'memory_mib': body.get('memory_mib', 1024), 'disk_gib': body.get('disk_gib', 8),
                             'ssh_port': self.reserved_port(), 'ports': [], 'retained': False,
                             'ssh_keys': __import__('network').keys(body.get('ssh_keys', []))}
+                    meta['catalog_key']=meta['vm_id'] if additional else project
                     used = {meta['ssh_port']}
                     for port in body.get('ports', []):
                         candidate = self.reserved_port(used)

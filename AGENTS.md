@@ -670,7 +670,7 @@ networking. Run compiled binaries, Python/Node.js programs, scripts or system
 services directly. **Docker and Compose are optional.** Neither publication,
 public ports nor the `GAP_*` environment requires a container or Compose release.
 
-Each project can own one managed microVM. The same microVM access approval
+Each project can own multiple managed microVMs, within the owner's node quota. The same microVM access approval
 covers its lifecycle, SSH, networking and optional Compose operations. Public
 Cloud access alone does not grant microVM access; ask the operator to approve
 your exact agent DID. Private nodes additionally require general node approval.
@@ -709,8 +709,21 @@ hot resource resize. Public port mappings and SSH keys can change while running.
 
 Humans can create a VM at `/microvms` after connecting their project with its
 owner token. The form defaults to 1 vCPU, 1024 MiB RAM, 8 GiB disk and stopped
-state, with an optional SSH public key. There is currently one VM per project;
-raising `--max-vms` allows additional VMs across that agent's projects on this node.
+state, with an optional SSH public key. The machine selector switches between VMs
+in the same project. New microVM creates another machine; Delete requires its
+complete VM ID and offers retained storage (still billed) or permanent erasure.
+Running machines stop gracefully before deletion. Raising `--max-vms` allows
+additional VMs in the same project or across that agent's projects on this node.
+
+`GET /v1/cloud/projects/{project}/vms` lists active allocations and the agent quota.
+`POST /v1/cloud/projects/{project}/vms` creates another VM with the same creation
+body and idempotent `request_id` as `/vm`. Select a VM for read operations with
+`?vm_id=vm_<32hex>` on `/vm`, `/vm/runtime`, `/vm/ingress`, `/vm/ports` or `/vm/ssh`.
+Mutations continue to require `vm_id` in their JSON body. Legacy `/vm` without
+a selector and `/stack` target the default VM. Additional VMs have separate
+`/apps/{vm_id}/` ingress paths, SSH identities, disks and five-port allocations.
+The project balance, spending budget and 72-hour storage retention deadline are
+shared across its VMs. Deleting one VM leaves the others running.
 This is not yet a fleet-wide customer quota.
 
 Operator command (on the node host):
@@ -788,6 +801,11 @@ Fractions carry between samples: there is no whole-minute rounding.
 `enforced` debits prepaid credits. Check `billing_mode` and `tariff` in the account:
 a missing tariff means pricing is not configured, not that hosting is permanently
 free. Usage checkpoints normally run every 5 seconds and at lifecycle changes.
+The billing ledger accumulates these measurements into one row per VM state
+period, starting another row on a state, allocation, execution mode or tariff
+change. Credit checks keep their five-second cadence. Historical raw measurements
+are archived locally and grouped as historical compute ON/OFF because older
+records did not distinguish stopped from hibernated. Existing balances are preserved.
 Budget alerts appear at 80% and exhaustion. The budget is an execution stop
 threshold, not a hard final invoice cap: an in-flight metering interval can cross
 it and retained disk continues to consume prepaid credits after execution stops.

@@ -697,3 +697,27 @@ Validation: `python3 -m unittest discover -s runtime/compose -p 'test_*.py'`.
 fixture variables. It exercises public/private owner authorization, protocol
 wake, concurrent restore, outgoing-only inactivity, host metering, real test
 credits, recharge cancellation and an accelerated 72-hour deletion deadline.
+
+
+### Multiple managed VMs and billing periods
+
+`GET/POST /v1/cloud/projects/{project}/vms` lists/creates machines in a project.
+Read a selected machine using `?vm_id=vm_<32hex>` on `/vm` and its runtime,
+ingress, ports or SSH resources. Mutations still identify the VM in JSON.
+The legacy default VM and Compose convenience API retain their original paths.
+Additional machines use `/apps/{vm_id}/`, separate SSH identities and five
+independent public port slots. The default owner quota is still one VM per node;
+raise it with `microvm-access.py set-quota --max-vms` when approved.
+
+The WebUI selects, creates and deletes machines. Deletion stops a running VM
+gracefully and requires its complete ID; retained disks remain billed. Each
+retained generation is metered once, even after creating a replacement. All
+project machines share the credit wallet, budget and exhaustion retention.
+Usage rows accumulate within VM state/allocation/pricing periods. The five-second
+checkpoint and charge transaction remains atomic. Legacy measurements are
+archived in `legacy_meter_entries` during migration without changing balances.
+
+Run `collection_integration.py` with `GAP_TEST_VM_COLLECTION=1` alongside the
+existing real-KVM test settings in an isolated, disposable container. It checks
+two-VM routing, selected wake-up, quota enforcement, deletion/replacement and
+project-wide retention expiry. Never point these tests at production state.

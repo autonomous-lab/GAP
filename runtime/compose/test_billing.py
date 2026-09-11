@@ -51,6 +51,65 @@ class LedgerTests(unittest.TestCase):
         for stamp in range(1100,2100,100): self.sample(stamp)
         self.assertEqual(self.ledger.view(P,O)['spent_microcredits'],3)
 
+    def test_period_accumulates_until_state_or_price_changes(self):
+        self.ledger.set_pricing('enforced',self.price);self.ledger.topup(P,O,10000,'one')
+        self.meta['state']='running'
+        self.sample(0)
+        for stamp in range(1000,101000,1000): self.sample(stamp)
+        rows=[e for e in self.ledger.view(P,O)['entries'] if e['kind']=='usage']
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]['usage']['vcpu_ms'],100000)
+        self.assertEqual(rows[0]['debited_microcredits'],300)
+        self.assertEqual(rows[0]['sample_count'],100)
+        self.meta['state']='hibernated'
+        self.sample(100000,on=False)  # transition at the same checkpoint timestamp
+        self.sample(101000,on=False)
+        rows=[e for e in self.ledger.view(P,O)['entries'] if e['kind']=='usage']
+        self.assertEqual([e['state'] for e in rows],['hibernated','running'])
+        self.assertEqual(rows[0]['debited_microcredits'],1)
+        self.ledger.set_pricing('enforced',dict(self.price,version='test-2'))
+        self.sample(102000,on=False)
+        rows=[e for e in self.ledger.view(P,O)['entries'] if e['kind']=='usage']
+        self.assertEqual(len(rows),3)
+        self.assertEqual(rows[0]['tariff_version'],'test-2')
+        self.assertEqual(sum(e['debited_microcredits'] for e in rows),self.ledger.view(P,O)['spent_microcredits'])
+
+    def test_legacy_compaction_preserves_raw_audit_and_never_changes_balance(self):
+        self.ledger.set_pricing('enforced',self.price);self.ledger.topup(P,O,1000,'one')
+        for n,on in enumerate([True,True,False],1):
+            usage={'vcpu_ms':1000 if on else 0,'ram_byte_ms':GIB*1000 if on else 0,
+                   'disk_byte_ms':GIB*1000,'bytes_in':0,'bytes_out':0}
+            self.now=n
+            with self.ledger.db() as db:self.ledger._charge(db,P,O,f'meter:{V}:{n*1000}',usage,'enforced',self.price)
+        before=self.ledger.view(P,O)
+        self.ledger=Ledger(self.ledger.path,lambda:self.now)
+        after=self.ledger.view(P,O)
+        self.assertEqual(after['balance_microcredits'],before['balance_microcredits'])
+        self.assertEqual(after['spent_microcredits'],before['spent_microcredits'])
+        rows=[e for e in after['entries'] if e['kind']=='usage']
+        self.assertEqual(len(rows),2)
+        self.assertEqual(sum(e['debited_microcredits'] for e in rows),7)
+        self.assertTrue(all(e['historical'] for e in rows))
+        with self.ledger.db() as db:self.assertEqual(db.execute('SELECT count(*) FROM legacy_meter_entries').fetchone()[0],3)
+        self.ledger=Ledger(self.ledger.path,lambda:self.now)
+        self.assertEqual(self.ledger.view(P,O),after)
+
+    def test_period_update_and_charge_roll_back_with_checkpoint(self):
+        from unittest.mock import patch
+        self.ledger.set_pricing('enforced',self.price);self.ledger.topup(P,O,1000,'one')
+        self.sample(0);self.sample(1000)
+        original=self.ledger.accumulate
+        def fail(*args):
+            original(*args)
+            raise RuntimeError('simulated interrupted transaction')
+        with patch.object(self.ledger,'accumulate',side_effect=fail):
+            with self.assertRaises(RuntimeError):self.sample(2000)
+        self.assertEqual(self.ledger.view(P,O)['spent_microcredits'],3)
+        self.sample(2000)
+        rows=[e for e in self.ledger.view(P,O)['entries'] if e['kind']=='usage']
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]['debited_microcredits'],6)
+
     def test_topup_dedup_conflict_owner_and_retention_recharge(self):
         self.ledger.set_pricing('enforced',self.price)
         self.ledger.topup(P,O,3,'one'); self.ledger.topup(P,O,3,'one')
@@ -128,7 +187,7 @@ class LedgerTests(unittest.TestCase):
         self.sample(1000,on=False)
         runner=Runner.__new__(Runner)
         runner.authorize=lambda *_: {}
-        runner.hypervisor=SimpleNamespace(read=lambda *_:self.meta)
+        runner.hypervisor=SimpleNamespace(read=lambda *_:self.meta,list=lambda *_:[self.meta])
         runner.runtime=SimpleNamespace(ledger=self.ledger,lock=lambda _:nullcontext(),sample=lambda _:self.sample(6000,on=False))
         runner.operator({'action':'topup','project_id':P,'owner_did':O,'amount_microcredits':100,'request_id':'paid'})
         self.assertEqual(self.ledger.view(P,O)['balance_microcredits'],100)
@@ -143,7 +202,7 @@ class LedgerTests(unittest.TestCase):
         self.sample(1000)
         runner=Runner.__new__(Runner)
         runner.authorize=lambda *_:{}
-        runner.hypervisor=SimpleNamespace(read=lambda *_:self.meta)
+        runner.hypervisor=SimpleNamespace(read=lambda *_:self.meta,list=lambda *_:[self.meta])
         runner.runtime=SimpleNamespace(ledger=self.ledger,lock=lambda _:nullcontext(),sample=lambda _:self.sample(2000))
         runner.rpc({'project_id':P,'owner_did':O,'action':'budget','method':'PUT','body':{'request_id':'new-period','budget_microcredits':10}})
         self.assertEqual(self.ledger.view(P,O)['budget_spent_microcredits'],0)

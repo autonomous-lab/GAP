@@ -224,17 +224,27 @@ class Runner:
             raise Failure(400, "invalid_project")
         self.authorize(project, owner)
         method, action, body = rpc.get("method"), rpc.get("action"), rpc.get("body")
+        selected = body.get('vm_id') if isinstance(body,dict) else None
+        if selected is not None and not re.fullmatch(r'vm_[0-9a-f]{32}',str(selected)):
+            raise Failure(400,'invalid_vm_identity')
+        if action=='vms':
+            if not self.hypervisor: raise Failure(409,'managed_hypervisor_not_configured')
+            if method=='GET':
+                return 200,{'vms':[self.hypervisor.public(m) for m in self.hypervisor.list(project,owner) if m['state']!='destroyed'],
+                            'agent_quota':self.hypervisor.quota_view(project,owner)}
+            if method!='POST' or not isinstance(body,dict): raise Failure(400,'invalid_vm_collection_method')
+            body=dict(body,new_vm=True)
+            action='vm'
         if action in ('runtime','credits','budget'):
             if not self.runtime: raise Failure(409,'serverless_not_configured')
             if method=='GET':
-                if action=='runtime': return 200,self.runtime.view(self.hypervisor.read(project,owner))
+                if action=='runtime': return 200,self.runtime.view(self.hypervisor.read(project,owner,selected))
                 return 200,self.runtime.ledger.view(project,owner)
             if action=='budget' and method=='PUT':
                 if not isinstance(body,dict) or set(body)!={'request_id','budget_microcredits'}:
                     raise Failure(400,'invalid_budget')
                 with self.runtime.lock(project):
-                    meta=self.hypervisor.read(project,owner)
-                    if meta: self.runtime.sample(meta)
+                    for meta in self.hypervisor.list(project,owner): self.runtime.sample(meta)
                     return 200,self.runtime.ledger.set_budget(project,owner,body['budget_microcredits'],body['request_id'])
             if action!='runtime' or method!='PUT': raise Failure(400,'invalid_runtime_method')
             method='POST'
@@ -242,7 +252,7 @@ class Runner:
             if not self.hypervisor or not self.hypervisor.network:
                 raise Failure(409, 'public_network_not_configured')
             if method == 'GET':
-                meta = self.hypervisor.read(project, owner)
+                meta = self.hypervisor.read(project, owner,selected)
                 view = self.hypervisor.network.public if action == 'ports' else self.hypervisor.network.ssh_public
                 return 200, view(meta)
             if method != 'PUT':
@@ -252,7 +262,7 @@ class Runner:
             if not self.ingress:
                 raise Failure(409, 'ingress_not_configured')
             if method == 'GET':
-                return 200, self.ingress.public(self.hypervisor.read(project, owner))
+                return 200, self.ingress.public(self.hypervisor.read(project, owner,selected))
             if method != 'PUT':
                 raise Failure(400, 'invalid_ingress_method')
             method = 'POST'
@@ -260,9 +270,9 @@ class Runner:
             if method == 'GET':
                 if not self.hypervisor:
                     raise Failure(409, 'managed_hypervisor_not_configured')
-                view = self.hypervisor.public(self.hypervisor.read(project, owner))
+                view = self.hypervisor.public(self.hypervisor.read(project, owner,selected))
                 view["agent_quota"] = self.hypervisor.quota_view(project, owner)
-                if self.runtime: view["runtime"] = self.runtime.view(self.hypervisor.read(project,owner))
+                if self.runtime: view["runtime"] = self.runtime.view(self.hypervisor.read(project,owner,selected))
                 return 200, view
             action = {'POST': 'vm/create', 'PATCH': 'vm/update', 'DELETE': 'vm/destroy'}.get(method)
             method = 'POST'
@@ -339,19 +349,19 @@ class Runner:
             payload = json.loads(row['payload'])
             with self.runtime.lock(row['project']) if self.runtime else nullcontext():
                 if self.runtime:
-                    current=self.hypervisor.read(row['project'],row['owner'])
+                    current=self.hypervisor.read(row['project'],row['owner'],payload['body'].get('vm_id'))
                     if current: self.runtime.sample(current)
                     if payload['action'] in ('vm/create','vm/start','vm/resume'):
                         self.runtime.check_credit({'project_id':row['project'],'owner_did':row['owner']})
-                    if current and current['state']=='hibernated' and payload['action'] not in ('vm/start','vm/resume','vm/stop','vm/hibernate','vm/destroy','vm/update','runtime'):
-                        self.runtime.ensure_awake(row['project'])
+                    if current and current['state']=='hibernated' and payload['action'] not in ('vm/create','vm/start','vm/resume','vm/stop','vm/hibernate','vm/destroy','vm/update','runtime'):
+                        self.runtime.ensure_awake(row['project'],current['vm_id'])
                 admission=nullcontext()
                 if self.runtime and payload['action'] in ('vm/create','vm/start','vm/resume'):
                     resources=payload['body'] if payload['action']=='vm/create' else current
-                    admission=self.runtime.admission(row['project'],resources.get('vcpus',1),resources.get('memory_mib',1024))
+                    admission=self.runtime.admission(row['project'],resources.get('vcpus',1),resources.get('memory_mib',1024),payload['body'].get('vm_id'))
                 with admission: result=self.dispatch_job(row,guest,payload)
                 if self.runtime:
-                    current=self.hypervisor.read(row['project'],row['owner'])
+                    current=self.hypervisor.read(row['project'],row['owner'],result.get('vm',{}).get('vm_id') or payload['body'].get('vm_id'))
                     if current:
                         if payload['action'] in ('vm/stop','vm/hibernate'): current['manual_stop']=True
                         elif payload['action'] in ('vm/start','vm/resume','vm/create'):
@@ -395,16 +405,15 @@ class Runner:
         if action=='pricing': return ledger.pricing()
         if action=='set-pricing':
             # Flush all current allocation intervals before changing the price.
-            metas=[json.loads(p.read_text()) for p in sorted((self.hypervisor.root/'catalog').glob('prj_*.json'))]
+            metas=[json.loads(p.read_text()) for p in sorted((self.hypervisor.root/'catalog').glob('*.json'))]
             with ExitStack() as locks:
                 for meta in metas: locks.enter_context(self.runtime.lock(meta['project_id']))
-                for meta in metas: self.runtime.sample(self.hypervisor.read(meta['project_id'],meta['owner_did']))
+                for meta in metas: self.runtime.sample(self.hypervisor.read(meta['project_id'],meta['owner_did'],meta['vm_id']))
                 return ledger.set_pricing(body['mode'],body.get('tariff'))
         if action=='topup':
             self.authorize(body['project_id'],body['owner_did'])
             with self.runtime.lock(body['project_id']):
-                meta=self.hypervisor.read(body['project_id'],body['owner_did'])
-                if meta: self.runtime.sample(meta)
+                for meta in self.hypervisor.list(body['project_id'],body['owner_did']): self.runtime.sample(meta)
                 return ledger.topup(body['project_id'],body['owner_did'],body['amount_microcredits'],body['request_id'])
         if action=='account': return ledger.view(body['project_id'],body['owner_did'])
         raise Failure(400,'invalid_operator_action')

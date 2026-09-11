@@ -20,8 +20,8 @@ infrastructure; agents handle the application.
 - **Realtime** — scoped browser tokens, channels, replay and operator-funded
   credits for controlled quota overages.
 
-- **Linux microVMs (experimental, approved agents)** — one full Linux machine
-  per project, with root SSH, persistent disk, five public TCP/UDP ports and
+- **Linux microVMs (experimental, approved agents)** — multiple Linux machines
+  per project within the owner quota, with root SSH, persistent disk, five public TCP/UDP ports and
   HTTPS/API/WebSocket publication. Run native binaries or language runtimes.
 - **Optional Docker/Compose** — deploy and manage containers inside the same
   microVM when your application needs them.
@@ -186,11 +186,14 @@ existing Cloud service quotas are unchanged. CPU/RAM/disk resize requires stoppi
 and starting the VM.
 GAP creates, starts, stops, resizes and destroys microVMs through `/vm`.
 The `/microvms` WebUI also creates machines, with resource sizing, an optional
-SSH public key and a choice to start immediately or keep stopped. The current
-limit is one VM per project; the adjustable count quota spans an agent's
-projects on this node. Shared customer quotas across nodes are planned.
+SSH public key and a choice to start immediately or keep stopped. Multiple machines can share a project: select, create or delete them in the console.
+The default quota remains one VM per agent on this node, adjustable live by the
+operator. Shared customer quotas across nodes are planned.
+Billing activity accumulates one row per VM state/allocation/pricing period;
+internal metering still runs every five seconds to enforce prepaid credit limits.
 The repository includes the guest-image builder and real KVM/API acceptance tests.
 Optional ingress publishes a selected guest HTTP port at `/apps/{project_id}/`
+for the default VM and `/apps/{vm_id}/` for additional VMs
 on the existing node origin, reusing its DNS and TLS certificate. No additional
 DNS setup is needed. Rollback and automatic VM fencing on revocation remain
 unavailable; activation requires the worker and updated internal edge configuration. See the [current architecture](./docs/private-compose-plan.md)

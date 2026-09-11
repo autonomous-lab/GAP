@@ -64,8 +64,24 @@ class Runtime:
         meta['tcp_recent_ports']={p:t for p,t in state['tcp_ports'].items() if t>state['guest_clock']-120}
 
     def recover(self):
-        for path in (self.manager.root/'catalog').glob('prj_*.json'):
+        known={json.loads(p.read_text())['vm_id'] for p in (self.manager.root/'catalog').glob('*.json')}
+        for folder in (self.manager.root/'retained').glob('vm_*'):
+            marker=folder/'retention.json'
+            if folder.name in known or not marker.exists(): continue
+            who=json.loads(marker.read_text())
+            if who.get('vm_id')!=folder.name: raise VMError('invalid_retained_generation')
+            meta={'project_id':who['project_id'],'owner_did':who['owner_did'],
+                  'vm_id':folder.name,'catalog_key':folder.name,'state':'destroyed',
+                  'vcpus':1,'memory_mib':1024,'disk_gib':0,'ports':[],'ssh_port':0,'retained':True}
+            self.manager.folder(meta)  # validate the generated identity/path
+            # Old checkpoints stopped when the default VM took over billing this
+            # retained disk. Start a fresh baseline rather than re-billing that gap.
+            with self.ledger.db() as db: db.execute('DELETE FROM samples WHERE vm=?',(meta['vm_id'],))
+            self.manager.save(meta)
+        for path in (self.manager.root/'catalog').glob('*.json'):
             meta=json.loads(path.read_text())
+            # Complete a default-generation archive interrupted after rename.
+            meta['catalog_key']=path.stem
             if self.manager.alive(meta):
                 # Worker/container restart normally also stops QEMU. Never
                 # continue an unmetered orphan left by a different deployment.
@@ -98,7 +114,7 @@ class Runtime:
             marker=path/'retention.json'
             if marker.exists():
                 who=json.loads(marker.read_text())
-                if who.get('project_id')==meta['project_id'] and who.get('owner_did')==meta['owner_did']:
+                if who.get('project_id')==meta['project_id'] and who.get('owner_did')==meta['owner_did'] and path.name==meta['vm_id']:
                     folders.append(path)
         for folder in folders:
             if not folder.exists(): continue
@@ -140,7 +156,7 @@ class Runtime:
         if 'idle_timeout_seconds' in body and (type(body['idle_timeout_seconds']) is not int or not 60<=body['idle_timeout_seconds']<=3600):
             raise VMError('idle_timeout_must_be_60_to_3600_seconds')
         with self.lock(project),self.manager.lock(project):
-            meta=self.manager.read(project,owner)
+            meta=self.manager.read(project,owner,body['vm_id'])
             if not meta or meta['vm_id']!=body['vm_id'] or meta['state']=='destroyed': raise VMError('vm_generation_mismatch')
             approval=self.runner.authorize(project,owner)
             if body['mode']=='always_on' and not approval.get('always_on_allowed'):
@@ -155,40 +171,42 @@ class Runtime:
         self.state(meta)['last_incoming']=time.time()
 
     @contextmanager
-    def admission(self,project,vcpus,memory_mib):
+    def admission(self,project,vcpus,memory_mib,vm_id=None):
         with self.capacity_lock:
             allocated=0
-            for path in (self.manager.root/'catalog').glob('prj_*.json'):
+            for path in (self.manager.root/'catalog').glob('*.json'):
                 meta=json.loads(path.read_text())
-                if meta['project_id']!=project and self.manager.alive(meta): allocated+=meta['vcpus']
+                if meta['vm_id']!=vm_id and self.manager.alive(meta): allocated+=meta['vcpus']
             available=next(int(line.split()[1]) for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))//1024
             if available<memory_mib+self.reserve_memory_mib or allocated+vcpus>max(1,(os.cpu_count() or 1)-self.reserve_vcpus):
                 raise VMError('host_capacity_unavailable_retry_later')
             yield
 
-    def ensure_awake(self,project):
+    def ensure_awake(self,project,vm_id=None):
         # Caller holds project lifecycle lock; concurrent first requests share
         # one restore. Recheck owner approval and quotas on every wake.
-        path=self.manager.catalog(project)
+        path=self.manager.catalog(vm_id or project)
+        if vm_id and not path.exists(): path=self.manager.catalog(project)
         if not path.exists(): raise VMError('vm_not_found')
         meta=json.loads(path.read_text())
+        if meta['project_id']!=project or (vm_id and meta['vm_id']!=vm_id): raise VMError('vm_generation_mismatch')
         if meta['state'] not in ('running','hibernated'):
             raise VMError('vm_not_available_for_automatic_wake')
         self.sample(meta,force=meta['state']=='hibernated'); self.check_credit(meta)
         if meta['state']=='hibernated':
             self.runner.authorize(project,meta['owner_did'])
-            with self.admission(project,meta['vcpus'],meta['memory_mib']):
+            with self.admission(project,meta['vcpus'],meta['memory_mib'],meta['vm_id']):
                 self.manager.perform(project,meta['owner_did'],'vm/resume',{'vm_id':meta['vm_id']})
-            meta=self.manager.read(project,meta['owner_did'])
+            meta=self.manager.read(project,meta['owner_did'],meta['vm_id'])
             meta['manual_stop']=False; meta.pop('runtime_error',None); self.manager.save(meta)
             self.sample(meta)
         self.touch(meta)
         return meta
 
     @contextmanager
-    def http_request(self,project):
+    def http_request(self,project,vm_id=None):
         with self.lock(project):
-            meta=self.ensure_awake(project)
+            meta=self.ensure_awake(project,vm_id)
             state=self.state(meta); state['active_http']+=1
         try: yield meta
         finally:
@@ -205,27 +223,35 @@ class Runtime:
 
     def expire(self,meta):
         project,owner=meta['project_id'],meta['owner_did']
-        if not self.ledger.claim_expired(project,owner,meta['vm_id']): return
-        self.disconnect(meta)
+        with self.ledger.db() as db:
+            account=self.ledger.ensure(db,project,owner)
+            claim=account['retention_claim'] or meta['vm_id']
+        if not self.ledger.claim_expired(project,owner,claim): return
         if self.gateway: self.gateway.withdraw(project)
-        # Do not require current approval to enforce deletion after retention.
-        # Exact generation and project lifecycle lock still protect new VMs.
+        # One project wallet has one retention deadline. Delete all generations
+        # under its lifecycle/owner locks before completing that claim.
         with self.manager.owner_lock(owner):
-            if self.manager.alive(meta): self.manager.stop(meta,True)
-            if meta['state']!='destroyed':
-                self.manager._perform(project,owner,'vm/destroy',{'vm_id':meta['vm_id'],'delete_data':True,'confirm_data_loss':True})
+            for current in self.manager.list(project,owner):
+                self.disconnect(current)
+                self.sample(current)
+                if self.manager.alive(current): self.manager.stop(current,True)
+                if current['state']!='destroyed':
+                    self.manager._perform(project,owner,'vm/destroy',{'vm_id':current['vm_id'],'delete_data':True,'confirm_data_loss':True})
             for path in (self.manager.root/'retained').glob('vm_*'):
                 marker=path/'retention.json'
                 if marker.exists():
                     who=json.loads(marker.read_text())
                     if who.get('project_id')==project and who.get('owner_did')==owner and path.resolve().parent==self.manager.root/'retained':
                         shutil.rmtree(path)
-        self.ledger.finish_deletion(project,owner,meta['vm_id'])
+            for current in self.manager.list(project,owner): self.sample(current)
+        self.ledger.finish_deletion(project,owner,claim)
 
     def tick_project(self,path):
-        project=path.stem
         meta=json.loads(path.read_text())
-        if meta['state']=='destroyed' and not self.storage_bytes(meta): return
+        project=meta['project_id']
+        if meta['state']=='destroyed' and not self.storage_bytes(meta):
+            if self.ledger.view(project,meta['owner_did'],include_entries=False)['deletion_committed']: self.expire(meta)
+            return
         state=self.state(meta)
         self.sample(meta,force=False)
         account=self.ledger.view(project,meta['owner_did'],include_entries=False)
@@ -249,16 +275,16 @@ class Runtime:
         meta['last_incoming_at']=state['last_incoming']; self.manager.save(meta)
         if meta.get('execution_mode')=='always_on' and meta['state'] in ('hibernated','stopped') and not meta.get('manual_stop') and not blocked and not busy:
             if self.runner.authorize(project,meta['owner_did']).get('always_on_allowed'):
-                with self.admission(project,meta['vcpus'],meta['memory_mib']):
+                with self.admission(project,meta['vcpus'],meta['memory_mib'],meta['vm_id']):
                     self.manager.perform(project,meta['owner_did'],'vm/start',{'vm_id':meta['vm_id']})
-                self.sample(self.manager.read(project,meta['owner_did']))
+                self.sample(self.manager.read(project,meta['owner_did'],meta['vm_id']))
                 if self.runner.ingress: self.runner.ingress.sync()
 
 
     def tick(self):
         errors=[]
-        for path in (self.manager.root/'catalog').glob('prj_*.json'):
-            with self.lock(path.stem):
+        for path in (self.manager.root/'catalog').glob('*.json'):
+            with self.lock(json.loads(path.read_text())['project_id']):
                 try: self.tick_project(path)
                 except Exception as error:
                     errors.append(path.stem+':'+str(error))

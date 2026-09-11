@@ -200,7 +200,7 @@ fn valid_did(did: &str) -> bool {
         .is_some_and(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// One microVM per project; Compose is an optional workload in that guest.
+/// A VM collection per project; legacy /vm routes address its default guest.
 pub fn runtime_route(path: &str) -> Option<(&str, &str)> {
     let rest = path.strip_prefix("/v1/cloud/projects/")?;
     let (project, tail) = rest.split_once('/')?;
@@ -212,6 +212,7 @@ pub fn runtime_route(path: &str) -> Option<(&str, &str)> {
     }
     match tail {
         "vm" => return Some((project, "vm")),
+        "vms" => return Some((project, "vms")),
         "vm/start" => return Some((project, "vm/start")),
         "vm/stop" => return Some((project, "vm/stop")),
         "vm/hibernate" => return Some((project, "vm/hibernate")),
@@ -324,13 +325,14 @@ mod tests {
                 Some((project, action))
             );
         }
+        assert_eq!(runtime_route(&format!("/v1/cloud/projects/{project}/vms")), Some((project, "vms")));
         let action = "jobs/job_0123456789abcdef0123456789abcdef";
         assert_eq!(
             runtime_route(&format!("/v1/cloud/projects/{project}/vm/{action}")),
             Some((project, action))
         );
         for suffix in [
-            "vms",
+            "vms/invalid",
             "vm/releases",
             "vm/../stack/start",
             "vm/jobs/invalid",

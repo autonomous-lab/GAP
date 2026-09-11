@@ -73,7 +73,7 @@ class IngressTests(unittest.TestCase):
              patch.object(self.manager, 'perform', side_effect=VMError('failed')):
             with self.assertRaises(VMError):
                 self.ingress.vm_operation(PROJECT, OWNER, 'vm/stop', {'vm_id': VM})
-        self.assertEqual(events, [PROJECT, None])
+        self.assertEqual(events, [VM, None])
 
     def test_dedicated_unix_caddy_required(self):
         for change in ({'dedicated_caddy': False}, {'admin_url': 'http://public.example:2019'},

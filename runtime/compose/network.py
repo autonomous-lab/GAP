@@ -65,7 +65,7 @@ class Network:
         # Caller holds the cross-project catalog allocation lock until save.
         import json
         used = set()
-        for path in (self.manager.root / 'catalog').glob('prj_*.json'):
+        for path in (self.manager.root / 'catalog').glob('*.json'):
             other = json.loads(path.read_text())
             if other['state'] != 'destroyed':
                 used.update(other.get('public_ports', []))
@@ -144,7 +144,7 @@ class Network:
     def perform(self, project, owner, action, body):
         validate(action, body)
         with self.manager.lock(project):
-            meta = self.manager.read(project, owner)
+            meta = self.manager.read(project, owner, body['vm_id'])
             if not meta or meta['state'] in ('creating', 'destroyed'):
                 raise VMError('vm_not_found')
             if meta['vm_id'] != body['vm_id']:

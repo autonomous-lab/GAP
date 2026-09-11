@@ -13,7 +13,7 @@ def variables(meta, hostname='', origin=''):
     settings = meta.get('ingress', {})
     enabled = bool(origin and settings.get('enabled') and any(
         p['guest_port'] == settings.get('guest_port') for p in meta['ports']))
-    base_path = '/apps/' + meta['project_id'] + '/' if origin else ''
+    base_path = '/apps/' + meta.get('catalog_key',meta['project_id']) + '/' if origin else ''
     url = origin + base_path if enabled else ''
     mappings = {p['slot']: p for p in meta.get('public_mappings', [])}
     ports = [dict(slot=i, public_port=port, guest_port=mappings.get(i, {}).get('guest_port'),

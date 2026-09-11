@@ -123,14 +123,18 @@ A project belongs to one customer and contains functions, site deployments,
 databases and zero or more microVMs. Every VM has its own immutable VM ID,
 project ID, customer ID and placement node ID.
 
-The current catalog has one VM per project and resource quotas per agent.
+The catalog now supports multiple VMs per project and resource quotas per agent.
+Collection GET/POST `/vms`, selected reads via `?vm_id=`, and WebUI selection,
+creation and deletion are implemented. The default VM retains its legacy `/vm`
+and `/stack` aliases; additional ingress paths use the VM ID. Project wallets
+and budgets remain shared, with independent VM billing periods.
 Multiple projects must not become a way to bypass the new customer VM limit.
 New count limits apply across all the customer's agents and projects. Count
 stopped and hibernated VMs as well as running VMs; release the count only after
 successful destruction. Resource allocation quotas remain separate from count
 limits and are configurable by the administrator.
 
-Use explicit VM collections, for example:
+Future resource-addressed aliases can complement the existing collection API, for example:
 
 - `GET/POST /v1/cloud/projects/{project}/vms`
 - `GET/PATCH/DELETE /v1/cloud/projects/{project}/vms/{vm}`

@@ -63,9 +63,9 @@ class Gateway:
         self.http_server.daemon_threads=True
         threading.Thread(target=self.http_server.serve_forever,daemon=True).start()
 
-    def destination(self,project,slot,protocol):
+    def destination(self,project,slot,protocol,vm_id=None):
         with self.runtime.lock(project):
-            meta=self.runtime.ensure_awake(project)
+            meta=self.runtime.ensure_awake(project,vm_id)
             mapping=next((m for m in meta.get('public_mappings',[]) if m['slot']==slot and m['protocol'] in (protocol,'both')),None)
             if not mapping: raise VMError('public_mapping_unavailable')
             return meta,meta['public_targets'][str(slot)]
@@ -73,7 +73,7 @@ class Gateway:
     def connect(self,port,meta):
         deadline=time.monotonic()+30
         with self.runtime.lock(meta['project_id']):
-            current=self.manager.read(meta['project_id'],meta['owner_did'])
+            current=self.manager.read(meta['project_id'],meta['owner_did'],meta['vm_id'])
             if not current or current['vm_id']!=meta['vm_id'] or current['state']!='running':
                 raise VMError('application_changed_retry_request')
             while time.monotonic()<deadline:
@@ -113,25 +113,25 @@ class Gateway:
                 state['connections'].discard(client); state['connections'].discard(upstream)
             upstream.close()
 
-    def tcp_handler(self,project,slot):
+    def tcp_handler(self,project,slot,vm_id=None):
         outer=self
         class Handler(socketserver.BaseRequestHandler):
             def handle(self):
                 try:
-                    meta,port=outer.destination(project,slot,'tcp')
+                    meta,port=outer.destination(project,slot,'tcp',vm_id)
                     outer.tunnel(meta,self.request,outer.connect(port,meta))
                 except (VMError,OSError): pass
         return Handler
 
-    def udp_handler(self,project,slot):
+    def udp_handler(self,project,slot,vm_id=None):
         outer=self
         class Handler(socketserver.BaseRequestHandler):
             def handle(self):
                 data,server=self.request
                 if len(data)>65507: return
                 try:
-                    meta,port=outer.destination(project,slot,'udp')
-                    identity=(project,slot,self.client_address)
+                    meta,port=outer.destination(project,slot,'udp',vm_id)
+                    identity=(project,slot,self.client_address,vm_id)
                     with outer.guard:
                         peer=outer.udp_peers.get(identity)
                         if peer is None:
@@ -166,13 +166,13 @@ class Gateway:
 
     def reconcile(self):
         wanted={}
-        for path in (self.manager.root/'catalog').glob('prj_*.json'):
+        for path in (self.manager.root/'catalog').glob('*.json'):
             meta=json.loads(path.read_text())
             if meta['state'] not in ('running','hibernated','hibernating','resuming'): continue
             for mapping in meta.get('public_mappings',[]):
                 for protocol in ('tcp','udp'):
                     if mapping['protocol'] in (protocol,'both'):
-                        identity=(meta['project_id'],mapping['slot'],protocol,meta['public_ports'][mapping['slot']-1])
+                        identity=(meta['project_id'],mapping['slot'],protocol,meta['public_ports'][mapping['slot']-1],meta['vm_id'])
                         wanted[identity]=mapping
         with self.guard:
             for identity,server in list(self.listeners.items()):
@@ -180,9 +180,9 @@ class Gateway:
                     server.shutdown(); server.server_close(); del self.listeners[identity]
             for identity in wanted:
                 if identity in self.listeners: continue
-                project,slot,protocol,port=identity
+                project,slot,protocol,port,vm_id=identity
                 cls=TCPServer if protocol=='tcp' else UDPServer
-                handler=self.tcp_handler(project,slot) if protocol=='tcp' else self.udp_handler(project,slot)
+                handler=self.tcp_handler(project,slot,vm_id) if protocol=='tcp' else self.udp_handler(project,slot,vm_id)
                 server=cls(('0.0.0.0',port),handler)
                 self.listeners[identity]=server
                 threading.Thread(target=server.serve_forever,daemon=True).start()
@@ -217,14 +217,18 @@ class Gateway:
             h.connection.settimeout(120)
             project=h.headers.get('X-GAP-Project','')
             if not re.fullmatch(r'prj_[0-9a-f]{24}',project): raise VMError('unknown_application')
-            path=self.manager.catalog(project)
+            vm_id=h.headers.get('X-GAP-VM')
+            if vm_id and not re.fullmatch(r'vm_[0-9a-f]{32}',vm_id): raise VMError('unknown_application')
+            path=self.manager.catalog(vm_id or project)
+            if vm_id and not path.exists(): path=self.manager.catalog(project)
             if not path.exists(): raise VMError('unknown_application')
             initial=json.loads(path.read_text())
+            if initial['project_id']!=project or (vm_id and initial['vm_id']!=vm_id): raise VMError('unknown_application')
             if not initial.get('ingress',{}).get('enabled'): raise VMError('unknown_application')
             upgrade=h.headers.get('Upgrade','').lower()=='websocket'
-            with self.runtime.http_request(project) as meta:
+            with self.runtime.http_request(project,vm_id) as meta:
                 with self.runtime.lock(project):
-                    current=self.manager.read(project,meta['owner_did'])
+                    current=self.manager.read(project,meta['owner_did'],meta['vm_id'])
                     if not current or current['vm_id']!=meta['vm_id'] or current['state']!='running' or not current.get('ingress',{}).get('enabled'):
                         raise VMError('application_changed_retry_request')
                     port=next(p['worker_port'] for p in current['ports'] if p['guest_port']==current['ingress']['guest_port'])
@@ -233,7 +237,7 @@ class Gateway:
                 if upgrade:
                     header=f'{h.command} {h.path} HTTP/1.1\r\n'
                     for key,value in h.headers.items():
-                        if key.lower()!='x-gap-project': header+=key+': '+value+'\r\n'
+                        if key.lower() not in ('x-gap-project','x-gap-vm'): header+=key+': '+value+'\r\n'
                     upstream.sendall((header+'\r\n').encode('latin-1'))
                     received=bytearray()
                     while not received.endswith(b'\r\n\r\n'):
@@ -245,7 +249,7 @@ class Gateway:
                         upstream.close(); h.close_connection=True; return
                 else:
                     body=self.request_body(h)
-                    headers={k:v for k,v in h.headers.items() if k.lower() not in HOP|{'x-gap-project','content-length'}}
+                    headers={k:v for k,v in h.headers.items() if k.lower() not in HOP|{'x-gap-project','x-gap-vm','content-length'}}
                     headers['Content-Length']=str(len(body)); headers['Connection']='close'
                     conn=http.client.HTTPConnection('127.0.0.1',port,timeout=120); conn.sock=upstream
                     try:

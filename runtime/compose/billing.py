@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import sqlite3
 import time
+import uuid
 
 GIB = 1024**3
 DENOMINATOR = GIB * 3_600_000
@@ -48,8 +49,57 @@ class Ledger:
                 project TEXT NOT NULL, operation TEXT NOT NULL, digest TEXT NOT NULL,
                 payload TEXT NOT NULL, created REAL NOT NULL, UNIQUE(project,operation));
             CREATE TABLE IF NOT EXISTS samples(vm TEXT PRIMARY KEY, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS legacy_meter_entries(id INTEGER PRIMARY KEY,
+                project TEXT NOT NULL, operation TEXT NOT NULL, digest TEXT NOT NULL,
+                payload TEXT NOT NULL, created REAL NOT NULL);
             ''')
+            if not db.in_transaction: db.execute('BEGIN IMMEDIATE')
+            self.compact_legacy(db)
         Path(self.path).chmod(0o600)
+
+    def compact_legacy(self, db):
+        """Keep old raw measurements for audit; display consolidated historical periods.
+
+        Old measurements did not record lifecycle state. Infer ON/OFF only,
+        explicitly labelled historical; never invent stopped vs hibernated.
+        This migration changes no account balance, carry, budget or checkpoint.
+        """
+        group = None
+        for row in list(db.execute("SELECT * FROM entries WHERE operation LIKE 'meter:%' ORDER BY project,id")):
+            payload = json.loads(row['payload'])
+            parts = row['operation'].split(':')
+            if payload.get('kind') != 'usage' or len(parts) != 3: continue
+            vm = parts[1]
+            state = 'historical_on' if payload['usage']['vcpu_ms'] else 'historical_off'
+            profile = (row['project'], vm, state, payload['billing_mode'], payload['tariff_version'])
+            db.execute('INSERT OR IGNORE INTO legacy_meter_entries VALUES(?,?,?,?,?,?)', tuple(row))
+            if group is None or group[0] != profile:
+                key = 'history-period:' + str(row['id'])
+                group = (profile, key)
+            period = {'vm_id': vm, 'state': state, 'started_at': row['created'],
+                      'ended_at': row['created'], 'historical': True}
+            self.accumulate(db, row['project'], group[1], payload, period)
+            db.execute('DELETE FROM entries WHERE id=?', (row['id'],))
+
+    def accumulate(self, db, project, key, result, period):
+        row = db.execute('SELECT payload FROM entries WHERE project=? AND operation=?', (project,key)).fetchone()
+        if row:
+            combined = json.loads(row[0])
+            for unit in UNITS: combined['usage'][unit] += result['usage'][unit]
+            for field in ('estimated_microcredits','debited_microcredits','unpaid_microcredits'):
+                combined[field] += result[field]
+            combined['ended_at'] = period['ended_at']
+            combined['sample_count'] += 1
+        else:
+            combined = dict(result, **period, sample_count=1)
+        encoded = json.dumps(combined, sort_keys=True)
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        if row:
+            db.execute('UPDATE entries SET payload=?,digest=? WHERE project=? AND operation=?',
+                       (encoded,digest,project,key))
+        else:
+            db.execute('INSERT INTO entries(project,operation,digest,payload,created) VALUES(?,?,?,?,?)',
+                       (project,key,digest,encoded,period['started_at']))
 
     @contextmanager
     def db(self):
@@ -105,7 +155,9 @@ class Ledger:
                 raise BillingError('nonzero_tariff_required_for_enforcement')
             db.execute('UPDATE settings SET mode=?,tariff=? WHERE id=1',(mode,current['version'] if current else None))
             for sample_row in list(db.execute('SELECT vm,payload FROM samples')):
-                sample=json.loads(sample_row['payload']);sample.update(mode=mode,tariff=current)
+                sample=json.loads(sample_row['payload'])
+                if sample['mode']!=mode or sample['tariff']!=current: sample.pop('period_id',None)
+                sample.update(mode=mode,tariff=current)
                 db.execute('UPDATE samples SET payload=? WHERE vm=?',(json.dumps(sample),sample_row['vm']))
             if mode=='enforced':
                 db.execute('UPDATE accounts SET exhausted_at=COALESCE(exhausted_at,?) WHERE balance=0',(self.clock(),))
@@ -147,13 +199,14 @@ class Ledger:
             self.entry(db,project,'budget:'+key,digest,result)
             return result
 
-    def _charge(self,db,project,owner,key,usage,mode,tariff):
+    def _charge(self,db,project,owner,key,usage,mode,tariff,period=None):
         if set(usage)!=set(UNITS) or any(type(v) is not int or v<0 for v in usage.values()):
             raise BillingError('invalid_metering_usage')
         account=self.ensure(db,project,owner)
         body={'usage':usage,'mode':mode,'tariff':tariff}
-        digest,old=self.operation(db,project,key,body)
-        if old is not None: return old
+        if period is None:
+            digest,old=self.operation(db,project,key,body)
+            if old is not None: return old
         remainder_column='remainder' if mode=='enforced' else 'shadow_remainder'
         # SQLite preserves fractional carry as rational text; legacy integer
         # remainders retain exactly the same denominator and value.
@@ -181,7 +234,8 @@ class Ledger:
         result={'kind':'usage','usage':usage,'tariff_version':tariff['version'] if tariff else None,
                 'billing_mode':mode,'estimated_microcredits':cost,'debited_microcredits':debit,
                 'unpaid_microcredits':cost-debit if mode=='enforced' else 0}
-        self.entry(db,project,key,digest,result)
+        if period is None: self.entry(db,project,key,digest,result)
+        else: self.accumulate(db,project,key,result,period)
         return result
 
     def sample(self,meta,now_ms,running,disk_bytes,bytes_in,bytes_out,incarnation):
@@ -198,15 +252,25 @@ class Ledger:
             old=json.loads(row[0]) if row else None
             sample={'at':now_ms,'running':running,'disk':disk_bytes,'in':bytes_in,'out':bytes_out,
                     'vcpus':meta['vcpus'],'memory_mib':meta['memory_mib'],
-                    'mode':mode,'tariff':tariff,'incarnation':incarnation}
-            if old and now_ms<=old['at']: return
+                    'mode':mode,'tariff':tariff,'incarnation':incarnation,
+                    'state':meta.get('state','running' if running else 'stopped'),
+                    'execution_mode':meta.get('execution_mode','serverless')}
+            if old and now_ms<old['at']: return
+            if old and now_ms==old['at'] and all(old.get(k)==v for k,v in sample.items()): return
             if old:
                 elapsed=now_ms-old['at']
                 on=elapsed if old['running'] and old['incarnation']==incarnation else 0
                 usage={'vcpu_ms':old['vcpus']*on,'ram_byte_ms':old['memory_mib']*1024**2*on,
                        'disk_byte_ms':old['disk']*elapsed,'bytes_in':max(0,bytes_in-old['in']),
                        'bytes_out':max(0,bytes_out-old['out'])}
-                self._charge(db,project,owner,f'meter:{vm}:{now_ms}',usage,old['mode'],old['tariff'])
+                old.setdefault('state','running' if old['running'] else 'stopped')
+                period_id=old.get('period_id',f'period:{vm}:{old["at"]}')
+                self._charge(db,project,owner,period_id,usage,old['mode'],old['tariff'],
+                             {'vm_id':vm,'state':old['state'],'started_at':old['at']/1000,
+                              'ended_at':now_ms/1000,'historical':False})
+                fields=('state','running','vcpus','memory_mib','mode','tariff','execution_mode')
+                if all(old.get(k)==sample.get(k) for k in fields): sample['period_id']=period_id
+            sample.setdefault('period_id',f'period:{vm}:{now_ms}:{uuid.uuid4().hex}')
             db.execute('INSERT OR REPLACE INTO samples VALUES(?,?)',(vm,json.dumps(sample)))
 
     def view(self,project,owner,include_entries=True):

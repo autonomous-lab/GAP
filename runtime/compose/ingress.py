@@ -66,7 +66,7 @@ class Ingress:
         if not meta or meta['state'] == 'destroyed':
             return {'enabled': False, 'routed': False}
         configured = meta.get('ingress', {})
-        prefix = self.prefix(meta['project_id'])
+        prefix = self.prefix(meta.get('catalog_key',meta['project_id']))
         return {'enabled': configured.get('enabled', False), 'vm_id': meta['vm_id'],
                 'guest_port': configured.get('guest_port'), 'base_path': prefix + '/',
                 'url': self.public_url + prefix + '/',
@@ -75,9 +75,9 @@ class Ingress:
 
     def configuration(self, exclude=None):
         routes, applied = [], set()
-        for path in sorted((self.manager.root / 'catalog').glob('prj_*.json')):
+        for path in sorted((self.manager.root / 'catalog').glob('*.json')):
             meta = json.loads(path.read_text())
-            if meta['project_id'] == exclude or meta['state'] in ('creating', 'destroyed'):
+            if exclude in (meta['project_id'],meta['vm_id']) or meta['state'] in ('creating', 'destroyed'):
                 continue
             settings = meta.get('ingress', {})
             state=self.manager.public(meta)['state']
@@ -86,7 +86,7 @@ class Ingress:
             port = next((p['worker_port'] for p in meta['ports'] if p['guest_port'] == settings['guest_port']), None)
             if port is None:
                 continue
-            prefix = self.prefix(meta['project_id'])
+            prefix = self.prefix(meta.get('catalog_key',meta['project_id']))
             routes.append({'match': [{'path': [prefix]}], 'handle': [{
                 'handler': 'static_response', 'status_code': 308,
                 'headers': {'Location': [prefix + '/{http.request.uri.prefixed_query}']}
@@ -95,7 +95,7 @@ class Ingress:
                 {'handler': 'rewrite', 'strip_path_prefix': prefix},
                 {'handler': 'reverse_proxy', 'upstreams': [{'dial': '127.0.0.1:' + str(self.manager.runtime.gateway.port if self.manager.runtime and self.manager.runtime.gateway else port)}],
                  'headers': {'request': {'set': {
-                     **({'X-GAP-Project': [meta['project_id']]} if self.manager.runtime else {}),
+                     **({'X-GAP-Project': [meta['project_id']], 'X-GAP-VM': [meta['vm_id']]} if self.manager.runtime else {}),
                      'X-Forwarded-Prefix': [prefix],
                      'X-Forwarded-Proto': [urlsplit(self.public_url).scheme]
                  }}, 'response': {'delete': ['Service-Worker-Allowed']}}}
@@ -127,7 +127,7 @@ class Ingress:
     def perform(self, project, owner, body):
         self.validate(body)
         with self.lock, self.manager.lock(project):
-            meta = self.manager.read(project, owner)
+            meta = self.manager.read(project, owner, body['vm_id'])
             if not meta or meta['state'] in ('creating', 'destroyed'):
                 raise VMError('vm_not_found')
             if meta['vm_id'] != body['vm_id']:
@@ -146,7 +146,7 @@ class Ingress:
         with self.lock:
             # Withdraw routes before any operation can release/reassign a port.
             # A Caddy outage prevents VM mutation rather than leaving stale routes.
-            self.sync(exclude=None if self.manager.runtime and action in ('vm/hibernate','vm/resume') else project)
+            self.sync(exclude=None if self.manager.runtime and action in ('vm/hibernate','vm/resume') else body.get('vm_id'))
             try:
                 return self.manager.perform(project, owner, action, body)
             finally:
