@@ -39,6 +39,7 @@ services:
       - ./data/gap-compose/worker:/data
       - ./data/gap-compose/admin:/run/caddy-admin
       - ./data/gap-compose/guest-image:/images:ro
+      - /run/gap-cpu:/run/gap-cpu:ro
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped

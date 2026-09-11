@@ -286,7 +286,9 @@ class Ledger:
             if old:
                 elapsed=now_ms-old['at']
                 on=elapsed if old['running'] and old['incarnation']==incarnation else 0
-                usage={'vcpu_ms':old['vcpus']*on,'ram_byte_ms':old['memory_mib']*1024**2*on,
+                cpu_quarters = int(old['vcpus']*4)*on + old.get('cpu_quarter_remainder',0)
+                sample['cpu_quarter_remainder'] = cpu_quarters % 4
+                usage={'vcpu_ms':cpu_quarters//4,'ram_byte_ms':old['memory_mib']*1024**2*on,
                        'disk_byte_ms':old['disk']*elapsed,'bytes_in':max(0,bytes_in-old['in']),
                        'bytes_out':max(0,bytes_out-old['out'])}
                 old.setdefault('state','running' if old['running'] else 'stopped')

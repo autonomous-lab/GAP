@@ -245,7 +245,7 @@ fn main() -> Result<()> {
                 request.method().as_str().to_string()
             };
             let original_path = request.url().to_string();
-            let auth = request
+            let mut auth = request
                 .headers()
                 .iter()
                 .find(|h| h.field.equiv("Authorization"))
@@ -304,7 +304,11 @@ fn main() -> Result<()> {
             let admin_host=admin_origin.trim_end_matches('/').strip_prefix("https://").unwrap_or("");
             let on_admin_host=!admin_host.is_empty() && host.eq_ignore_ascii_case(admin_host);
             let admin_api=clean_path.starts_with("/v1/admin/console/");
-            if on_admin_host || clean_path=="/admin" || admin_api {
+            let vm_console=on_admin_host && gap::cloud_vm_session::console_path(clean_path);
+            if clean_path=="/microvms" && !custom_domain_request && !on_admin_host && !admin_host.is_empty() {
+                let _=request.respond(Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{}/microvms",admin_origin.trim_end_matches('/'))).unwrap()));continue;
+            }
+            if (on_admin_host && !vm_console) || clean_path=="/admin" || admin_api {
                 let header=|name:&'static str|request.headers().iter().find(|h|h.field.equiv(name)).map(|h|h.value.as_str().to_string()).unwrap_or_default();
                 let mut response=if custom_domain_request {
                     Response::from_string("Not found").with_status_code(404)
@@ -436,13 +440,50 @@ fn main() -> Result<()> {
             if let Some((ctype, body)) =
                 (method == "GET").then(|| gap::cloud_surface::page(&path)).flatten()
             {
-                let body = if head_only { String::new() } else { body };
+                let body = if head_only { String::new() } else if vm_console {
+                    let public=env::var("GAP_PUBLIC_URL").unwrap_or_default().trim_end_matches('/').replace('&',"&amp;").replace('"',"&quot;").replace('<',"&lt;");
+                    body.replace("href=\"/docs",&format!("href=\"{public}/docs")).replace("href=\"/\"",&format!("href=\"{public}/\""))
+                } else { body };
                 let mut response = Response::from_string(body).with_status_code(200);
+                if vm_console {
+                    for (name,value) in [("Cache-Control","no-store"),("X-Frame-Options","DENY"),("Referrer-Policy","no-referrer"),("Content-Security-Policy","frame-ancestors 'none'; base-uri 'none'")] {response.add_header(Header::from_bytes(name,value).unwrap());}
+                }
                 response.add_header(
                     Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap(),
                 );
                 let _ = request.respond(response);
                 continue;
+            }
+
+            let header = |name: &'static str| request.headers().iter().find(|h|h.field.equiv(name)).map(|h|h.value.as_str()).unwrap_or("");
+            let session_cookie=header("Cookie");
+            let session_csrf=header("X-GAP-VM-Session");
+            if !custom_domain_request && on_admin_host && auth.is_none() {
+                auth=gap::cloud_vm_session::authorization(&path,session_cookie,session_csrf);
+            }
+            if !custom_domain_request && clean_path.starts_with("/v1/cloud/projects/") && clean_path.ends_with("/browser-session") {
+                let project=clean_path.trim_start_matches("/v1/cloud/projects/").trim_end_matches("/browser-session");
+                let origin_ok=on_admin_host && header("Origin")==admin_origin.trim_end_matches('/');
+                let (status,body,set_cookie)=if !origin_ok {
+                    (403,serde_json::json!({"error":{"code":"origin_required"}}),None)
+                } else if method=="POST" {
+                    // Authorization of this project's VM listing proves ownership
+                    // and current approval before issuing any session cookie.
+                    let (status,result)=route_with_ip(&state,"GET",&format!("/v1/cloud/projects/{project}/vms"),&[],auth.as_deref(),client_ip.as_deref());
+                    if status!=200 {(status,result,None)} else if let Some(token)=auth.as_deref() {
+                        match gap::cloud_vm_session::issue(project,token) {
+                            Ok((body,cookie))=>(201,body,Some(cookie)),
+                            Err(())=>(503,serde_json::json!({"error":{"code":"sessions_unavailable"}}),None)
+                        }
+                    } else {(401,serde_json::json!({"error":{"code":"unauthorized"}}),None)}
+                } else if method=="DELETE" && gap::cloud_vm_session::authorization(&path,session_cookie,session_csrf).is_some() {
+                    (200,serde_json::json!({"disconnected":true}),Some(gap::cloud_vm_session::revoke(session_cookie)))
+                } else {(401,serde_json::json!({"error":{"code":"unauthorized"}}),None)};
+                let mut response=Response::from_string(body.to_string()).with_status_code(status);
+                response.add_header(Header::from_bytes("Content-Type","application/json").unwrap());
+                response.add_header(Header::from_bytes("Cache-Control","no-store").unwrap());
+                if let Some(cookie)=set_cookie {response.add_header(Header::from_bytes("Set-Cookie",cookie).unwrap());}
+                let _=request.respond(response);continue;
             }
 
             let (status, json_body) = if !gap::cloud_surface::allowed_api(&path) {
@@ -462,6 +503,7 @@ fn main() -> Result<()> {
             };
 
             let mut response = Response::from_string(json_str).with_status_code(status);
+            if vm_console {response.add_header(Header::from_bytes("Cache-Control","no-store").unwrap());}
             response.add_header(
                 Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
             );

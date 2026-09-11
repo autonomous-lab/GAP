@@ -8,21 +8,46 @@ from microvm import VMError
 
 
 def keys(value):
-    # A single unadorned Ed25519 key per line; never accept authorized_keys options.
+    # Public key blobs only; never accept authorized_keys options or private keys.
     if not isinstance(value, list) or len(value) > 20:
         raise VMError('invalid_ssh_keys')
     result = []
     for key in value:
-        if not isinstance(key, str) or len(key) > 1024 or '\n' in key or '\r' in key:
+        if not isinstance(key, str) or len(key) > 16384 or '\n' in key or '\r' in key:
             raise VMError('invalid_ssh_key')
         parts = key.split()
         try:
             raw = base64.b64decode(parts[1], validate=True)
-            if parts[0] != 'ssh-ed25519' or raw[:19] != b'\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20' or len(raw) != 51:
+            offset = 0
+            def field():
+                nonlocal offset
+                if offset + 4 > len(raw): raise ValueError()
+                size = int.from_bytes(raw[offset:offset+4], 'big')
+                offset += 4
+                if size > len(raw) - offset: raise ValueError()
+                value = raw[offset:offset+size]; offset += size
+                return value
+            kind = field().decode('ascii')
+            if kind != parts[0]: raise ValueError()
+            if kind == 'ssh-ed25519':
+                if len(field()) != 32: raise ValueError()
+            elif kind == 'ssh-rsa':
+                def positive_mpint():
+                    value = field()
+                    if not value or value[0] & 128: raise ValueError()
+                    if len(value) > 1 and value[0] == 0 and not value[1] & 128: raise ValueError()
+                    number = int.from_bytes(value, 'big')
+                    if number <= 0: raise ValueError()
+                    return number
+                exponent, modulus = positive_mpint(), positive_mpint()
+                if not 3 <= exponent < 2**64 or exponent % 2 != 1: raise ValueError()
+                if not 2048 <= modulus.bit_length() <= 16384 or modulus % 2 != 1: raise ValueError()
+            else:
                 raise ValueError()
-        except (ValueError, IndexError):
-            raise VMError('expected_ed25519_public_key')
-        normalized = 'ssh-ed25519 ' + parts[1]
+            if offset != len(raw): raise ValueError()
+        except (ValueError, IndexError, UnicodeError):
+            raise VMError('expected_ed25519_or_rsa_public_key')
+        normalized = kind + ' ' + base64.b64encode(raw).decode('ascii')
         if normalized not in result:
             result.append(normalized)
     return result

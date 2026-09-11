@@ -189,3 +189,10 @@ class MicroVMTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class FractionalCPUTests(unittest.TestCase):
+    def test_quarter_steps_only(self):
+        from cpu_quota import quarters
+        for value in [.25,.5,.75,1,1.25,2]: self.assertEqual(quarters(value),int(value*4))
+        for value in [True,0,.1,.3,-1,float('nan'),float('inf'),'0.25']:
+            with self.assertRaises(ValueError): quarters(value)

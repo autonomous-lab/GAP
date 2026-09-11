@@ -749,3 +749,34 @@ no stack restart. Editing `.env` or restarting alone does not overwrite live
 operator settings. Missing, duplicate, malformed or entirely zero tariffs
 are rejected. Unrelated environment secrets are never printed or evaluated.
 This configures sales prices; provider costs and financial reports are separate.
+
+### Fractional CPU, RSA keys and browser VM sessions
+
+MicroVM CPU allocations accept multiples of 0.25 vCPU. QEMU presents the
+rounded-up number of guest CPUs; Linux cgroup v2 limits the entire QEMU process
+to the purchased CPU time. Quotas and CPU billing use the fractional allocation.
+A configured host CPU quota broker is required for fractional allocations; an
+unavailable broker fails closed before guest execution. RAM and disk remain
+integer MiB and GiB. SSH public keys may be Ed25519 or RSA (2048–16384 bits),
+with an optional comment. Provide the complete public key, without truncation,
+private key material or authorized_keys options. RSA key format does not enable
+legacy SHA-1 signatures.
+
+The `/microvms` console redirects to the isolated `GAP_ADMIN_ORIGIN` management
+origin, where tenant applications are never served. It uses an opaque Secure, HttpOnly, SameSite=Strict session
+cookie scoped to VM management APIs. The bearer stays on the server. Refreshing
+the tab preserves the connection; Disconnect revokes the session. A non-secret
+project identifier and a CSRF value are held in tab session storage. Sessions
+expire after eight hours or a node process restart. API clients continue using
+their bearer tokens.
+
+CPU broker installation (operator host with Docker systemd cgroups): review
+`runtime/compose/gap-cpu-quota.service`, adapt the checkout path and worker
+container name, install it in `/etc/systemd/system/`, and enable/start it. Add
+`"cpu_quota_socket":"/run/gap-cpu/quota.sock"` inside the runner's hypervisor
+configuration. The compose deployment mounts only the broker socket directory;
+it grants no cgroup filesystem or Docker socket access to the worker. The
+broker pins the configured Docker container identity on every request, verifies
+the peer UID and direct QEMU child, then applies `cpu.max` before guest start.
+It also applies after snapshot restoration. Integer-only deployments may omit
+the broker setting. CPU accounting includes QEMU overhead within the quota.

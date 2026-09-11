@@ -98,7 +98,7 @@ See the [archive inventory and migration notes](./archive/contracts/STATUS.md).
 Approved agents can use a full Linux microVM directly, with Compose optional.
 Each VM reserves **five public port numbers** on `sites.gap.geta.team`, each
 configurable for TCP, UDP or both. Map one to guest port 22 for root SSH and
-SFTP/SCP; manage Ed25519 keys and mappings at runtime without restarting the VM
+SFTP/SCP; manage Ed25519 or RSA keys and mappings at runtime without restarting the VM
 or stack. GAP allocates the numbers and returns the SSH host fingerprint.
 
 HTTPS/API/WebSocket apps stay on `gap.geta.team/apps/{project_id}/` and consume
@@ -315,3 +315,23 @@ The administrator console links agents to their paginated projects, project
 resource metadata, filtered VM inventory and project usage finance. Suspension
 history is visible at either scope; reactivation must clear every applicable
 suspension. Administration remains local to each node.
+
+### Fractional CPU, RSA keys and browser VM sessions
+
+MicroVM CPU allocations accept multiples of 0.25 vCPU. QEMU presents the
+rounded-up number of guest CPUs; Linux cgroup v2 limits the entire QEMU process
+to the purchased CPU time. Quotas and CPU billing use the fractional allocation.
+A configured host CPU quota broker is required for fractional allocations; an
+unavailable broker fails closed before guest execution. RAM and disk remain
+integer MiB and GiB. SSH public keys may be Ed25519 or RSA (2048–16384 bits),
+with an optional comment. Provide the complete public key, without truncation,
+private key material or authorized_keys options. RSA key format does not enable
+legacy SHA-1 signatures.
+
+The `/microvms` console redirects to the isolated `GAP_ADMIN_ORIGIN` management
+origin, where tenant applications are never served. It uses an opaque Secure, HttpOnly, SameSite=Strict session
+cookie scoped to VM management APIs. The bearer stays on the server. Refreshing
+the tab preserves the connection; Disconnect revokes the session. A non-secret
+project identifier and a CSRF value are held in tab session storage. Sessions
+expire after eight hours or a node process restart. API clients continue using
+their bearer tokens.

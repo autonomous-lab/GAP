@@ -78,12 +78,13 @@ class AdminHTTP(unittest.TestCase):
             with (root/'node.log').open('w') as log:
                 proc = subprocess.Popen([os.environ['GAP_TEST_BINARY']], env=env, cwd=root, stdout=log, stderr=log)
                 try:
-                    def request(method, path, body=None, cookie=None, csrf=None, host='admin.test', origin='https://admin.test', bearer=None, basic=None):
+                    def request(method, path, body=None, cookie=None, csrf=None, host='admin.test', origin='https://admin.test', bearer=None, basic=None, vm_csrf=None):
                         headers = {'Host': host, 'Origin': origin, 'Content-Type': 'application/json'}
                         if bearer: headers['Authorization'] = 'Bearer '+bearer
                         if basic: headers['Authorization']='Basic '+base64.b64encode(basic.encode()).decode()
                         if cookie: headers['Cookie'] = cookie
                         if csrf: headers['X-CSRF-Token'] = csrf
+                        if vm_csrf: headers['X-GAP-VM-Session']=vm_csrf
                         req = urllib.request.Request(base+path, method=method, headers=headers,
                                                      data=json.dumps(body).encode() if body is not None else None)
                         try: response = urllib.request.urlopen(req, timeout=10)
@@ -160,6 +161,20 @@ class AdminHTTP(unittest.TestCase):
                     self.assertEqual(status, 200)
                     self.assertEqual(reviewed['status'], 'approved')
                     self.assertIn(agent['did'], json.loads((root/'approvals.json').read_text())['agents'])
+                    from unittest.mock import patch
+                    vm_session='/v1/cloud/projects/'+project_id+'/browser-session'
+                    with patch.object(runner,'rpc',return_value=(200,{'vms':[]})):
+                        self.assertEqual(request('POST',vm_session,host='admin.test',origin='https://client.test',bearer=agent['token'])[0],403)
+                        st,session_vm,headers_vm=request('POST',vm_session,host='admin.test',origin='https://admin.test',bearer=agent['token'])
+                        self.assertEqual(st,201)
+                        cookie_vm=headers_vm['Set-Cookie'].split(';')[0]
+                        self.assertIn('HttpOnly',headers_vm['Set-Cookie']);self.assertNotIn(agent['token'],headers_vm['Set-Cookie'])
+                        vms='/v1/cloud/projects/'+project_id+'/vms'
+                        self.assertEqual(request('GET',vms,host='admin.test',cookie=cookie_vm)[0],401)
+                        self.assertEqual(request('GET',vms,host='admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],200)
+                        self.assertEqual(request('GET','/v1/cloud/projects/'+other_project['project_id']+'/vms',host='admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],401)
+                        self.assertEqual(request('DELETE',vm_session,host='admin.test',origin='https://admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],200)
+                        self.assertEqual(request('GET',vms,host='admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],401)
                     self.assertNotIn(agent['token'], json.dumps(request('GET', api+'agents', cookie=cookie)[1]))
                     self.assertEqual(request('GET', api+'projects/'+project_id, cookie=cookie)[0], 200)
                     site='/v1/cloud/projects/'+project_id+'/site'

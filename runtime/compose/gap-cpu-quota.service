@@ -1,0 +1,14 @@
+[Unit]
+Description=GAP microVM CPU quota broker
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/app/gap-node-01/runtime/compose/cpu_quota.py --socket /run/gap-cpu/quota.sock --container-name gap-compose-compose-runner-1
+Restart=on-failure
+RuntimeDirectory=gap-cpu
+RuntimeDirectoryMode=0755
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

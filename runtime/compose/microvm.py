@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -67,7 +68,11 @@ def validate(action, body):
         raise VMError('invalid_vm_operation_fields')
     if action != 'vm/create' and not re.fullmatch(r'vm_[0-9a-f]{32}', str(body.get('vm_id', ''))):
         raise VMError('vm_id_required')
-    for key in ('vcpus', 'memory_mib', 'disk_gib'):
+    if 'vcpus' in body:
+        from cpu_quota import quarters
+        try: quarters(body['vcpus'])
+        except ValueError: raise VMError('invalid_vcpus')
+    for key in ('memory_mib', 'disk_gib'):
         if key in body and (type(body[key]) is not int or not 0 < body[key] < 2**31):
             raise VMError('invalid_' + key)
     for key in ('start', 'force', 'delete_data', 'confirm_data_loss', 'new_vm'):
@@ -103,6 +108,7 @@ class MicroVMs:
         self.ingress_origin = ''
         self.quota_provider = lambda project, owner: {"vcpus": 2, "memory_mib": 4096, "max_vms": 1}
         self.runtime = None
+        self.cpu_quota_socket = config.get('cpu_quota_socket')
         self.meters = {}
         self.network = None
         if config.get('public_network'):
@@ -364,7 +370,7 @@ class MicroVMs:
         if self.network:
             forwards += ['hostfwd=' + rule for rule in self.network.rules(meta)]
         command = ['qemu-system-x86_64', '-machine', 'microvm,accel=kvm', '-cpu', 'host',
-                '-name', meta['vm_id'], '-m', str(meta['memory_mib']), '-smp', str(meta['vcpus']),
+                '-name', meta['vm_id'], '-m', str(meta['memory_mib']), '-smp', str(math.ceil(meta['vcpus'])),
                 '-kernel', str(self.images / 'vmlinuz'), '-initrd', str(self.images / 'initramfs'),
                 '-append', 'console=ttyS0 root=/dev/vda rootfstype=ext4 modules=virtio_mmio,virtio_blk,ext4 rootwait rw reboot=t net.ifnames=0',
                 '-nodefaults', '-no-user-config', '-display', 'none',
@@ -382,6 +388,21 @@ class MicroVMs:
             command += ['-object', f'filter-dump,id=meterin,netdev=net0,queue=tx,file={folder}/meter-in.fifo,maxlen=96',
                         '-object', f'filter-dump,id=meterout,netdev=net0,queue=rx,file={folder}/meter-out.fifo,maxlen=96']
         return command
+
+    def enforce_cpu(self, meta, process):
+        if not self.cpu_quota_socket:
+            if meta['vcpus'] != int(meta['vcpus']):
+                raise VMError('fractional_cpu_requires_quota_broker')
+            return
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect(self.cpu_quota_socket)
+            sock.sendall((json.dumps({'pid':process.pid,'vm_id':meta['vm_id'],'vcpus':meta['vcpus']})+'\n').encode())
+            response = sock.makefile('rb').readline(2049)
+        expected = int(meta['vcpus']*100000)
+        result = json.loads(response)
+        if result != {'ok':True,'quota_us':expected,'period_us':100000}:
+            raise VMError('cpu_quota_unavailable')
 
     @staticmethod
     def guest_mac(meta):
@@ -489,10 +510,16 @@ class MicroVMs:
         self.capture_start(meta)
         error_log = folder / 'hypervisor.log'
         with (error_log.open('wb') if self.diagnostic_serial else open(os.devnull, 'wb')) as log:
-            process = subprocess.Popen(self.command(meta), stdin=subprocess.DEVNULL,
+            process = subprocess.Popen(self.command(meta)+['-S'], stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=log, start_new_session=True,
                 env={'PATH': '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'})
         self.children[meta['vm_id']] = process
+        try:
+            self.enforce_cpu(meta, process)
+        except Exception:
+            process.terminate(); process.wait(timeout=10)
+            self.capture_stop(meta)
+            raise
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -500,7 +527,11 @@ class MicroVMs:
                 error.diagnostic = error_log.read_text(errors='replace')[-4096:] if error_log.exists() else ''
                 raise error
             try:
-                if self.qmp(meta, 'query-status')['status'] == 'running':
+                if self.qmp(meta, 'query-status')['status'] in ('prelaunch','paused'):
+                    if self.runtime and not self.runtime.check_policy(meta,force=True):
+                        process.terminate(); process.wait(timeout=10)
+                        raise VMError('microvm_suspended_or_policy_unavailable')
+                    self.qmp(meta, 'cont')
                     break
             except OSError:
                 pass
@@ -583,6 +614,8 @@ class MicroVMs:
 
     def perform(self, project, owner, action, body):
         validate(action, body)
+        if 'vcpus' in body and body['vcpus'] != int(body['vcpus']) and not self.cpu_quota_socket:
+            raise VMError('fractional_cpu_requires_quota_broker')
         # All lifecycle changes share an owner lock across projects and processes.
         # Read live approval/quota after acquiring it, before reserving resources.
         with self.owner_lock(owner):

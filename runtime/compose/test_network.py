@@ -77,6 +77,17 @@ class NetworkTests(unittest.TestCase):
             with self.assertRaises(VMError):
                 keys([key])
 
+    def test_rsa_public_key_blob_validation(self):
+        def field(value): return len(value).to_bytes(4, 'big') + value
+        blob = field(b'ssh-rsa') + field(b'\x01\x00\x01') + field(b'\0\x80' + b'x'*254 + b'\x01')
+        key = 'ssh-rsa ' + base64.b64encode(blob).decode()
+        self.assertEqual(keys([key+' root@localhost', key]), [key])
+        for bad in [blob+b'x', blob[:-1], field(b'ssh-rsa')+field(b'\x02')+field(b'\x03'),
+                    field(b'ssh-rsa')+field(b'\x01\x00\x01')+field(b'\x80'+b'x'*255)]:
+            with self.assertRaises(VMError): keys(['ssh-rsa '+base64.b64encode(bad).decode()])
+        with self.assertRaises(VMError): keys(['ssh-ed25519 '+base64.b64encode(blob).decode()])
+        with self.assertRaises(VMError): keys(['command="id" '+key])
+
     def test_owner_generation_and_hot_replacement(self):
         self.reserve(self.meta)
         body = dict(request_id='a'*32, vm_id=V, mappings=[dict(slot=1, guest_port=22, protocol='both')])

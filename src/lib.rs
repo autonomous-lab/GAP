@@ -33,6 +33,7 @@ pub mod cloud;
 pub mod cloud_admin;
 pub mod cloud_suspension;
 pub mod cloud_surface;
+pub mod cloud_vm_session;
 pub mod compliance;
 pub mod conformance;
 pub mod contract;

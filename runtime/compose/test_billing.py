@@ -18,6 +18,14 @@ class LedgerTests(unittest.TestCase):
         self.price={'version':'test-1','vcpu_hour':3600,'gib_ram_hour':3600,
                     'gib_disk_hour':3600,'gib_in':100,'gib_out':200}
 
+    def test_fractional_cpu_keeps_submillisecond_carry(self):
+        self.meta['vcpus'] = .25
+        self.sample(0, disk=0)
+        for stamp in range(1,1001): self.sample(stamp, disk=0)
+        view=self.ledger.view(P,O)
+        used=sum(e.get('usage',{}).get('vcpu_ms',0) for e in view['entries'])
+        self.assertEqual(used,250)
+
     def sample(self,ms,on=True,disk=GIB,incoming=0,outgoing=0,incarnation='a'):
         self.now=ms/1000
         self.ledger.sample(self.meta,ms,on,disk,incoming,outgoing,incarnation)

@@ -830,7 +830,7 @@ external connections across inactivity; reconnect at the application layer.
 ### Native application quickstart
 
 No Docker build or Compose release is needed for this workflow. The CLI uses
-`GAP_TOKEN` for management; SSH uses your own Ed25519 key.
+`GAP_TOKEN` for management; SSH uses your own Ed25519 or RSA public key.
 
 ```bash
 export GAP_TOKEN="$TOKEN"
@@ -980,7 +980,7 @@ python3 scripts/microvm.py --project "$PROJECT" ssh
 The CLI prints the request ID before submitting; use `--request-id` to retry
 that exact operation. `set-ports` without `--map` disables all mappings.
 `set-ssh-keys` without `--key` removes all managed owner keys. Only unadorned
-Ed25519 public keys are accepted; never upload private keys. Optional
+Ed25519 and RSA public keys are accepted; never upload private keys. Optional
 `ssh_keys: [...]` on VM creation installs initial owner keys before first boot.
 SSH passwords are disabled. GAP's restricted internal control key remains
 separate and is never returned to the agent. Wait for SSH to boot before a live
@@ -1372,3 +1372,23 @@ or restarting the administrator console does not clear either decision.
 Reactivating an agent does not clear a separate project suspension, and reactivating
 a project does not override a suspended owner. This applies within the current
 node; customer-wide and fleet-wide administration remain separate work.
+
+### Fractional CPU, RSA keys and browser VM sessions
+
+MicroVM CPU allocations accept multiples of 0.25 vCPU. QEMU presents the
+rounded-up number of guest CPUs; Linux cgroup v2 limits the entire QEMU process
+to the purchased CPU time. Quotas and CPU billing use the fractional allocation.
+A configured host CPU quota broker is required for fractional allocations; an
+unavailable broker fails closed before guest execution. RAM and disk remain
+integer MiB and GiB. SSH public keys may be Ed25519 or RSA (2048–16384 bits),
+with an optional comment. Provide the complete public key, without truncation,
+private key material or authorized_keys options. RSA key format does not enable
+legacy SHA-1 signatures.
+
+The `/microvms` console redirects to the isolated `GAP_ADMIN_ORIGIN` management
+origin, where tenant applications are never served. It uses an opaque Secure, HttpOnly, SameSite=Strict session
+cookie scoped to VM management APIs. The bearer stays on the server. Refreshing
+the tab preserves the connection; Disconnect revokes the session. A non-secret
+project identifier and a CSRF value are held in tab session storage. Sessions
+expire after eight hours or a node process restart. API clients continue using
+their bearer tokens.
