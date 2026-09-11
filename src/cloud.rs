@@ -257,6 +257,8 @@ pub struct ProjectRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SiteDomain {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vm_id: Option<String>,
     pub hostname: String,
     pub project_id: String,
     /// `public` or `basic`. The GAP-owned `/sites/{project}/` URL always
@@ -1433,7 +1435,7 @@ fn sql_int(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| Error::Other("integer exceeds SQLite range".into()))
 }
 
-fn hash_site_password(password: &str) -> Result<String> {
+pub(crate) fn hash_site_password(password: &str) -> Result<String> {
     use argon2::password_hash::{PasswordHasher, SaltString};
     if !(12..=128).contains(&password.len()) {
         return Err(Error::Other(
@@ -1451,7 +1453,7 @@ fn hash_site_password(password: &str) -> Result<String> {
         .map_err(|e| Error::Other(format!("site password hash: {e}")))
 }
 
-fn verify_site_password(password: &str, encoded: &str) -> Result<bool> {
+pub(crate) fn verify_site_password(password: &str, encoded: &str) -> Result<bool> {
     use argon2::password_hash::{PasswordHash, PasswordVerifier};
     let hash =
         PasswordHash::new(encoded).map_err(|e| Error::Other(format!("site password hash: {e}")))?;

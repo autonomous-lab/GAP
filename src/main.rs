@@ -295,6 +295,19 @@ fn main() -> Result<()> {
                 .map(str::to_string)
                 .or_else(|| request.remote_addr().map(|addr| addr.ip().to_string()));
 
+            // Private nginx auth subrequest. The dedicated edge secret never
+            // reaches a guest and is unrelated to owner/admin credentials.
+            if path.split('?').next()==Some("/internal/vm-http-admission") {
+                let h=|name:&'static str|request.headers().iter().find(|h|h.field.equiv(name)).map(|h|h.value.as_str()).unwrap_or("");
+                let out=gap::server::admit_vm_http(&state,h("X-GAP-Edge-Token"),h("X-GAP-Original-Host"),h("X-GAP-Original-Path"),h("X-GAP-Original-URI"),Some(h("X-GAP-Original-Authorization")),Some(h("X-GAP-Client-IP")));
+                let mut response=Response::from_string("").with_status_code(out.status).with_header(Header::from_bytes("Cache-Control","no-store").unwrap());
+                if out.status==401 {response.add_header(Header::from_bytes("WWW-Authenticate","Basic realm=\"GAP microVM\", charset=\"UTF-8\"").unwrap())}
+                if let Some(uri)=out.uri {if let Ok(header)=Header::from_bytes("X-GAP-VM-URI",uri){response.add_header(header)}else{let _=request.respond(Response::from_string("").with_status_code(403));continue;}}
+                if let Some(vm_id)=out.vm_id {response.add_header(Header::from_bytes("X-GAP-VM-Identity",vm_id).unwrap())}
+                if out.strip_authorization {response.add_header(Header::from_bytes("X-GAP-VM-Strip-Auth","1").unwrap())}
+                let _=request.respond(response);continue;
+            }
+
             // Cloud-only boundary before archived protocol dispatch.
             let clean_path = path.split('?').next().unwrap_or(&path);
             // A dedicated admin origin must never serve tenant applications.

@@ -7,6 +7,9 @@
 //! escrows, and the audit spine. Agents speak HTTPS to it; they never
 //! implement GAP themselves.
 
+mod vm_http;
+pub use vm_http::admit_vm_http;
+
 use crate::amount::Amount;
 use crate::contract::{Contract, ContractState, Terms};
 use crate::discovery::{Announcement, Capability, Query, Reachability, Registry};
@@ -495,6 +498,7 @@ pub struct NodeState {
     /// Verified custom hostname -> project mapping. Kept globally so a TLS
     /// handshake and a Host-routed request are O(1), not a scan of tenant DBs.
     custom_domains: HashMap<String, crate::cloud::SiteDomain>,
+    vm_http: HashMap<String, vm_http::Record>,
     /// Paid realtime overage balance, separate from escrow/payment balances.
     realtime_credits: HashMap<String, crate::cloud::RealtimeCreditAccount>,
     /// Operator top-ups are idempotent and durably auditable.
@@ -787,6 +791,8 @@ impl NodeState {
             .expect("cannot load project suspension policy; refusing to serve")
             .into_iter().map(|r| (r.key,serde_json::from_str::<crate::cloud_suspension::Record>(&r.value)
                 .expect("invalid project suspension policy; refusing to serve"))).collect();
+        let vm_http = storage.list_state("cloud_vm_http").expect("cannot load VM HTTP policy")
+            .into_iter().map(|r| (r.key,serde_json::from_str::<vm_http::Record>(&r.value).expect("invalid VM HTTP policy"))).collect();
         let custom_domains: HashMap<String, crate::cloud::SiteDomain> =
             load(&*storage, "cloud_domains", cloud_only);
 
@@ -952,6 +958,7 @@ impl NodeState {
             registration: None,
             cloud_admin: None,
             custom_domains,
+            vm_http,
             realtime_credits,
             realtime_credit_topups,
             cloud_root: std::env::var("GAP_CLOUD_ROOT")
@@ -2627,13 +2634,16 @@ the content inline"
         hostname: &str,
         access: &str,
     ) -> Result<crate::cloud::SiteDomain> {
+        self.cloud_create_domain(token,project_id,hostname,access,None)
+    }
+    fn cloud_create_domain(&mut self,token:&str,project_id:&str,hostname:&str,access:&str,vm_id:Option<&str>) -> Result<crate::cloud::SiteDomain> {
         self.cloud_owned_project(token, project_id)?;
         let hostname = normalize_custom_hostname(hostname)?;
         if !matches!(access, "public" | "basic") {
             return Err(Error::Other("domain access must be public or basic".into()));
         }
         if let Some(existing) = self.custom_domains.get(&hostname) {
-            if existing.project_id == project_id {
+            if existing.project_id == project_id && existing.vm_id.as_deref()==vm_id {
                 return Ok(existing.clone());
             }
             return Err(Error::Other(
@@ -2654,6 +2664,7 @@ the content inline"
         rand::rngs::OsRng.fill_bytes(&mut random);
         let now = now_unix();
         let domain = crate::cloud::SiteDomain {
+            vm_id: vm_id.map(str::to_owned),
             verification_name: format!("_gap-verify.{hostname}"),
             verification_value: format!("gap-verification={}", hex::encode(random)),
             hostname: hostname.clone(),
@@ -2664,8 +2675,8 @@ the content inline"
             updated_at: now,
             verified_at: None,
         };
+        self.storage.upsert_state(&crate::storage::StateRecord{scope:"cloud_domains".into(),key:hostname.clone(),value:serde_json::to_string(&domain).map_err(|e|Error::Other(e.to_string()))?,updated_at:now})?;
         self.custom_domains.insert(hostname.clone(), domain.clone());
-        self.save_state("cloud_domains", &hostname, &domain);
         self.record(
             "cloud.site.domain.created",
             json!({ "project_id": project_id, "hostname": hostname, "access": access }),
@@ -2682,7 +2693,7 @@ the content inline"
         let mut domains = self
             .custom_domains
             .values()
-            .filter(|domain| domain.project_id == project_id)
+            .filter(|domain| domain.project_id == project_id && domain.vm_id.is_none())
             .cloned()
             .collect::<Vec<_>>();
         domains.sort_by(|a, b| a.hostname.cmp(&b.hostname));
@@ -2745,7 +2756,7 @@ the content inline"
         if !self
             .custom_domains
             .get(&hostname)
-            .is_some_and(|domain| domain.project_id == project_id)
+            .is_some_and(|domain| domain.project_id == project_id && domain.vm_id.is_none())
         {
             return Ok(false);
         }
@@ -2770,6 +2781,7 @@ the content inline"
     /// supply a project id separately from the Host header.
     pub fn custom_domain_project(&self, hostname: &str) -> Option<String> {
         let domain = self.custom_domain(hostname)?;
+        if domain.vm_id.is_some() {return None}
         self.cloud_projects
             .get(&domain.project_id)
             .filter(|project| self.active_cloud_project(&project.project_id))?;
@@ -2806,6 +2818,9 @@ the content inline"
             .is_some_and(|project| self.active_cloud_project(&project.project_id))
         {
             return false;
+        }
+        if let Some(vm)=&domain.vm_id {
+            return self.vm_http.get(vm).is_some_and(|r|r.project_id==domain.project_id && self.private_node.as_ref().is_some_and(|p|p.authorize_compose(&r.owner_did).is_ok()));
         }
         crate::cloud::ProjectStore::open(&self.cloud_root, &domain.project_id)
             .and_then(|store| store.site_config())
@@ -7000,6 +7015,7 @@ pub fn serve_custom_domain_site(
     client_ip: Option<&str>,
 ) -> Option<(SiteHttpResponse, bool)> {
     let domain = state.lock().ok()?.custom_domain(hostname)?;
+    if domain.vm_id.is_some() {return None}
     let requested = path
         .split('?')
         .next()
@@ -7630,6 +7646,8 @@ pub fn route_with_ip(
         }
     };
 
+    if let Some(result)=vm_http::manage(state,method,raw_path,&body,auth) {return result}
+
     let mut guard = match state.lock() {
         Ok(g) => g,
         Err(_) => {
@@ -8052,6 +8070,7 @@ pub fn route_with_ip(
                 Ok(domain) => domain,
                 Err(error) => return error_response(&error),
             };
+            if pending.vm_id.is_some() {return error_response(&Error::Other("use the microVM domain verification endpoint".into()))}
             let expected = pending.verification_value.clone();
             drop(guard);
             if let Err(error) = verify_domain_txt(&pending) {

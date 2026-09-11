@@ -8,6 +8,10 @@ esac
 case "$GAP_ADMIN_HOST" in
   ''|*[!a-zA-Z0-9.-]*) echo 'Administrator origin must use a DNS hostname without a port' >&2; exit 1 ;;
 esac
-export GAP_ADMIN_HOST
-envsubst '${GAP_ADMIN_HOST}' < /etc/nginx/gap.conf.template > /tmp/gap-nginx.conf
+GAP_VM_EDGE_TOKEN=${GAP_VM_EDGE_TOKEN:-}
+case "$GAP_VM_EDGE_TOKEN" in
+  *[!a-f0-9]*) echo 'VM edge token must be hexadecimal' >&2; exit 1 ;;
+esac
+export GAP_ADMIN_HOST GAP_VM_EDGE_TOKEN
+envsubst '${GAP_ADMIN_HOST} ${GAP_VM_EDGE_TOKEN}' < /etc/nginx/gap.conf.template > /tmp/gap-nginx.conf
 exec nginx -c /tmp/gap-nginx.conf -g 'daemon off;'

@@ -11,7 +11,7 @@ import socketserver
 import subprocess
 import sys
 from types import SimpleNamespace
-from http.server import ThreadingHTTPServer
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import tempfile
 import threading
 import time
@@ -63,10 +63,19 @@ class AdminHTTP(unittest.TestCase):
             runner.runtime=SimpleNamespace(ledger=Ledger(root/'billing.sqlite'))
             worker=ThreadingHTTPServer(('127.0.0.1',0),handler_for(runner))
             threading.Thread(target=worker.serve_forever,daemon=True).start()
+            dns_answers=[]
+            class DNS(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200);self.end_headers();self.wfile.write(json.dumps({'Answer':[{'type':16,'data':v} for v in dns_answers]}).encode())
+                def log_message(self,*args):pass
+            dns=ThreadingHTTPServer(('127.0.0.1',0),DNS)
+            threading.Thread(target=dns.serve_forever,daemon=True).start()
+            self.addCleanup(dns.shutdown);self.addCleanup(dns.server_close)
             base = 'http://127.0.0.1:' + str(port())
             env = {'PATH': os.environ['PATH'], 'GAP_ADDR': base.removeprefix('http://'),
                    'GAP_STORAGE': 'sqlite', 'GAP_SQLITE_PATH': str(root/'node.sqlite'),
                    'GAP_VM_SESSIONS_DB': str(root/'vm-sessions.sqlite'), 'GAP_CLOUD_ROOT': str(root/'projects'), 'GAP_WORKERS': '4',
+                   'GAP_VM_EDGE_TOKEN':'e'*64, 'GAP_CADDY_ASK_TOKEN':'f'*64, 'GAP_CUSTOM_DOMAIN_TARGET':'node.example.com', 'GAP_DNS_JSON_RESOLVER':'http://127.0.0.1:'+str(dns.server_port),
                    'GAP_MASTER_KEY': 'c'*64, 'GAP_PUBLIC_URL': 'https://client.test',
                    'GAP_CLOUD_ADMIN_ENABLED': '1', 'GAP_ADMIN_EMAILS': 'owner@example.com',
                    'GAP_ADMIN_ORIGIN': 'https://admin.test', 'GAP_ADMIN_DB': str(root/'admin.sqlite'),
@@ -78,13 +87,14 @@ class AdminHTTP(unittest.TestCase):
             with (root/'node.log').open('w') as log:
                 proc = subprocess.Popen([os.environ['GAP_TEST_BINARY']], env=env, cwd=root, stdout=log, stderr=log)
                 try:
-                    def request(method, path, body=None, cookie=None, csrf=None, host='admin.test', origin='https://admin.test', bearer=None, basic=None, vm_csrf=None):
+                    def request(method, path, body=None, cookie=None, csrf=None, host='admin.test', origin='https://admin.test', bearer=None, basic=None, vm_csrf=None, extra=None):
                         headers = {'Host': host, 'Origin': origin, 'Content-Type': 'application/json'}
                         if bearer: headers['Authorization'] = 'Bearer '+bearer
                         if basic: headers['Authorization']='Basic '+base64.b64encode(basic.encode()).decode()
                         if cookie: headers['Cookie'] = cookie
                         if csrf: headers['X-CSRF-Token'] = csrf
                         if vm_csrf: headers['X-GAP-VM-Session']=vm_csrf
+                        headers.update(extra or {})
                         req = urllib.request.Request(base+path, method=method, headers=headers,
                                                      data=json.dumps(body).encode() if body is not None else None)
                         try: response = urllib.request.urlopen(req, timeout=10)
@@ -193,6 +203,51 @@ class AdminHTTP(unittest.TestCase):
                         self.assertEqual(request('DELETE',vm_session,host='admin.test',origin='https://admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],200)
                         self.assertEqual(request('DELETE',vm_session,host='admin.test',origin='https://admin.test',cookie=cookie_vm)[0],200)
                         self.assertEqual(request('GET',vms,host='admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],401)
+                    # Mandatory VM visitor auth and verified custom-domain routing.
+                    vm_id='vm_'+'a'*32
+                    vm_base='/v1/cloud/projects/'+project_id+'/vm'
+                    ingress={'vm_id':vm_id,'base_path':'/apps/'+project_id+'/','enabled':True,'routed':True}
+                    def admission(path=None,basic=None,hostname='client.test',secret='e'*64,raw=None):
+                        path=path or ingress['base_path']
+                        headers={'X-GAP-Edge-Token':secret,'X-GAP-Original-Host':hostname,'X-GAP-Original-Path':path,'X-GAP-Original-URI':raw or path,'X-GAP-Client-IP':'192.0.2.4'}
+                        if basic:headers['X-GAP-Original-Authorization']='Basic '+base64.b64encode(basic.encode()).decode()
+                        return request('GET','/internal/vm-http-admission',extra=headers)
+                    with patch.object(runner,'rpc',return_value=(200,ingress)) as mock:
+                        self.assertEqual(request('GET',vm_base+'/http-access?vm_id='+vm_id,host='client.test')[0],401)
+                        self.assertEqual(request('GET',vm_base+'/domains?vm_id='+vm_id,host='client.test',bearer='wrong')[0],401)
+                        self.assertEqual(admission()[0],401)
+                        self.assertEqual(admission(secret='wrong')[0],403)
+                        self.assertEqual(admission('/health')[0],200)
+                        mock.assert_not_called() # admission must not call back into the worker
+                        self.assertEqual(request('PUT',vm_base+'/http-access',{'vm_id':vm_id,'username':'visitor','password':'too short'},host='client.test',bearer=agent['token'])[0],400)
+                        credentials={'vm_id':vm_id,'username':'visitor','password':'isolated VM password'}
+                        status,access,_=request('PUT',vm_base+'/http-access',credentials,host='client.test',bearer=agent['token'])
+                        self.assertEqual(status,200,access);self.assertTrue(access['configured']);self.assertNotIn('password',json.dumps(access))
+                        self.assertEqual(admission(basic='visitor:wrong')[0],401)
+                        status,_,headers=admission(basic='visitor:isolated VM password')
+                        self.assertEqual(status,200);self.assertEqual(headers['X-GAP-VM-URI'],ingress['base_path']);self.assertEqual(headers['X-GAP-VM-Strip-Auth'],'1')
+                        self.assertEqual(admission(path=ingress['base_path']+'../other',basic='visitor:isolated VM password')[0],403)
+                        self.assertEqual(headers['X-GAP-VM-Identity'],vm_id)
+                        payload={'vm_id':vm_id,'hostname':'app.customer.test'}
+                        st,domain,_=request('POST',vm_base+'/domains',payload,host='client.test',bearer=agent['token'])
+                        self.assertEqual(st,200,domain);self.assertEqual(domain['domain']['status'],'pending_dns')
+                        self.assertEqual(domain['domain']['vm_id'],vm_id)
+                        self.assertEqual(request('POST',vm_base+'/domains',{**payload,'vm_id':'vm_'+'b'*32},host='client.test',bearer=agent['token'])[0],400)
+                        self.assertEqual(request('POST','/v1/cloud/projects/'+project_id+'/site/domains/'+payload['hostname']+'/verify',{},host='client.test',bearer=agent['token'])[0],400)
+                        self.assertEqual(request('POST','/v1/cloud/projects/'+project_id+'/site/domains',{'hostname':payload['hostname'],'access':'public'},host='client.test',bearer=agent['token'])[0],400)
+                        verify=vm_base+'/domains/'+payload['hostname']+'/verify'
+                        self.assertEqual(request('POST',verify,{'vm_id':vm_id},host='client.test',bearer=agent['token'])[0],400)
+                        dns_answers.append(domain['domain']['verification_value'])
+                        self.assertEqual(request('POST',verify,{'vm_id':vm_id},host='client.test',bearer=agent['token'])[0],200)
+                        st,_,headers=admission('/hello world',hostname=payload['hostname'],raw='/hello%20world?q=1')
+                        self.assertEqual(st,200);self.assertEqual(headers['X-GAP-VM-URI'],ingress['base_path']+'hello%20world?q=1');self.assertNotIn('X-GAP-VM-Strip-Auth',headers)
+                        self.assertEqual(admission()[0],401) # custom domain never unlocks the shared origin
+                        self.assertEqual(request('GET','/internal/tls/ask?token='+('f'*64)+'&domain='+payload['hostname'],host='client.test')[0],200)
+                        restart('1')
+                        self.assertEqual(admission(basic='visitor:isolated VM password')[0],200)
+                        self.assertEqual(admission('/hello',hostname=payload['hostname'])[0],200)
+                        st,_,_=request('DELETE',vm_base+'/domains/'+payload['hostname'],{'vm_id':vm_id},host='client.test',bearer=agent['token']);self.assertEqual(st,200)
+                        self.assertNotIn('X-GAP-VM-URI',admission('/hello',hostname=payload['hostname'])[2])
                     self.assertNotIn(agent['token'], json.dumps(request('GET', api+'agents', cookie=cookie)[1]))
                     self.assertEqual(request('GET', api+'projects/'+project_id, cookie=cookie)[0], 200)
                     site='/v1/cloud/projects/'+project_id+'/site'

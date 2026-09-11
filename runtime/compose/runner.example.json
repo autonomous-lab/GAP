@@ -14,6 +14,7 @@
     }
   },
   "ingress": {
+    "admission_token_file": "/config/http-edge.token",
     "dedicated_caddy": true,
     "public_url": "https://gap.geta.team",
     "admin_socket": "/run/caddy-admin/admin.sock"

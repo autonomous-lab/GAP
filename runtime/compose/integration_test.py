@@ -109,7 +109,8 @@ class Integration(unittest.TestCase):
                                             "image_dir": os.environ["GAP_VM_TEST_IMAGE_DIR"],
                                             "public_network": {"hostname": "sites.gap.geta.team", "first_port": 24100, "last_port": 24109}}
                 if managed and os.environ.get('GAP_TEST_CADDY_BINARY'):
-                    config['ingress'] = {'dedicated_caddy': True, 'public_url': os.environ.get('GAP_TEST_APP_ORIGIN', 'http://127.0.0.1:8093'),
+                    (root/'http-edge.token').write_text('ab'*32)
+                    config['ingress'] = {'dedicated_caddy': True, 'admission_token_file':str(root/'http-edge.token'), 'public_url': os.environ.get('GAP_TEST_APP_ORIGIN', 'http://127.0.0.1:8093'),
                         'admin_socket': str(root / 'caddy-admin.sock'),
                         'http_port': int(os.environ.get('GAP_TEST_APP_PORT', '8093'))}
                     bootstrap = root / 'caddy.json'
@@ -261,6 +262,7 @@ class Integration(unittest.TestCase):
                     '-o','HostKeyAlias='+meta['vm_id'],'-i',str(key),'-p',str(meta['ssh_port']),
                     'root@127.0.0.1', command], capture_output=True, text=True, check=True, timeout=15)
                 return dict(line.split('=',1) for line in result.stdout.splitlines() if line.startswith('GAP_'))
+            edge_headers={'X-GAP-VM-Admission':'ab'*32,'X-GAP-VM-Identity':vm['vm_id']}
             initial_env = guest_env()
             self.assertEqual(initial_env['GAP_HTTP_PORT'], '')
             self.assertEqual(initial_env['GAP_PUBLIC_PORTS'], ','.join(str(p['public_port']) for p in public_ports))
@@ -285,7 +287,7 @@ class Integration(unittest.TestCase):
                 native_url = request('GET', prefix+'/ingress', token)[1]['url']
                 for attempt in range(40):
                     try:
-                        with urllib.request.urlopen(native_url, timeout=5) as response:
+                        with urllib.request.urlopen(urllib.request.Request(native_url,headers=edge_headers), timeout=5) as response:
                             self.assertEqual(response.read().strip(), b'native-without-docker')
                         break
                     except OSError:
@@ -310,7 +312,7 @@ class Integration(unittest.TestCase):
                 ingress = operation('PUT', '/ingress', {**identity, 'enabled': True, 'guest_port': 8000})['ingress']
                 self.assertTrue(ingress['routed'])
                 def app_request(path='', method='GET', data=None):
-                    req = urllib.request.Request(ingress['url'] + path, method=method, data=data)
+                    req = urllib.request.Request(ingress['url'] + path, method=method, data=data, headers=edge_headers)
                     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10) as response:
                         self.assertIsNone(response.headers.get('Service-Worker-Allowed'))
                         return response.read().strip()
@@ -333,12 +335,13 @@ class Integration(unittest.TestCase):
                 self.assertEqual(failure.exception.code, 503)
                 self.assertEqual(failure.exception.read(), b'app-unavailable')
                 # Missing slash redirects to the canonical path, preserving query.
-                with urllib.request.urlopen(ingress['url'][:-1] + '?probe=1', timeout=10) as response:
+                with urllib.request.urlopen(urllib.request.Request(ingress['url'][:-1] + '?probe=1',headers=edge_headers), timeout=10) as response:
                     self.assertEqual(response.geturl(), ingress['url'] + '?probe=1')
                 origin = urlsplit(ingress['url'])
                 with socket.create_connection((origin.hostname, origin.port or 80), timeout=5) as ws:
                     path = origin.path + 'socket'
                     ws.sendall(('GET ' + path + ' HTTP/1.1\r\nHost: ' + origin.netloc +
+                        '\r\nX-GAP-VM-Admission: '+edge_headers['X-GAP-VM-Admission']+'\r\nX-GAP-VM-Identity: '+edge_headers['X-GAP-VM-Identity']+
                         '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13'
                         '\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n').encode())
                     wire = ws.makefile('rb')
@@ -358,7 +361,7 @@ class Integration(unittest.TestCase):
                 self.assertFalse(request('GET', prefix + '/ingress', token)[1]['routed'])
                 with self.assertRaises(urllib.error.HTTPError) as disabled:
                     app_request()
-                self.assertEqual(disabled.exception.code, 404)
+                self.assertEqual(disabled.exception.code, 401)
                 operation('PUT', '/ingress', {**identity, 'enabled': True, 'guest_port': 8000})
             self.assertEqual(len(persisted), 36)
             operation("POST", "/vm/stop", identity)

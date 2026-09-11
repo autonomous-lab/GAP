@@ -1454,16 +1454,9 @@ network panel. Await the update job, PUT `/vm/ingress` with `request_id`, `vm_id
 must listen on that port inside the guest. GET `/vm/ingress?vm_id=...` returns
 the exact URL; do not guess a project path when the VM has its own identity.
 
-Native custom-domain attachment currently supports static sites, not microVMs.
-The console supplies a Caddy reverse-proxy example for a VM with enabled HTTPS
-routing. Point your custom domain's A/AAAA records at a proxy you operate,
-allow inbound 80/443 there, and proxy to the GAP origin after prepending the
-returned application base path. A CNAME cannot map a hostname to a URL path.
-Keep this external proxy available while the VM hibernates. Configure your
-app's public origin, redirects, cookie paths and WebSockets for the domain;
-GAP does not rewrite application responses or register that domain for you.
-See [Caddy reverse_proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)
-and [rewrite](https://caddyserver.com/docs/caddyfile/directives/rewrite).
+GAP application URLs require visitor Basic Auth, even when a public custom
+domain is attached. Configure access and domains from the network panel;
+see [HTTP authentication and custom domains](#microvm-http-authentication-and-custom-domains).
 
 GET `/v1/cloud/projects/{project}/vm/metrics?vm_id=...` requires owner auth and
 microVM approval. It reads host counters only, without SSH, guest execution,
@@ -1485,3 +1478,71 @@ are zero when the VM process is absent; allocated resources and stored disk
 remain visible. `sampled_at`, `cpu_window_seconds`, `errors` and the DNS
 `resolved_at` timestamp describe freshness and limitations. Metrics are current
 samples, not a historical time-series database.
+
+## MicroVM HTTP authentication and custom domains
+
+All shared GAP `/apps/{project-or-vm}/` routes require **Basic Auth**, including
+HTTP APIs and WebSocket handshakes. Existing routes without visitor credentials
+are locked until their owner configures them. There is no anonymous-access
+switch on the GAP domain. SSH and the five raw TCP/UDP mappings are separate;
+applications exposed on those ports must enforce their own access policy.
+
+In **MicroVMs → Network & application access → GAP URL protection**, choose a
+visitor username and a new password (12–128 bytes). These are separate from your
+owner bearer token. GAP stores an Argon2 hash and removes visitor Authorization
+before forwarding to the guest. Changing credentials takes effect on new HTTP
+requests and WebSocket handshakes; an already open stream is not reauthenticated.
+A WebSocket client on the shared origin must support the Basic handshake;
+for public browser applications, use a verified custom domain.
+
+Owner API (also accepts the console's authenticated browser session):
+
+```text
+GET /v1/cloud/projects/{project}/vm/http-access?vm_id=vm_...
+PUT /v1/cloud/projects/{project}/vm/http-access
+    {"vm_id":"vm_...","username":"visitor","password":"your-unique-visitor-password"}
+```
+
+The GET response includes `configured` and `username`, never the password or
+hash. There is no credential default. Use your secret manager to deliver the
+chosen password to authorized visitors; never place it in a public URL.
+
+To publish without GAP Basic Auth, use **Custom domains** in the same panel:
+
+1. Enable the VM's HTTPS ingress for the correct guest application port.
+2. Add a hostname such as `app.example.com`. GAP reserves it for that VM and
+   shows a unique TXT challenge under `_gap-verify.app.example.com`.
+3. Create the TXT record exactly as shown. Point the hostname at the displayed
+   node routing target using CNAME (hostname), or A/AAAA (IP). Use DNS-only while
+   provisioning; the target must reach this node on 80/443. A CNAME to the node
+   works because GAP now maps the verified hostname to this exact VM internally.
+4. Click **Verify DNS** after propagation. The status becomes `active`; the
+   first HTTPS visit provisions a certificate through the node's TLS gateway.
+5. Configure your application's public origin, redirects, cookie paths and
+   WebSocket URL for the domain. GAP does not rewrite application responses.
+
+The custom hostname is public without GAP Basic Auth. Your app may still require
+its own login or API Authorization, which GAP preserves on that hostname.
+The shared `/apps/` URL remains protected. Removing a domain disconnects its
+routing and certificate authorization for new connections. Hibernated VMs can
+wake on authorized shared-origin requests or verified-domain requests.
+
+```text
+GET    /v1/cloud/projects/{project}/vm/domains?vm_id=vm_...
+POST   /v1/cloud/projects/{project}/vm/domains
+       {"vm_id":"vm_...","hostname":"app.example.com"}
+POST   /v1/cloud/projects/{project}/vm/domains/app.example.com/verify
+       {"vm_id":"vm_..."}
+DELETE /v1/cloud/projects/{project}/vm/domains/app.example.com
+       {"vm_id":"vm_..."}
+```
+
+The node's three-domain limit is shared across a project's static sites and
+microVMs. A hostname cannot be attached to two targets. Ownership, agent approval
+and project suspension are checked; stale mappings never route a replacement VM.
+
+Operators: configure `GAP_VM_EDGE_TOKEN` with a random 32-byte hex value in the
+node `.env`. Put the same value in the worker's private `/config/http-edge.token`
+and set `ingress.admission_token_file` to that path in `runner.json`. Never expose
+this secret to tenants. Main edge and private Caddy both require this admission
+chain; without it VM routing fails closed. See the worker README for rollout.

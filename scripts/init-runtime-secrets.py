@@ -7,7 +7,7 @@ import re
 import secrets
 import tempfile
 
-KEYS = ('GAP_FUNCTION_SANDBOX_TOKEN', 'GAP_REALTIME_SECRET')
+KEYS = ('GAP_FUNCTION_SANDBOX_TOKEN', 'GAP_REALTIME_SECRET', 'GAP_VM_EDGE_TOKEN')
 
 
 def initialize(path):

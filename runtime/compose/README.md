@@ -457,7 +457,8 @@ Operator configuration (also in `runner.example.json`):
 "ingress": {
   "dedicated_caddy": true,
   "public_url": "https://gap.geta.team",
-  "admin_socket": "/run/caddy-admin/admin.sock"
+  "admin_socket": "/run/caddy-admin/admin.sock",
+  "admission_token_file": "/config/http-edge.token"
 }
 ```
 
@@ -812,3 +813,30 @@ intervals; network counter resets invalidate the rate baseline. Host RSS and
 allocated guest RAM are distinct, as are host storage (including snapshots)
 and virtual disk capacity. DNS resolution of the operator-configured public
 hostname is asynchronous and cached for 60 seconds. `/vm/metrics` is read-only.
+
+### Mandatory shared-origin HTTP authentication
+
+The main node verifies visitor Basic Auth before the private Caddy can forward
+an `/apps/` request or initiate a WebSocket. Set a random 32-byte lowercase hex
+`GAP_VM_EDGE_TOKEN` in the main node/edge environment, and put the identical
+value in a worker-readable private file `/config/http-edge.token` (0600, worker
+UID). Set `ingress.admission_token_file` to that file. Caddy matches a dedicated
+internal admission header and deletes it before forwarding to any guest.
+Without a configured secret it publishes no VM routes. Do not publish its admin
+socket or give agents this secret. Never use an owner/service bearer as this key.
+
+Rollout: build and test the node, edge and worker; hibernate running VMs and wait
+for jobs to finish before restarting the worker (a restart kills live QEMU).
+Provision the matching secret/config, restart the worker and node, then the main
+edge, and resume only VMs running before maintenance. Existing shared URLs stay
+locked until owners set visitor credentials in the console or `/vm/http-access`.
+Do not generate a universal visitor password. See AGENTS.md for the owner API.
+
+Native custom domains are verified in the main node's shared hostname registry.
+The main edge rewrites a verified domain to the exact VM route; the private
+worker never accepts caller-selected upstreams. On these domains application
+Authorization is preserved and no visitor Basic Auth is imposed. The outer TLS
+gateway must use the existing authenticated `/internal/tls/ask` integration and
+forward verified custom hosts to the main edge. Set `GAP_CUSTOM_DOMAIN_TARGET`
+to this node's direct public DNS target. Raw TCP/UDP ports remain separate from
+HTTP authentication and require application-level access controls.

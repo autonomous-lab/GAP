@@ -25,7 +25,9 @@ class IngressTests(unittest.TestCase):
         sync.start()
         self.addCleanup(sync.stop)
         self.manager.save(self.meta)
-        self.config = {'dedicated_caddy': True, 'public_url': 'https://gap.geta.team'}
+        token = root / 'edge.token'
+        token.write_text('ab' * 32)
+        self.config = {'dedicated_caddy': True, 'public_url': 'https://gap.geta.team', 'admission_token_file': str(token)}
         self.opener = patch('ingress.AdminConnection').start()
         self.addCleanup(patch.stopall)
         self.opener.return_value.getresponse.return_value.status = 200
@@ -40,12 +42,31 @@ class IngressTests(unittest.TestCase):
         self.assertTrue(result['ingress']['routed'])
         config, _ = self.ingress.configuration()
         route = config['apps']['http']['servers']['compose']['routes'][1]
-        self.assertEqual(route['match'], [{'path': ['/apps/' + PROJECT + '/*']}])
+        self.assertEqual(route['match'], [{'path': ['/apps/' + PROJECT + '/*'], 'header': {'X-GAP-VM-Admission': ['ab' * 32], 'X-GAP-VM-Identity': [VM]}}])
         self.assertEqual(result['ingress']['url'], 'https://gap.geta.team/apps/' + PROJECT + '/')
         self.assertEqual(route['handle'][0]['strip_path_prefix'], '/apps/' + PROJECT)
         self.assertEqual(route['handle'][1]['upstreams'], [{'dial': '127.0.0.1:23000'}])
         self.assertTrue(config['admin']['listen'].startswith('unix/'))
         self.assertNotIn('tls', config['apps'])  # normal automatic public TLS
+
+    def test_missing_secret_fails_closed(self):
+        self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 8000})
+        config = dict(self.config)
+        del config['admission_token_file']
+        closed = Ingress(config, self.manager)
+        routes, applied = closed.configuration()
+        self.assertEqual(applied, set())
+        self.assertEqual(routes['apps']['http']['servers']['compose']['routes'][0]['handle'][0]['status_code'], 401)
+
+    def test_secret_guards_redirect_and_is_removed_before_guest(self):
+        self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 8000})
+        config, _ = self.ingress.configuration()
+        routes = config['apps']['http']['servers']['compose']['routes']
+        self.assertEqual(routes[0]['match'][0]['header'], {'X-GAP-VM-Admission': ['ab' * 32], 'X-GAP-VM-Identity': [VM]})
+        self.assertIn('X-GAP-VM-Admission', routes[1]['handle'][1]['headers']['request']['delete'])
+        Path(self.config['admission_token_file']).write_text('weak')
+        with self.assertRaisesRegex(ValueError, 'invalid_http_admission_token'):
+            Ingress(self.config, self.manager)
 
     def test_owner_and_vm_generation_are_enforced(self):
         for owner, vm in (('wrong-owner', VM), (OWNER, 'vm_' + 'd' * 32)):

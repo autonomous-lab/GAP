@@ -1,5 +1,6 @@
 """Dedicated Caddy ingress for managed guests; never configures the shared edge."""
 import json
+from pathlib import Path
 import re
 import threading
 import http.client
@@ -39,6 +40,10 @@ class Ingress:
         self.http_port = config.get('http_port', 8093)
         if type(self.http_port) is not int or not 1 <= self.http_port <= 65535:
             raise ValueError('invalid ingress http_port')
+        token_file=config.get('admission_token_file')
+        self.admission_token=Path(token_file).read_text().strip() if token_file else None
+        if self.admission_token is not None and (len(self.admission_token)<32 or any(c not in '0123456789abcdef' for c in self.admission_token)):
+            raise ValueError('invalid_http_admission_token')
         self.manager = manager
         manager.ingress_origin = self.public_url
         self.lock = threading.Lock()
@@ -87,21 +92,27 @@ class Ingress:
             if port is None:
                 continue
             prefix = self.prefix(meta.get('catalog_key',meta['project_id']))
-            routes.append({'match': [{'path': [prefix]}], 'handle': [{
+            routes.append({'match': [{'path': [prefix], 'header': {'X-GAP-VM-Identity': [meta['vm_id']]}}], 'handle': [{
                 'handler': 'static_response', 'status_code': 308,
                 'headers': {'Location': [prefix + '/{http.request.uri.prefixed_query}']}
             }], 'terminal': True})
-            routes.append({'match': [{'path': [prefix + '/*']}], 'handle': [
+            routes.append({'match': [{'path': [prefix + '/*'], 'header': {'X-GAP-VM-Identity': [meta['vm_id']]}}], 'handle': [
                 {'handler': 'rewrite', 'strip_path_prefix': prefix},
                 {'handler': 'reverse_proxy', 'upstreams': [{'dial': '127.0.0.1:' + str(self.manager.runtime.gateway.port if self.manager.runtime and self.manager.runtime.gateway else port)}],
                  'headers': {'request': {'set': {
                      **({'X-GAP-Project': [meta['project_id']], 'X-GAP-VM': [meta['vm_id']]} if self.manager.runtime else {}),
                      'X-Forwarded-Prefix': [prefix],
                      'X-Forwarded-Proto': [urlsplit(self.public_url).scheme]
-                 }}, 'response': {'delete': ['Service-Worker-Allowed']}}}
+                 }, 'delete': ['X-GAP-VM-Admission', 'X-GAP-VM-Identity']}, 'response': {'delete': ['Service-Worker-Allowed']}}}
             ], 'terminal': True})
             applied.add(meta['vm_id'])
-        routes.append({'handle': [{'handler': 'static_response', 'status_code': 404}]})
+        if self.admission_token:
+            for route in routes:
+                for match in route.get('match',[]):
+                    match['header']['X-GAP-VM-Admission']=[self.admission_token]
+        else:
+            routes=[]; applied=set()
+        routes.append({'handle': [{'handler':'static_response','status_code':401,'headers':{'WWW-Authenticate':['Basic realm="GAP microVM"']}}]})
         config = {'admin': {'listen': 'unix/' + self.admin_socket},
                   'apps': {'http': {'servers': {'compose': {
                       'listen': [':' + str(self.http_port)],
