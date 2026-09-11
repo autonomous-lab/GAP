@@ -1398,3 +1398,37 @@ stable: changing it invalidates existing sessions. Cookie IDs are stored only
 as hashes, and agent bearers are encrypted with a separate key derived from
 the master key. Disconnect durably revokes the session. API clients continue using
 their bearer tokens.
+
+## SSH connection details and browser terminal
+
+The `/microvms` console displays the selected VM's public SSH command, port,
+ED25519 host fingerprint and authorized public key count. Add Ed25519 or RSA
+public keys from the console. Expose SSH explicitly on an unused TCP slot;
+existing port mappings are preserved. Use the matching private key locally,
+optionally with `ssh -i /path/to/private_key`; never upload a private key.
+
+The web terminal uses a controller-owned, host-key-pinned SSH connection to the
+VM's internal SSH port. It needs no public port and opens `/bin/sh` inside the
+VM as root. A hibernated VM is resumed through the normal asynchronous resume
+job first; a stopped VM must be started first. Owner authorization, quota
+approval, workload suspension and credit checks apply. Browser sessions remain
+on the isolated management origin.
+
+Before opening a terminal, POST `/v1/cloud/projects/{project}/vm/terminal/prepare`
+with `vm_id` and `request_id` (32 lower-case hex characters) and await its job.
+This installs a separate forced-shell key, preserving the restricted deployment key
+and user public keys. Then, for an interactive terminal, POST `/v1/cloud/projects/{project}/vm/terminal/open`
+with `vm_id`, `cols` (20–300), `rows` (5–100). The response includes
+`terminal_id`. POST `/vm/terminal/io` with `vm_id`, `terminal_id`, dimensions,
+`seq` (starting at 1), `cursor` (starting at 0), and base64 `input`. Advance
+`seq` after each response, and use the returned byte `cursor`. A retry must use
+the same sequence and input. Decode base64 `output`; `closed` marks EOF and
+`truncated` indicates discarded old output. POST `/vm/terminal/close` with
+`vm_id` and `terminal_id` to close. All requests require project owner auth.
+
+Limits: two live terminals per owner, 32 per node, 16 KiB input per exchange,
+64 KiB output per response and a 1 MiB output ring per terminal. Terminals
+expire after 30 seconds without browser exchanges, 15 minutes without input,
+or eight hours total. Polling/output alone does not reset VM inbound activity;
+opening a terminal and typing do. Stop/hibernate/suspension closes the terminal;
+background programs should use an appropriate supervisor inside the VM.

@@ -252,6 +252,10 @@ pub fn runtime_route(path: &str) -> Option<(&str, &str)> {
         "vm/budget" => return Some((project, "budget")),
         "vm/ports" => return Some((project, "ports")),
         "vm/ssh" => return Some((project, "ssh")),
+        "vm/terminal/prepare" => return Some((project, "terminal/prepare")),
+        "vm/terminal/open" => return Some((project, "terminal/open")),
+        "vm/terminal/io" => return Some((project, "terminal/io")),
+        "vm/terminal/close" => return Some((project, "terminal/close")),
         "vm/ingress" => return Some((project, "ingress")),
         _ => {}
     }
@@ -315,6 +319,15 @@ pub fn forward(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_routes_are_explicit() {
+        let p="prj_0123456789abcdef01234567";
+        for action in ["prepare","open","io","close"] {
+            assert_eq!(runtime_route(&format!("/v1/cloud/projects/{p}/vm/terminal/{action}")),Some((p,format!("terminal/{action}").as_str())));
+        }
+        assert!(runtime_route(&format!("/v1/cloud/projects/{p}/vm/terminal/exec")).is_none());
+        assert!(runtime_route(&format!("/v1/cloud/projects/{p}/vm/terminal/open/extra")).is_none());
+    }
     #[test]
     fn strict_project_routes() {
         let id = "prj_0123456789abcdef01234567";

@@ -79,7 +79,7 @@ pub fn authorization(path:&str,cookies:&str,csrf:&str)->Option<String> {store().
 pub fn revoke(cookies:&str)->Result<String,()> {store()?.revoke(cookies)}
 pub fn console_path(path: &str) -> bool {
     let path=path.split('?').next().unwrap_or(path);
-    if path=="/microvms" {return true}
+    if matches!(path,"/microvms" | "/microvms/assets/xterm.js" | "/microvms/assets/xterm.css" | "/microvms/assets/xterm-fit.js") {return true}
     let Some(rest)=path.strip_prefix("/v1/cloud/projects/") else {return false};
     let Some((project,action))=rest.split_once('/') else {return false};
     project.len()==28 && project.starts_with("prj_") && project[4..].bytes().all(|c|c.is_ascii_hexdigit()) &&

@@ -26,7 +26,7 @@ MAX_OUTPUT = 1024 * 1024
 PROJECT = re.compile(r"prj_[0-9a-f]{24}\Z")
 REQUEST = re.compile(r"[0-9a-f]{32}\Z")
 ACTION = {"releases", "start", "stop", "status", "logs",
-          "vm/create", "vm/start", "vm/stop", "vm/update", "vm/destroy", "vm/hibernate", "vm/resume", "runtime", "ingress", "ports", "ssh"}
+          "vm/create", "vm/start", "vm/stop", "vm/update", "vm/destroy", "vm/hibernate", "vm/resume", "runtime", "ingress", "ports", "ssh", "terminal/prepare"}
 
 
 class Failure(Exception):
@@ -155,6 +155,10 @@ class Runner:
             from gateway import Gateway
             self.runtime=Runtime(self,config)
             Gateway(self.runtime,config.get('wake_gateway_port',8094))
+        self.terminals = None
+        if self.runtime:
+            from terminal import Terminals
+            self.terminals = Terminals(self)
         self.ingress = None
         self.ingress_config = config.get('ingress')
         if self.ingress_config:
@@ -269,6 +273,13 @@ class Runner:
         selected = body.get('vm_id') if isinstance(body,dict) else None
         if selected is not None and not re.fullmatch(r'vm_[0-9a-f]{32}',str(selected)):
             raise Failure(400,'invalid_vm_identity')
+        if isinstance(action,str) and action.startswith('terminal/') and action!='terminal/prepare':
+            if not self.terminals: raise Failure(409,'terminal_not_configured')
+            if method != 'POST': raise Failure(405,'terminal_post_required')
+            from terminal import TerminalError
+            from microvm import VMError
+            try: return 200,self.terminals.rpc(project,owner,action[9:],body)
+            except (TerminalError,VMError) as error: raise Failure(409,str(error))
         if action=='vms':
             if not self.hypervisor: raise Failure(409,'managed_hypervisor_not_configured')
             if method=='GET':
@@ -355,6 +366,8 @@ class Runner:
                 self.ingress.validate(body)
             except VMError as error:
                 raise Failure(400, str(error))
+        elif action == "terminal/prepare":
+            if not self.terminals or set(body)!={"request_id","vm_id"} or not selected: raise Failure(400,"invalid_terminal_prepare")
         elif action == "runtime":
             if not {"request_id","vm_id","mode"} <= set(body) <= {"request_id","vm_id","mode","idle_timeout_seconds"}: raise Failure(400,"invalid_runtime_fields")
         elif action == "releases":
@@ -424,6 +437,25 @@ class Runner:
             db.execute("UPDATE jobs SET status=?,result=?,payload=NULL WHERE id=?", (status, json.dumps(result), job))
 
     def dispatch_job(self,row,guest,payload):
+        if payload['action']=='terminal/prepare':
+            from microvm import VMError, run
+            meta=self.hypervisor.read(row['project'],row['owner'],payload['body']['vm_id'])
+            if not meta or meta['state']!='running' or not self.runtime.check_policy(meta): raise VMError('vm_not_running')
+            self.runtime.check_credit(meta)
+            key=self.hypervisor.folder(meta)/'terminal_key'
+            if not key.exists():run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(key)])
+            for attempt in range(6):
+                if not self.runtime.check_policy(meta): raise VMError('microvm_suspended_or_policy_unavailable')
+                self.runtime.check_credit(meta)
+                try:
+                    self.hypervisor.write_keys(meta,meta.get('ssh_keys',[]))
+                    break
+                except Failure as error:
+                    if attempt==5 or error.code!='guest_unreachable_or_failed_state_unknown': raise
+                    time.sleep(1)
+            self.runtime.touch(meta)
+            return {'ok':True}
+
         if payload['action']=='runtime':
             return self.runtime.configure(row['project'],row['owner'],payload['body'])
         if payload['action'].startswith('vm/'):

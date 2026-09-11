@@ -785,3 +785,20 @@ broker pins the configured Docker container identity on every request, verifies
 the peer UID and direct QEMU child, then applies `cpu.max` before guest start.
 It also applies after snapshot restoration. Integer-only deployments may omit
 the broker setting. CPU accounting includes QEMU overhead within the quota.
+
+### Interactive terminal
+
+`terminal.py` provides bounded owner/project/VM-scoped SSH PTYs through the
+private runner RPC. Public routes allow only terminal/prepare, terminal/open, terminal/io and
+terminal/close. Preparation runs as a tracked job and installs a separate
+forced-shell key without relaxing the forced deployment command. Every request passes normal owner approval; runtime policy
+and prepaid credit checks apply throughout. Idle polling never touches VM
+activity. The service runs as UID 10001 and launches only the controller's
+fixed SSH command, with host-key verification and forwarding disabled.
+
+The browser uses vendored xterm.js 6.0.0 and addon-fit 0.11.0, including their
+MIT license files under src/ui/vendor. No runtime CDN or attach addon is used.
+The terminal is transient: worker restart closes it. A lost HTTP response can
+be retried with identical input sequence and output cursor without rerunning
+input. Output is bounded and never interpreted as HTML. There is no terminal
+transcript logging or private key browser transfer.

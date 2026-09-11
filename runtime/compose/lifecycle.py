@@ -272,6 +272,8 @@ class Runtime:
                 state['active_http']-=1; state['last_incoming']=time.time()
 
     def disconnect(self,meta):
+        terminals=getattr(self.runner,"terminals",None)
+        if terminals: terminals.close_vm(meta["vm_id"])
         for sock in list(self.state(meta)['connections']):
             try: sock.shutdown(2)
             except OSError: pass

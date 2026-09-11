@@ -340,3 +340,11 @@ stable: changing it invalidates existing sessions. Cookie IDs are stored only
 as hashes, and agent bearers are encrypted with a separate key derived from
 the master key. Disconnect durably revokes the session. API clients continue using
 their bearer tokens.
+
+### SSH and browser terminal
+
+The microVM dashboard shows a copyable SSH command and host fingerprint,
+lets owners add public keys and expose SSH on a free TCP slot, and includes
+an interactive browser terminal. The terminal uses internal, pinned SSH and
+requires no public port or private key upload. Hibernated VMs resume before
+connection. Terminal limits and API details are in [AGENTS.md](AGENTS.md#ssh-connection-details-and-browser-terminal).
