@@ -101,7 +101,6 @@ class Ingress:
                 {'handler': 'reverse_proxy', 'upstreams': [{'dial': '127.0.0.1:' + str(self.manager.runtime.gateway.port if self.manager.runtime and self.manager.runtime.gateway else port)}],
                  'headers': {'request': {'set': {
                      **({'X-GAP-Project': [meta['project_id']], 'X-GAP-VM': [meta['vm_id']]} if self.manager.runtime else {}),
-                     'X-Forwarded-Prefix': [prefix],
                      'X-Forwarded-Proto': [urlsplit(self.public_url).scheme]
                  }, 'delete': ['X-GAP-VM-Admission', 'X-GAP-VM-Identity']}, 'response': {'delete': ['Service-Worker-Allowed']}}}
             ], 'terminal': True})

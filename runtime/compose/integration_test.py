@@ -262,7 +262,7 @@ class Integration(unittest.TestCase):
                     '-o','HostKeyAlias='+meta['vm_id'],'-i',str(key),'-p',str(meta['ssh_port']),
                     'root@127.0.0.1', command], capture_output=True, text=True, check=True, timeout=15)
                 return dict(line.split('=',1) for line in result.stdout.splitlines() if line.startswith('GAP_'))
-            edge_headers={'X-GAP-VM-Admission':'ab'*32,'X-GAP-VM-Identity':vm['vm_id']}
+            edge_headers={'X-GAP-VM-Admission':'ab'*32,'X-GAP-VM-Identity':vm['vm_id'],'X-Forwarded-Prefix':'/apps/'+project}
             initial_env = guest_env()
             self.assertEqual(initial_env['GAP_HTTP_PORT'], '')
             self.assertEqual(initial_env['GAP_PUBLIC_PORTS'], ','.join(str(p['public_port']) for p in public_ports))

@@ -105,9 +105,9 @@ def main():
             assert req(app,target=caddy_port,extra={'X-GAP-VM-Admission':SECRET,'X-GAP-VM-Identity':'vm_wrong'})[0]==401
             status,data,h=req(app+'hello%20world?q=1',auth=BASIC)
             assert status==200,(status,data);assert data['kind']=='guest';assert data['path']=='/hello%20world?q=1',data
-            assert 'Authorization' not in data['headers'];assert 'X-Gap-Vm-Admission' not in data['headers'];assert SECRET not in json.dumps(data);assert h['Cache-Control']=='no-store'
+            assert 'Authorization' not in data['headers'];assert 'X-Gap-Vm-Admission' not in data['headers'];assert SECRET not in json.dumps(data);assert h['Cache-Control']=='no-store';assert data['headers'].get('X-Forwarded-Prefix')=='/apps/'+PROJECT
             status,data,_=req('/api/data?q=1',host='app.customer.test',auth='Bearer application-token')
-            assert status==200 and data['kind']=='guest',data;assert data['headers'].get('Authorization')=='Bearer application-token';assert data['path']=='/api/data?q=1';assert SECRET not in json.dumps(data)
+            assert status==200 and data['kind']=='guest',data;assert data['headers'].get('Authorization')=='Bearer application-token';assert data['path']=='/api/data?q=1';assert SECRET not in json.dumps(data);assert not data['headers'].get('X-Forwarded-Prefix')
             status,data,_=req('/v1/example',auth='Bearer owner-token',extra={'X-GAP-VM-Admission':'spoof'})
             assert status==200 and data['kind']=='node';assert data['headers']['Authorization']=='Bearer owner-token';assert SECRET not in json.dumps(data);assert 'spoof' not in json.dumps(data)
             assert req('/v1/realtime')[1]['kind']=='realtime'
