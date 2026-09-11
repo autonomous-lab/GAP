@@ -33,6 +33,15 @@ class NetworkTests(unittest.TestCase):
             self.net.allocate(meta)
             self.manager.save(meta)
 
+    def test_fractional_catalog_usage_across_projects(self):
+        self.meta['vcpus']=.25; self.manager.save(self.meta)
+        other=dict(self.meta,project_id='prj_'+'d'*24,vm_id='vm_'+'e'*32,vcpus=.5)
+        self.manager.save(other)
+        self.assertEqual(self.manager.quota_usage(O,True),{'vcpus':.75,'memory_mib':2048,'disk_gib':16})
+        for invalid in [True,0,.3,float('nan')]:
+            other['vcpus']=invalid;self.manager.save(other)
+            with self.assertRaisesRegex(VMError,'invalid_resource_catalog'):self.manager.quota_usage(O)
+
     def test_exclusive_durable_five_numbers_and_release(self):
         self.reserve(self.meta)
         second = dict(self.meta, project_id='prj_'+'d'*24, vm_id='vm_'+'e'*32)

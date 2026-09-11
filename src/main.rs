@@ -466,7 +466,7 @@ fn main() -> Result<()> {
                 let origin_ok=on_admin_host && header("Origin")==admin_origin.trim_end_matches('/');
                 let (status,body,set_cookie)=if !origin_ok {
                     (403,serde_json::json!({"error":{"code":"origin_required"}}),None)
-                } else if method=="POST" {
+                } else if method=="POST" && !header("Authorization").is_empty() {
                     // Authorization of this project's VM listing proves ownership
                     // and current approval before issuing any session cookie.
                     let (status,result)=route_with_ip(&state,"GET",&format!("/v1/cloud/projects/{project}/vms"),&[],auth.as_deref(),client_ip.as_deref());
@@ -476,8 +476,13 @@ fn main() -> Result<()> {
                             Err(())=>(503,serde_json::json!({"error":{"code":"sessions_unavailable"}}),None)
                         }
                     } else {(401,serde_json::json!({"error":{"code":"unauthorized"}}),None)}
-                } else if method=="DELETE" && gap::cloud_vm_session::authorization(&path,session_cookie,session_csrf).is_some() {
-                    (200,serde_json::json!({"disconnected":true}),Some(gap::cloud_vm_session::revoke(session_cookie)))
+                } else if method=="DELETE" {
+                    // Origin was checked above. Allow idempotent logout even
+                    // after expiry, so an expired session cannot trap the UI.
+                    match gap::cloud_vm_session::revoke(session_cookie) {
+                        Ok(cookie)=>(200,serde_json::json!({"disconnected":true}),Some(cookie)),
+                        Err(())=>(503,serde_json::json!({"error":{"code":"session_revocation_failed"}}),None)
+                    }
                 } else {(401,serde_json::json!({"error":{"code":"unauthorized"}}),None)};
                 let mut response=Response::from_string(body.to_string()).with_status_code(status);
                 response.add_header(Header::from_bytes("Content-Type","application/json").unwrap());

@@ -66,7 +66,7 @@ class AdminHTTP(unittest.TestCase):
             base = 'http://127.0.0.1:' + str(port())
             env = {'PATH': os.environ['PATH'], 'GAP_ADDR': base.removeprefix('http://'),
                    'GAP_STORAGE': 'sqlite', 'GAP_SQLITE_PATH': str(root/'node.sqlite'),
-                   'GAP_CLOUD_ROOT': str(root/'projects'), 'GAP_WORKERS': '4',
+                   'GAP_VM_SESSIONS_DB': str(root/'vm-sessions.sqlite'), 'GAP_CLOUD_ROOT': str(root/'projects'), 'GAP_WORKERS': '4',
                    'GAP_MASTER_KEY': 'c'*64, 'GAP_PUBLIC_URL': 'https://client.test',
                    'GAP_CLOUD_ADMIN_ENABLED': '1', 'GAP_ADMIN_EMAILS': 'owner@example.com',
                    'GAP_ADMIN_ORIGIN': 'https://admin.test', 'GAP_ADMIN_DB': str(root/'admin.sqlite'),
@@ -168,12 +168,22 @@ class AdminHTTP(unittest.TestCase):
                         st,session_vm,headers_vm=request('POST',vm_session,host='admin.test',origin='https://admin.test',bearer=agent['token'])
                         self.assertEqual(st,201)
                         cookie_vm=headers_vm['Set-Cookie'].split(';')[0]
+                        proc.terminate();proc.wait(timeout=10)
+                        proc=subprocess.Popen([os.environ['GAP_TEST_BINARY']],env=env,cwd=root,stdout=log,stderr=log)
+                        for _ in range(200):
+                            try:
+                                if request('GET','/health')[0]==200:break
+                            except OSError:pass
+                            time.sleep(.05)
+
                         self.assertIn('HttpOnly',headers_vm['Set-Cookie']);self.assertNotIn(agent['token'],headers_vm['Set-Cookie'])
                         vms='/v1/cloud/projects/'+project_id+'/vms'
+                        self.assertEqual(request('POST',vm_session,host='admin.test',origin='https://admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],401)
                         self.assertEqual(request('GET',vms,host='admin.test',cookie=cookie_vm)[0],401)
                         self.assertEqual(request('GET',vms,host='admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],200)
                         self.assertEqual(request('GET','/v1/cloud/projects/'+other_project['project_id']+'/vms',host='admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],401)
                         self.assertEqual(request('DELETE',vm_session,host='admin.test',origin='https://admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],200)
+                        self.assertEqual(request('DELETE',vm_session,host='admin.test',origin='https://admin.test',cookie=cookie_vm)[0],200)
                         self.assertEqual(request('GET',vms,host='admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],401)
                     self.assertNotIn(agent['token'], json.dumps(request('GET', api+'agents', cookie=cookie)[1]))
                     self.assertEqual(request('GET', api+'projects/'+project_id, cookie=cookie)[0], 200)

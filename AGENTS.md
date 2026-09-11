@@ -1391,5 +1391,10 @@ origin, where tenant applications are never served. It uses an opaque Secure, Ht
 cookie scoped to VM management APIs. The bearer stays on the server. Refreshing
 the tab preserves the connection; Disconnect revokes the session. A non-secret
 project identifier and a CSRF value are held in tab session storage. Sessions
-expire after eight hours or a node process restart. API clients continue using
+expire after eight hours and survive node process restarts and deployments.
+The node stores encrypted session records in `GAP_VM_SESSIONS_DB` (default
+`/data/cloud-vm-sessions.sqlite`, on persistent storage). Keep `GAP_MASTER_KEY`
+stable: changing it invalidates existing sessions. Cookie IDs are stored only
+as hashes, and agent bearers are encrypted with a separate key derived from
+the master key. Disconnect durably revokes the session. API clients continue using
 their bearer tokens.

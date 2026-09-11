@@ -595,7 +595,11 @@ class MicroVMs:
             if meta['owner_did'] == owner and meta['state'] != 'destroyed':
                 for key in usage:
                     value = meta[key]
-                    if type(value) is not int or value <= 0:
+                    if key == 'vcpus':
+                        from cpu_quota import quarters
+                        try: quarters(value)
+                        except ValueError: raise VMError('invalid_resource_catalog')
+                    elif type(value) is not int or value <= 0:
                         raise VMError('invalid_resource_catalog')
                     usage[key] += value
         return usage
