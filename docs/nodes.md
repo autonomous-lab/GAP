@@ -1,0 +1,57 @@
+# GAP node operations
+
+## Inventory
+
+| Node | SSH host | Checkout | Public origin |
+|---|---|---|---|
+| gap-node-01 | root@159.195.122.180 | /opt/app/gap-node-01 | https://gap.geta.team |
+| gap-node-02 | root@159.195.123.24 | /opt/app/gap-node-02 | https://gap-node-02-u3.vm.elestio.app |
+
+Node 02 hostname: `cicd-gap-2-u3`. Observed capacity: 8 vCPUs, approximately
+16 GiB RAM, 196 GiB root filesystem; `/dev/kvm` is present. The existing operator
+SSH key is authorized on both hosts. From the operator workspace:
+
+```sh
+ssh -i /opt/app/data/.ssh/id_ed25519 root@159.195.123.24
+```
+
+The private key stays in the operator workspace. Never copy it into a node or
+repository. Each node keeps its own live secrets in its checkout's `.env`.
+Node 02 uses Elestio nginx with its assigned HTTPS hostname, forwarding to
+`172.17.0.1:8080`. Its `GAP_PUBLIC_URL` must name node 02, not node 01's origin.
+
+## Fresh-node initialization and recovery
+
+The initial node-02 deployment failed at service startup: the function sandbox
+had no `SANDBOX_TOKEN`, and realtime had no `REALTIME_SECRET`. Those container
+variables come from `GAP_FUNCTION_SANDBOX_TOKEN` and `GAP_REALTIME_SECRET` in `.env`.
+ClickHouse was healthy and its data does not need to be reset.
+
+After configuring node identity, master key, operator credentials and ClickHouse
+credentials in `.env`, run from the checkout:
+
+```sh
+python3 scripts/init-runtime-secrets.py
+python3 scripts/deploy-check.py
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps
+```
+
+The initializer creates only missing or empty runtime secrets, preserves existing
+values, rejects duplicate definitions, and writes newly updated `.env` files with
+mode 0600. It prints key names only. Do not run concurrent initialization or edit
+`.env` while it runs. Compose refuses missing runtime secrets before deployment.
+Reusing existing values preserves issued realtime tokens and worker authentication.
+An interrupted first deployment may leave no node/edge images; use `--build`.
+
+## Cluster preparation boundary
+
+These are currently independent GAP stacks. Deploying the second stack does not
+replicate projects, identities, balances, files or microVMs. Node 02 is available
+for future cluster placement and rebalancing work; it has not been joined to a
+shared scheduler or billing ledger, and no microVM worker is configured there yet.
+Keep node-01 project storage and its prepaid wallet authoritative until an explicit
+cluster design and migration implement shared ownership, routing, fencing and
+storage movement. Never copy a live ledger independently to both nodes and charge
+against both copies.

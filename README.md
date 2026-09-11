@@ -66,6 +66,7 @@ Copy `.env.example` to `.env`, configure the persistent node identity,
 master key, operator token, sandbox token and realtime signing secret, then:
 
 ```bash
+python3 scripts/init-runtime-secrets.py
 docker compose up -d --build
 curl http://172.17.0.1:8080/health
 ```
@@ -202,3 +203,5 @@ template is `src/ui/cloud_home.html`. Artwork provenance and UI behavior are
 documented in `src/ui/cloud-design.md`.
 Project storage lives in `src/cloud.rs`; function and realtime sidecars live
 under `runtime/`. Cloud request examples are maintained in `AGENTS.md`.
+
+Operational node inventory and fresh-node recovery: [nodes](docs/nodes.md).
