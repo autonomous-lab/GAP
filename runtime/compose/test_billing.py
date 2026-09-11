@@ -91,6 +91,35 @@ class LedgerTests(unittest.TestCase):
         self.ledger.set_budget(P,O,10,'budget-two')
         self.assertTrue(self.ledger.view(P,O)['execution_allowed'])
 
+    def test_commercial_gb_month_and_network_rates_are_exact_across_restarts(self):
+        price={'version':'usd-v1','vcpu_hour':10000,'gib_ram_hour':10000,
+               'gb_disk_month':100000,'gb_in':10000,'gb_out':10000}
+        self.ledger.set_pricing('enforced',price)
+        self.ledger.topup(P,O,100_000_000,'authorized')
+        self.sample(0,on=False,disk=10**9)
+        # One decimal GB over 730 hours, split into hourly checkpoints.
+        for hour in range(1,731):
+            self.sample(hour*3_600_000,on=False,disk=10**9,
+                        incoming=hour*10**9//730,outgoing=hour*10**9//730)
+            if hour==365:
+                self.ledger=Ledger(self.ledger.path,lambda:self.now)
+        self.assertEqual(self.ledger.view(P,O)['spent_microcredits'],120000)
+        self.assertEqual(self.ledger.view(P,O)['balance_microcredits'],99_880_000)
+
+    def test_fractional_carry_survives_tariff_unit_change(self):
+        commercial={'version':'usd-v1','vcpu_hour':10000,'gib_ram_hour':10000,
+                    'gb_disk_month':100000,'gb_in':10000,'gb_out':10000}
+        self.ledger.set_pricing('enforced',commercial)
+        self.ledger.topup(P,O,1000,'authorized')
+        self.sample(0,on=False,disk=10**9)
+        self.sample(1,on=False,disk=10**9)
+        self.ledger.set_pricing('enforced',self.price)
+        self.sample(2,on=False,disk=10**9)
+        self.ledger.set_pricing('enforced',dict(commercial,version='usd-v2'))
+        self.sample(730*3_600_000+1,on=False,disk=10**9)
+        view=self.ledger.view(P,O)
+        self.assertEqual(view['estimated_microcredits'],100000)
+
     def test_operator_recharge_checkpoints_grace_usage_before_new_balance(self):
         from contextlib import nullcontext
         from types import SimpleNamespace

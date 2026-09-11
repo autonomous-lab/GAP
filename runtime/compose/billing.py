@@ -4,6 +4,7 @@ One credit = 1,000,000 microcredits. Metering carries fractional microcredits
 between samples. Realtime's existing project credit accounts remain separate.
 """
 from contextlib import contextmanager
+from fractions import Fraction
 import hashlib
 import json
 from pathlib import Path
@@ -15,6 +16,8 @@ GIB = 1024**3
 DENOMINATOR = GIB * 3_600_000
 RETENTION_SECONDS = 3 * 24 * 3600
 RATES = ('vcpu_hour', 'gib_ram_hour', 'gib_disk_hour', 'gib_in', 'gib_out')
+COMMERCIAL_RATES = ('vcpu_hour', 'gib_ram_hour', 'gb_disk_month', 'gb_in', 'gb_out')
+MONTH_HOURS = 730
 UNITS = ('vcpu_ms', 'ram_byte_ms', 'disk_byte_ms', 'bytes_in', 'bytes_out')
 
 
@@ -88,17 +91,17 @@ class Ledger:
         with self.db() as db:
             _, current = self.tariff(db)
             if tariff is not None:
-                if not isinstance(tariff,dict) or set(tariff) != {'version',*RATES}:
+                if not isinstance(tariff,dict) or set(tariff) not in ({'version',*RATES}, {'version',*COMMERCIAL_RATES}):
                     raise BillingError('invalid_tariff')
                 if not isinstance(tariff['version'],str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}',tariff['version']):
                     raise BillingError('invalid_tariff_version')
-                for key in RATES: integer(tariff[key],0,10**12)
+                for key in set(tariff)-{'version'}: integer(tariff[key],0,10**12)
                 encoded=json.dumps(tariff,sort_keys=True)
                 existing=db.execute('SELECT payload FROM tariffs WHERE version=?',(tariff['version'],)).fetchone()
                 if existing and existing[0]!=encoded: raise BillingError('immutable_tariff_version')
                 db.execute('INSERT OR IGNORE INTO tariffs VALUES(?,?,?)',(tariff['version'],encoded,self.clock()))
                 current=tariff
-            if mode=='enforced' and (not current or not any(current[k] for k in RATES)):
+            if mode=='enforced' and (not current or not any(current[k] for k in set(current)-{'version'})):
                 raise BillingError('nonzero_tariff_required_for_enforcement')
             db.execute('UPDATE settings SET mode=?,tariff=? WHERE id=1',(mode,current['version'] if current else None))
             for sample_row in list(db.execute('SELECT vm,payload FROM samples')):
@@ -152,12 +155,20 @@ class Ledger:
         digest,old=self.operation(db,project,key,body)
         if old is not None: return old
         remainder_column='remainder' if mode=='enforced' else 'shadow_remainder'
-        numerator=account[remainder_column]
+        # SQLite preserves fractional carry as rational text; legacy integer
+        # remainders retain exactly the same denominator and value.
+        numerator=Fraction(account[remainder_column])
         if tariff:
+            if 'gb_disk_month' in tariff:
+                disk_rate=Fraction(tariff['gb_disk_month']*GIB,10**9*MONTH_HOURS)
+                in_rate=Fraction(tariff['gb_in']*GIB,10**9)
+                out_rate=Fraction(tariff['gb_out']*GIB,10**9)
+            else:
+                disk_rate,in_rate,out_rate=(tariff[k] for k in RATES[2:])
             numerator+=(usage['vcpu_ms']*GIB*tariff['vcpu_hour']
                 +usage['ram_byte_ms']*tariff['gib_ram_hour']
-                +usage['disk_byte_ms']*tariff['gib_disk_hour']
-                +(usage['bytes_in']*tariff['gib_in']+usage['bytes_out']*tariff['gib_out'])*3_600_000)
+                +usage['disk_byte_ms']*disk_rate
+                +(usage['bytes_in']*in_rate+usage['bytes_out']*out_rate)*3_600_000)
         cost,remainder=divmod(numerator,DENOMINATOR)
         # Budget is an execution stop threshold. Persistent storage remains
         # billable after execution stops; never turn a budget into free disk.
@@ -166,7 +177,7 @@ class Ledger:
         if mode=='enforced' and account['balance']-debit==0 and exhausted is None:
             exhausted=self.clock()
         db.execute(f'UPDATE accounts SET balance=balance-?,spent=spent+?,estimated=estimated+?,{remainder_column}=?,exhausted_at=?,budget_spent=budget_spent+? WHERE project=?',
-                   (debit,debit,cost,remainder,exhausted,debit,project))
+                   (debit,debit,cost,str(remainder),exhausted,debit,project))
         result={'kind':'usage','usage':usage,'tariff_version':tariff['version'] if tariff else None,
                 'billing_mode':mode,'estimated_microcredits':cost,'debited_microcredits':debit,
                 'unpaid_microcredits':cost-debit if mode=='enforced' else 0}

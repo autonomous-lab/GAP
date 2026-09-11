@@ -616,14 +616,28 @@ python3 scripts/microvm-access.py set-always-on did:gap:<64-hex> --always-on no
 The worker starts in **shadow mode with no tariff**, which records raw usage but
 neither debits credits nor deletes zero-balance storage. Set real rates only after
 choosing the credit conversion, host cost allocation, network/storage costs and
-margin. The tariff JSON must have exactly `version`, `vcpu_hour`, `gib_ram_hour`,
-`gib_disk_hour`, `gib_in`, `gib_out`. Rates are nonnegative integer microcredits per
-unit; enforced mode requires at least one nonzero rate. Versions are immutable.
-No illustrative tariff is automatically activated.
+margin. The tariff JSON supports two exact unit schemas: `version`, `vcpu_hour`,
+`gib_ram_hour`, plus either legacy `gib_disk_hour`, `gib_in`, `gib_out`, or
+commercial `gb_disk_month`, `gb_in`, `gb_out`. Do not mix schemas. Rates are
+nonnegative integer microcredits per named unit; enforced mode requires at least
+one nonzero rate. Versions are immutable. A commercial disk-month is exactly
+730 hours and GB is decimal; RAM remains GiB. Fractional microcredits carry
+exactly across checkpoints, worker restarts and tariff changes.
+
+GAP hosted pricing uses **1 credit = USD 1** (1,000,000 microcredits):
+**USD 0.010/vCPU-hour**, **USD 0.010/GiB RAM-hour**, **USD 0.10/GB disk-month**,
+and **USD 0.01/GB in each network direction**. CPU/RAM bill only while ON;
+physical stored data includes hibernation snapshots and remains billable while OFF.
+A disk-month means 730 hours, prorated by elapsed time. GB means 1,000,000,000
+bytes; GiB means 1,073,741,824 bytes. Conversions and fractional carry are exact.
+
+The approved hosted tariff is `runtime/compose/pricing-usd-v1.json`. It is not
+automatically activated on self-hosted workers. After recording authorized
+balances, apply it with the operator command below.
 
 ```bash
 python3 scripts/microvm-billing.py pricing
-python3 scripts/microvm-billing.py set-pricing --mode shadow --tariff-file /secure/pricing.json
+python3 scripts/microvm-billing.py set-pricing --mode shadow --tariff-file runtime/compose/pricing-usd-v1.json
 python3 scripts/microvm-billing.py topup --project "$PROJECT" --owner "$OWNER_DID" --amount-microcredits 10000000 --request-id payment-reference-unique
 python3 scripts/microvm-billing.py account --project "$PROJECT" --owner "$OWNER_DID"
 python3 scripts/microvm-billing.py set-pricing --mode enforced

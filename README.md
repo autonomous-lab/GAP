@@ -121,6 +121,13 @@ not keep a VM awake. Always-on is an additional live permission per agent.
 A durable, idempotent ledger tracks allocated CPU/RAM time, physical persistent
 disk including snapshots, and host-measured IP bytes in both directions.
 Versioned prices use integer microcredits (1 credit = 1,000,000 microcredits).
+GAP hosted pricing uses **1 credit = USD 1** (1,000,000 microcredits):
+**USD 0.010/vCPU-hour**, **USD 0.010/GiB RAM-hour**, **USD 0.10/GB disk-month**,
+and **USD 0.01/GB in each network direction**. CPU/RAM bill only while ON;
+physical stored data includes hibernation snapshots and remains billable while OFF.
+A disk-month means 730 hours, prorated by elapsed time. GB means 1,000,000,000
+bytes; GiB means 1,073,741,824 bytes. Conversions and fractional carry are exact.
+
 Shadow mode records usage before real billing is enabled. The microVM wallet is
 separate from Realtime credits. Budget thresholds stop execution; retained disk
 continues to incur storage charges. At zero credit, storage is kept **72 hours**,

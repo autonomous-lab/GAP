@@ -739,9 +739,13 @@ The owner-only [microVM console](/microvms) shows these controls and usage.
 
 **One credit is 1,000,000 microcredits.** The microVM account belongs to the project
 and is separate from existing Realtime credits and legacy contract escrow.
-There is no implicit cash exchange rate. The operator sets a versioned tariff for
-allocated vCPU-hours, allocated GiB RAM-hours, physical GiB disk-hours (including
-hibernation snapshots and retained volumes), and GiB of IP traffic in/out.
+GAP hosted pricing uses **1 credit = USD 1** (1,000,000 microcredits):
+**USD 0.010/vCPU-hour**, **USD 0.010/GiB RAM-hour**, **USD 0.10/GB disk-month**,
+and **USD 0.01/GB in each network direction**. CPU/RAM bill only while ON;
+physical stored data includes hibernation snapshots and remains billable while OFF.
+A disk-month means 730 hours, prorated by elapsed time. GB means 1,000,000,000
+bytes; GiB means 1,073,741,824 bytes. Conversions and fractional carry are exact.
+The operator sets immutable tariff versions.
 Host counters measure both directions, including guest control traffic; they are
 independent of guest-reported usage. CPU utilization percentage is not the price
 basis. CPU/RAM cost stops when QEMU exits; retained storage remains billable.

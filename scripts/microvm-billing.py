@@ -20,7 +20,7 @@ def main():
     sub.add_parser('pricing')
     price=sub.add_parser('set-pricing')
     price.add_argument('--mode',choices=('shadow','enforced'),required=True)
-    price.add_argument('--tariff-file',help='JSON: version and five microcredit unit prices')
+    price.add_argument('--tariff-file',help='JSON: version and five microcredit unit prices (legacy GiB or commercial GB/730-hour month)')
     for action in ('account','topup'):
         command=sub.add_parser(action)
         command.add_argument('--project',required=True)

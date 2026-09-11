@@ -7,7 +7,7 @@ the same VM, network and billing paths.
 
 ## Validation
 
-- 50 worker unit tests: lifecycle validation, quota and port isolation, immutable
+- 52 worker unit tests: lifecycle validation, quota and port isolation, immutable
   tariffs, atomic/idempotent charges, fractional carry, budget behavior,
   recharge/deletion and budget-period boundaries, and host queue counters independent of guest MAC.
 - 6 access CLI tests and 3 agent CLI tests.
@@ -39,14 +39,24 @@ slow responses. Test workers use separate catalog directories and wake ports.
 
 ## Operating limits and activation
 
-Production rollout starts in `shadow` without a tariff. No fabricated production
-prices or test credit balances are installed. Real debit and the automatic
-72-hour zero-credit deletion policy require operator activation of `enforced`
-after rates and initial balances are configured. The implementation of that
-policy is exercised with isolated test rates; elapsed retention is accelerated
-in the test account rather than waiting three days.
+Production now uses `enforced` billing with the approved `usd-v1` tariff.
+The GAP project received its authorized initial 100-credit allocation before
+enforcement. The operator endpoint verified balance 100,000,000 microcredits,
+execution allowed, and no storage deletion deadline. Fresh installations still
+start in `shadow` without a tariff and must fund accounts before enforcement.
+No production usage was fabricated to test billing; unit tests use isolated
+ledgers. The 72-hour retention policy was exercised with accelerated test time.
 
-Pricing still requires the host cost, margin and chosen cash-to-credit conversion.
+GAP hosted pricing uses **1 credit = USD 1** (1,000,000 microcredits):
+**USD 0.010/vCPU-hour**, **USD 0.010/GiB RAM-hour**, **USD 0.10/GB disk-month**,
+and **USD 0.01/GB in each network direction**. CPU/RAM bill only while ON;
+physical stored data includes hibernation snapshots and remains billable while OFF.
+A disk-month means 730 hours, prorated by elapsed time. GB means 1,000,000,000
+bytes; GiB means 1,073,741,824 bytes. Conversions and fractional carry are exact.
+
+The hosted tariff is `runtime/compose/pricing-usd-v1.json`. Production activation
+is verified through the operator pricing endpoint; fresh workers still default
+to shadow mode.
 CPU/RAM are charged by allocation while QEMU exists. Persistent disk is charged
 while retained, including when execution stops for a budget. A budget is an
 execution threshold, not a waiver of storage costs or a hard final spending cap.

@@ -1,0 +1,8 @@
+{
+  "version": "usd-v1",
+  "vcpu_hour": 10000,
+  "gib_ram_hour": 10000,
+  "gb_disk_month": 100000,
+  "gb_in": 10000,
+  "gb_out": 10000
+}
