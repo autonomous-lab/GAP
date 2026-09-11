@@ -13,7 +13,7 @@ FIELDS = {
 VERSION = 'GAP_PRICING_VERSION'
 
 
-def tariff_from_env(path):
+def explicit_values(path, fields, version):
     values = {}
     for line in Path(path).read_text().splitlines():
         line = line.strip()
@@ -21,7 +21,7 @@ def tariff_from_env(path):
             continue
         name, value = line.split('=', 1)
         name = name.strip().removeprefix('export ').strip()
-        if name not in FIELDS and name != VERSION:
+        if name not in fields and name != version:
             continue  # Never print, interpolate or evaluate unrelated secrets.
         if name in values:
             raise ValueError('duplicate pricing setting: ' + name)
@@ -35,9 +35,14 @@ def tariff_from_env(path):
         else:
             value = re.split(r'\s+#', value, maxsplit=1)[0].strip()
         values[name] = value
-    missing = ({VERSION} | set(FIELDS)) - values.keys()
+    missing = ({version} | set(fields)) - values.keys()
     if missing:
         raise ValueError('missing pricing settings: ' + ', '.join(sorted(missing)))
+    return values
+
+
+def tariff_from_env(path):
+    values=explicit_values(path,FIELDS,VERSION)
     if not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', values[VERSION]):
         raise ValueError('invalid pricing version')
     tariff = {'version': values[VERSION]}

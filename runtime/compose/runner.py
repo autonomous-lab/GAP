@@ -235,6 +235,10 @@ class Runner:
                 if self.ingress:view['ingress']=self.ingress.public(meta)
                 values.append(view)
             return 200,{'vms':values,'total':len(paths),'offset':offset,'limit':100,'available':True}
+        if rpc.get('action')=='admin/finance' and rpc.get('method')=='GET':
+            if not self.runtime:return 200,{'available':False}
+            body=rpc.get('body') or {}
+            return 200,dict(self.runtime.ledger.finance_report(body['start'],body['end'],body.get('project_id')),available=True)
         project, owner = rpc.get("project_id", ""), rpc.get("owner_did", "")
         if not isinstance(project, str) or not PROJECT.fullmatch(project) or not isinstance(owner, str):
             raise Failure(400, "invalid_project")
@@ -419,6 +423,9 @@ class Runner:
         ledger=self.runtime.ledger
         action=body.get('action')
         if action=='pricing': return ledger.pricing()
+        if action=='finance':return ledger.finance_report(body['start'],body['end'],body.get('project_id'))
+        if action=='set-costs':return ledger.finance_costs(body['costs'],body['expected_version'])
+        if action=='classify-funding':return ledger.classify_funding(body['project_id'],body['operation'],body['source'],body['cash_microdollars'],body['note'])
         if action=='set-pricing':
             # Flush all current allocation intervals before changing the price.
             metas=[json.loads(p.read_text()) for p in sorted((self.hypervisor.root/'catalog').glob('*.json'))]
@@ -476,7 +483,7 @@ def handler_for(runner):
                 status, value = error.status, {"error": {"code": error.code}}
             except BillingError as error:
                 code=str(error)
-                status=409 if code in ('immutable_tariff_version','tariff_version_changed_refresh_before_retry','billing_operation_conflict') else 400
+                status=409 if code in ('immutable_tariff_version','tariff_version_changed_refresh_before_retry','billing_operation_conflict','immutable_cost_version','cost_version_changed_refresh_before_retry','immutable_funding_classification') else 400
                 value={"error":{"code":code}}
             except (ValueError, UnicodeError, TimeoutError, RecursionError):
                 status, value = 400, {"error": {"code": "invalid_request"}}

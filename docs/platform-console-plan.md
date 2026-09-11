@@ -27,7 +27,8 @@ Implemented, tested and deployed to both node web servers in the first delivery
 - Explicit per-node sales tariffs can be previewed and applied from `.env`
   through `microvm-billing.py`, with exact microcredit conversion and atomic
   expected-version checks. Restarts do not override live pricing. Provider
-  costs and public tariff discovery remain to implement.
+  costs now have separate immutable versions and explicit unknown values;
+  public tariff discovery remains to implement.
 - Existing identities continue to work and are not falsely marked verified.
   The email registry is node-local; it does not create a shared operator account.
 - Elestio Postfix configuration discovered from the actual provisioning scripts.
@@ -42,10 +43,19 @@ node-local agents/projects/VM inventory and project resource metadata. Owners
 can submit access/quota requests; administrator approval changes node-local
 quotas without restarting. Shared customer and fleet scope remain to implement.
 
+Node 01 also exposes usage finance by complete UTC hour or rolling 30-day window.
+Hourly projections conserve every debit and preserve original ledger tables.
+Historical interval timing is marked as estimated. Provider costs are versioned
+from the time of configuration; unknown costs suppress full usage margin.
+Credit funding annotations distinguish paid, promotional and unclassified credit
+additions without modifying wallet balances. Recorded cash is an operator
+assertion, not Stripe verification. The GAP project grant is promotional.
+Customer/fleet aggregation and complete provider cost coverage are still pending.
+
 Still to implement: customer/operator account authority and shared wallets;
 customer-wide and fleet-wide quotas; complete fleet dashboard and
-customer-wide approval application; complete workload suspension; finance
-reporting; per-node provider cost configuration and public tariff discovery; federation explorer; verified
+customer-wide approval application; complete workload suspension; customer/fleet finance
+aggregation; public tariff discovery; federation explorer; verified
 operator badges; encrypted volumes, snapshots and backups with external keys.
 Stripe remains a later phase. Do not present the local email registry or
 per-agent count limit as the completed account/federation architecture.

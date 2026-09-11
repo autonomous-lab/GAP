@@ -12,6 +12,7 @@ import re
 import sqlite3
 import time
 import uuid
+import finance
 
 GIB = 1024**3
 DENOMINATOR = GIB * 3_600_000
@@ -53,8 +54,10 @@ class Ledger:
                 project TEXT NOT NULL, operation TEXT NOT NULL, digest TEXT NOT NULL,
                 payload TEXT NOT NULL, created REAL NOT NULL);
             ''')
+            finance.schema(db)
             if not db.in_transaction: db.execute('BEGIN IMMEDIATE')
             self.compact_legacy(db)
+            finance.initialize(db,self.clock())
         Path(self.path).chmod(0o600)
 
     def compact_legacy(self, db):
@@ -168,6 +171,22 @@ class Ledger:
                 db.execute('UPDATE accounts SET exhausted_at=COALESCE(exhausted_at,?) WHERE balance=0',(self.clock(),))
         return self.pricing()
 
+    def finance_report(self,start,end,project=None):
+        with self.db() as db:
+            try: return finance.report(db,start,end,project)
+            except ValueError as error: raise BillingError(str(error)) from error
+
+    def finance_costs(self,values,expected):
+        with self.db() as db:
+            try: return finance.set_costs(db,values,expected,self.clock())
+            except ValueError as error: raise BillingError(str(error)) from error
+
+    def classify_funding(self,project,operation,source,cash,note):
+        with self.db() as db:
+            try: finance.funding(db,project,operation,source,cash,note,self.clock())
+            except ValueError as error: raise BillingError(str(error)) from error
+        return {'classified':True,'source':source}
+
     def operation(self, db, project, key, body):
         if not isinstance(key,str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}',key):
             raise BillingError('invalid_billing_operation')
@@ -241,6 +260,8 @@ class Ledger:
                 'unpaid_microcredits':cost-debit if mode=='enforced' else 0}
         if period is None: self.entry(db,project,key,digest,result)
         else: self.accumulate(db,project,key,result,period)
+        finance.record(db,project,result,period['started_at'] if period else self.clock(),
+                       period['ended_at'] if period else self.clock())
         return result
 
     def sample(self,meta,now_ms,running,disk_bytes,bytes_in,bytes_out,incarnation):

@@ -11,6 +11,7 @@ import sys
 import urllib.request
 import uuid
 from pricing_env import tariff_from_env
+from costs_env import costs_from_env
 
 
 def main():
@@ -19,6 +20,20 @@ def main():
     p.add_argument('--endpoint',default='http://172.17.0.1:8092/operator')
     sub=p.add_subparsers(dest='action',required=True)
     sub.add_parser('pricing')
+    for action in ('preview-costs-env','set-costs-env'):
+        costs=sub.add_parser(action)
+        costs.add_argument('--env-file',default='.env')
+        if action=='set-costs-env':costs.add_argument('--expect-version',required=True)
+    report=sub.add_parser('finance')
+    report.add_argument('--start',type=int,required=True,help='UTC hour boundary, Unix seconds')
+    report.add_argument('--end',type=int,required=True,help='Exclusive UTC hour boundary, Unix seconds')
+    report.add_argument('--project')
+    classify=sub.add_parser('classify-funding')
+    classify.add_argument('--project',required=True)
+    classify.add_argument('--operation',required=True,help='Existing topup:<request-id> operation')
+    classify.add_argument('--source',choices=('paid','promotional'),required=True)
+    classify.add_argument('--cash-microdollars',type=int,required=True)
+    classify.add_argument('--note',required=True)
     preview=sub.add_parser('preview-pricing-env',help='Validate and print only the tariff; no network request')
     preview.add_argument('--env-file',default='.env')
     apply=sub.add_parser('set-pricing-env',help='Apply explicit environment prices without restarting')
@@ -44,6 +59,15 @@ def main():
         if args.action=='preview-pricing-env':
             print(json.dumps(tariff,indent=2));return
     body={'action':args.action}
+    if args.action in ('preview-costs-env','set-costs-env'):
+        try: costs=costs_from_env(args.env_file)
+        except (ValueError,OSError):
+            print('Invalid provider cost configuration; all fields must be explicit. Empty costs mean unknown.',file=sys.stderr)
+            raise SystemExit(2)
+        if args.action=='preview-costs-env':print(json.dumps(costs,indent=2));return
+        body={'action':'set-costs','costs':costs,'expected_version':None if args.expect_version=='none' else args.expect_version}
+    if args.action=='finance':body.update(start=args.start,end=args.end,project_id=args.project)
+    if args.action=='classify-funding':body.update(project_id=args.project,operation=args.operation,source=args.source,cash_microdollars=args.cash_microdollars,note=args.note)
     if args.action=='set-pricing-env':
         body={'action':'set-pricing','mode':'enforced','tariff':tariff,
               'expected_version':None if args.expect_version=='none' else args.expect_version}

@@ -8,6 +8,9 @@ import re
 import socket
 import socketserver
 import subprocess
+import sys
+from types import SimpleNamespace
+from http.server import ThreadingHTTPServer
 import tempfile
 import threading
 import time
@@ -49,6 +52,15 @@ class AdminHTTP(unittest.TestCase):
             threading.Thread(target=smtp.serve_forever, daemon=True).start()
             root = Path(directory)
             (root/'approvals.json').write_text('{"agents":[]}')
+            runner_dir=Path(__file__).resolve().parent.parent/'runtime/compose'
+            if not runner_dir.exists():runner_dir=Path('/opt/runner')
+            sys.path.insert(0,str(runner_dir))
+            from runner import Runner,handler_for
+            from billing import Ledger
+            runner=Runner.__new__(Runner);runner.token='b'*64;runner.operator_token='o'*64
+            runner.runtime=SimpleNamespace(ledger=Ledger(root/'billing.sqlite'))
+            worker=ThreadingHTTPServer(('127.0.0.1',0),handler_for(runner))
+            threading.Thread(target=worker.serve_forever,daemon=True).start()
             base = 'http://127.0.0.1:' + str(port())
             env = {'PATH': os.environ['PATH'], 'GAP_ADDR': base.removeprefix('http://'),
                    'GAP_STORAGE': 'sqlite', 'GAP_SQLITE_PATH': str(root/'node.sqlite'),
@@ -60,7 +72,7 @@ class AdminHTTP(unittest.TestCase):
                    'GAP_SMTP_HOST': '127.0.0.1', 'GAP_SMTP_PORT': str(smtp.server_address[1]),
                    'GAP_SMTP_FROM': 'test@example.com', 'GAP_COMPOSE_ENABLED': '1',
                    'GAP_COMPOSE_APPROVALS_FILE': str(root/'approvals.json'),
-                   'GAP_COMPOSE_RUNNER_TOKEN': 'b'*64, 'GAP_COMPOSE_RUNNER_URL': 'http://127.0.0.1:9'}
+                   'GAP_COMPOSE_RUNNER_TOKEN': 'b'*64, 'GAP_COMPOSE_RUNNER_URL': 'http://127.0.0.1:'+str(worker.server_port)}
             with (root/'node.log').open('w') as log:
                 proc = subprocess.Popen([os.environ['GAP_TEST_BINARY']], env=env, cwd=root, stdout=log, stderr=log)
                 try:
@@ -108,6 +120,12 @@ class AdminHTTP(unittest.TestCase):
                     self.assertEqual(request('POST', api+'verify', {'challenge_id':challenge['challenge_id'],'code':code})[0], 400)
                     self.assertEqual(request('GET', api+'session', cookie=cookie)[0], 200)
                     self.assertEqual(request('GET', api+'overview', cookie=cookie)[0], 200)
+                    self.assertEqual(request('GET', api+'finance')[0], 401)
+                    status, report, _=request('GET', api+'finance',cookie=cookie)
+                    self.assertEqual(status,200)
+                    self.assertTrue(report['available'])
+                    self.assertIsNone(report['usage_margin_microdollars'])
+                    self.assertEqual(request('GET',api+'finance?start=1&end=3600',cookie=cookie)[0],400)
                     self.assertEqual(request('GET', api+'agents', cookie=cookie)[1]['agents'], [])
                     _, agent, _ = request('POST', '/v1/identity', host='client.test')
                     _, project, _ = request('POST', '/v1/cloud/projects', {}, host='client.test', bearer=agent['token'])
@@ -134,6 +152,7 @@ class AdminHTTP(unittest.TestCase):
                     proc.terminate()
                     proc.wait(timeout=10)
                     smtp.shutdown()
+                    worker.shutdown();worker.server_close()
 
 
 if __name__ == '__main__':

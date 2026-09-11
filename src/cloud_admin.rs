@@ -250,6 +250,18 @@ pub fn handle(state:&Arc<Mutex<crate::server::NodeState>>,method:&str,path:&str,
             return response(policy.ok_or(Failure(409,"microvm_hosting_not_configured")).and_then(|p|admin.review_access(id,decision,&session.email,&p,now)));
         }
     }
+    if clean=="/v1/admin/console/finance" && method=="GET" {
+        let param=|name:&str|path.split_once('?').and_then(|(_,q)|q.split('&').find_map(|p|p.split_once('=').filter(|(key,_)|*key==name).map(|(_,v)|v.to_owned())));
+        let end=now/3600*3600;
+        let start=param("start").and_then(|v|v.parse::<u64>().ok()).unwrap_or(end.saturating_sub(86400));
+        let end=param("end").and_then(|v|v.parse::<u64>().ok()).unwrap_or(end);
+        if start%3600!=0 || end%3600!=0 || end<=start || end>now/3600*3600 || end-start>366*86400 {return response(Err(Failure(400,"invalid_finance_window")))}
+        let runner=state.lock().ok().and_then(|s|s.private_node.as_ref().and_then(|p|p.runner.clone()));
+        return match runner {
+            Some(r)=>{let (status,body)=crate::private_node::forward(&r,"","","GET","admin/finance",json!({"start":start,"end":end,"project_id":param("project_id")}));HttpResponse{status,body,cookie:None}},
+            None=>response(Ok(json!({"available":false}))),
+        };
+    }
     if clean=="/v1/admin/console/microvms" && method=="GET" {
         let runner=state.lock().ok().and_then(|s|s.private_node.as_ref().and_then(|p|p.runner.clone()));
         return match runner {

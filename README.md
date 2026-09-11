@@ -265,3 +265,43 @@ accepting updates the live approval file without restarting the node or VMs.
 Quotas apply to the agent's combined VMs on this node, not to each project.
 Approval does not add prepaid credits. Always-on execution needs explicit
 approval and continues consuming compute credits while running.
+
+### Usage finance and provider costs
+
+The operator console's Finance view reports complete UTC hours over the last
+24 hours or 30 days. Historical billing periods are apportioned across hours and
+marked as estimates; aggregate debits and wallet balances remain unchanged.
+Usage charges may consume promotional credits and are not cash receipts.
+Unclassified credit additions remain separate from paid and promotional funding.
+
+Provider costs are independent of sales tariffs. Configure `GAP_COST_VERSION`,
+`GAP_COST_NODE_MONTH_USD`, `GAP_COST_EXTRA_DISK_MONTH_USD`,
+`GAP_COST_NETWORK_IN_GB_USD` and `GAP_COST_NETWORK_OUT_GB_USD` in `.env`.
+Every key must be present. An empty amount means unknown; `0` explicitly means
+zero cost. Extra disk is the total monthly invoice for additional provisioned
+capacity (extra GB times the provider's per-GB quote), not customer storage usage.
+Costs become effective when applied; historical costs are not invented.
+Monthly infrastructure estimates use 730 hours, matching storage pricing.
+
+```sh
+python3 scripts/microvm-billing.py preview-costs-env
+python3 scripts/microvm-billing.py set-costs-env --expect-version none
+```
+
+For later changes, supply the current cost version and a new immutable version.
+Missing provider costs make the full cost and usage margin unavailable. Known
+costs are shown as partial estimates. Project reports do not allocate shared
+node costs to individual customers.
+
+An operator can annotate an existing credit addition without changing its amount
+or issuing more credit. For example, classify an operator grant as promotional:
+
+```sh
+python3 scripts/microvm-billing.py classify-funding --project prj_PROJECT_ID \
+  --operation topup:EXISTING_REQUEST_ID --source promotional \
+  --cash-microdollars 0 --note "Operator promotional allocation"
+```
+
+Annotations are immutable and idempotent. `--source paid` requires a positive
+cash amount and a supporting note; it records an operator assertion, not payment
+processor verification. Stripe receipts remain a later integration.
