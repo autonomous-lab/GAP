@@ -4,6 +4,7 @@ import re
 import threading
 import http.client
 import socket
+from urllib.parse import urlsplit
 
 from microvm import VMError
 
@@ -23,25 +24,22 @@ class Ingress:
     def __init__(self, config, manager):
         if not manager or config.get('dedicated_caddy') is not True:
             raise ValueError('ingress requires managed VMs and dedicated_caddy=true')
-        domain = config.get('base_domain', '')
-        if (not isinstance(domain, str) or len(domain) > 215 or domain != domain.lower()
-                or len(domain.split('.')) < 2 or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label)
-                                                     for label in domain.split('.'))):
-            raise ValueError('invalid ingress base_domain')
+        self.public_url = config.get('public_url', 'https://gap.geta.team').rstrip('/')
+        url = urlsplit(self.public_url)
+        if (url.scheme not in ('http', 'https') or not url.hostname or url.username
+                or url.password or url.path or url.query or url.fragment):
+            raise ValueError('public_url must be the existing node origin')
+        if any(key in config for key in ('base_domain', 'https_port', 'internal_tls')):
+            raise ValueError('use shared-origin public_url; per-project TLS/DNS is unsupported')
         self.admin_socket = config.get('admin_socket', '/run/caddy-admin/admin.sock')
         if ('admin_url' in config or not isinstance(self.admin_socket, str)
                 or not re.fullmatch(r'/[A-Za-z0-9_./-]+', self.admin_socket)
                 or len(self.admin_socket) > 100 or '..' in self.admin_socket.split('/')):
             raise ValueError('dedicated Caddy requires a safe absolute Unix admin_socket')
-        self.http_port = config.get('http_port', 80)
-        self.https_port = config.get('https_port', 443)
-        ports = [self.http_port, self.https_port]
-        if any(type(port) is not int or not 1 <= port <= 65535 for port in ports) or len(set(ports)) != 2:
-            raise ValueError('ingress ports must be valid and distinct')
-        self.internal_tls = config.get('internal_tls', False)
-        if type(self.internal_tls) is not bool:
-            raise ValueError('internal_tls must be boolean')
-        self.domain, self.manager = domain, manager
+        self.http_port = config.get('http_port', 8093)
+        if type(self.http_port) is not int or not 1 <= self.http_port <= 65535:
+            raise ValueError('invalid ingress http_port')
+        self.manager = manager
         self.lock = threading.Lock()
         self.applied = set()
         self.sync()  # remove stale routes before accepting VM operations
@@ -59,24 +57,23 @@ class Ingress:
         if not body['enabled'] and 'guest_port' in body:
             raise VMError('disabled_ingress_has_no_port')
 
-    def host(self, project):
-        self.manager.catalog(project)  # validate project before forming hostname
-        return project.replace('_', '-', 1) + '.' + self.domain
+    def prefix(self, project):
+        self.manager.catalog(project)
+        return '/apps/' + project
 
     def public(self, meta):
         if not meta or meta['state'] == 'destroyed':
             return {'enabled': False, 'routed': False}
         configured = meta.get('ingress', {})
-        host = self.host(meta['project_id'])
-        suffix = '' if self.https_port == 443 else ':' + str(self.https_port)
+        prefix = self.prefix(meta['project_id'])
         return {'enabled': configured.get('enabled', False), 'vm_id': meta['vm_id'],
-                'guest_port': configured.get('guest_port'), 'hostname': host,
-                'url': 'https://' + host + suffix,
+                'guest_port': configured.get('guest_port'), 'base_path': prefix + '/',
+                'url': self.public_url + prefix + '/',
                 'routed': meta['vm_id'] in self.applied,
-                'note': 'Routing configuration only; not certificate or application health'}
+                'note': 'Routing configuration only; not application health'}
 
     def configuration(self, exclude=None):
-        routes, names, applied = [], [], set()
+        routes, applied = [], set()
         for path in sorted((self.manager.root / 'catalog').glob('prj_*.json')):
             meta = json.loads(path.read_text())
             if meta['project_id'] == exclude or meta['state'] in ('creating', 'destroyed'):
@@ -87,18 +84,25 @@ class Ingress:
             port = next((p['worker_port'] for p in meta['ports'] if p['guest_port'] == settings['guest_port']), None)
             if port is None:
                 continue
-            host = self.host(meta['project_id'])
-            names.append(host)
-            routes.append({'match': [{'host': [host]}], 'handle': [{
-                'handler': 'reverse_proxy', 'upstreams': [{'dial': '127.0.0.1:' + str(port)}]
+            prefix = self.prefix(meta['project_id'])
+            routes.append({'match': [{'path': [prefix]}], 'handle': [{
+                'handler': 'static_response', 'status_code': 308,
+                'headers': {'Location': [prefix + '/{http.request.uri.prefixed_query}']}
             }], 'terminal': True})
+            routes.append({'match': [{'path': [prefix + '/*']}], 'handle': [
+                {'handler': 'rewrite', 'strip_path_prefix': prefix},
+                {'handler': 'reverse_proxy', 'upstreams': [{'dial': '127.0.0.1:' + str(port)}],
+                 'headers': {'request': {'set': {
+                     'X-Forwarded-Prefix': [prefix],
+                     'X-Forwarded-Proto': [urlsplit(self.public_url).scheme]
+                 }}, 'response': {'delete': ['Service-Worker-Allowed']}}}
+            ], 'terminal': True})
             applied.add(meta['vm_id'])
         routes.append({'handle': [{'handler': 'static_response', 'status_code': 404}]})
         config = {'admin': {'listen': 'unix/' + self.admin_socket},
-                  'apps': {'http': {'http_port': self.http_port, 'https_port': self.https_port,
-                    'servers': {'compose': {'listen': [':' + str(self.https_port)], 'routes': routes}}}}}
-        if self.internal_tls and names:
-            config['apps']['tls'] = {'automation': {'policies': [{'subjects': names, 'issuers': [{'module': 'internal'}]}]}}
+                  'apps': {'http': {'servers': {'compose': {
+                      'listen': [':' + str(self.http_port)],
+                      'automatic_https': {'disable': True}, 'routes': routes}}}}}
         return config, applied
 
     def sync(self, exclude=None):

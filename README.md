@@ -101,10 +101,10 @@ also require the separate general node approval. Classic guest Compose is accept
 resource quotas or GAP egress ACLs; existing Cloud service quotas are unchanged.
 GAP creates, starts, stops, resizes and destroys microVMs through `/stack/vm`.
 The repository includes the guest-image builder and real KVM/API acceptance tests.
-Optional dedicated Caddy ingress publishes a selected guest HTTP port under a
-generated project HTTPS hostname. Custom customer domains, rollback and automatic
-VM fencing on revocation remain unavailable; production activation requires
-operator DNS and execution-host configuration. See the [current architecture](./docs/private-compose-plan.md)
+Optional ingress publishes a selected guest HTTP port at `/apps/{project_id}/`
+on the existing node origin, reusing its DNS and TLS certificate. No additional
+DNS setup is needed. Rollback and automatic VM fencing on revocation remain
+unavailable; activation requires the worker and updated internal edge configuration. See the [current architecture](./docs/private-compose-plan.md)
 and [API examples](./AGENTS.md#compose--experimental).
 
 ```bash

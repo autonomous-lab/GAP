@@ -22,23 +22,25 @@ class IngressTests(unittest.TestCase):
                      'ports': [{'guest_port': 8000, 'worker_port': 23000}], 'vcpus': 1,
                      'memory_mib': 1024, 'disk_gib': 4}
         self.manager.save(self.meta)
-        self.config = {'dedicated_caddy': True, 'base_domain': 'apps.example.test'}
+        self.config = {'dedicated_caddy': True, 'public_url': 'https://gap.geta.team'}
         self.opener = patch('ingress.AdminConnection').start()
         self.addCleanup(patch.stopall)
         self.opener.return_value.getresponse.return_value.status = 200
         self.public = patch.object(self.manager, 'public', return_value={'state': 'running'}).start()
         self.ingress = Ingress(self.config, self.manager)
 
-    def test_only_generated_hostname_and_configured_guest_port(self):
+    def test_only_project_path_and_configured_guest_port(self):
         for extra in ({'hostname': 'other.test'}, {'upstream': '127.0.0.1:8080'}, {'guest_port': 22}, {'guest_port': 9000}):
             with self.assertRaises(VMError):
                 self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 8000, **extra})
         result = self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 8000})
         self.assertTrue(result['ingress']['routed'])
         config, _ = self.ingress.configuration()
-        route = config['apps']['http']['servers']['compose']['routes'][0]
-        self.assertEqual(route['match'], [{'host': ['prj-' + 'a' * 24 + '.apps.example.test']}])
-        self.assertEqual(route['handle'][0]['upstreams'], [{'dial': '127.0.0.1:23000'}])
+        route = config['apps']['http']['servers']['compose']['routes'][1]
+        self.assertEqual(route['match'], [{'path': ['/apps/' + PROJECT + '/*']}])
+        self.assertEqual(result['ingress']['url'], 'https://gap.geta.team/apps/' + PROJECT + '/')
+        self.assertEqual(route['handle'][0]['strip_path_prefix'], '/apps/' + PROJECT)
+        self.assertEqual(route['handle'][1]['upstreams'], [{'dial': '127.0.0.1:23000'}])
         self.assertTrue(config['admin']['listen'].startswith('unix/'))
         self.assertNotIn('tls', config['apps'])  # normal automatic public TLS
 
@@ -73,7 +75,7 @@ class IngressTests(unittest.TestCase):
     def test_dedicated_unix_caddy_required(self):
         for change in ({'dedicated_caddy': False}, {'admin_url': 'http://public.example:2019'},
                        {'base_domain': '*.example.com'}, {'base_domain': 'example.com/path'},
-                       {'https_port': 80}):
+                       {'http_port': 0}):
             with self.assertRaises(ValueError):
                 Ingress({**self.config, **change}, self.manager)
 

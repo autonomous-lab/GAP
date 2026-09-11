@@ -65,7 +65,7 @@ Defaults are 1 vCPU, 1024 MiB RAM and 8 GiB virtual disk. These are allocations,
 not commercial quotas. Disk growth is applied to the guest filesystem at next
 boot. `ports` contains guest TCP port numbers other than 22; GAP allocates
 loopback forwards in the **worker network namespace**, returned as `worker_port`.
-Optional ingress publishes this forward under a generated project HTTPS hostname;
+Optional ingress publishes this forward under the existing node /apps/ path;
 otherwise it remains worker-local.
 
 A returned `running` state describes QEMU, not Docker readiness. Wait for the
@@ -258,7 +258,7 @@ Revocation blocks new management and queued execution at recheck, **not already
 running VMs/apps or visitor/scoped tokens**. For incident containment, the
 operator must fence/stop the VM through the hypervisor first. Custom customer
 domains, arbitrary public TCP/UDP forwarding, HA, backup/restore and rollback
-are not implemented. Generated project HTTPS ingress is available below. Guest `ports:` does not automatically
+are not implemented. Shared-origin application path routing is available below. Guest `ports:` does not automatically
 publish physical-host ports. Existing Cloud service quotas stay unchanged.
 
 ## Tests and production readiness
@@ -300,36 +300,39 @@ value surviving stop/resize/restart. Without opt-in it keeps simulated guests.
 These tests do not establish HA, adversarial hypervisor isolation or production
 load capacity. Production Compose activation remains a separate operator step.
 
-## Project HTTPS ingress (opt-in)
+## Application paths on the existing GAP origin
 
-A managed VM may expose one HTTP application through a **dedicated Caddy** in
-the worker's network namespace. The agent selects a guest port already in the
-VM's `ports`; it cannot choose an upstream IP, host port, certificate or domain.
-GAP generates `prj-<24-hex-project-id>.<base_domain>`. Custom customer domains
-and arbitrary TCP/UDP services are outside this API.
+Applications use `https://gap.geta.team/apps/{project_id}/`, through the node's
+existing DNS, TLS certificate and public edge. **No new DNS record, hostname or
+certificate is required.** The internal Compose gateway listens on the private
+bridge at port 8093; the existing GAP edge forwards `/apps/` to it. All other
+Cloud/function/realtime routes retain their current handling.
 
-Add this operator configuration to the runner:
+The worker assigns each project's path and resolves its selected guest port to
+the correct managed microVM. Agents cannot supply upstream IPs or host paths.
+Only an explicitly enabled, running VM with that forwarded port is routed.
+
+Operator configuration (also in `runner.example.json`):
 
 ```json
 "ingress": {
   "dedicated_caddy": true,
-  "base_domain": "apps.example.com",
+  "public_url": "https://gap.geta.team",
   "admin_socket": "/run/caddy-admin/admin.sock"
 }
 ```
 
-The operator controls the base domain, points wildcard DNS at the dedicated
-edge, and makes ports 80/443 reachable for ACME validation. The worker replaces
-the **entire dedicated Caddy configuration** through `/load`. Never point it at
-GAP's shared edge or a Caddy serving unrelated sites. Its administrator endpoint
-uses a Unix socket shared only with the worker, never TCP or guest mounts.
-QEMU guest networking can reach worker loopback services, so TCP localhost
-is insufficient protection for the Caddy administration API. Persist certificate data.
-Caddy's [automatic HTTPS](https://caddyserver.com/docs/automatic-https) obtains and
-renews certificates; a configured route does not prove DNS, certificate issuance
-or application health has succeeded.
+`public_url` is the **existing node origin**, not a new app domain; it defaults
+to `https://gap.geta.team`. For another node, use that node's existing origin.
+The gateway runs plain HTTP internally and does not request TLS certificates.
+Its separate Caddy instance owns only application paths. Its admin API uses a
+Unix socket shared with the worker, not TCP: guest networking can reach worker
+loopback services. Never point it at the shared production edge's admin socket.
 
-After deploying the application in a VM that forwards port 8000:
+### Publish, inspect and disable
+
+First create the VM with the guest port in `ports`, then deploy the application.
+Publish that port through the authenticated project API:
 
 ```bash
 curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/stack/ingress" \
@@ -338,62 +341,82 @@ curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/stack/ingress" \
 
 curl -s "$NODE/v1/cloud/projects/$PROJECT/stack/ingress" \
   -H "Authorization: Bearer $TOKEN"
+# url: https://gap.geta.team/apps/prj_<24-hex-id>/
+# base_path: /apps/prj_<24-hex-id>/
 ```
 
-PUT returns an asynchronous job with normal request-id deduplication. GET returns
-`enabled`, `routed`, `vm_id`, `guest_port`, `hostname` and `url`. `enabled` is saved
-intent; `routed` describes the last accepted Caddy configuration, not health.
-To disable, PUT a new request ID, the exact VM ID and `enabled: false`, omitting
-`guest_port`. Publishing is explicit and public; visitor authentication belongs
-to the application. Compose approval controls management, not visitor access.
+PUT returns a job with the usual request-id retry/deduplication semantics. GET
+returns `enabled`, `routed`, `vm_id`, `guest_port`, `base_path` and `url`.
+`enabled` is saved intent; `routed` describes the last accepted routing config,
+not application health. Disable with a new request ID, the VM ID and
+`enabled: false`, omitting `guest_port`.
 
-Before VM mutations, the worker withdraws the route, then reconciles catalog
-state afterward. Stop/delete removes it; starting the same VM restores an
-enabled route. Removing the selected forwarded port leaves it enabled but
-unrouted. A replacement VM does not inherit the deleted VM's publication.
-Controller startup reconciles saved intent. A Caddy reload error fails the job;
-inspect state and retry with a new request ID. If route withdrawal fails, VM
-mutation is not attempted, preventing stale routes to reassigned ports.
-An operator can still stop the exact VM outside the API for incident containment.
-Approval revocation does not automatically stop a running app or remove its
-visitor route. Updates may interrupt existing connections.
+Publishing is explicit and public. Visitor authentication belongs to the app;
+Compose approval governs management, not visitors. VM stop/delete withdraws
+the route; restarting the same VM restores it. A replacement VM does not inherit
+publication. Before VM mutations the worker withdraws the old route, preventing
+routing to a reassigned port. A gateway configuration failure blocks that
+mutation. Inspect and retry a failed job with a new request ID.
 
-### Standalone deployment
+### Application contract
 
-`runtime/compose/deploy.yml` is separate from the node's production stack. Its
-dedicated edge and non-root worker share a network namespace. Select an available
-listener IP that does not conflict with the existing edge on ports 80/443.
-The worker management API binds only to `172.17.0.1:8092`.
+`/apps/{project_id}/api/items?x=1` reaches the guest as `/api/items?x=1`.
+Methods, bodies and query strings are forwarded; WebSocket upgrades and streamed
+responses are supported. The gateway sets `X-Forwarded-Prefix` to
+`/apps/{project_id}` and `X-Forwarded-Proto` from the configured public origin.
+The path without its trailing slash redirects to the canonical slash form.
+Unknown or disabled project routes return 404.
+
+Applications must support a configurable public base path or generate relative
+URLs. Root-relative URLs such as `/assets/app.js`, redirects such as `/login`,
+and cookies scoped to `/` are not automatically rewritten. Configure the app's
+base URL and cookie path to the returned `base_path`; HTML/JavaScript content
+is not rewritten. This is path routing, not a transparent virtual hostname.
+
+All applications share the node's browser origin, like the existing path-based
+endpoints. Do not store owner bearers in browser storage. The gateway removes
+`Service-Worker-Allowed` responses so guest apps cannot broaden a worker scope
+beyond its normal script path. Approval revocation does not stop already running
+apps or remove their visitor routes; explicit VM containment remains necessary.
+
+### Internal deployment
+
+Use `runtime/compose/deploy.yml` alongside the node stack. It exposes only
+`172.17.0.1:8093` (application gateway) and `172.17.0.1:8092` (worker RPC), not
+new public 80/443 listeners. The edge and non-root worker share a network
+namespace; guest forwards remain internal to it.
 
 1. Create `data/gap-compose/{config,worker,caddy-data,caddy-config,guest-image,admin}`.
-   Writable worker/Caddy directories must belong to UID/GID 10001; set the
-   shared admin directory to mode 700.
-2. Build guest assets into `data/gap-compose/guest-image` with the earlier image
-   build command. Directory mode 755 and image files 644 allow read-only use.
+   Writable directories belong to UID/GID 10001; protect `admin` with mode 700.
+2. Build guest assets into `data/gap-compose/guest-image` with the earlier build
+   command. Directory mode 755 and files 644 allow the read-only image mount.
 3. Copy `runtime/compose/runner.example.json` to
-   `data/gap-compose/config/runner.json`; replace `base_domain` and `node_url`.
-   Put the matching node/worker service token in `config/service.token`.
-   Protect the config directory with ownership 10001 and mode 700, files 600.
-4. Set `GAP_COMPOSE_PUBLIC_IP` to the available IP and `GAP_COMPOSE_KVM_GID` to
-   the numeric group returned by `stat -c %g /dev/kvm`. Configure node Compose
-   approval and worker settings, DNS, and public routing to ports 80/443.
-5. From the repository root, validate and start:
+   `data/gap-compose/config/runner.json`. Set `node_url` and the existing
+   `public_url`; put the matching node/worker secret in `config/service.token`.
+   Config directory ownership is 10001/mode 700; files are mode 600.
+4. Set `GAP_COMPOSE_KVM_GID` to `stat -c %g /dev/kvm`, then configure Compose
+   approval and worker settings on the node as described earlier.
+5. From the repository root:
 
 ```bash
 docker compose --project-directory . -f runtime/compose/deploy.yml config
 docker compose --project-directory . -f runtime/compose/deploy.yml up -d --build
 ```
 
-The edge resumes persisted configuration. If recreating the edge container
-changes its network namespace, recreate the worker with it. Neither service
-mounts the host Docker socket or the node's secrets.
+Rebuild the existing `gap-edge` with the updated `runtime/edge/nginx.conf` to
+activate `/apps/` forwarding. Its TLS terminator and DNS remain unchanged.
+For a worker on another machine, adapt the edge's private gateway address and
+secure that internal transport. The example uses the same execution host.
+If recreating the gateway changes its network namespace, recreate the worker
+with it. Caddy resumes persisted routing and the worker reconciles catalog state
+on startup. No host Docker socket or node secret files are mounted into guests.
 
-### Real TLS validation
+### Real routing validation
 
-Set `GAP_TEST_CADDY_BINARY` to a Caddy executable alongside the real KVM test
-environment variables. The integration test starts an isolated Caddy using high
-ports and an internal CA, and verifies the HTTPS certificate chain **and hostname**,
-route disable/re-enable, removal on VM stop/delete and restoration after restart.
-It does not request a public certificate or change production DNS. Operator-only
-`internal_tls: true`, `http_port` and `https_port` support this isolated test;
-leave internal TLS disabled for browser-trusted public certificates.
+With `GAP_TEST_CADDY_BINARY` and the real KVM test variables, the integration test
+starts a private HTTP gateway. `GAP_TEST_APP_ORIGIN` optionally points to a real
+GAP nginx edge in front of it; the default is `http://127.0.0.1:8093`.
+`GAP_TEST_APP_PORT` selects the private gateway port (default 8093).
+Tests cover GET/POST, preserved queries, assets, slash redirect, WebSocket echo,
+disable/re-enable, removal on stop/delete, and restoration after restart with
+persistent guest data. This path introduces no new certificate issuance.

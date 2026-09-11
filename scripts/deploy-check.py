@@ -60,11 +60,7 @@ if yaml:
                 print(f"{f}: service {name} pins container_name")
                 sys.exit(1)
             for port in svc.get("ports", []):
-                managed_public = (f == "runtime/compose/deploy.yml" and name == "compose-edge"
-                    and str(port) in (
-                        "${GAP_COMPOSE_PUBLIC_IP:?Set a dedicated available listener IP}:80:80",
-                        "${GAP_COMPOSE_PUBLIC_IP:?Set a dedicated available listener IP}:443:443"))
-                if not managed_public and not str(port).startswith("172.17.0.1:"):
+                if not str(port).startswith("172.17.0.1:"):
                     print(f"{f}: service {name} publishes {port} outside the bridge")
                     sys.exit(1)
 

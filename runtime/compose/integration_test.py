@@ -9,14 +9,13 @@ import json
 import os
 from pathlib import Path
 import socket
-import ssl
-from unittest.mock import patch
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
 import uuid
+from urllib.parse import urlsplit
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -106,9 +105,9 @@ class Integration(unittest.TestCase):
                     config["hypervisor"] = {"state_dir": os.environ["GAP_VM_TEST_STATE_DIR"],
                                             "image_dir": os.environ["GAP_VM_TEST_IMAGE_DIR"]}
                 if managed and os.environ.get('GAP_TEST_CADDY_BINARY'):
-                    config['ingress'] = {'dedicated_caddy': True, 'base_domain': 'apps.test',
+                    config['ingress'] = {'dedicated_caddy': True, 'public_url': os.environ.get('GAP_TEST_APP_ORIGIN', 'http://127.0.0.1:8093'),
                         'admin_socket': str(root / 'caddy-admin.sock'),
-                        'http_port': free_port(), 'https_port': free_port(), 'internal_tls': True}
+                        'http_port': int(os.environ.get('GAP_TEST_APP_PORT', '8093'))}
                     bootstrap = root / 'caddy.json'
                     bootstrap.write_text(json.dumps({'admin': {'listen': 'unix/' + config['ingress']['admin_socket']}}))
                     caddy_process = subprocess.Popen([os.environ['GAP_TEST_CADDY_BINARY'], 'run', '--config', str(bootstrap)],
@@ -222,7 +221,8 @@ class Integration(unittest.TestCase):
             ready()
             sources = {
                 "compose.yaml": 'services:\n  web:\n    build: .\n    ports: ["8000:8000"]\n    volumes: ["data:/persist"]\nvolumes:\n  data: {}\n',
-                "Dockerfile": 'FROM alpine:3.23\nRUN apk add --no-cache busybox-extras\nCMD ["sh", "-c", "test -f /persist/index.html || cat /proc/sys/kernel/random/uuid > /persist/index.html; exec busybox-extras httpd -f -p 8000 -h /persist"]\n'}
+                "Dockerfile": 'FROM alpine:3.23\nRUN apk add --no-cache python3\nCOPY http_fixture.py /app.py\nCMD ["python3", "/app.py"]\n',
+                "http_fixture.py": (Path(__file__).parent / 'http_fixture.py').read_text()}
             operation("POST", "/releases", {"compose_file": "compose.yaml", "files": {
                 name: base64.b64encode(value.encode()).decode() for name, value in sources.items()}})
             url = 'http://127.0.0.1:' + str(vm["ports"][0]["worker_port"])
@@ -233,34 +233,47 @@ class Integration(unittest.TestCase):
             if runner.ingress:
                 ingress = operation('PUT', '/ingress', {**identity, 'enabled': True, 'guest_port': 8000})['ingress']
                 self.assertTrue(ingress['routed'])
-                ca = root / 'caddy-data/caddy/pki/authorities/local/root.crt'
-                original_resolve = socket.getaddrinfo
-                def resolve(host, *args, **kwargs):
-                    return original_resolve('127.0.0.1' if host == ingress['hostname'] else host, *args, **kwargs)
-                def https_page():
-                    context = ssl.create_default_context(cafile=str(ca))
-                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
-                    with patch('socket.getaddrinfo', side_effect=resolve):
-                        with opener.open(ingress['url'], timeout=5) as response:
-                            return response.read().strip()
-                for attempt in range(60):
-                    try:
-                        self.assertEqual(https_page(), persisted)
-                        break
-                    except (OSError, urllib.error.URLError):
-                        if attempt == 59:
-                            raise
-                        time.sleep(.5)
-                print('REAL CADDY HTTPS: certificate chain + hostname verified', flush=True)
+                def app_request(path='', method='GET', data=None):
+                    req = urllib.request.Request(ingress['url'] + path, method=method, data=data)
+                    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10) as response:
+                        self.assertIsNone(response.headers.get('Service-Worker-Allowed'))
+                        return response.read().strip()
+                self.assertEqual(app_request(), persisted)
+                echo = json.loads(app_request('echo?value=a%2Fb&x=1', 'POST', b'hello-world'))
+                self.assertEqual(echo['path'], '/echo?value=a%2Fb&x=1')
+                self.assertEqual(echo['method'], 'POST')
+                self.assertEqual(echo['body'], 'hello-world')
+                self.assertEqual(echo['prefix'], '/apps/' + project)
+                self.assertEqual(app_request('asset.txt'), b'nested-asset')
+                with self.assertRaises(urllib.error.HTTPError) as failure:
+                    app_request('failure')
+                self.assertEqual(failure.exception.code, 503)
+                self.assertEqual(failure.exception.read(), b'app-unavailable')
+                # Missing slash redirects to the canonical path, preserving query.
+                with urllib.request.urlopen(ingress['url'][:-1] + '?probe=1', timeout=10) as response:
+                    self.assertEqual(response.geturl(), ingress['url'] + '?probe=1')
+                origin = urlsplit(ingress['url'])
+                with socket.create_connection((origin.hostname, origin.port or 80), timeout=5) as ws:
+                    path = origin.path + 'socket'
+                    ws.sendall(('GET ' + path + ' HTTP/1.1\r\nHost: ' + origin.netloc +
+                        '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13'
+                        '\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n').encode())
+                    wire = ws.makefile('rb')
+                    self.assertIn(b'101', wire.readline())
+                    for _ in range(64):
+                        if wire.readline() == b'\r\n':
+                            break
+                    else:
+                        self.fail('invalid WebSocket handshake headers')
+                    ws.sendall(b'\x81\x84abcd' + bytes(c ^ b'abcd'[i % 4] for i, c in enumerate(b'ping')))
+                    self.assertEqual(wire.read(6), b'\x81\x04ping')
+                    wire.close()
+                print('REAL SHARED-ORIGIN PATH: GET + POST + QUERY + ASSET + REDIRECT + WEBSOCKET OK', flush=True)
                 operation('PUT', '/ingress', {**identity, 'enabled': False})
                 self.assertFalse(request('GET', prefix + '/ingress', token)[1]['routed'])
-                with patch('socket.getaddrinfo', side_effect=resolve):
-                    try:
-                        https_page()
-                    except (OSError, urllib.error.URLError):
-                        pass
-                    else:
-                        self.fail('disabled route still serves application')
+                with self.assertRaises(urllib.error.HTTPError) as disabled:
+                    app_request()
+                self.assertEqual(disabled.exception.code, 404)
                 operation('PUT', '/ingress', {**identity, 'enabled': True, 'guest_port': 8000})
             self.assertEqual(len(persisted), 36)
             operation("POST", "/vm/stop", identity)
@@ -270,9 +283,19 @@ class Integration(unittest.TestCase):
             operation("POST", "/vm/start", identity)
             ready()
             operation("POST", "/start")
-            self.assertEqual(page(), persisted, "named volume must survive VM stop/resize/restart")
+            # Compose start reports process start, not HTTP readiness. The Python
+            # test service needs a moment to bind its listener after restart.
+            for attempt in range(60):
+                try:
+                    restored = page()
+                    break
+                except OSError:
+                    if attempt == 59:
+                        raise
+                    time.sleep(.25)
+            self.assertEqual(restored, persisted, "named volume must survive VM stop/resize/restart")
             if runner.ingress:
-                self.assertEqual(https_page(), persisted)
+                self.assertEqual(app_request(), persisted)
             operation("POST", "/status")
             operation("POST", "/logs")
             operation("POST", "/vm/stop", identity)

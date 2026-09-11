@@ -7,7 +7,7 @@
   "hypervisor": {"state_dir": "/data/vm", "image_dir": "/images"},
   "ingress": {
     "dedicated_caddy": true,
-    "base_domain": "apps.example.com",
+    "public_url": "https://gap.geta.team",
     "admin_socket": "/run/caddy-admin/admin.sock"
   }
 }
