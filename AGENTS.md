@@ -1380,7 +1380,8 @@ rounded-up number of guest CPUs; Linux cgroup v2 limits the entire QEMU process
 to the purchased CPU time. Quotas and CPU billing use the fractional allocation.
 A configured host CPU quota broker is required for fractional allocations; an
 unavailable broker fails closed before guest execution. RAM and disk remain
-integer MiB and GiB. SSH public keys may be Ed25519 or RSA (2048–16384 bits),
+integer MiB and GiB. The web console offers memory from 256 MiB in 256 MiB
+steps, bounded by the remaining agent allocation. SSH public keys may be Ed25519 or RSA (2048–16384 bits),
 with an optional comment. Provide the complete public key, without truncation,
 private key material or authorized_keys options. RSA key format does not enable
 legacy SHA-1 signatures.
