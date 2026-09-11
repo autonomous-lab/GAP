@@ -250,20 +250,22 @@ pub fn handle(state:&Arc<Mutex<crate::server::NodeState>>,method:&str,path:&str,
             return response(policy.ok_or(Failure(409,"microvm_hosting_not_configured")).and_then(|p|admin.review_access(id,decision,&session.email,&p,now)));
         }
     }
-    if let Some(did)=clean.strip_prefix("/v1/admin/console/agents/").and_then(|p|p.strip_suffix("/suspension")) {
+    let suspension_target=clean.strip_prefix("/v1/admin/console/agents/").and_then(|p|p.strip_suffix("/suspension")).map(|id|("agent",id))
+        .or_else(||clean.strip_prefix("/v1/admin/console/projects/").and_then(|p|p.strip_suffix("/suspension")).map(|id|("project",id)));
+    if let Some((scope,did))=suspension_target {
         if method=="POST" {
             let (Some(active),Some(generation),Some(reason))=(input["active"].as_bool(),input["expected_generation"].as_u64(),input["reason"].as_str()) else {return response(Err(Failure(400,"suspension_decision_required")))};
             let did=crate::server::percent_decode(did);
-            let mut result=state.lock().map_err(unavailable).and_then(|mut s|s.admin_suspend_agent(&did,generation,active,reason,&session.email).map_err(|e|{
+            let mut result=state.lock().map_err(unavailable).and_then(|mut s|(if scope=="agent" {s.admin_suspend_agent(&did,generation,active,reason,&session.email)} else {s.admin_suspend_project(&did,generation,active,reason,&session.email)}).map_err(|e|{
                 let error=e.to_string();
                 if error.contains("version_changed"){Failure(409,"suspension_version_changed_refresh_before_retry")}
-                else if error.contains("reason_required") || error.contains("unknown agent"){Failure(400,"invalid_suspension_decision")}
+                else if error.contains("reason_required") || error.contains("unknown "){Failure(400,"invalid_suspension_decision")}
                 else{Failure(503,"suspension_update_unavailable")}
             }));
             if let Ok(ref mut value)=result {
                 // Attribution/history is already atomic with the durable policy.
                 // This is a secondary index for the common audit-log view.
-                if admin.audit(&session.email,if active {"agent.suspended"} else {"agent.reactivated"},&did,value,now).is_err(){value["audit_index_pending"]=json!(true);}
+                if admin.audit(&session.email,&format!("{}.{}",scope,if active {"suspended"}else{"reactivated"}),&did,value,now).is_err(){value["audit_index_pending"]=json!(true);}
             }
             return response(result);
         }
@@ -281,9 +283,11 @@ pub fn handle(state:&Arc<Mutex<crate::server::NodeState>>,method:&str,path:&str,
         };
     }
     if clean=="/v1/admin/console/microvms" && method=="GET" {
+        let project=path.split_once('?').and_then(|(_,q)|q.split('&').find_map(|p|p.strip_prefix("project_id="))).map(crate::server::percent_decode);
+        if project.as_ref().is_some_and(|p|!p.starts_with("prj_") || p.len()!=28 || !p[4..].bytes().all(|b|b.is_ascii_hexdigit())) {return response(Err(Failure(400,"invalid_project")))}
         let runner=state.lock().ok().and_then(|s|s.private_node.as_ref().and_then(|p|p.runner.clone()));
         return match runner {
-            Some(r)=>{let (status,body)=crate::private_node::forward(&r,"","","GET","admin/inventory",json!({"offset":offset}));HttpResponse{status,body,cookie:None}},
+            Some(r)=>{let (status,body)=crate::private_node::forward(&r,"","","GET","admin/inventory",json!({"offset":offset,"project_id":project}));HttpResponse{status,body,cookie:None}},
             None=>response(Ok(json!({"vms":[],"available":false}))),
         };
     }

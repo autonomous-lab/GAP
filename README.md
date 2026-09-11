@@ -198,7 +198,7 @@ Optional ingress publishes a selected guest HTTP port at `/apps/{project_id}/`
 for the default VM and `/apps/{vm_id}/` for additional VMs
 on the existing node origin, reusing its DNS and TLS certificate. No additional
 DNS setup is needed. Revocation now fences running VMs through short-lived
-worker authorization. Administrator agent suspension also blocks Cloud access,
+worker authorization. Administrator agent and independent project suspension also block Cloud access,
 terminates active functions and disconnects realtime sessions, with durable
 decision history. Rollback remains unavailable; activation requires the worker
 and updated internal edge configuration. See the [current architecture](./docs/private-compose-plan.md)
@@ -310,3 +310,8 @@ python3 scripts/microvm-billing.py classify-funding --project prj_PROJECT_ID \
 Annotations are immutable and idempotent. `--source paid` requires a positive
 cash amount and a supporting note; it records an operator assertion, not payment
 processor verification. Stripe receipts remain a later integration.
+
+The administrator console links agents to their paginated projects, project
+resource metadata, filtered VM inventory and project usage finance. Suspension
+history is visible at either scope; reactivation must clear every applicable
+suspension. Administration remains local to each node.

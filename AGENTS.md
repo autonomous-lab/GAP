@@ -1354,3 +1354,21 @@ be separately approved and is checked before any disk allocation. The choice is
 saved before first start, without a second configuration call. `start: false`
 keeps either mode stopped until an explicit start. Server-side allocation checks
 remain authoritative if another request consumes quota while the form is open.
+
+### Administrator resource navigation and project suspension
+
+In `/admin`, open an agent to browse its paginated projects and decision history.
+Projects link back to their owner and show functions, site configuration/releases,
+database schema, project-filtered VM inventory and a shortcut to usage finance.
+The finance view identifies the selected project and can return to all projects.
+Resource metadata lists currently show at most 100 functions/schema entries.
+Agent, project and VM inventory pages support pagination.
+
+A project can be suspended independently from its owner. Its management operations,
+public workloads and execution leases are denied while the owner's other projects
+remain accessible. Decisions use the same reason, administrator attribution,
+durable history and stale-generation rejection as agent suspension. Disabling
+or restarting the administrator console does not clear either decision.
+Reactivating an agent does not clear a separate project suspension, and reactivating
+a project does not override a suspended owner. This applies within the current
+node; customer-wide and fleet-wide administration remain separate work.

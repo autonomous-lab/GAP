@@ -13,6 +13,16 @@ from lifecycle import Runtime
 
 class CollectionTests(unittest.TestCase):
     setUp = fixture.MicroVMTests.setUp
+    def test_admin_inventory_filters_before_counting_and_pagination(self):
+        from runner import Runner,Failure
+        other=dict(self.meta,project_id='prj_'+'d'*24,vm_id='vm_'+'e'*32,owner_did='did:gap:'+'f'*64)
+        self.manager.save(other)
+        runner=Runner.__new__(Runner);runner.hypervisor=self.manager;runner.runtime=None;runner.ingress=None
+        status,data=runner.rpc({'method':'GET','action':'admin/inventory','body':{'project_id':PROJECT}})
+        self.assertEqual(status,200);self.assertEqual(data['total'],1)
+        self.assertEqual([v['vm_id'] for v in data['vms']],[VM])
+        self.assertEqual(runner.rpc({'method':'GET','action':'admin/inventory','body':{}})[1]['total'],2)
+        with self.assertRaises(Failure):runner.rpc({'method':'GET','action':'admin/inventory','body':{'project_id':'invalid'}})
     def extra(self):
         self.manager.quota_provider=lambda *_:{'vcpus':4,'memory_mib':8192,'max_vms':2}
         with patch.object(self.manager,'prepare',side_effect=lambda m:self.manager.folder(m).mkdir()):

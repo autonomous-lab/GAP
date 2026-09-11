@@ -488,6 +488,7 @@ pub struct NodeState {
     /// the existing ClickHouse-backed generic state table.
     cloud_projects: HashMap<String, crate::cloud::ProjectRecord>,
     cloud_suspensions: HashMap<String, crate::cloud_suspension::Record>,
+    cloud_project_suspensions: HashMap<String, crate::cloud_suspension::Record>,
     pub private_node: Option<crate::private_node::PrivateNode>,
     pub registration: Option<Arc<crate::registration::Registration>>,
     pub cloud_admin: Option<Arc<crate::cloud_admin::Admin>>,
@@ -782,6 +783,10 @@ impl NodeState {
             .expect("cannot load suspension policy; refusing to serve")
             .into_iter().map(|r| (r.key,serde_json::from_str::<crate::cloud_suspension::Record>(&r.value)
                 .expect("invalid suspension policy; refusing to serve"))).collect();
+        let cloud_project_suspensions=storage.list_state("cloud_project_suspensions")
+            .expect("cannot load project suspension policy; refusing to serve")
+            .into_iter().map(|r| (r.key,serde_json::from_str::<crate::cloud_suspension::Record>(&r.value)
+                .expect("invalid project suspension policy; refusing to serve"))).collect();
         let custom_domains: HashMap<String, crate::cloud::SiteDomain> =
             load(&*storage, "cloud_domains", cloud_only);
 
@@ -942,6 +947,7 @@ impl NodeState {
             deposit_chain: None,
             cloud_projects,
             cloud_suspensions,
+            cloud_project_suspensions,
             private_node: None,
             registration: None,
             cloud_admin: None,
@@ -2541,13 +2547,18 @@ the content inline"
 
     fn active_cloud_project(&self,id:&str)->bool {
         self.cloud_projects.get(id).is_some_and(|p|p.status=="active" && !self.agent_suspended(&p.owner_did))
+            && !self.cloud_project_suspensions.get(id).is_some_and(|r|r.current.active)
     }
 
     fn workload_policy(&self,project_id:&str,compose:bool)->Value {
         let Some(project)=self.cloud_projects.get(project_id) else{return json!({"allowed":false,"generation":0,"reason":"unknown_project"})};
         let suspension=self.cloud_suspensions.get(&project.owner_did);
+        let project_suspension=self.cloud_project_suspensions.get(project_id);
+        // Both counters are durable and only increase. Restoring one scope
+        // cannot roll back a newer decision at the other scope.
+        let generation=suspension.map_or(0,|r|r.current.generation).saturating_add(project_suspension.map_or(0,|r|r.current.generation));
         let admission=self.private_node.as_ref().is_none_or(|p|p.authorize(&project.owner_did).is_ok() && (!compose || p.microvm_quota(&project.owner_did).is_ok()));
-        json!({"allowed":self.active_cloud_project(project_id) && admission,"owner_did":project.owner_did,"generation":suspension.map_or(0,|r|r.current.generation),"suspended":self.agent_suspended(&project.owner_did),"lease_seconds":5})
+        json!({"allowed":self.active_cloud_project(project_id) && admission,"owner_did":project.owner_did,"generation":generation,"suspended":self.agent_suspended(&project.owner_did) || project_suspension.is_some_and(|r|r.current.active),"lease_seconds":5})
     }
 
     pub fn admin_suspend_agent(&mut self,did:&str,expected:u64,active:bool,reason:&str,actor:&str)->Result<Value> {
@@ -2557,6 +2568,21 @@ the content inline"
         self.cloud_suspensions.insert(did.into(),next.clone());
         let projects:Vec<_>=self.cloud_projects.values().filter(|p|p.owner_did==did).map(|p|p.project_id.clone()).collect();
         Ok(json!({"agent_did":did,"decision":next.current,"projects":projects}))
+    }
+
+    pub fn admin_suspend_project(&mut self,id:&str,expected:u64,active:bool,reason:&str,actor:&str)->Result<Value> {
+        let project=self.cloud_projects.get(id).ok_or_else(||Error::Other("unknown project".into()))?;
+        let next=crate::cloud_suspension::Record::next(self.cloud_project_suspensions.get(id),expected,active,reason,actor,now_unix())?;
+        self.storage.upsert_state(&crate::storage::StateRecord{scope:"cloud_project_suspensions".into(),key:id.into(),value:serde_json::to_string(&next).map_err(|_|Error::Other("cannot encode suspension".into()))?,updated_at:now_unix()})?;
+        let owner=project.owner_did.clone();
+        self.cloud_project_suspensions.insert(id.into(),next.clone());
+        Ok(json!({"project_id":id,"owner_did":owner,"decision":next.current}))
+    }
+
+    fn admin_project_summary(&self,p:&crate::cloud::ProjectRecord)->Value {
+        json!({"project_id":p.project_id,"owner_did":p.owner_did,"created_at":p.created_at,"status":p.status,
+            "execution_allowed":self.active_cloud_project(&p.project_id),"suspension":self.cloud_project_suspensions.get(&p.project_id),
+            "owner_suspension":self.cloud_suspensions.get(&p.owner_did)})
     }
 
     /// Called only after an individual administrator session has been verified.
@@ -2574,13 +2600,22 @@ the content inline"
             }
             "/v1/admin/console/projects" => {
                 let mut projects:Vec<_>=self.cloud_projects.values().collect();projects.sort_by(|a,b|a.project_id.cmp(&b.project_id));
-                Ok(json!({"projects":projects.into_iter().skip(offset as usize).take(100).collect::<Vec<_>>(),"total":self.cloud_projects.len(),"offset":offset,"limit":100}))
+                Ok(json!({"projects":projects.into_iter().skip(offset as usize).take(100).map(|p|self.admin_project_summary(p)).collect::<Vec<_>>(),"total":self.cloud_projects.len(),"offset":offset,"limit":100}))
             }
             _ => {
+                if let Some(did)=path.strip_prefix("/v1/admin/console/agents/") {
+                    let did=percent_decode(did);
+                    if !self.agents_by_did.contains_key(&did){return Err(Error::Other("unknown agent".into()))}
+                    let verified=self.storage.get_state("cloud_verified_agent_emails",&did)?.and_then(|r|serde_json::from_str::<Value>(&r.value).ok());
+                    let mut projects:Vec<_>=self.cloud_projects.values().filter(|p|p.owner_did==did).collect();
+                    projects.sort_by(|a,b|a.project_id.cmp(&b.project_id));let total=projects.len();
+                    return Ok(json!({"agent":{"did":did,"suspension":self.cloud_suspensions.get(&did),"email":verified.as_ref().and_then(|v|v.get("email")),"email_verified":verified.is_some(),"project_count":total,"microvm_quota":self.private_node.as_ref().and_then(|p|p.microvm_quota(&did).ok())},
+                        "projects":projects.into_iter().skip(offset as usize).take(100).map(|p|self.admin_project_summary(p)).collect::<Vec<_>>(),"total":total,"offset":offset,"limit":100}));
+                }
                 let id=path.strip_prefix("/v1/admin/console/projects/").ok_or_else(||Error::Other("unknown admin resource".into()))?;
                 let project=self.cloud_projects.get(id).ok_or_else(||Error::Other("unknown project".into()))?;
                 let store=crate::cloud::ProjectStore::open(&self.cloud_root,id)?;
-                Ok(json!({"project":project,"resources":store.admin_inventory()?}))
+                Ok(json!({"project":self.admin_project_summary(project),"resources":store.admin_inventory()?}))
             }
         }
     }
@@ -2737,7 +2772,7 @@ the content inline"
         let domain = self.custom_domain(hostname)?;
         self.cloud_projects
             .get(&domain.project_id)
-            .filter(|project| project.status == "active" && !self.agent_suspended(&project.owner_did))?;
+            .filter(|project| self.active_cloud_project(&project.project_id))?;
         let store = crate::cloud::ProjectStore::open(&self.cloud_root, &domain.project_id).ok()?;
         let site = store.site_config().ok().flatten()?;
         (site.enabled && site.active_version.is_some()).then_some(domain.project_id)
@@ -2768,7 +2803,7 @@ the content inline"
         if !self
             .cloud_projects
             .get(&domain.project_id)
-            .is_some_and(|project| project.status == "active" && !self.agent_suspended(&project.owner_did))
+            .is_some_and(|project| self.active_cloud_project(&project.project_id))
         {
             return false;
         }
@@ -2795,7 +2830,7 @@ the content inline"
                 "cloud project belongs to another agent".into(),
             ));
         }
-        if project.status != "active" {
+        if !self.active_cloud_project(project_id) {
             return Err(Error::Other("cloud project is not active".into()));
         }
         Ok(project)
@@ -7004,7 +7039,7 @@ fn serve_site_project(
     let project_exists = guard
         .cloud_projects
         .get(project_id)
-        .is_some_and(|project| project.status == "active" && !guard.agent_suspended(&project.owner_did));
+        .is_some_and(|project| guard.active_cloud_project(&project.project_id));
     if !project_exists {
         return Some(site_response(
             404,
@@ -7671,7 +7706,7 @@ pub fn route_with_ip(
                 return None;
             }
             let project = body["project_id"].as_str().and_then(|id| guard.cloud_projects.get(id))?;
-            if project.status != "active" || guard.agent_suspended(&project.owner_did) || body["owner_did"].as_str() != Some(project.owner_did.as_str()) {
+            if !guard.active_cloud_project(&project.project_id) || body["owner_did"].as_str() != Some(project.owner_did.as_str()) {
                 return None;
             }
             policy.microvm_quota(&project.owner_did).ok()

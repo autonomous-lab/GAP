@@ -244,7 +244,10 @@ class Runner:
             if not self.hypervisor:return 200,{'vms':[],'available':False}
             body=rpc.get('body') or {};offset=body.get('offset',0)
             if type(offset) is not int or not 0<=offset<=1000000:raise Failure(400,'invalid_offset')
+            project=body.get('project_id')
+            if project is not None and (not isinstance(project,str) or not PROJECT.fullmatch(project)):raise Failure(400,'invalid_project')
             paths=sorted((self.hypervisor.root/'catalog').glob('*.json'))
+            if project is not None:paths=[p for p in paths if json.loads(p.read_text())['project_id']==project]
             values=[]
             for path in paths[offset:offset+100]:
                 meta=json.loads(path.read_text())

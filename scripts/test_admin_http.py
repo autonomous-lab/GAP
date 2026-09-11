@@ -17,6 +17,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -143,6 +144,11 @@ class AdminHTTP(unittest.TestCase):
                     _, agent, _ = request('POST', '/v1/identity', host='client.test')
                     _, project, _ = request('POST', '/v1/cloud/projects', {}, host='client.test', bearer=agent['token'])
                     project_id = project['project_id']
+                    _, other_project, _=request('POST','/v1/cloud/projects',{},host='client.test',bearer=agent['token'])
+                    status, detail, _=request('GET',api+'agents/'+urllib.parse.quote(agent['did'],safe=''),cookie=cookie)
+                    self.assertEqual(status,200);self.assertEqual(detail['total'],2)
+                    self.assertEqual({p['project_id'] for p in detail['projects']},{project_id,other_project['project_id']})
+                    self.assertNotIn(agent['token'],json.dumps(detail))
                     route = '/v1/cloud/projects/'+project_id+'/access-requests'
                     status, access, _ = request('POST', route, {'request_id':'d'*32,'quota':{'vcpus':2,'memory_mib':4096,'max_vms':1},'always_on':False,'reason':'Test workload'}, host='client.test', bearer=agent['token'])
                     self.assertEqual(status, 202)
@@ -164,6 +170,14 @@ class AdminHTTP(unittest.TestCase):
                     self.assertEqual(request('POST',site+'/versions/'+version+'/activate',{},host='client.test',bearer=agent['token'])[0],200)
                     public='/sites/'+project_id+'/'
                     self.assertEqual(request('GET',public,host='client.test',basic='visitor:isolated site password')[0],200)
+                    project_suspend=api+'projects/'+project_id+'/suspension'
+                    project_decision={'active':True,'expected_generation':0,'reason':'Isolated project review'}
+                    self.assertEqual(request('POST',project_suspend,project_decision,cookie=cookie)[0],403)
+                    self.assertEqual(request('POST',project_suspend,project_decision,cookie=cookie,csrf=session['csrf'])[0],200)
+                    self.assertEqual(request('GET',public,host='client.test',basic='visitor:isolated site password')[0],404)
+                    self.assertEqual(request('GET','/v1/cloud/projects/'+other_project['project_id']+'/kv/check',host='client.test',bearer=agent['token'])[0],200)
+                    self.assertFalse(request('GET',api+'projects/'+project_id,cookie=cookie)[1]['project']['execution_allowed'])
+                    self.assertEqual(request('POST',project_suspend,project_decision,cookie=cookie,csrf=session['csrf'])[0],409)
                     suspend=api+'agents/'+agent['did']+'/suspension'
                     decision={'active':True,'expected_generation':0,'reason':'Isolated abuse test'}
                     self.assertEqual(request('POST',suspend,decision,cookie=cookie)[0],403)
@@ -178,6 +192,10 @@ class AdminHTTP(unittest.TestCase):
                     self.assertEqual(request('GET',api+'session',cookie=cookie)[0],200)
                     self.assertEqual(request('POST',suspend,decision,cookie=cookie,csrf=session['csrf'])[0],409)
                     self.assertEqual(request('POST',suspend,{'active':False,'expected_generation':1,'reason':'Resolved in isolated test'},cookie=cookie,csrf=session['csrf'])[0],200)
+                    self.assertEqual(request('GET',public,host='client.test',basic='visitor:isolated site password')[0],404)
+                    self.assertEqual(request('POST',project_suspend,{'active':False,'expected_generation':1,'reason':'Project review resolved'},cookie=cookie,csrf=session['csrf'])[0],200)
+                    policy=request('POST','/internal/workload-policy',{'project_id':project_id},host='client.test',bearer='b'*64)[1]
+                    self.assertEqual(policy['generation'],4);self.assertTrue(policy['allowed'])
                     self.assertEqual(request('GET',public,host='client.test',basic='visitor:isolated site password')[0],200)
 
                     self.assertEqual(request('POST', api+'logout', {}, cookie=cookie)[0], 403)
