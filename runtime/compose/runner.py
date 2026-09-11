@@ -409,7 +409,7 @@ class Runner:
             with ExitStack() as locks:
                 for meta in metas: locks.enter_context(self.runtime.lock(meta['project_id']))
                 for meta in metas: self.runtime.sample(self.hypervisor.read(meta['project_id'],meta['owner_did'],meta['vm_id']))
-                return ledger.set_pricing(body['mode'],body.get('tariff'))
+                return ledger.set_pricing(body['mode'],body.get('tariff'),body.get('expected_version',...))
         if action=='topup':
             self.authorize(body['project_id'],body['owner_did'])
             with self.runtime.lock(body['project_id']):
@@ -420,6 +420,7 @@ class Runner:
 
 
 def handler_for(runner):
+    from billing import BillingError
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass  # Never put manifests, bearer tokens or guest logs in host logs.
@@ -457,6 +458,10 @@ def handler_for(runner):
                 status, value = (200,runner.operator(rpc)) if self.path=="/operator" else runner.rpc(rpc)
             except Failure as error:
                 status, value = error.status, {"error": {"code": error.code}}
+            except BillingError as error:
+                code=str(error)
+                status=409 if code in ('immutable_tariff_version','tariff_version_changed_refresh_before_retry','billing_operation_conflict') else 400
+                value={"error":{"code":code}}
             except (ValueError, UnicodeError, TimeoutError, RecursionError):
                 status, value = 400, {"error": {"code": "invalid_request"}}
             except Exception:

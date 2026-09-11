@@ -136,10 +136,15 @@ class Ledger:
             return {'mode':mode,'tariff':tariff,'microcredits_per_credit':1_000_000,
                     'retention_seconds':RETENTION_SECONDS}
 
-    def set_pricing(self, mode, tariff=None):
+    def set_pricing(self, mode, tariff=None, expected_version=...):
         if mode not in ('shadow','enforced'): raise BillingError('invalid_billing_mode')
         with self.db() as db:
             _, current = self.tariff(db)
+            if expected_version is not ...:
+                if expected_version is not None and not isinstance(expected_version,str):
+                    raise BillingError('invalid_expected_tariff_version')
+                if (current['version'] if current else None) != expected_version:
+                    raise BillingError('tariff_version_changed_refresh_before_retry')
             if tariff is not None:
                 if not isinstance(tariff,dict) or set(tariff) not in ({'version',*RATES}, {'version',*COMMERCIAL_RATES}):
                     raise BillingError('invalid_tariff')

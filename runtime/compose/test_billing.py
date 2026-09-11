@@ -32,6 +32,17 @@ class LedgerTests(unittest.TestCase):
         with self.assertRaisesRegex(BillingError,'immutable'):
             self.ledger.set_pricing('shadow',dict(self.price,vcpu_hour=1))
 
+    def test_tariff_compare_and_set_preserves_concurrent_operator_update(self):
+        self.ledger.set_pricing('enforced',self.price,expected_version=None)
+        updated=dict(self.price,version='test-2',vcpu_hour=7200)
+        self.ledger.set_pricing('enforced',updated,expected_version='test-1')
+        for expected in (None,'test-1'):
+            with self.assertRaisesRegex(BillingError,'tariff_version_changed'):
+                self.ledger.set_pricing('enforced',dict(self.price,version='stale'),expected_version=expected)
+        self.assertEqual(self.ledger.pricing()['tariff'],updated)
+        with self.ledger.db() as db:
+            self.assertIsNone(db.execute("SELECT version FROM tariffs WHERE version='stale'").fetchone())
+
     def test_metering_debit_and_checkpoint_are_atomic_and_idempotent(self):
         self.ledger.set_pricing('enforced',self.price)
         self.ledger.topup(P,O,1000,'one')

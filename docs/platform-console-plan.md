@@ -9,15 +9,25 @@ product behavior, dependencies, migration boundaries and acceptance criteria.
 Implemented, tested and deployed to both node web servers in the first delivery
 (the microVM execution worker is present only on node 01):
 
-- Human microVM creation at `/microvms`, minimum defaults, optional public SSH
+- Human microVM creation, selection and deletion at `/microvms`; multiple VMs
+  within a project, independent routes/ports/disks and shared project credits.
+  Deletion requires the full VM ID and supports retaining or erasing storage.
+- Minimum creation defaults, optional public SSH
   key, stopped/start choice, price estimate, asynchronous job polling and safe
   retry identifiers after uncertain transport failures.
 - `max_vms` approval quota, default one, adjustable live with the operator CLI.
   It currently covers an agent's projects on one node and includes stopped and
-  hibernated VMs. One VM per project remains the current storage model.
+  hibernated VMs. Since b041620, multiple VM IDs can share one project.
 - Email verification API and `/signup`, with first-project creation. Codes are
   HMAC protected in persistent SQLite, expire in ten minutes, have five attempts,
   cannot be replayed, and are subject to persistent sending limits.
+- Billing accumulates within VM state/allocation/mode/tariff periods while
+  five-second metering and prepaid enforcement continue. Historical raw samples
+  remain archived; migration preserves account balances and fractional carry.
+- Explicit per-node sales tariffs can be previewed and applied from `.env`
+  through `microvm-billing.py`, with exact microcredit conversion and atomic
+  expected-version checks. Restarts do not override live pricing. Provider
+  costs and public tariff discovery remain to implement.
 - Existing identities continue to work and are not falsely marked verified.
   The email registry is node-local; it does not create a shared operator account.
 - Elestio Postfix configuration discovered from the actual provisioning scripts.
@@ -26,9 +36,9 @@ Implemented, tested and deployed to both node web servers in the first delivery
   namespaces. Actual recipient-inbox delivery has not been confirmed.
 
 Still to implement: customer/operator account authority and shared wallets;
-customer-wide and fleet-wide quotas; multiple VM IDs within a project; admin
+customer-wide and fleet-wide quotas; admin
 sessions and dashboard; approval requests; complete workload suspension; finance
-reporting; versioned per-node environment pricing; federation explorer; verified
+reporting; per-node provider cost configuration and public tariff discovery; federation explorer; verified
 operator badges; encrypted volumes, snapshots and backups with external keys.
 Stripe remains a later phase. Do not present the local email registry or
 per-agent count limit as the completed account/federation architecture.

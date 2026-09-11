@@ -721,3 +721,30 @@ Run `collection_integration.py` with `GAP_TEST_VM_COLLECTION=1` alongside the
 existing real-KVM test settings in an isolated, disposable container. It checks
 two-VM routing, selected wake-up, quota enforcement, deletion/replacement and
 project-wide retention expiry. Never point these tests at production state.
+
+### Configure microVM sales prices from a node environment
+
+Set `GAP_PRICING_VERSION`, `GAP_PRICE_VCPU_HOUR_USD`,
+`GAP_PRICE_RAM_GIB_HOUR_USD`, `GAP_PRICE_DISK_GB_MONTH_USD`,
+`GAP_PRICE_NETWORK_IN_GB_USD` and `GAP_PRICE_NETWORK_OUT_GB_USD` in that
+node's `.env`. Values use USD, at most six decimal places; RAM uses GiB,
+storage/network use decimal GB, and a storage month is 730 hours.
+
+On the host, preview without credentials or network access, then apply:
+
+```bash
+python3 scripts/microvm-billing.py preview-pricing-env
+python3 scripts/microvm-billing.py pricing
+python3 scripts/microvm-billing.py set-pricing-env --expect-version usd-v1
+```
+
+Use `--expect-version none` only to initialize a fresh ledger. For updates,
+use the current live version as the expected version and a new version in
+`.env` whenever any amount changes. A stale expected version is rejected
+atomically. After a lost response, read live pricing before retrying.
+
+Applying prices flushes current VM usage under the old tariff and requires
+no stack restart. Editing `.env` or restarting alone does not overwrite live
+operator settings. Missing, duplicate, malformed or entirely zero tariffs
+are rejected. Unrelated environment secrets are never printed or evaluated.
+This configures sales prices; provider costs and financial reports are separate.

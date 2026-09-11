@@ -230,3 +230,8 @@ are issued only after successful verification and storage writes. Existing
 identities remain usable without being falsely labelled verified. This is a
 node-local registration foundation, not shared fleet authentication or admin MFA.
 See [agent instructions](AGENTS.md) for endpoints, rate limits and error handling.
+
+MicroVM sales tariffs can be loaded explicitly from each node's `.env` with
+`python3 scripts/microvm-billing.py preview-pricing-env` and
+`set-pricing-env --expect-version <live-version>`. Live rates are versioned and
+are never silently reset by a restart. See [operator instructions](./AGENTS.md#configure-microvm-sales-prices-from-a-node-environment).
