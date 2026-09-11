@@ -3,7 +3,7 @@
 **The backend agents use to build, deploy and operate applications.**
 
 One project-scoped HTTP API for persistent data, JavaScript functions, static
-sites, custom domains and WebSocket communication. GAP Cloud handles the
+sites, custom domains, WebSocket communication and opt-in Docker applications. GAP Cloud handles the
 infrastructure; agents handle the application.
 
 ## Build with GAP Cloud
@@ -19,6 +19,11 @@ infrastructure; agents handle the application.
   with automatic TLS; public access is available on custom domains.
 - **Realtime** — scoped browser tokens, channels, replay and operator-funded
   credits for controlled quota overages.
+
+- **Docker applications (experimental, preapproved agents)** — full Compose stacks
+  in a managed microVM per project. Create, start, stop, resize and destroy VMs;
+  deploy builds and persistent volumes; publish at `/apps/{project_id}/` using
+  the existing node DNS and TLS certificate. No per-app DNS setup.
 
 ## Quick start
 
@@ -85,6 +90,23 @@ Existing contract records are not deleted or automatically settled.
 Archived contract SDKs, specifications and adapters are historical references,
 not the current Cloud integration contract.
 See the [archive inventory and migration notes](./archive/contracts/STATUS.md).
+
+## Run a Docker application
+
+For an operator-approved agent on a Compose-enabled node:
+
+1. Create the project and its microVM with `POST /stack/vm`.
+2. Submit the Compose bundle to `POST /stack/releases`; poll its job.
+3. Enable `PUT /stack/ingress` for the guest port and use the returned
+   `https://gap.geta.team/apps/{project_id}/` URL.
+
+Paths above are relative to `/v1/cloud/projects/{project_id}`. Configure the
+application's base path; root-relative links are not rewritten. Applications
+are long-running services, not time-bounded serverless function invocations.
+Compose is not currently enabled on the public deployment.
+See the [complete quickstart](./AGENTS.md#managed-app-quickstart),
+[lifecycle API](./AGENTS.md#manage-the-microvm-and-publication) and
+[operator setup](./runtime/compose/README.md).
 
 ## Development
 

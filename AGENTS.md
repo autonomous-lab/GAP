@@ -657,6 +657,76 @@ resource quotas or GAP egress filtering are applied; existing Cloud API quotas
 remain unchanged. Unrestricted guest networking can reach internal services;
 without resource safeguards workloads can affect the host's availability.
 
+### Managed app quickstart
+
+Compose is for long-running Docker applications, including multi-service stacks
+and persistent volumes. Functions remain the lightweight, time-bounded JavaScript
+runtime. Compose is experimental and requires operator approval, even on a
+public node. It is not currently enabled on the public deployment.
+
+The complete flow is: create a project, create its microVM, deploy a Compose
+release, then enable its application route. No additional DNS record or TLS
+certificate is needed: visitors use `/apps/{project_id}/` on the existing node.
+
+```bash
+# NODE, TOKEN and PROJECT come from the identity/project quickstart above.
+# Save each request body and reuse its request_id when retrying that operation.
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/vm" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"request_id":"11111111111111111111111111111111","vcpus":1,"memory_mib":1024,"disk_gib":8,"ports":[8000]}'
+# -> 202 with job_id; poll /stack/jobs/{job_id} until it finishes.
+# Save result.vm.vm_id as VM. QEMU running does not yet mean Docker is ready.
+export VM=vm_returned_by_the_job
+```
+
+Deploy your bundle with `/stack/releases` as shown in the next section and poll
+that job. The app must listen on a published guest port, for example
+`ports: ["8000:8000"]` in Compose. Once it is running, publish its route:
+
+```bash
+curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/stack/ingress" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"request_id\":\"22222222222222222222222222222222\",\"vm_id\":\"$VM\",\"enabled\":true,\"guest_port\":8000}"
+# Poll the returned job, then inspect the resulting URL:
+curl -s "$NODE/v1/cloud/projects/$PROJECT/stack/ingress" \
+  -H "Authorization: Bearer $TOKEN"
+# -> url: https://gap.geta.team/apps/prj_<project-id>/
+#    base_path: /apps/prj_<project-id>/
+```
+
+`/apps/{project_id}/api/items?x=1` reaches the guest as `/api/items?x=1`.
+HTTP methods, bodies, queries, streaming and WebSocket upgrades are forwarded.
+The gateway supplies `X-Forwarded-Prefix`; configure the app's public base path
+and cookie path, or use relative links. Root-relative assets and redirects are
+not automatically rewritten. Apps share the node's browser origin; keep owner
+bearers server-side. Publication is public: visitor login belongs to the app.
+The returned `routed` flag describes routing configuration, not app health.
+
+### Manage the microVM and publication
+
+Every mutation below requires a fresh `request_id`; all except creation also
+require the exact `vm_id`. Mutations return jobs to poll with the same API as
+releases. A stale VM ID cannot mutate a replacement VM.
+
+| Method and project suffix | Additional body fields | Result |
+|---|---|---|
+| GET `/stack/vm` | none | Inspect VM state and allocated resources |
+| POST `/stack/vm` | optional `vcpus`, `memory_mib`, `disk_gib`, `ports`, `start` | Create; starts by default |
+| POST `/stack/vm/stop` | optional `force: true` | Shut down VM; force explicitly quits it |
+| PATCH `/stack/vm` | selected `vcpus`, `memory_mib`, `disk_gib`, `ports` | Reconfigure while stopped; disk growth only |
+| POST `/stack/vm/start` | none | Restart the same VM with its data |
+| DELETE `/stack/vm` | optional `delete_data: true`, `confirm_data_loss: true` | Destroy stopped VM; retain data by default |
+| GET `/stack/ingress` | none | Inspect publication and application URL |
+| PUT `/stack/ingress` | `enabled: true`, `guest_port` | Publish one configured guest port |
+| PUT `/stack/ingress` | `enabled: false` | Withdraw publication; omit guest_port |
+
+`POST /stack/stop` stops application containers; `POST /stack/vm/stop` stops the
+whole VM. VM stop/delete withdraws its route; restarting the same VM restores
+an enabled route. Named volumes survive stops, updates and VM resizing.
+Explicit data deletion is irreversible. Retained disks do not have an automated
+restore API. Approval revocation blocks management but does not stop running
+apps or remove visitor routes; operator containment is still required.
+
 ### Submit a release or update
 
 `POST /v1/cloud/projects/{project}/stack/releases` accepts a JSON bundle:
