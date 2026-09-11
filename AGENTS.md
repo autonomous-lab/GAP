@@ -635,34 +635,40 @@ is unsuitable for public clients. Browser integration is the dependency-free
 [`sdk/realtime.js`](./sdk/realtime.js), which renews through your token provider,
 reconnects and restores subscriptions.
 
-## Compose — experimental
+## MicroVMs — experimental
 
 **Opt-in on public or private nodes; operator approval required on gap.geta.team.**
-Compose always requires an operator-preapproved agent and an exclusive,
-GAP-managed microVM bound to your project (or a legacy operator-provisioned guest).
-You cannot self-approve or choose the worker SSH target. On a public node, create an identity normally
-and ask the operator to approve its exact DID for Compose. Without that approval,
-ordinary Cloud services still work but every Compose operation is denied.
-On a private node, operator-only identity creation and general node approval
-are required in addition to the separate Compose approval.
-See [operator setup](./runtime/compose/README.md). Use the node where your
-operator has configured Compose; do not assume the public deployment enables it.
+A microVM is a full Linux machine with CPU, RAM, persistent disk, SSH and
+networking. Run compiled binaries, Python/Node.js programs, scripts or system
+services directly. **Docker and Compose are optional.** Neither publication,
+public ports nor the `GAP_*` environment requires a container or Compose release.
 
-One Compose stack is supported per project. Docker Engine/Compose run inside
-your guest: builds, `.env`, includes, guest bind mounts, guest Docker socket,
-`privileged` and guest `network_mode: host` are allowed. They do not refer to the
-GAT host. No host control socket or owner bearer is passed to the guest.
-Guest features still depend on its kernel/devices. No extra commercial stack
-resource quotas or GAP egress filtering are applied; existing Cloud API quotas
-remain unchanged. Unrestricted guest networking can reach internal services;
-without resource safeguards workloads can affect the host's availability.
+Each project can own one managed microVM. The same microVM access approval
+covers its lifecycle, SSH, networking and optional Compose operations. Public
+Cloud access alone does not grant microVM access; ask the operator to approve
+your exact agent DID. Private nodes additionally require general node approval.
+See [operator setup](./runtime/compose/README.md).
+
+Use `/v1/cloud/projects/{project}/vm` for the machine, `/vm/ports`, `/vm/ssh`
+and `/vm/ingress` for its network, and `/vm/jobs/{job_id}` to poll operations.
+`/stack/releases`, `/stack/start`, `/stack/stop`, `/stack/status` and `/stack/logs`
+operate only on the optional Docker Compose stack inside the VM. For native
+programs, manage processes and logs over SSH using Linux tools or a service
+supervisor. A running VM does not imply that a Compose stack exists.
+
+The VM provides guest root, not host root. Guest Docker bind mounts, privileged
+containers and host networking refer to the guest only. No host control socket
+or owner bearer is injected. No additional commercial resource quotas or GAP
+egress filtering are applied; existing Cloud API quotas remain unchanged.
+Unrestricted guest networking can reach internal services, and workloads can
+affect host availability without resource safeguards.
 
 Operator command (on the node host):
 
 ```bash
-python3 scripts/compose-access.py grant did:gap:<64-hex-agent-identity>
-python3 scripts/compose-access.py revoke did:gap:<64-hex-agent-identity>
-python3 scripts/compose-access.py list
+python3 scripts/microvm-access.py grant did:gap:<64-hex-agent-identity>
+python3 scripts/microvm-access.py revoke did:gap:<64-hex-agent-identity>
+python3 scripts/microvm-access.py list
 ```
 
 Agent approvals take effect immediately without restarting the node or worker.
@@ -670,11 +676,46 @@ The infrastructure is configured once; grant/revoke never changes environment
 variables. Approval covers the agent's projects and does not create or publish
 an application. Only the operator can run these host commands.
 
-### Managed app quickstart
+### Native application quickstart
+
+No Docker build or Compose release is needed for this workflow. The CLI uses
+`GAP_TOKEN` for management; SSH uses your own Ed25519 key.
+
+```bash
+export GAP_TOKEN="$TOKEN"
+python3 scripts/microvm.py --project "$PROJECT" create --key ~/.ssh/id_ed25519.pub --guest-port 8000 --stopped
+# Poll the returned job, then save result.vm.vm_id as VM.
+python3 scripts/microvm.py --project "$PROJECT" job job_returned_above
+export VM=vm_returned_by_the_job
+python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" set-ports --map 1:22:tcp
+# Poll each mutation before submitting the next.
+python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" set-ingress --guest-port 8000
+python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" start
+python3 scripts/microvm.py --project "$PROJECT" ssh
+# Connect using the returned command and verify its host fingerprint.
+```
+
+Inside the guest, a simple native HTTP server can run immediately:
+
+```bash
+mkdir -p /root/www
+cd /root/www
+gap-env sh -c 'exec python3 -m http.server "$GAP_HTTP_PORT" --bind 0.0.0.0'
+```
+
+It is served through `/apps/{project_id}/` with no container. This foreground
+example ends with the session; use OpenRC or another process supervisor for a
+persistent service. For your own Rust/Go binary, upload it with SCP/SFTP, mark it
+executable and run `gap-env ./my-server`. Configure the program to listen on
+`GAP_HTTP_PORT` and support `GAP_BASE_PATH` as appropriate. Stopping the VM stops
+all its processes; stopping an optional Compose stack leaves native processes
+running.
+
+### Managed app quickstart — optional Docker/Compose
 
 Compose is for long-running Docker applications, including multi-service stacks
 and persistent volumes. Functions remain the lightweight, time-bounded JavaScript
-runtime. Compose is experimental and requires operator approval, even on a
+runtime. MicroVM access requires operator approval, even on a
 public node. On the public deployment, only explicitly approved agents can use it.
 
 The complete flow is: create a project, create its microVM, deploy a Compose
@@ -684,10 +725,10 @@ certificate is needed: visitors use `/apps/{project_id}/` on the existing node.
 ```bash
 # NODE, TOKEN and PROJECT come from the identity/project quickstart above.
 # Save each request body and reuse its request_id when retrying that operation.
-curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/vm" \
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/vm" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"request_id":"11111111111111111111111111111111","vcpus":1,"memory_mib":1024,"disk_gib":8,"ports":[8000]}'
-# -> 202 with job_id; poll /stack/jobs/{job_id} until it finishes.
+# -> 202 with job_id; poll /vm/jobs/{job_id} until it finishes.
 # Save result.vm.vm_id as VM. QEMU running does not yet mean Docker is ready.
 export VM=vm_returned_by_the_job
 ```
@@ -697,11 +738,11 @@ that job. The app must listen on a published guest port, for example
 `ports: ["8000:8000"]` in Compose. Once it is running, publish its route:
 
 ```bash
-curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/stack/ingress" \
+curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/vm/ingress" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d "{\"request_id\":\"22222222222222222222222222222222\",\"vm_id\":\"$VM\",\"enabled\":true,\"guest_port\":8000}"
 # Poll the returned job, then inspect the resulting URL:
-curl -s "$NODE/v1/cloud/projects/$PROJECT/stack/ingress" \
+curl -s "$NODE/v1/cloud/projects/$PROJECT/vm/ingress" \
   -H "Authorization: Bearer $TOKEN"
 # -> url: https://gap.geta.team/apps/prj_<project-id>/
 #    base_path: /apps/prj_<project-id>/
@@ -723,17 +764,17 @@ releases. A stale VM ID cannot mutate a replacement VM.
 
 | Method and project suffix | Additional body fields | Result |
 |---|---|---|
-| GET `/stack/vm` | none | Inspect VM state and allocated resources |
-| POST `/stack/vm` | optional `vcpus`, `memory_mib`, `disk_gib`, `ports`, `start`, `ssh_keys` | Create; starts by default |
-| POST `/stack/vm/stop` | optional `force: true` | Shut down VM; force explicitly quits it |
-| PATCH `/stack/vm` | selected `vcpus`, `memory_mib`, `disk_gib`, `ports` | Reconfigure while stopped; disk growth only |
-| POST `/stack/vm/start` | none | Restart the same VM with its data |
-| DELETE `/stack/vm` | optional `delete_data: true`, `confirm_data_loss: true` | Destroy stopped VM; retain data by default |
-| GET `/stack/ingress` | none | Inspect publication and application URL |
-| PUT `/stack/ingress` | `enabled: true`, `guest_port` | Publish one configured guest port |
-| PUT `/stack/ingress` | `enabled: false` | Withdraw publication; omit guest_port |
+| GET `/vm` | none | Inspect VM state and allocated resources |
+| POST `/vm` | optional `vcpus`, `memory_mib`, `disk_gib`, `ports`, `start`, `ssh_keys` | Create; starts by default |
+| POST `/vm/stop` | optional `force: true` | Shut down VM; force explicitly quits it |
+| PATCH `/vm` | selected `vcpus`, `memory_mib`, `disk_gib`, `ports` | Reconfigure while stopped; disk growth only |
+| POST `/vm/start` | none | Restart the same VM with its data |
+| DELETE `/vm` | optional `delete_data: true`, `confirm_data_loss: true` | Destroy stopped VM; retain data by default |
+| GET `/vm/ingress` | none | Inspect publication and application URL |
+| PUT `/vm/ingress` | `enabled: true`, `guest_port` | Publish one configured guest port |
+| PUT `/vm/ingress` | `enabled: false` | Withdraw publication; omit guest_port |
 
-`POST /stack/stop` stops application containers; `POST /stack/vm/stop` stops the
+`POST /stack/stop` stops application containers; `POST /vm/stop` stops the
 whole VM. VM stop/delete withdraws its route; restarting the same VM restores
 an enabled route. Named volumes survive stops, updates and VM resizing.
 Explicit data deletion is irreversible. Retained disks do not have an automated
@@ -760,13 +801,13 @@ allocations: read the API response.
 
 | Method and project suffix | Body besides request_id and vm_id | Behavior |
 |---|---|---|
-| GET `/stack/ports` | none; no body needed | Five allocated numbers, mappings and routing state |
-| PUT `/stack/ports` | `mappings: [{"slot":1,"guest_port":22,"protocol":"tcp"}]` | Replace all mappings at once, live |
-| GET `/stack/ssh` | none; no body needed | Managed public keys, host key/fingerprint and SSH commands |
-| PUT `/stack/ssh` | `authorized_keys: ["ssh-ed25519 AAAA..."]` | Replace managed owner SSH keys, live |
+| GET `/vm/ports` | none; no body needed | Five allocated numbers, mappings and routing state |
+| PUT `/vm/ports` | `mappings: [{"slot":1,"guest_port":22,"protocol":"tcp"}]` | Replace all mappings at once, live |
+| GET `/vm/ssh` | none; no body needed | Managed public keys, host key/fingerprint and SSH commands |
+| PUT `/vm/ssh` | `authorized_keys: ["ssh-ed25519 AAAA..."]` | Replace managed owner SSH keys, live |
 
 Writes return asynchronous jobs, use the exact VM generation, and require the
-same agent approval as Compose. Retry a lost response with the same request ID
+the microVM access approval. Retry a lost response with the same request ID
 and body; after a failed job inspect its result before using a new ID. A
 `pending` network state means application failed or was interrupted: inspect
 and resubmit the intended complete mappings. `routed` is configuration status,
@@ -805,7 +846,7 @@ blocks management, not already published services or SSH sessions.
 
 The direct endpoints do not add TLS or visitor authentication to TCP/UDP
 services: configure those in your application. HTTP-only guest `ports` from
-`POST/PATCH /stack/vm` remain separate internal forwards; public mappings can
+`POST/PATCH /vm` remain separate internal forwards; public mappings can
 target any guest port without changing that list or rebooting the VM.
 
 ### Runtime environment inside the microVM
@@ -833,7 +874,7 @@ Applications bind to the **guest** port, usually on `0.0.0.0`, not to the
 allocated public port. No generic `PORT` variable is overwritten globally;
 map it explicitly for the service that needs it.
 
-For correct first startup, configure `/stack/ingress` **before deploying the
+For correct first startup, configure `/vm/ingress` **before deploying the
 application**. You can create the VM with `start: false`, configure its HTTP
 route and public mappings while stopped, then start it. The environment is
 installed from the guest-only seed before Docker starts. Configuring a route
@@ -869,11 +910,16 @@ container, mount `/etc/gap` read-only as a directory; individual file mounts
 can retain the old inode when GAP atomically replaces the file.
 
 A failed guest update fails the management job and exposes
-`environment_sync_pending: true` in `/stack/vm`; routing may already have
+`environment_sync_pending: true` in `/vm`; routing may already have
 changed. Inspect and retry the operation with a new request ID. The latest
 catalog metadata is regenerated on the next VM start and synchronized before
 managed Compose commands. The environment contains no owner bearer, controller
 credentials, host paths or worker-internal ports.
+
+### Compose — optional container deployment
+
+The following operations apply only if you choose to run a Compose stack.
+They are not part of the native application workflow.
 
 ### Submit a release or update
 
@@ -921,7 +967,7 @@ they are not atomic and do not automatically roll back database migrations.
 
 ```bash
 export JOB=job_returned_by_submission
-curl -s "$NODE/v1/cloud/projects/$PROJECT/stack/jobs/$JOB" \
+curl -s "$NODE/v1/cloud/projects/$PROJECT/vm/jobs/$JOB" \
   -H "Authorization: Bearer $TOKEN"
 # -> {job_id,request_id,action,status,created_at,result}
 
@@ -983,14 +1029,24 @@ build contexts inside the guest. Named volumes persist between updates, but
 relative bind mounts point into the new release directory on each update.
 
 Managed VM creation/start/stop, offline CPU/RAM/disk-growth updates and explicit
-deletion are available through `/stack/vm`; see the [VM API](./runtime/compose/README.md#vm-api).
+deletion are available through `/vm`; see the [VM API](./runtime/compose/README.md#vm-api).
 Apps publish at `https://gap.geta.team/apps/{project_id}/` through
-`GET/PUT /stack/ingress`, using the existing DNS and TLS certificate.
+`GET/PUT /vm/ingress`, using the existing DNS and TLS certificate.
 See [setup, API and base-path contract](./runtime/compose/README.md#application-paths-on-the-existing-gap-origin).
-Custom customer domains, arbitrary public TCP/UDP forwarding, rollback, backup
-and HA are **not implemented**. Your `ports:` publishes
+Custom customer app domains, rollback, backup and HA are **not implemented**.
+Public TCP/UDP forwarding is available through the five microVM port slots. Your `ports:` publishes
 on the guest, not automatically on the GAT host. Approval revocation blocks new
 management/admission, but does not stop running apps or revoke visitor/scoped
 tokens: the operator must stop/fence the VM for incident containment.
 Real KVM and API acceptance tests are provided; production activation requires
 operator configuration of the execution host.
+
+### Compatibility with earlier clients
+
+Existing `/stack/vm`, `/stack/vm/start`, `/stack/vm/stop`, `/stack/ports`,
+`/stack/ssh`, `/stack/ingress` and `/stack/jobs/{job_id}` calls remain aliases
+of the corresponding `/vm` routes. They share authorization, VM identity,
+request deduplication and job history; no resources are duplicated.
+`compose-access.py` remains an alias for `microvm-access.py`. Existing approval
+files, historical `GAP_COMPOSE_*` infrastructure settings and machine error
+codes remain compatible. These names do not require using Docker.

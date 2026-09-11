@@ -187,11 +187,21 @@ class Integration(unittest.TestCase):
                     process.wait()
 
     def exercise_managed(self, request, prefix, token, other_token, runner, project, owner, approval, root):
+        legacy_request = request
+        def request(method, path, token=None, body=None):
+            if path.startswith(prefix + '/'):
+                suffix = path[len(prefix):]
+                if suffix == '/vm' or suffix.startswith('/vm/'):
+                    path = prefix[:-len('/stack')] + suffix
+                elif suffix in ('/ports', '/ssh', '/ingress') or suffix.startswith('/jobs/'):
+                    path = prefix[:-len('/stack')] + '/vm' + suffix
+            return legacy_request(method, path, token, body)
+
         def operation(method, path, body=None):
             body = {"request_id": uuid.uuid4().hex, **(body or {})}
             status, job = request(method, prefix + path, token, body)
             self.assertEqual(status, 202, job)
-            retry_status, retry = request(method, prefix + path, token, body)
+            retry_status, retry = legacy_request(method, prefix + path, token, body)
             self.assertEqual(retry_status, 200, retry)
             self.assertEqual(job["job_id"], retry["job_id"])
             deadline = time.monotonic() + 600
@@ -251,6 +261,23 @@ class Integration(unittest.TestCase):
             if runner.ingress:
                 operation('PUT', '/ingress', {**identity, 'enabled': True, 'guest_port': 8000})
                 self.assertEqual(guest_env()['GAP_HTTP_PORT'], '8000')
+                # No Compose release exists. Native HTTP still runs with Docker stopped.
+                guest_env('rc-service docker stop')
+                self.assertFalse(execute_guest(manager.guest(project, owner), {'action':'vm_probe','body':{}}, timeout=12)['ok'])
+                guest_env("mkdir -p /root/native-www; echo native-without-docker > /root/native-www/index.html; nohup gap-env sh -c 'exec python3 -m http.server \"$GAP_HTTP_PORT\" --bind 0.0.0.0 --directory /root/native-www' >/tmp/native.log 2>&1 </dev/null & echo $! > /tmp/native.pid")
+                native_url = request('GET', prefix+'/ingress', token)[1]['url']
+                for attempt in range(40):
+                    try:
+                        with urllib.request.urlopen(native_url, timeout=5) as response:
+                            self.assertEqual(response.read().strip(), b'native-without-docker')
+                        break
+                    except OSError:
+                        if attempt == 39:
+                            raise
+                        time.sleep(.25)
+                guest_env('kill "$(cat /tmp/native.pid)"; rc-service docker start')
+                ready()
+                print('CANONICAL VM API + LEGACY DEDUP + NATIVE HTTP WITHOUT DOCKER OK', flush=True)
             sources = {
                 "compose.yaml": 'services:\n  web:\n    build: .\n    ports: ["8000:8000"]\n    env_file:\n      - path: /etc/gap/runtime.env\n        format: raw\n    environment:\n      TEST_INTERPOLATED_HTTP_PORT: ${GAP_HTTP_PORT}\n    volumes: ["data:/persist"]\nvolumes:\n  data: {}\n',
                 "Dockerfile": 'FROM alpine:3.23\nRUN apk add --no-cache python3\nCOPY http_fixture.py /app.py\nCMD ["python3", "/app.py"]\n',

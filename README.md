@@ -20,10 +20,11 @@ infrastructure; agents handle the application.
 - **Realtime** — scoped browser tokens, channels, replay and operator-funded
   credits for controlled quota overages.
 
-- **Docker applications (experimental, preapproved agents)** — full Compose stacks
-  in a managed microVM per project. Create, start, stop, resize and destroy VMs;
-  deploy builds and persistent volumes; publish at `/apps/{project_id}/` using
-  the existing node DNS and TLS certificate. No per-app DNS setup.
+- **Linux microVMs (experimental, approved agents)** — one full Linux machine
+  per project, with root SSH, persistent disk, five public TCP/UDP ports and
+  HTTPS/API/WebSocket publication. Run native binaries or language runtimes.
+- **Optional Docker/Compose** — deploy and manage containers inside the same
+  microVM when your application needs them.
 
 ## Quick start
 
@@ -110,26 +111,37 @@ interpolation and an explicit container env file. See the
 and the [agent guide](./AGENTS.md#direct-ssh-and-five-public-tcpudp-ports),
 [CLI](./scripts/microvm.py) and [operator setup](./runtime/compose/README.md).
 
-## Run a Docker application
+## Run an application without Docker
 
-For an operator-approved agent on a Compose-enabled node:
+Create a microVM through `POST /vm` or `scripts/microvm.py create`, configure
+SSH and publication, then upload and execute your program with `gap-env`.
+Use Linux tools or OpenRC to manage its process and logs. No Compose release
+is needed. Follow the [native quickstart](./AGENTS.md#native-application-quickstart).
 
-1. Create the project and its microVM with `POST /stack/vm`.
+The operator grants access with `scripts/microvm-access.py grant <DID>`.
+This covers the VM and its optional Compose stack without a restart. Historical
+`compose-access.py` commands and `/stack/vm` routes remain compatible aliases.
+
+## Run a Docker application (optional)
+
+For an operator-approved agent on a microVM-enabled node:
+
+1. Create the project and its microVM with `POST /vm`.
 2. Submit the Compose bundle to `POST /stack/releases`; poll its job.
-3. Enable `PUT /stack/ingress` for the guest port and use the returned
+3. Enable `PUT /vm/ingress` for the guest port and use the returned
    `https://gap.geta.team/apps/{project_id}/` URL.
 
 Paths above are relative to `/v1/cloud/projects/{project_id}`. Configure the
 application's base path; root-relative links are not rewritten. Applications
 are long-running services, not time-bounded serverless function invocations.
-Compose on the public deployment requires explicit operator approval.
+MicroVM access on the public deployment requires explicit operator approval.
 See the [complete quickstart](./AGENTS.md#managed-app-quickstart),
 [lifecycle API](./AGENTS.md#manage-the-microvm-and-publication) and
 [operator setup](./runtime/compose/README.md).
 
 ## Development
 
-Experimental: [preapproved Compose hosting](./runtime/compose/README.md),
+Experimental: [microVM hosting with optional Compose](./runtime/compose/README.md),
 restricted to operator-preapproved agents and **GAP-managed exclusive
 project microVMs**. The API and asynchronous SSH worker support deploy/update,
 start/stop, status and logs with request-id deduplication. Docker runs only in
@@ -137,10 +149,10 @@ the guest; no GAT host Docker socket is given to GAP or workloads.
 
 Enable on public or private nodes with `GAP_COMPOSE_ENABLED=1` and the mandatory
 operator-owned `GAP_COMPOSE_APPROVALS_FILE`. Public registration and ordinary
-Cloud services remain open; only listed owners can use Compose. Private nodes
+Cloud services remain open; only listed owners can use microVMs, with or without Compose. Private nodes
 also require the separate general node approval. Classic guest Compose is accepted without additional commercial
 resource quotas or GAP egress ACLs; existing Cloud service quotas are unchanged.
-GAP creates, starts, stops, resizes and destroys microVMs through `/stack/vm`.
+GAP creates, starts, stops, resizes and destroys microVMs through `/vm`.
 The repository includes the guest-image builder and real KVM/API acceptance tests.
 Optional ingress publishes a selected guest HTTP port at `/apps/{project_id}/`
 on the existing node origin, reusing its DNS and TLS certificate. No additional

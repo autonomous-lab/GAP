@@ -1,7 +1,8 @@
-# Preapproved Compose worker (experimental)
+# MicroVM worker and optional Compose (experimental)
 
 This opt-in worker creates and manages **exclusive QEMU/KVM microVMs per
-project**, then runs Docker Engine and Compose inside them. The public node
+project**. Agents may run native programs directly; Docker Engine and Compose
+are available inside the guest as optional deployment tools. The public node
 requires explicit agent approval before use. The worker runs as an unprivileged
 Linux user with access to
 `/dev/kvm`; it receives no host Docker socket. Legacy operator-provisioned guests
@@ -50,17 +51,17 @@ the persisted catalog permits explicit VM start after restart.
 
 ### VM API
 
-All mutations return asynchronous jobs; poll `/stack/jobs/{job_id}` as for
+All mutations return asynchronous jobs; poll `/vm/jobs/{job_id}` as for
 Compose. Every mutation requires a saved 32-lowercase-hex `request_id`.
 
 | Method and project suffix | Body besides request_id | Behavior |
 |---|---|---|
-| GET `/stack/vm` | none | Current hypervisor state or `absent` |
-| POST `/stack/vm` | optional `vcpus`, `memory_mib`, `disk_gib`, `ports`, `start` | Create exclusive VM; start defaults to true |
-| POST `/stack/vm/stop` | `vm_id`, optional `force` | Guest shutdown; explicit force uses verified QMP quit |
-| PATCH `/stack/vm` | `vm_id`, selected resource fields or `ports` | Reconfigure a stopped VM; disk growth only |
-| POST `/stack/vm/start` | `vm_id` | Start the existing VM |
-| DELETE `/stack/vm` | `vm_id`, optional `delete_data`, `confirm_data_loss` | Destroy a stopped VM, retaining its files by default |
+| GET `/vm` | none | Current hypervisor state or `absent` |
+| POST `/vm` | optional `vcpus`, `memory_mib`, `disk_gib`, `ports`, `start` | Create exclusive VM; start defaults to true |
+| POST `/vm/stop` | `vm_id`, optional `force` | Guest shutdown; explicit force uses verified QMP quit |
+| PATCH `/vm` | `vm_id`, selected resource fields or `ports` | Reconfigure a stopped VM; disk growth only |
+| POST `/vm/start` | `vm_id` | Start the existing VM |
+| DELETE `/vm` | `vm_id`, optional `delete_data`, `confirm_data_loss` | Destroy a stopped VM, retaining its files by default |
 
 Defaults are 1 vCPU, 1024 MiB RAM and 8 GiB virtual disk. These are allocations,
 not commercial quotas. Disk growth is applied to the guest filesystem at next
@@ -99,7 +100,7 @@ for each of the five numbers. Stop keeps reservations, destruction releases them
 Port exhaustion fails VM creation before disks/processes are created.
 
 VMs created before public networking was configured can acquire their five
-slots with their first PUT `/stack/ports`. Owner-key rotation and SFTP require
+slots with their first PUT `/vm/ports`. Owner-key rotation and SFTP require
 the current guest helper/image; never replace an image backing existing VM
 overlays. Deploy a separate worker/image version if older guests exist.
 
@@ -129,9 +130,9 @@ ID. Stopping then starting also rebuilds the desired forwards. Removal closes
 listeners but may retain established sessions until VM stop. Raw services must
 provide their own authentication/encryption. Guest root remains unrestricted.
 
-The normal agent bearer authorizes GET/PUT `/stack/ports` and `/stack/ssh`.
+The normal agent bearer authorizes GET/PUT `/vm/ports` and `/vm/ssh`.
 `python3 scripts/microvm.py --help` lists the agent commands; operator approval
-continues to use `scripts/compose-access.py grant|revoke|list` without reboot.
+continues to use `scripts/microvm-access.py grant|revoke|list` without reboot.
 See [the complete agent guide](../../AGENTS.md#direct-ssh-and-five-public-tcpudp-ports).
 
 ## Guest runtime environment
@@ -149,7 +150,7 @@ atomically. `GAP_ENV_REVISION` identifies their content; use a single format per
 reader. Running process environments cannot be changed externally. Use
 `gap-env` for new processes and recreate Compose containers after changes, or
 have the app reread the JSON file. Mapping-job failure can mean routing changed
-but metadata could not be delivered; `/stack/vm` reports
+but metadata could not be delivered; `/vm` reports
 `environment_sync_pending` for guest update failures. Retry once SSH is ready.
 
 This requires the updated guest image/helper. Do not replace a backing image
@@ -215,11 +216,11 @@ GAP_ADMIN_TOKEN=<different-random-secret-at-least-32-characters>
 
 Generate secrets independently with `openssl rand -hex 32`. The current Compose
 stack passes `.env` to GAP and mounts `./data/gap-node` as `/data`. Provision an
-operator-owned Compose approval file, initially `{"agents":[]}`; never put it
-in an agent-writable project directory. Compose without this file fails startup;
+operator-owned microVM approval file, initially `{"agents":[]}`; never put it
+in an agent-writable project directory. MicroVM hosting without this file fails startup;
 an empty, missing or corrupt list never grants access. Public nodes allow normal
-identity/project creation without Compose approval. Approve the owner's exact
-DID for Compose by atomically replacing `/data/compose-agents.json`:
+identity/project creation without microVM approval. Approve the owner's exact
+DID for microVM access by atomically replacing `/data/compose-agents.json`:
 
 ```json
 {"agents":["did:gap:<64-hex-character-identity>"]}
@@ -227,14 +228,14 @@ DID for Compose by atomically replacing `/data/compose-agents.json`:
 
 ### Authorize agents without restarting
 
-The environment enables the Compose infrastructure once. Individual permissions
+The environment enables the microVM infrastructure once. Individual permissions
 are stored in the operator-owned approval file, reloaded on every request and
 before job execution. Use this host command from the repository root:
 
 ```bash
-python3 scripts/compose-access.py list
-python3 scripts/compose-access.py grant did:gap:<64-lowercase-hex-identity>
-python3 scripts/compose-access.py revoke did:gap:<64-lowercase-hex-identity>
+python3 scripts/microvm-access.py list
+python3 scripts/microvm-access.py grant did:gap:<64-lowercase-hex-identity>
+python3 scripts/microvm-access.py revoke did:gap:<64-lowercase-hex-identity>
 ```
 
 The default host file is `data/gap-node/compose-agents.json`, mounted in the node
@@ -254,8 +255,8 @@ cannot remove it as an orphan during node updates.
 
 For a private node, additionally set `GAP_PRIVATE_NODE=1` and
 `GAP_PRIVATE_APPROVALS_FILE=/data/private-agents.json`. This second list controls
-general Cloud management, not Compose privileges. An agent needs both approvals
-to use Compose in private mode. Private identity creation requires the operator:
+general Cloud management, not microVM privileges. An agent needs both approvals
+to use microVMs in private mode. Private identity creation requires the operator:
 
 ```bash
 curl -sX POST "$NODE/v1/identity" -H "Authorization: Bearer $ADMIN_TOKEN"
@@ -269,7 +270,7 @@ Approve the exact returned DID by atomically replacing the approval file:
 
 The approved agent can now create a project with its own bearer. The file is
 reloaded on management authentication; missing/corrupt files deny access. There
-is no self-approval endpoint. Compose is supported in either node mode.
+is no self-approval endpoint. MicroVM hosting is supported in either node mode.
 Private management admission does not replace visitor authentication: existing
 site/public-function/scoped-WS access rules remain separate. Do not accidentally
 expose the private instance. Existing Cloud service quotas are unchanged.
@@ -324,7 +325,7 @@ callback also requires the shared worker secret. No owner bearer goes to guests.
 Service-token rotation requires coordinated worker/node restarts.
 
 GAP forwards scoped jobs outside its global lock. The worker checks inventory
-and calls GAP to recheck the active project, owner and Compose approval (plus
+and calls GAP to recheck the active project, owner and microVM approval (plus
 general node approval in private mode) before
 admission and execution. Agents cannot choose an IP, key or host command.
 
@@ -357,14 +358,16 @@ HTTP bodies are bounded to 5 MiB including base64/JSON (GAP/proxies can impose
 less). Returned output is bounded. Operational timeouts are 540s per guest
 command and 600s per SSH session, with a 120s health wait. They are not application
 runtime or commercial resource quotas: started apps keep running. Fetch larger
-build contexts inside the guest; large-artifact uploads are not implemented.
+build contexts inside the guest or upload files through SSH/SFTP. Large-artifact
+uploads through the Compose JSON API are not implemented.
 
 Revocation blocks new management and queued execution at recheck, **not already
 running VMs/apps or visitor/scoped tokens**. For incident containment, the
 operator must fence/stop the VM through the hypervisor first. Custom customer
-domains, arbitrary public TCP/UDP forwarding, HA, backup/restore and rollback
-are not implemented. Shared-origin application path routing is available below. Guest `ports:` does not automatically
-publish physical-host ports. Existing Cloud service quotas stay unchanged.
+domains, HA, backup/restore and rollback are not implemented. Each VM supports
+five public port slots with TCP/UDP forwarding, configured independently of
+Compose. Shared-origin application path routing is available below. Guest
+Compose `ports:` does not automatically publish physical-host ports. Existing Cloud service quotas stay unchanged.
 
 ## Tests and production readiness
 
@@ -403,13 +406,13 @@ GAP and worker HTTP in both public/private modes, approval/ownership, request
 retry deduplication, VM CRUD, a Compose build, HTTP access and a random named-volume
 value surviving stop/resize/restart. Without opt-in it keeps simulated guests.
 These tests do not establish HA, adversarial hypervisor isolation or production
-load capacity. Production Compose activation remains a separate operator step.
+load capacity. Production microVM activation remains a separate operator step.
 
 ## Application paths on the existing GAP origin
 
 Applications use `https://gap.geta.team/apps/{project_id}/`, through the node's
 existing DNS, TLS certificate and public edge. **No new DNS record, hostname or
-certificate is required.** The internal Compose gateway listens on the private
+certificate is required.** The internal microVM HTTP gateway listens on the private
 bridge at port 8093; the existing GAP edge forwards `/apps/` to it. All other
 Cloud/function/realtime routes retain their current handling.
 
@@ -440,11 +443,11 @@ First create the VM with the guest port in `ports`, then deploy the application.
 Publish that port through the authenticated project API:
 
 ```bash
-curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/stack/ingress" \
+curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/vm/ingress" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"request_id":"0123456789abcdef0123456789abcdef","vm_id":"vm_<32-hex-id>","enabled":true,"guest_port":8000}'
 
-curl -s "$NODE/v1/cloud/projects/$PROJECT/stack/ingress" \
+curl -s "$NODE/v1/cloud/projects/$PROJECT/vm/ingress" \
   -H "Authorization: Bearer $TOKEN"
 # url: https://gap.geta.team/apps/prj_<24-hex-id>/
 # base_path: /apps/prj_<24-hex-id>/
@@ -457,7 +460,7 @@ not application health. Disable with a new request ID, the VM ID and
 `enabled: false`, omitting `guest_port`.
 
 Publishing is explicit and public. Visitor authentication belongs to the app;
-Compose approval governs management, not visitors. VM stop/delete withdraws
+MicroVM approval governs management, not visitors. VM stop/delete withdraws
 the route; restarting the same VM restores it. A replacement VM does not inherit
 publication. Before VM mutations the worker withdraws the old route, preventing
 routing to a reassigned port. A gateway configuration failure blocks that
@@ -525,3 +528,15 @@ GAP nginx edge in front of it; the default is `http://127.0.0.1:8093`.
 Tests cover GET/POST, preserved queries, assets, slash redirect, WebSocket echo,
 disable/re-enable, removal on stop/delete, and restoration after restart with
 persistent guest data. This path introduces no new certificate issuance.
+
+## Naming and compatibility
+
+The public machine API is `/vm`; networking lives under `/vm/ports`, `/vm/ssh`
+and `/vm/ingress`. `/stack/*` deploys or manages optional Docker containers.
+Legacy VM/network routes under `/stack` remain aliases. The operator command
+is `scripts/microvm-access.py`; `scripts/compose-access.py` forwards to the same
+implementation and approval file. No permission migration is required.
+Historical `GAP_COMPOSE_*` configuration variables, the `compose-agents.json`
+filename and this runtime directory are infrastructure compatibility names;
+they authorize native microVM use too. Granting access does not deploy Docker
+containers. The bundled Docker daemon may be stopped for native-only workloads.

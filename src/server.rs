@@ -7541,13 +7541,13 @@ pub fn route_with_ip(
         return (if allowed { 200 } else { 403 }, json!({"allowed": allowed}));
     }
 
-    if let Some((project_id, action)) = crate::private_node::stack_route(path) {
+    if let Some((project_id, action)) = crate::private_node::runtime_route(path) {
         let runner = match guard.private_node.as_ref().and_then(|p| p.runner.clone()) {
             Some(runner) => runner,
             None => {
                 return (
                     404,
-                    json!({"error":{"code":"compose_disabled","message":"Compose is not enabled on this node"}}),
+                    json!({"error":{"code":"compose_disabled","message":"MicroVM hosting is not enabled on this node"}}),
                 )
             }
         };

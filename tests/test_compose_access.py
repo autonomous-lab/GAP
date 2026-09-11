@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +13,19 @@ A, B = 'did:gap:' + 'a' * 64, 'did:gap:' + 'b' * 64
 
 
 class AccessTests(unittest.TestCase):
+    def test_old_and_new_commands_share_the_same_approval_store(self):
+        scripts = Path(__file__).resolve().parents[1] / 'scripts'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'approved.json'
+            def call(name, *args):
+                result = subprocess.run([sys.executable, str(scripts/name), '--file', str(path), *args],
+                                        capture_output=True, text=True, check=True)
+                return json.loads(result.stdout)
+            self.assertTrue(call('microvm-access.py', 'grant', A)['approved'])
+            self.assertEqual(call('compose-access.py', 'list')['agents'], [A])
+            self.assertFalse(call('compose-access.py', 'revoke', A)['approved'])
+            self.assertEqual(call('microvm-access.py', 'list')['agents'], [])
+
     def test_live_grant_idempotence_and_selective_revoke(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'approved.json'

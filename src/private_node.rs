@@ -1,4 +1,4 @@
-//! Independent private management admission and preapproved Compose transport.
+//! Independent private management admission and preapproved microVM transport (with optional Compose).
 //! The runner, never this process, talks to operator-provisioned guests.
 use crate::{Error, Result};
 use serde::Deserialize;
@@ -57,7 +57,7 @@ impl PrivateNode {
             let token = std::env::var("GAP_COMPOSE_RUNNER_TOKEN").unwrap_or_default();
             if !(url.starts_with("http://") || url.starts_with("https://")) || token.len() < 32 {
                 return Err(Error::Other(
-                    "configure Compose runner URL and token (32+ bytes)".into(),
+                    "configure microVM runner URL and token (32+ bytes)".into(),
                 ));
             }
             Some((url.trim_end_matches('/').to_owned(), token))
@@ -115,7 +115,7 @@ impl PrivateNode {
         let path = self
             .compose_approvals
             .as_ref()
-            .ok_or_else(|| Error::Unauthorized("Compose approval is not configured".into()))?;
+            .ok_or_else(|| Error::Unauthorized("MicroVM approval is not configured".into()))?;
         Self::authorize_file(path, did)
     }
 
@@ -138,8 +138,8 @@ fn valid_did(did: &str) -> bool {
         .is_some_and(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// One stack per project in the MVP. No user-chosen upstream addresses.
-pub fn stack_route(path: &str) -> Option<(&str, &str)> {
+/// One microVM per project; Compose is an optional workload in that guest.
+pub fn runtime_route(path: &str) -> Option<(&str, &str)> {
     let rest = path.strip_prefix("/v1/cloud/projects/")?;
     let (project, tail) = rest.split_once('/')?;
     if !project
@@ -148,11 +148,34 @@ pub fn stack_route(path: &str) -> Option<(&str, &str)> {
     {
         return None;
     }
+    match tail {
+        "vm" => return Some((project, "vm")),
+        "vm/start" => return Some((project, "vm/start")),
+        "vm/stop" => return Some((project, "vm/stop")),
+        "vm/ports" => return Some((project, "ports")),
+        "vm/ssh" => return Some((project, "ssh")),
+        "vm/ingress" => return Some((project, "ingress")),
+        _ => {}
+    }
+    if let Some(job) = tail.strip_prefix("vm/jobs/") {
+        if job
+            .strip_prefix("job_")
+            .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Some((project, tail.strip_prefix("vm/").unwrap()));
+        }
+        return None;
+    }
     if tail == "stack" {
         Some((project, ""))
     } else {
         tail.strip_prefix("stack/").map(|tail| (project, tail))
     }
+}
+
+/// Compatibility name for callers of the previous transport helper.
+pub fn stack_route(path: &str) -> Option<(&str, &str)> {
+    runtime_route(path)
 }
 
 pub fn forward(
@@ -188,7 +211,7 @@ pub fn forward(
         let value: Value = serde_json::from_slice(&bytes).ok()?;
         Some((status, value))
     })();
-    result.unwrap_or_else(|| (502, json!({"error":{"code":"compose_runner_unavailable","message":"Compose runner unavailable; retry with the same request_id"}})))
+    result.unwrap_or_else(|| (502, json!({"error":{"code":"compose_runner_unavailable","message":"MicroVM runner unavailable; retry with the same request_id"}})))
 }
 
 #[cfg(test)]
@@ -204,6 +227,40 @@ mod tests {
         assert!(stack_route("/v1/cloud/projects/../stack/releases").is_none());
         assert!(stack_route(&format!("/v1/cloud/projects/{id}/stacking")).is_none());
     }
+    #[test]
+    fn microvm_routes_are_independent_of_compose_and_share_legacy_actions() {
+        let project = "prj_0123456789abcdef01234567";
+        for (canonical, legacy, action) in [
+            ("vm", "stack/vm", "vm"),
+            ("vm/start", "stack/vm/start", "vm/start"),
+            ("vm/stop", "stack/vm/stop", "vm/stop"),
+            ("vm/ports", "stack/ports", "ports"),
+            ("vm/ssh", "stack/ssh", "ssh"),
+            ("vm/ingress", "stack/ingress", "ingress"),
+        ] {
+            for suffix in [canonical, legacy] {
+                assert_eq!(
+                    runtime_route(&format!("/v1/cloud/projects/{project}/{suffix}")),
+                    Some((project, action))
+                );
+            }
+        }
+        let action = "jobs/job_0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            runtime_route(&format!("/v1/cloud/projects/{project}/vm/{action}")),
+            Some((project, action))
+        );
+        for suffix in [
+            "vms",
+            "vm/releases",
+            "vm/../stack/start",
+            "vm/jobs/invalid",
+            "vm/start/extra",
+        ] {
+            assert!(runtime_route(&format!("/v1/cloud/projects/{project}/{suffix}")).is_none());
+        }
+    }
+
     #[test]
     fn approvals_reload_and_fail_closed() {
         let path =
