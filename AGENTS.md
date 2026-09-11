@@ -1432,3 +1432,56 @@ expire after 30 seconds without browser exchanges, 15 minutes without input,
 or eight hours total. Polling/output alone does not reset VM inbound activity;
 opening a terminal and typing do. Stop/hibernate/suspension closes the terminal;
 background programs should use an appropriate supervisor inside the VM.
+
+## MicroVM network and live metrics
+
+The `/microvms` console shows the public node hostname and its asynchronously
+resolved IP addresses, all five reserved TCP/UDP port slots, guest destinations,
+routing state, and the application's HTTPS/API/WebSocket URL. The IP belongs
+to the shared node; a microVM does not have a dedicated public IP. Unconfigured
+ports and disabled HTTP routing are explicitly marked. A published route does
+not certify application health. Use **Refresh metrics & network** or the
+10-second automatic refresh; neither wakes a VM or resets inbound inactivity.
+
+For HTTPS routing, the application's port must be in the VM's `ports` allocation.
+At creation use `ports: [8000]`. For an existing VM, inspect GET `/vm?vm_id=...`
+and preserve its existing guest port list. If a new guest port is needed, stop
+the VM first (resume a hibernated VM before stopping), await that job, then
+PATCH `/vm` with `request_id`, `vm_id` and `ports: [8000, ...existing_ports]`.
+This reconfiguration requires downtime; it is not performed by opening the
+network panel. Await the update job, PUT `/vm/ingress` with `request_id`, `vm_id`,
+`enabled: true`, `guest_port: 8000`, await that job, then start the VM. The app
+must listen on that port inside the guest. GET `/vm/ingress?vm_id=...` returns
+the exact URL; do not guess a project path when the VM has its own identity.
+
+Native custom-domain attachment currently supports static sites, not microVMs.
+The console supplies a Caddy reverse-proxy example for a VM with enabled HTTPS
+routing. Point your custom domain's A/AAAA records at a proxy you operate,
+allow inbound 80/443 there, and proxy to the GAP origin after prepending the
+returned application base path. A CNAME cannot map a hostname to a URL path.
+Keep this external proxy available while the VM hibernates. Configure your
+app's public origin, redirects, cookie paths and WebSockets for the domain;
+GAP does not rewrite application responses or register that domain for you.
+See [Caddy reverse_proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)
+and [rewrite](https://caddyserver.com/docs/caddyfile/directives/rewrite).
+
+GET `/v1/cloud/projects/{project}/vm/metrics?vm_id=...` requires owner auth and
+microVM approval. It reads host counters only, without SSH, guest execution,
+QMP resume or an application health request. Metrics include:
+
+- CPU time and percentage of allocated vCPU capacity, averaged between samples
+  at least one second apart. The first live sample has no percentage. A process
+  restart resets the CPU baseline; fractional allocations are accounted for.
+- QEMU resident memory on the host, including overhead, alongside allocated
+  guest memory. This is **not** guest application memory usage.
+- Occupied host storage including snapshots and metadata, alongside virtual
+  disk capacity. This is **not** guest filesystem free/used space.
+- Persisted cumulative inbound/outbound VM IP byte counts and sampled bytes/s.
+  Counter resets do not produce negative rates. Host-side guest SSH traffic is
+  included; metrics polling itself never contacts the guest.
+
+Unavailable readings are null, not fabricated zeros. CPU and resident memory
+are zero when the VM process is absent; allocated resources and stored disk
+remain visible. `sampled_at`, `cpu_window_seconds`, `errors` and the DNS
+`resolved_at` timestamp describe freshness and limitations. Metrics are current
+samples, not a historical time-series database.

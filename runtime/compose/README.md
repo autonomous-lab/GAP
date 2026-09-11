@@ -802,3 +802,13 @@ The terminal is transient: worker restart closes it. A lost HTTP response can
 be retried with identical input sequence and output cursor without rerunning
 input. Output is bounded and never interpreted as HTML. There is no terminal
 transcript logging or private key browser transfer.
+
+### Host metrics
+
+`metrics.py` reads authenticated VM host process, storage and packet counters
+without touching lifecycle activity or executing inside the guest. CPU rates
+use PID plus process start time, fractional vCPU capacity and monotonic sample
+intervals; network counter resets invalidate the rate baseline. Host RSS and
+allocated guest RAM are distinct, as are host storage (including snapshots)
+and virtual disk capacity. DNS resolution of the operator-configured public
+hostname is asynchronous and cached for 60 seconds. `/vm/metrics` is read-only.

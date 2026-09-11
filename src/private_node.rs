@@ -251,6 +251,7 @@ pub fn runtime_route(path: &str) -> Option<(&str, &str)> {
         "vm/credits" => return Some((project, "credits")),
         "vm/budget" => return Some((project, "budget")),
         "vm/ports" => return Some((project, "ports")),
+        "vm/metrics" => return Some((project, "metrics")),
         "vm/ssh" => return Some((project, "ssh")),
         "vm/terminal/prepare" => return Some((project, "terminal/prepare")),
         "vm/terminal/open" => return Some((project, "terminal/open")),
@@ -362,6 +363,7 @@ mod tests {
             ("runtime", "runtime"),
             ("credits", "credits"),
             ("budget", "budget"),
+            ("metrics", "metrics"),
         ] {
             assert_eq!(
                 runtime_route(&format!("/v1/cloud/projects/{project}/vm/{suffix}")),

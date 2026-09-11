@@ -155,6 +155,8 @@ class Runner:
             from gateway import Gateway
             self.runtime=Runtime(self,config)
             Gateway(self.runtime,config.get('wake_gateway_port',8094))
+        from metrics import Metrics
+        self.metrics = Metrics(self)
         self.terminals = None
         if self.runtime:
             from terminal import Terminals
@@ -280,6 +282,10 @@ class Runner:
             from microvm import VMError
             try: return 200,self.terminals.rpc(project,owner,action[9:],body)
             except (TerminalError,VMError) as error: raise Failure(409,str(error))
+        if action=='metrics':
+            if method!='GET': raise Failure(405,'metrics_get_required')
+            if not self.hypervisor: raise Failure(409,'managed_hypervisor_not_configured')
+            return 200,self.metrics.read(self.hypervisor.read(project,owner,selected))
         if action=='vms':
             if not self.hypervisor: raise Failure(409,'managed_hypervisor_not_configured')
             if method=='GET':

@@ -348,3 +348,9 @@ lets owners add public keys and expose SSH on a free TCP slot, and includes
 an interactive browser terminal. The terminal uses internal, pinned SSH and
 requires no public port or private key upload. Hibernated VMs resume before
 connection. Terminal limits and API details are in [AGENTS.md](AGENTS.md#ssh-connection-details-and-browser-terminal).
+
+The microVM console also displays public IP/hostname, all five port mappings,
+the HTTPS routing URL and a custom-domain reverse-proxy guide. Host CPU,
+resident RAM, occupied storage and inbound/outbound traffic refresh every ten
+seconds or on demand, without waking a VM. See [network and metrics](AGENTS.md#microvm-network-and-live-metrics)
+for measurement scope and custom-domain limitations.

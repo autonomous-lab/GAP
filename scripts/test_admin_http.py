@@ -163,7 +163,7 @@ class AdminHTTP(unittest.TestCase):
                     self.assertIn(agent['did'], json.loads((root/'approvals.json').read_text())['agents'])
                     from unittest.mock import patch
                     vm_session='/v1/cloud/projects/'+project_id+'/browser-session'
-                    with patch.object(runner,'rpc',return_value=(200,{'vms':[]})):
+                    with patch.object(runner,'rpc',return_value=(200,{'vms':[]})) as rpc_mock:
                         self.assertEqual(request('POST',vm_session,host='admin.test',origin='https://client.test',bearer=agent['token'])[0],403)
                         st,session_vm,headers_vm=request('POST',vm_session,host='admin.test',origin='https://admin.test',bearer=agent['token'])
                         self.assertEqual(st,201)
@@ -181,6 +181,14 @@ class AdminHTTP(unittest.TestCase):
                         self.assertEqual(request('POST',vm_session,host='admin.test',origin='https://admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],401)
                         self.assertEqual(request('GET',vms,host='admin.test',cookie=cookie_vm)[0],401)
                         self.assertEqual(request('GET',vms,host='admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],200)
+                        metrics='/v1/cloud/projects/'+project_id+'/vm/metrics?vm_id=vm_'+'a'*32
+                        self.assertEqual(request('GET',metrics,host='admin.test',cookie=cookie_vm)[0],401)
+                        self.assertEqual(request('GET',metrics,host='admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],200)
+                        forwarded=rpc_mock.call_args.args[0]
+                        self.assertEqual(forwarded['action'],'metrics')
+                        self.assertEqual(forwarded['body'],{'vm_id':'vm_'+'a'*32})
+                        self.assertEqual(forwarded['project_id'],project_id)
+                        self.assertEqual(request('GET',metrics.replace(project_id,other_project['project_id']),host='admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],401)
                         self.assertEqual(request('GET','/v1/cloud/projects/'+other_project['project_id']+'/vms',host='admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],401)
                         self.assertEqual(request('DELETE',vm_session,host='admin.test',origin='https://admin.test',cookie=cookie_vm,vm_csrf=session_vm['csrf'])[0],200)
                         self.assertEqual(request('DELETE',vm_session,host='admin.test',origin='https://admin.test',cookie=cookie_vm)[0],200)
