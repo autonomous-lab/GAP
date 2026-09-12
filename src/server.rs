@@ -2538,6 +2538,25 @@ the content inline"
         Ok(project)
     }
 
+    pub fn cloud_provision_fleet_project(&mut self, token: &str, project_id: &str) -> Result<crate::cloud::ProjectRecord> {
+        let access = self.fleet_access.as_ref().ok_or_else(crate::fleet_access::denied)?;
+        let claims = access.verify(token, project_id, now_unix()).ok_or_else(crate::fleet_access::denied)?;
+        if self.agent_suspended(&claims.owner_did) || claims.agent_did.as_ref().is_some_and(|a| self.agent_suspended(a)) {
+            return Err(crate::fleet_access::denied());
+        }
+        if let Some(policy) = &self.private_node { policy.authorize(&claims.owner_did)?; }
+        if self.cloud_projects.contains_key(project_id) { return self.cloud_owned_project(token, project_id); }
+        crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?;
+        let now = now_unix();
+        let project = crate::cloud::ProjectRecord { project_id: project_id.into(), owner_did: claims.owner_did,
+            status: "active".into(), plan: "free".into(), created_at: now, updated_at: now };
+        self.storage.upsert_state(&crate::storage::StateRecord { scope: "cloud_projects".into(), key: project_id.into(),
+            value: serde_json::to_string(&project)?, updated_at: now })?;
+        self.cloud_projects.insert(project_id.into(), project.clone());
+        self.record("cloud.project.provisioned", json!({"project_id":project_id,"owner_did":project.owner_did,"operator_id":claims.operator_id}));
+        Ok(project)
+    }
+
     pub fn cloud_list_projects(&self, token: &str) -> Result<Vec<crate::cloud::ProjectRecord>> {
         let owner = self.agent_by_token(token)?.identity.did().to_string();
         let mut projects: Vec<_> = self
@@ -7732,6 +7751,21 @@ pub fn route_with_ip(
 
     let token = auth.and_then(|h| h.strip_prefix("Bearer "));
 
+    if method=="POST" && matches!(path,"/v1/fleet/login" | "/v1/fleet/login/verify") {
+        let Some(access)=guard.fleet_access.clone() else{return (409,json!({"error":{"code":"fleet_access_disabled"}}))};
+        let Some(registration)=guard.registration.clone() else{return (409,json!({"error":{"code":"email_verification_not_configured"}}))};
+        if let Err(e)=guard.check_rate_limit(token,client_ip){return error_response(&e)}
+        drop(guard);
+        if path=="/v1/fleet/login" {
+            return match registration.request_link(body["email"].as_str().unwrap_or(""),client_ip.unwrap_or("unknown"),now_unix(),"fleet-human-login") {
+                Ok(v)=>(202,v),Err(e)=>e.response(),
+            };
+        }
+        let email=match registration.verify_link(body["challenge_id"].as_str().unwrap_or(""),body["code"].as_str().unwrap_or(""),now_unix(),"fleet-human-login") {
+            Ok(email)=>email,Err(e)=>return e.response(),
+        };
+        return access.connect(&json!({"action":"human-login","email":email}));
+    }
     if path == "/v1/fleet/connect" && method == "POST" {
         let Some(access) = guard.fleet_access.clone() else {return (409,json!({"error":{"code":"fleet_access_disabled"}}))};
         if let Err(e)=guard.check_rate_limit(token,client_ip) {return error_response(&e)}
@@ -7743,7 +7777,10 @@ pub fn route_with_ip(
             Ok(p)=>p, Err(e)=>return error_response(&e),
         };
         let record = match guard.storage.get_state("cloud_verified_agent_emails", &agent) {
-            Ok(Some(r))=>r, Ok(None)=>return (403,json!({"error":{"code":"verified_email_required"}})),
+            Ok(Some(r))=>r, Ok(None)=>{
+                drop(guard);
+                return access.connect(&json!({"action":"reconnect","project_id":project.project_id,"agent_did":agent}));
+            },
             Err(_)=>return (503,json!({"error":{"code":"verified_identity_unavailable"}})),
         };
         let proof:Value = match serde_json::from_str(&record.value) {
@@ -7846,6 +7883,13 @@ pub fn route_with_ip(
         if path == "/v1/identity/verify" { return (404,json!({"error":{"code":"not_found"}})); }
     }
 
+    if method == "POST" {
+        if let Some(project_id) = path.strip_prefix("/v1/cloud/projects/").and_then(|p| p.strip_suffix("/provision")) {
+            return match guard.cloud_provision_fleet_project(token.unwrap_or(""), project_id) {
+                Ok(project) => (200, json!(project)), Err(e) => error_response(&e),
+            };
+        }
+    }
     if let Some(project_id)=path.strip_prefix("/v1/cloud/projects/").and_then(|p|p.strip_suffix("/access-requests")) {
         let project=match guard.cloud_owned_project(token.unwrap_or(""),project_id) {Ok(p)=>p,Err(e)=>return error_response(&e)};
         let Some(admin)=guard.cloud_admin.clone() else {return (409,json!({"error":{"code":"approval_requests_not_configured"}}))};

@@ -78,6 +78,10 @@ class Application:
                 raise Failure('identity_gateway_credentials_required', 403)
             if not self.access:
                 raise Failure('fleet_access_disabled', 409)
+            if body.get('action') == 'reconnect':
+                return self.access.reconnect(actor,body['agent_did'],body['project_id'])
+            if body.get('action') == 'human-login':
+                return self.access.human_login(body['email'])
             if body.get('action') != 'connect':
                 raise Failure('unknown_identity_action', 404)
             return self.access.connect(actor, body['request_id'], body['email'], body['agent_did'], body['project_id'])
@@ -86,6 +90,15 @@ class Application:
                 raise Failure('operator_credentials_required', 403)
             action = body.get('action')
             request = body.get('request_id')
+            if action == 'confirm-identity':
+                if not isinstance(body.get('reason'), str) or len(body['reason']) < 10:
+                    raise Failure('invalid_manual_confirmation')
+                if not self.access:
+                    raise Failure('fleet_access_disabled', 409)
+                if body['node_id'] not in self.nodes:
+                    raise Failure('unknown_trusted_node')
+                return self.access.connect(body['node_id'], request, body['email'],
+                                           body['agent_did'], body['project_id'], body['reason'])
             if action == 'create-customer':
                 return a.create_customer('operator', request, body['label'])
             if action == 'attach-principal':
@@ -121,6 +134,11 @@ class Application:
         if method == 'POST' and parsed.path == '/node':
             if kind != 'node':
                 raise Failure('node_credentials_required', 403)
+            if body.get('action') in ('retention-status','retention-claim','retention-finish'):
+                import retention
+                args=(a,actor,body['project_id'],body['owner_did'])
+                if body['action']=='retention-status':return retention.status(*args)
+                return (retention.claim if body['action']=='retention-claim' else retention.finish)(*args,body['claim_id'])
             if body.get('action') == 'wallet-import':
                 from wallet_import import receive
                 return receive(a,actor,body['request_id'],body['project_id'],body['owner_did'],body['transfer_id'],body['snapshot_digest'])
@@ -152,10 +170,14 @@ class Application:
                 result = a.checkpoint(actor,body['request_id'],body['project_id'],body['owner_did'],
                     body['reservation_id'],body['consumed_microcredits'],body['unpaid_microcredits'],
                     body['target_microcredits'],body['lease_seconds'],body.get('close',False))
-                return dict(result,authority_now=math.ceil(a.clock()))
+                import retention
+                return dict(result,authority_now=math.ceil(a.clock()),retention=retention.status(a,actor,body['project_id'],body['owner_did']))
             raise Failure('unknown_node_action', 404)
         if kind != 'client':
             raise Failure('client_credentials_required', 403)
+        if parsed.path == '/v1/members' and self.access:
+            if method=='GET':return self.access.members(actor)
+            if method=='POST':return self.access.membership(actor,body)
         if method == 'GET' and parsed.path == '/v1/account':
             return {'operator_id': a.operator, 'customer_id': actor['customer'], 'agent_did': actor['agent']}
         if method == 'GET' and parsed.path == '/v1/wallet':

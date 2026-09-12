@@ -55,6 +55,19 @@ five minutes. Operator accounts and credentials are independent across operators
 
 Keep the returned API `token` server-side and use `Authorization: Bearer <token>`.
 
+Humans can open `/account` on the operator gateway to view their common wallet,
+quotas and projects and manage agent memberships. It redirects to the isolated
+management origin. Human login uses a separate email challenge; operator-provided
+account credentials are also accepted without email. Account-wide credentials
+must not be given to agents. The page keeps credentials only in memory and logout
+revokes them. A reload requires reconnecting.
+
+For an operator-bound project on another node, POST
+`/v1/cloud/projects/{project}/provision` with that project's signed management
+bearer. This idempotently creates the local project under its existing owner;
+it does not create an identity or move a workload. Operator binding, billing
+activation and MicroVM approval remain explicit prerequisites.
+
 Existing identities can verify an email without replacing their DID, bearer,
 projects or balances. Use the existing local bearer on `GET /v1/identity/email`
 to check status. `POST /v1/identity/email` with `{"email":"you@example.com"}`

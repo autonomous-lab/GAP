@@ -109,6 +109,27 @@ class FleetIdentityIntegration(unittest.TestCase):
                 nodes.append(dict(base=base,identity=identity,project=project['project_id'],linked=linked,proc=proc,start=start,env=env))
             one,two=nodes
             self.assertEqual(one['linked']['customer_id'],two['linked']['customer_id'])
+            import sqlite3
+            with sqlite3.connect(root/'node-one'/'registration.sqlite') as db:
+                db.execute('UPDATE email_challenges SET created=created-61')
+            status,login=request(one['base'],'/v1/fleet/login',body={'email':'same-owner@example.com'})
+            self.assertEqual(status,202,login)
+            message=email.message_from_bytes(smtp.messages.get(timeout=3))
+            contents=message.get_payload(decode=True).decode()
+            code=re.search(r'\b([0-9]{6})\b',contents).group(1)
+            status,human=request(one['base'],'/v1/fleet/login/verify',body={'challenge_id':login['challenge_id'],'code':code})
+            self.assertEqual(status,200,human);self.assertIsNone(human['agent_did'])
+            self.assertEqual(len(request(control_url,'/v1/projects',human['token'])[1]['projects']),2)
+            self.assertEqual(request(control_url,'/v1/members',human['token'])[0],200)
+            self.assertEqual(request(one['base'],'/v1/fleet/login/verify',body={'challenge_id':login['challenge_id'],'code':code})[0],400)
+            provisioned='prj_'+uuid.uuid4().hex[:24]
+            authority.attach_project('operator','cross-node-provision',one['linked']['customer_id'],provisioned,'node-two',one['identity']['did'])
+            provision_token=access.issue(authority.authenticate(one['linked']['credential']['token']),provisioned)['token']
+            provision_path='/v1/cloud/projects/'+provisioned+'/provision'
+            self.assertEqual(request(two['base'],provision_path,provision_token,{})[0],200)
+            self.assertEqual(request(two['base'],provision_path,provision_token,{})[0],200)
+            self.assertNotEqual(request(one['base'],provision_path,provision_token,{})[0],200)
+            self.assertNotEqual(request(two['base'],provision_path,one['identity']['token'],{})[0],200)
             for current,other in [(one,two),(two,one)]:
                 control_token=current['linked']['credential']['token']
                 self.assertEqual(request(control_url,'/v1/project-token',control_token,{'project_id':other['project']})[0],403)

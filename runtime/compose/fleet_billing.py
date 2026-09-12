@@ -77,7 +77,7 @@ class FleetLedger(Ledger):
             raise ValueError('invalid_fleet_limits')
         self.monotonic=monotonic
         self.transport=transport or Client(config)
-        self.deadlines={};self.last_sync={};self.errors={};self.funding={}
+        self.deadlines={};self.last_sync={};self.errors={};self.funding={};self.retention={}
         self.locks={p:threading.RLock() for p in self.projects}
         super().__init__(path,clock)
 
@@ -160,6 +160,7 @@ class FleetLedger(Ledger):
                 self.deadlines[project]=started+remaining if balance else 0
                 self.last_sync[project]=started
                 self.funding[project]=reply['funding_status']
+                self.retention[project]=reply.get('retention',{})
                 self.errors.pop(project,None)
             except BillingError as error:
                 self.errors[project]=str(error) if str(error) in ('fleet_authority_unavailable','fleet_authority_denied','fleet_reconciliation_required') else 'fleet_authority_unavailable'
@@ -175,12 +176,39 @@ class FleetLedger(Ledger):
         result=super().view(project,owner,include_entries)
         if project in self.projects:
             valid=self.lease_allowed(project)
-            result.update(balance_scope='node_reservation',exhausted_at=None,delete_after=None,
-                          deletion_committed=False,execution_allowed=result['execution_allowed'] and valid,
+            policy=self.retention.get(project,{})
+            result.update(balance_scope='node_reservation',exhausted_at=policy.get('exhausted_at'),delete_after=policy.get('delete_after'),
+                          execution_allowed=result['execution_allowed'] and valid,
                           fleet={'operator_id':self.config['operator_id'],'node_id':self.config['node_id'],
                                  'lease_valid':valid,'authority_error':self.errors.get(project),
                                  'funding_status':self.funding.get(project,'unknown'),
-                                 'retention':'preserve_until_authoritative_reconciliation'})
+                                 'retention':'authority_confirmed_72_hours' if policy.get('delete_after') is not None else 'preserve_until_authoritative_reconciliation'})
             result['alerts']=[a for a in result['alerts'] if a!='credits_exhausted']
             if not valid:result['alerts'].append('fleet_allowance_or_lease_unavailable')
         return result
+
+    def claim_expired(self,project,owner,vm_id):
+        if project not in self.projects:return super().claim_expired(project,owner,vm_id)
+        with self.locks[project]:
+            with self.db() as db:
+                account=self.ensure(db,project,owner)
+                if account['retention_claim']:return account['retention_claim']==vm_id
+            # Fresh central authorization is required at the destructive boundary.
+            # A cached deadline alone, including after restart, never deletes data.
+            try:
+                reply=self.transport(dict(action='retention-claim',project_id=project,owner_did=owner,claim_id=vm_id))
+            except BillingError:return False
+            if reply.get('claim_id')!=vm_id or reply.get('state')!='claimed':return False
+            with self.db() as db:
+                self.ensure(db,project,owner)
+                db.execute('UPDATE accounts SET retention_claim=? WHERE project=?',(vm_id,project))
+            self.deadlines.pop(project,None)
+            return True
+
+    def finish_deletion(self,project,owner,vm_id):
+        if project not in self.projects:return super().finish_deletion(project,owner,vm_id)
+        with self.locks[project]:
+            reply=self.transport(dict(action='retention-finish',project_id=project,owner_did=owner,claim_id=vm_id))
+            if reply.get('claim_id')!=vm_id or reply.get('state')!='finished':raise BillingError('invalid_retention_receipt')
+            super().finish_deletion(project,owner,vm_id)
+            self.retention.pop(project,None)

@@ -107,3 +107,52 @@ class AccessTests(unittest.TestCase):
         for ttl in [0,29,301,True,'120']:
             with self.assertRaises(Failure):self.access.issue(actor,PROJECT,ttl)
 
+
+    def test_manual_confirmation_is_operator_only_audited_and_idempotent(self):
+        body=dict(action='confirm-identity',request_id='manual-confirm',node_id='node-one',
+                  email='owner@example.com',agent_did=OWNER,project_id=PROJECT,
+                  reason='Owner confirmed address directly in authenticated support conversation')
+        for token in ['worker1','identity1','garbage']:
+            with self.assertRaises(Failure):self.app.handle('POST','/operator',token,body)
+        for reason in [None, '', 'short']:
+            with self.assertRaises(Failure):self.app.handle('POST','/operator','admin',dict(body,reason=reason))
+        first=self.app.handle('POST','/operator','admin',body)
+        second=self.app.handle('POST','/operator','admin',body)
+        self.assertEqual(first['customer_id'],second['customer_id'])
+        self.assertEqual(first['confirmation_method'],'operator_confirmation')
+        self.assertEqual(self.access.reconnect('node-one',OWNER,PROJECT)['customer_id'],first['customer_id'])
+        with self.assertRaises(Failure):self.access.reconnect('node-two',OWNER,PROJECT)
+        with self.a.db() as db:
+            row=db.execute("SELECT result FROM operations WHERE actor='operator' AND id='manual-confirm'").fetchone()
+            self.assertIn(body['reason'],row[0])
+            self.assertNotIn('gapc_',row[0])
+        with self.assertRaisesRegex(Failure,'request_id_conflict'):
+            self.app.handle('POST','/operator','admin',dict(body,reason='Different confirmation reason'))
+        with self.assertRaisesRegex(Failure,'identity_source_conflict'):
+            self.app.handle('POST','/operator','admin',dict(body,request_id='other',email='another@example.com'))
+
+    def test_human_membership_cycle_is_scoped_and_detachment_revokes(self):
+        linked=self.connect();human=self.access.human_login('owner@example.com')['token']
+        actor=self.a.authenticate(human)
+        self.assertIsNone(actor['agent'])
+        body=dict(request_id='attach',action='attach',agent_did=AGENT)
+        with self.assertRaises(Failure):self.app.handle('POST','/v1/members',linked['credential']['token'],body)
+        self.app.handle('POST','/v1/members',human,body)
+        token=self.app.handle('POST','/v1/members',human,dict(body,action='issue-token'))['token']
+        self.app.handle('POST','/v1/members',human,dict(body,request_id='grant',action='grant',project_id=PROJECT,role='operator'))
+        self.assertTrue(self.access.issue(self.a.authenticate(token),PROJECT)['token'])
+        self.app.handle('POST','/v1/members',human,dict(body,request_id='detach',action='detach'))
+        with self.assertRaises(Failure):self.a.authenticate(token)
+        with self.assertRaisesRegex(Failure,'membership_detached'):
+            self.connect(agent=AGENT,project=SECOND,request='return')
+        with self.assertRaisesRegex(Failure,'project_owner_cannot_be_detached'):
+            self.app.handle('POST','/v1/members',human,dict(body,agent_did=OWNER,request_id='detach-owner',action='detach'))
+        self.app.handle('POST','/v1/members',human,dict(body,request_id='reattach'))
+        self.assertTrue(self.a.issue(actor['customer'],AGENT)['token'])
+
+    def test_verified_human_can_open_empty_account_without_free_money(self):
+        first=self.access.human_login('new@example.com')
+        second=self.access.human_login('New@example.com')
+        self.assertEqual(first['customer_id'],second['customer_id'])
+        self.assertEqual(self.a.wallet(first['customer_id'])['total_remaining_microcredits'],0)
+        self.assertEqual(self.app.handle('GET','/v1/projects',first['token'],{})['projects'],[])

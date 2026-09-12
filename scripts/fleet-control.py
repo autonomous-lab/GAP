@@ -73,7 +73,7 @@ def main():
         body = json.loads(Path(args.request_file).read_text()) if args.request_file else None
         if body is not None and not isinstance(body, dict):
             raise ValueError()
-        if (body and body.get('action') == 'issue-token' or args.path in ('/v1/project-token','/v1/fleet/connect','/v1/fleet/project-token')) and not args.output:
+        if (body and body.get('action') in ('issue-token', 'confirm-identity') or args.path in ('/v1/project-token','/v1/fleet/connect','/v1/fleet/project-token')) and not args.output:
             raise ValueError('credential issuance requires --output')
         if args.output and Path(args.output).exists():
             raise ValueError('output already exists')

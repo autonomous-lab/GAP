@@ -150,4 +150,25 @@ class FleetTests(unittest.TestCase):
         self.assertIsNone(failed['delete_after'])
 
 
-if __name__=='__main__':unittest.main()
+
+    def test_authoritative_retention_requires_fresh_claim_and_survives_restart(self):
+        import retention
+        def transport(body):
+            if self.down:raise BillingError('fleet_authority_unavailable')
+            action=body['action']
+            if action.startswith('retention-'):
+                return (retention.claim if action=='retention-claim' else retention.finish)(self.authority,'node',P,O,body['claim_id'])
+            return dict(self.transport(body),retention=retention.status(self.authority,'node',P,O))
+        self.ledger.transport=transport
+        self.ledger.target=10000
+        self.ledger.sync(P,O,True)
+        self.charge(10000,'drain');self.ledger.sync(P,O,True)
+        self.assertEqual(self.ledger.view(P,O)['delete_after'],self.now+RETENTION_SECONDS)
+        self.advance(RETENTION_SECONDS+1)
+        self.down=True;self.assertFalse(self.ledger.claim_expired(P,O,'vm-retention'))
+        self.down=False;self.assertTrue(self.ledger.claim_expired(P,O,'vm-retention'))
+        self.ledger=self.open();self.ledger.transport=transport
+        self.assertTrue(self.ledger.view(P,O)['deletion_committed'])
+        self.assertTrue(self.ledger.claim_expired(P,O,'vm-retention'))
+        self.ledger.finish_deletion(P,O,'vm-retention')
+        self.assertFalse(self.ledger.view(P,O)['deletion_committed'])

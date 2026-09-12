@@ -318,9 +318,16 @@ fn main() -> Result<()> {
             let admin_host=admin_origin.trim_end_matches('/').strip_prefix("https://").unwrap_or("");
             let on_admin_host=!admin_host.is_empty() && host.eq_ignore_ascii_case(admin_host);
             let admin_api=clean_path.starts_with("/v1/admin/console/");
-            let vm_console=on_admin_host && gap::cloud_vm_session::console_path(clean_path);
-            if clean_path=="/microvms" && !custom_domain_request && !on_admin_host && !admin_host.is_empty() {
-                let _=request.respond(Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{}/microvms",admin_origin.trim_end_matches('/'))).unwrap()));continue;
+            let vm_console=on_admin_host && (gap::cloud_vm_session::console_path(clean_path) || clean_path=="/account" || clean_path.starts_with("/v1/fleet/"));
+            if clean_path=="/account" {
+                if let Ok(origin)=env::var("GAP_FLEET_ACCOUNT_ORIGIN") {
+                    if origin.starts_with("https://") && !host.eq_ignore_ascii_case(origin.trim_start_matches("https://").trim_end_matches('/')) {
+                        let _=request.respond(Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{}/account",origin.trim_end_matches('/'))).unwrap()));continue;
+                    }
+                }
+            }
+            if matches!(clean_path,"/microvms" | "/account") && !custom_domain_request && !on_admin_host && !admin_host.is_empty() {
+                let _=request.respond(Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{}{clean_path}",admin_origin.trim_end_matches('/'))).unwrap()));continue;
             }
             if (on_admin_host && !vm_console) || clean_path=="/admin" || admin_api {
                 let header=|name:&'static str|request.headers().iter().find(|h|h.field.equiv(name)).map(|h|h.value.as_str().to_string()).unwrap_or_default();

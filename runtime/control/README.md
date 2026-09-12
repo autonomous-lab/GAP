@@ -564,3 +564,60 @@ The isolated `runtime/compose/wallet_migration_kvm_test.py` acceptance test migr
 a funded fixture wallet, loses the credit acknowledgement, restores the ledger,
 and then runs the real VM lifecycle and quota/partition tests. It preserves the
 historical spend baseline and never mounts production catalogs or credit databases.
+
+
+## Explicit operator confirmation of an existing owner
+
+For an owner whose address was confirmed directly through an authenticated
+support channel, the private operator API accepts `action: "confirm-identity"`
+with `request_id`, `node_id`, `email`, `agent_did`, `project_id` and a mandatory
+`reason` (10-1000 characters). Check the actual project owner on the source node
+before using it. This is a deliberate administrative attestation, not an OTP
+challenge. It records the confirmation method and reason in the durable operator
+receipt, enforces the existing node/owner/email bindings, and never moves money.
+Only operator credentials can use it; it is not exposed by the public relay.
+The node's local OTP registry is unchanged. The response contains a secret control
+credential; save it privately (`fleet-control.py --output`), never in logs.
+
+
+## Human account and membership management
+
+`/account` on the operator gateway redirects to the isolated management origin.
+Humans sign in using a fresh email challenge (`POST /v1/fleet/login`, then
+`/v1/fleet/login/verify`). Challenges are scoped to human login: an agent bearer
+or an identity-link/signup code cannot grant account-wide access. A newly verified address opens an empty account without promotional funding. Operator-provided human control
+credentials can also be entered without sending an email. Credentials stay in
+page memory, expire within one hour, and logout revokes them. Refreshing the
+page requires reconnecting; no credential is stored in browser storage.
+
+The page displays the common wallet, global quotas, projects and memberships.
+Human-only `GET/POST /v1/fleet/members` lists members/grants and supports `attach`,
+`grant` (viewer/operator/none), `issue-token` (one-hour agent access) and `detach`, with `agent_did` and a unique
+`request_id`; grant also needs `project_id` and `role`. An agent cannot administer
+its own membership. Another customer's agent cannot be taken over. Owners of
+projects cannot be detached. Detachment revokes control credentials and blocks
+automatic reconnection until explicit reattachment by the same account owner.
+Previously signed project capabilities expire within five minutes.
+
+`POST /v1/cloud/projects/{id}/provision` on a target node accepts only a valid
+operator-signed capability for that exact node/project. The operator must first
+bind the project and owner at the authority. Provisioning is idempotent and
+persists the project before responding; it does not copy any owner private key.
+Local policy and MicroVM approvals still apply. This enables an existing owner's
+project on a second node without registering another identity or sending email.
+Worker billing opt-in remains an explicit operator configuration operation.
+For secondary gateways, set `GAP_FLEET_ACCOUNT_ORIGIN` to the primary operator's
+isolated management origin so `/account` opens the shared account console.
+
+## Central retention after confirmed exhaustion
+
+The central authority tracks a 72-hour deadline only when the customer's
+unreserved balance AND all outstanding node allowances are zero. An unavailable
+node's allowance is never inferred to be consumed or refunded. A top-up resets
+the deadline before a deletion claim. A worker's cached deadline is informational;
+it must obtain a fresh `retention-claim` at the destructive boundary. An outage
+cannot authorize deletion. Claimed deletion fences new execution for that project,
+including after a top-up, until the worker has removed all generations and retained
+data and acknowledged `retention-finish`. Other projects may use the new funds.
+Claims and local deletion progress survive restarts and lost acknowledgements.
+Destroy operations also reconcile global capacity before completing retention.

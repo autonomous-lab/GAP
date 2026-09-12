@@ -317,7 +317,8 @@ class Runtime:
                 self.sample(current)
                 if self.manager.alive(current): self.manager.stop(current,True)
                 if current['state']!='destroyed':
-                    self.manager._perform(project,owner,'vm/destroy',{'vm_id':current['vm_id'],'delete_data':True,'confirm_data_loss':True})
+                    destroy=self.manager.capacity.execute if self.manager.capacity.managed(project) else self.manager._perform
+                    destroy(project,owner,'vm/destroy',{'vm_id':current['vm_id'],'delete_data':True,'confirm_data_loss':True})
             for path in (self.manager.root/'retained').glob('vm_*'):
                 marker=path/'retention.json'
                 if marker.exists():

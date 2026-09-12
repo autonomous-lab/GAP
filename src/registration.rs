@@ -210,7 +210,7 @@ impl Registration {
     }
     fn request_for(&self,email:&str,ip:&str,now:u64,context:&str)->Result<Value> {
         let (id, email, code) = self.prepare_for(email, ip, now,context)?;
-        let purpose=if context.is_empty(){String::new()}else{format!("Attach this email to existing GAP identity: {context}\n")};
+        let purpose=if context.is_empty(){String::new()}else if context=="fleet-human-login" {"Sign in to your GAP operator account.\n".into()}else{format!("Attach this email to existing GAP identity: {context}\n")};
         let message = Message::builder().from(self.from.clone()).to(email.parse().map_err(unavailable)?)
             .subject("Your GAP verification code")
             .body(format!("Your GAP verification code is: {code}\n\nRequested for: {}\n{purpose}This code expires in 10 minutes and can be used once.\nIf you did not request it, ignore this email.\nNever share this code with anyone.\n", self.origin))

@@ -94,8 +94,8 @@ impl Access {
 pub fn relay_path(method: &str, path: &str) -> Option<String> {
     match (method, path) {
         ("POST", "/v1/fleet/identity") => Some("/identity".into()),
-        ("GET", "/v1/fleet/account" | "/v1/fleet/projects" | "/v1/fleet/wallet" | "/v1/fleet/quotas")
-        | ("POST", "/v1/fleet/project-token" | "/v1/fleet/logout") => Some(path.replacen("/v1/fleet/", "/v1/", 1)),
+        ("GET", "/v1/fleet/account" | "/v1/fleet/projects" | "/v1/fleet/wallet" | "/v1/fleet/quotas" | "/v1/fleet/members")
+        | ("POST", "/v1/fleet/project-token" | "/v1/fleet/logout" | "/v1/fleet/members") => Some(path.replacen("/v1/fleet/", "/v1/", 1)),
         _ => None,
     }
 }

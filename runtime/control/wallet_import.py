@@ -65,6 +65,7 @@ def receive(a,node,request,project,owner,transfer,snapshot_digest):
             balance=amount(customer['balance']+snapshot['balance'])
             spent=amount(customer['spent']+snapshot['spent'])
             db.execute('UPDATE customers SET balance=?,spent=? WHERE id=?',(balance,spent,row['customer']))
+            db.execute('DELETE FROM retention_clocks WHERE customer=?',(row['customer'],))
             db.execute("UPDATE wallet_imports SET state='credited' WHERE node=? AND project=?",(node,project))
             a.entry(db,row['customer'],project,node,'legacy_transfer',snapshot['balance'],'legacy','node:'+node,request)
         return dict(operator_id=a.operator,node_id=node,project_id=project,owner_did=owner,

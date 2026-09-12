@@ -93,6 +93,8 @@ class Authority:
             db.execute("INSERT OR IGNORE INTO metadata VALUES('operator',?)", (operator,))
             from wallet_import import schema
             schema(db)
+            import retention
+            retention.schema(db)
             if db.execute("SELECT value FROM metadata WHERE key='operator'").fetchone()[0] != operator:
                 raise Failure('operator_database_mismatch', 409)
 
@@ -406,6 +408,7 @@ class Authority:
             amount(row['balance']+held+value)
             balance = amount(row['balance'] + value)
             db.execute('UPDATE customers SET balance=? WHERE id=?', (balance, customer))
+            db.execute('DELETE FROM retention_clocks WHERE customer=?',(customer,))
             self.entry(db, customer, None, None, 'funding', value, source, actor, request)
             return dict(customer_id=customer, balance_microcredits=balance)
         return self.mutation(actor, request, body, apply)
@@ -507,6 +510,8 @@ class Authority:
             if placement['owner'] != owner:
                 raise Failure('reservation_owner_mismatch', 403)
             customer = self.customer(db, placement['customer'])
+            deleting=db.execute("SELECT 1 FROM retention_claims WHERE node=? AND project=? AND state='claimed'",(node,project)).fetchone()
+            effective_target=0 if deleting else target
             old = db.execute('SELECT * FROM reservations WHERE id=?', (reservation,)).fetchone()
             if old is None:
                 if consumed or unpaid or close:
@@ -533,10 +538,10 @@ class Authority:
                 db.execute('UPDATE customers SET balance=balance+? WHERE id=?', (held,customer['id']))
                 allocated, expires = old['allocated'], 0
             else:
-                extra = min(max(0,target-held),customer['balance'])
+                extra = min(max(0,effective_target-held),customer['balance'])
                 allocated = amount(old['allocated']+extra)
                 db.execute('UPDATE customers SET balance=balance-? WHERE id=?', (extra,customer['id']))
-                expires = int(self.clock())+lease_seconds if held+extra else 0
+                expires = int(self.clock())+lease_seconds if held+extra and not deleting else 0
             db.execute('UPDATE reservations SET allocated=?,consumed=?,unpaid=?,expires=?,closed=? WHERE id=?',
                        (allocated,consumed,unpaid,expires,int(close),reservation))
             remaining=db.execute('SELECT coalesce(sum(allocated-consumed),0) FROM reservations WHERE customer=? AND closed=0',(customer['id'],)).fetchone()[0]
