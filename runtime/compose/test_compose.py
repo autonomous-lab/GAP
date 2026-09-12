@@ -185,6 +185,66 @@ class RunnerTests(unittest.TestCase):
         with runner.db() as db:
             self.assertIsNone(db.execute("SELECT payload FROM jobs").fetchone()[0])
 
+    def test_selected_compose_target_is_deduplicated_and_not_sent_to_guest(self):
+        from unittest.mock import Mock
+        selected = 'vm_' + 'd' * 32
+        runner = Runner(self.path, execute=lambda vm, payload: {'ok': True})
+        runner.authorize = lambda *_: {}
+        runner.hypervisor = Mock()
+        runner.hypervisor.read.return_value = {'vm_id': selected}
+        runner.hypervisor.guest.return_value = {'vm_id': selected}
+        rpc = {'project_id': PROJECT, 'owner_did': OWNER, 'method': 'POST',
+               'action': 'releases', 'body': dict(release(), vm_id=selected)}
+        with patch('runner.threading.Thread'):
+            _, job = runner.rpc(rpc)
+            self.assertEqual(runner.rpc(rpc)[1]['job_id'], job['job_id'])
+            with self.assertRaisesRegex(Failure, 'request_id_conflict'):
+                runner.rpc(dict(rpc, body=dict(release(), vm_id='vm_'+'e'*32)))
+        calls = []
+        runner.execute = lambda vm, payload: calls.append((vm,payload)) or {'ok': True}
+        runner.run_job(job['job_id'])
+        runner.hypervisor.guest.assert_called_once_with(PROJECT, OWNER, selected)
+        runner.hypervisor.read.assert_called_once_with(PROJECT, OWNER, selected)
+        self.assertNotIn('vm_id', calls[0][1]['body'])
+        self.assertEqual(calls[0][0]['vm_id'], selected)
+        with runner.db() as db:
+            result = json.loads(db.execute('SELECT result FROM jobs').fetchone()[0])
+        self.assertEqual(result['vm_id'], selected)
+        for action in ('start', 'stop', 'status', 'logs'):
+            with patch('runner.threading.Thread'):
+                with runner.db() as db: db.execute("UPDATE jobs SET status='succeeded'")
+                status,_ = runner.rpc(dict(rpc, action=action, body={'request_id': __import__('uuid').uuid4().hex, 'vm_id':selected}))
+                self.assertEqual(status, 202)
+
+    def test_readiness_distinguishes_process_guest_and_docker_without_wake(self):
+        from unittest.mock import Mock
+        runner = Runner(self.path)
+        runner.hypervisor = Mock()
+        runner.hypervisor.public.return_value = {'state': 'hibernated'}
+        runner.execute = Mock()
+        payload = {'action':'readiness','body':{'vm_id':'vm_'+'d'*32}}
+        row = {'project':PROJECT,'owner':OWNER}
+        result = runner.dispatch_job(row,{},payload)
+        self.assertFalse(result['ready']);runner.execute.assert_not_called()
+        runner.hypervisor.public.return_value = {'state':'running'}
+        runner.execute.side_effect = Failure(502,'guest_ssh_connection_refused')
+        result = runner.dispatch_job(row,{},payload)
+        self.assertFalse(result['guest_ready']);self.assertEqual(result['reason'],'guest_ssh_connection_refused')
+        runner.execute.side_effect = None
+        runner.execute.return_value = {'ok':False}
+        result = runner.dispatch_job(row,{},payload)
+        self.assertTrue(result['guest_ready']);self.assertFalse(result['docker_ready'])
+        runner.execute.return_value = {'ok':True}
+        self.assertTrue(runner.dispatch_job(row,{},payload)['ready'])
+        runner.hypervisor.sync_environment.assert_not_called()
+
+    def test_ssh_diagnostics_are_classified_without_exposing_output(self):
+        from runner import ssh_failure
+        self.assertEqual(ssh_failure(b'Permission denied (publickey). SECRET',255),'guest_ssh_authentication_failed')
+        self.assertEqual(ssh_failure(b'Connection refused SECRET',255),'guest_ssh_connection_refused')
+        self.assertEqual(ssh_failure(b'Host key verification failed SECRET',255),'guest_ssh_host_key_mismatch')
+        self.assertEqual(ssh_failure(b'Permission denied application log SECRET',1),'guest_command_failed_state_unknown')
+
     def test_revocation_before_execution(self):
         executions = []
         runner = Runner(self.path, execute=lambda *args: executions.append(args))

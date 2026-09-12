@@ -25,7 +25,7 @@ MAX_BODY = 5 * 1024 * 1024  # HTTP framing budget, not a guest storage quota
 MAX_OUTPUT = 1024 * 1024
 PROJECT = re.compile(r"prj_[0-9a-f]{24}\Z")
 REQUEST = re.compile(r"[0-9a-f]{32}\Z")
-ACTION = {"releases", "start", "stop", "status", "logs",
+ACTION = {"releases", "start", "stop", "status", "logs", "readiness",
           "vm/create", "vm/start", "vm/stop", "vm/update", "vm/destroy", "vm/hibernate", "vm/resume", "runtime", "ingress", "ports", "ssh", "terminal/prepare"}
 
 
@@ -87,6 +87,23 @@ def ssh_command(guest):
             "root@" + guest["address"], "python3 /usr/local/lib/gap-compose-guest.py"]
 
 
+def ssh_failure(output, returncode):
+    # Never return raw SSH output: guest commands may include application secrets.
+    text = output.decode('utf-8', errors='replace').lower()
+    for marker, code in (
+        ('host key verification failed', 'guest_ssh_host_key_mismatch'),
+        ('remote host identification has changed', 'guest_ssh_host_key_mismatch'),
+        ('permission denied', 'guest_ssh_authentication_failed'),
+        ('connection refused', 'guest_ssh_connection_refused'),
+        ('no route to host', 'guest_ssh_network_unreachable'),
+        ('connection timed out', 'guest_ssh_connection_timeout'),
+        ('connection reset', 'guest_ssh_connection_reset_state_unknown'),
+    ):
+        if returncode == 255 and marker in text:
+            return code
+    return 'guest_ssh_transport_failed_state_unknown' if returncode == 255 else 'guest_command_failed_state_unknown'
+
+
 def execute_guest(guest, payload, timeout=600):
     # Source is stdin, never part of a host command. No local Compose parsing,
     # env interpolation, archive extraction, Docker socket or host bind mounts.
@@ -112,8 +129,9 @@ def execute_guest(guest, payload, timeout=600):
                     output.extend(chunk)
                     if len(output) > MAX_OUTPUT:
                         raise Failure(502, "guest_output_too_large_state_unknown")
-            if process.wait(timeout=max(1, deadline - time.monotonic())) != 0:
-                raise Failure(502, "guest_unreachable_or_failed_state_unknown")
+            returncode = process.wait(timeout=max(1, deadline - time.monotonic()))
+            if returncode != 0:
+                raise Failure(502, ssh_failure(output, returncode))
             try:
                 result = json.loads(output)
                 if not isinstance(result, dict):
@@ -376,14 +394,19 @@ class Runner:
             if not self.terminals or set(body)!={"request_id","vm_id"} or not selected: raise Failure(400,"invalid_terminal_prepare")
         elif action == "runtime":
             if not {"request_id","vm_id","mode"} <= set(body) <= {"request_id","vm_id","mode","idle_timeout_seconds"}: raise Failure(400,"invalid_runtime_fields")
+        elif action == "readiness":
+            if not self.hypervisor or set(body) != {"request_id", "vm_id"} or not selected:
+                raise Failure(400, "readiness_requires_vm_id")
         elif action == "releases":
             from guest import validate_release
             try:
-                validate_release(body)
+                validate_release({k: v for k, v in body.items() if k != "vm_id"})
             except ValueError:
                 raise Failure(400, "invalid_release_bundle")
-        elif set(body) != {"request_id"}:
+        elif not {"request_id"} <= set(body) <= {"request_id", "vm_id"}:
             raise Failure(400, "unexpected_operation_fields")
+        if selected and not self.hypervisor and action in ('releases', 'start', 'stop', 'status', 'logs'):
+            raise Failure(400, 'vm_selector_requires_managed_microvms')
         payload = json.dumps({"action": action, "body": body}, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(payload.encode()).hexdigest()
         with self.lock, self.db() as db:
@@ -414,7 +437,7 @@ class Runner:
                     if current: self.runtime.sample(current)
                     if payload['action'] in ('vm/create','vm/start','vm/resume'):
                         self.runtime.check_credit({'project_id':row['project'],'owner_did':row['owner']})
-                    if current and current['state']=='hibernated' and payload['action'] not in ('vm/create','vm/start','vm/resume','vm/stop','vm/hibernate','vm/destroy','vm/update','runtime'):
+                    if current and current['state']=='hibernated' and payload['action'] not in ('vm/create','vm/start','vm/resume','vm/stop','vm/hibernate','vm/destroy','vm/update','runtime','readiness'):
                         self.runtime.ensure_awake(row['project'],current['vm_id'])
                 admission=nullcontext()
                 if self.runtime and payload['action'] in ('vm/create','vm/start','vm/resume'):
@@ -443,6 +466,23 @@ class Runner:
             db.execute("UPDATE jobs SET status=?,result=?,payload=NULL WHERE id=?", (status, json.dumps(result), job))
 
     def dispatch_job(self,row,guest,payload):
+        if payload['action'] == 'readiness':
+            selected = payload['body']['vm_id']
+            meta = self.hypervisor.read(row['project'], row['owner'], selected)
+            view = self.hypervisor.public(meta)
+            result = {'ok': True, 'vm_id': selected, 'state': view['state'],
+                      'guest_ready': False, 'docker_ready': False, 'ready': False}
+            if view['state'] != 'running':
+                return dict(result, reason='vm_not_running')
+            try:
+                probe = self.execute(self.hypervisor.guest(row['project'], row['owner'], selected),
+                                     {'action': 'vm_probe', 'body': {}}, timeout=15)
+                result.update(guest_ready=True, docker_ready=probe.get('ok') is True)
+                result['ready'] = result['docker_ready']
+                result['reason'] = None if result['ready'] else 'guest_docker_not_ready'
+            except Failure as error:
+                result['reason'] = error.code
+            return result
         if payload['action']=='terminal/prepare':
             from microvm import VMError, run
             meta=self.hypervisor.read(row['project'],row['owner'],payload['body']['vm_id'])
@@ -457,7 +497,7 @@ class Runner:
                     self.hypervisor.write_keys(meta,meta.get('ssh_keys',[]))
                     break
                 except Failure as error:
-                    if attempt==5 or error.code!='guest_unreachable_or_failed_state_unknown': raise
+                    if attempt==5 or error.code not in ('guest_unreachable_or_failed_state_unknown','guest_ssh_connection_refused','guest_ssh_connection_timeout','guest_ssh_transport_failed_state_unknown'): raise
                     time.sleep(1)
             self.runtime.touch(meta)
             return {'ok':True}
@@ -473,10 +513,13 @@ class Runner:
             result = self.ingress.perform(row['project'], row['owner'], payload['body'])
         else:
             if self.hypervisor:
-                guest = self.hypervisor.guest(row['project'], row['owner'])
-                meta = self.hypervisor.read(row['project'], row['owner'])
+                guest = self.hypervisor.guest(row['project'], row['owner'], payload['body'].get('vm_id'))
+                meta = self.hypervisor.read(row['project'], row['owner'], payload['body'].get('vm_id'))
                 self.hypervisor.sync_environment(meta)
-            result = self.execute(guest, payload)
+            # VM identity is controller metadata, not part of the immutable guest bundle.
+            guest_payload = dict(payload, body={k: v for k, v in payload['body'].items() if k != 'vm_id'})
+            result = self.execute(guest, guest_payload)
+            if self.hypervisor: result = dict(result, vm_id=meta['vm_id'])
         return result
 
     def operator(self,body):

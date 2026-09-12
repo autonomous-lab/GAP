@@ -227,9 +227,16 @@ class AdminHTTP(unittest.TestCase):
                         self.assertEqual(admission('/health')[0],200)
                         mock.assert_not_called() # admission must not call back into the worker
                         self.assertEqual(request('PUT',vm_base+'/http-access',{'vm_id':vm_id,'username':'visitor','password':'too short'},host='client.test',bearer=agent['token'])[0],400)
+                        status,publication,_=request('GET',vm_base+'/ingress?vm_id='+vm_id,host='client.test',bearer=agent['token'])
+                        self.assertEqual(status,200);self.assertFalse(publication['access_ready'])
+                        self.assertEqual(publication['blocking_reasons'],['visitor_credentials_not_configured'])
                         credentials={'vm_id':vm_id,'username':'visitor','password':'isolated VM password'}
                         status,access,_=request('PUT',vm_base+'/http-access',credentials,host='client.test',bearer=agent['token'])
                         self.assertEqual(status,200,access);self.assertTrue(access['configured']);self.assertNotIn('password',access);self.assertNotIn('password_hash',access);self.assertTrue(access['password_recoverable'])
+                        status,publication,_=request('GET',vm_base+'/ingress?vm_id='+vm_id,host='client.test',bearer=agent['token'])
+                        self.assertEqual(status,200);self.assertTrue(publication['access_ready'])
+                        self.assertEqual(publication['application_health'],'not_checked')
+                        self.assertNotIn('password',publication['http_access'])
                         reveal=vm_base+'/http-access/reveal'
                         self.assertEqual(request('POST',reveal,{'vm_id':vm_id},host='client.test')[0],401)
                         self.assertEqual(request('POST',reveal,{'vm_id':vm_id},host='client.test',bearer='wrong')[0],401)

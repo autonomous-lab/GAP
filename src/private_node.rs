@@ -247,6 +247,7 @@ pub fn runtime_route(path: &str) -> Option<(&str, &str)> {
         "vm/stop" => return Some((project, "vm/stop")),
         "vm/hibernate" => return Some((project, "vm/hibernate")),
         "vm/resume" => return Some((project, "vm/resume")),
+        "vm/readiness" => return Some((project, "readiness")),
         "vm/runtime" => return Some((project, "runtime")),
         "vm/credits" => return Some((project, "credits")),
         "vm/budget" => return Some((project, "budget")),

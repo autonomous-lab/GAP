@@ -1,0 +1,5 @@
+FROM wordpress:cli-php8.3
+USER root
+COPY config.php install.sh /opt/gap-wordpress/
+RUN chmod 0755 /opt/gap-wordpress && chmod 0444 /opt/gap-wordpress/config.php /opt/gap-wordpress/install.sh
+USER 33:33

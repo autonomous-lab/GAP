@@ -1,0 +1,3 @@
+FROM wordpress:php8.3-apache
+COPY config.php /opt/gap-wordpress/config.php
+RUN chmod 0755 /opt/gap-wordpress && chmod 0444 /opt/gap-wordpress/config.php

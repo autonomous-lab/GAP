@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--vm', help='Required VM generation for writes')
     parser.add_argument('--request-id', help='Reuse the same ID and body after a lost response')
     sub = parser.add_subparsers(dest='action', required=True)
+    sub.add_parser('readiness', help='Probe guest control and Docker readiness; poll the returned job')
     sub.add_parser('show', help='Inspect the microVM')
     create = sub.add_parser('create', help='Create a Linux VM; no Compose release is required')
     create.add_argument('--vcpus', type=int, default=1)
@@ -64,7 +65,7 @@ def main():
     if not re.fullmatch(r'prj_[0-9a-f]{24}', args.project):
         parser.error('invalid project identity')
     resource, body, method = args.action, None, 'GET'
-    if args.action.startswith('set-') or args.action in ('create','start','stop','resize','destroy','hibernate','resume'):
+    if args.action.startswith('set-') or args.action in ('create','start','stop','resize','destroy','hibernate','resume','readiness'):
         if args.action not in ('create','set-budget') and (not args.vm or not re.fullmatch(r'vm_[0-9a-f]{32}', args.vm)):
             parser.error('--vm is required for writes')
         method = 'PUT'
@@ -97,7 +98,7 @@ def main():
             body.update(vcpus=args.vcpus, memory_mib=args.memory_mib, disk_gib=args.disk_gib,
                         ports=args.guest_port, start=not args.stopped,
                         ssh_keys=[Path(p).read_text().strip() for p in args.key])
-        elif resource in ('start','stop','hibernate','resume'):
+        elif resource in ('start','stop','hibernate','resume','readiness'):
             method = 'POST'
             if resource == 'stop':
                 body['force'] = args.force
@@ -120,8 +121,12 @@ def main():
     if args.action == 'show':
         resource = ''
     url = args.node.rstrip('/') + '/v1/cloud/projects/' + args.project + '/vm' + ('/' + resource if resource else '')
+    if method == 'GET' and args.vm:
+        if not re.fullmatch(r'vm_[0-9a-f]{32}', args.vm):
+            parser.error('invalid VM identity')
+        url += '?vm_id=' + args.vm
     req = urllib.request.Request(url, method=method, headers={
-        'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+        'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'User-Agent': 'GAP-CLI/1.0'},
         data=json.dumps(body).encode() if body else None)
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *a, **kw):

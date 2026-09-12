@@ -881,3 +881,30 @@ Node01 installs `gap-microvm-firewall.service` and `.timer` from this directory
 into `/etc/systemd/system/`, then runs `systemctl enable --now
 gap-microvm-firewall.timer`. Adjust WorkingDirectory and container name for
 other nodes. Only nodes with a MicroVM worker need these rules.
+
+
+## Guest readiness and explicit Compose targets
+
+QEMU `running` is a process state. POST `/vm/readiness` with `request_id` and
+`vm_id`, then poll its job: wait for `result.ready` before a Compose release.
+`guest_ready` and `docker_ready` distinguish the SSH helper from the daemon.
+The probe does not wake a VM or check application health. Retry probes with new
+IDs for up to 180 seconds; never replay an uncertain release automatically.
+SSH errors now distinguish refused/timed-out connections, authentication,
+host-key mismatch, transport loss and guest command failure. Raw SSH diagnostics
+are not returned because they can contain application secrets. Host-key and
+authentication failures require operator investigation; never disable pinning.
+The historical `guest_unreachable_or_failed_state_unknown` does not prove which
+of these occurred. Configuring ingress before boot is not a readiness check.
+
+All Compose POSTs accept a `vm_id` beside the existing bundle/operation fields.
+The selector participates in request deduplication and is removed before the
+guest helper sees the bundle. No selector means the legacy default VM; deleting
+it never promotes another VM. Query selectors are accepted too; mismatches with
+the body are rejected. The existing project-wide job serialization remains.
+
+GET `/vm/ingress?vm_id=...` on the node adds `http_access.configured`,
+`access_ready` and `blocking_reasons` to worker routing state. Every GAP-owned
+`/apps/` URL requires visitor credentials through `/vm/http-access`. The worker
+alone cannot report that node-owned policy. A configured route is not a healthy
+application. See the [complete WordPress example](../../examples/wordpress/README.md).

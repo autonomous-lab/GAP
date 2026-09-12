@@ -1,0 +1,60 @@
+services:
+  database:
+    image: mariadb:11.4
+    restart: unless-stopped
+    env_file:
+      - path: ./runtime.env
+        format: raw
+    volumes:
+      - database:/var/lib/mysql
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+  wordpress:
+    build:
+      context: .
+      dockerfile: Dockerfile.wordpress
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    env_file:
+      - path: ./runtime.env
+        format: raw
+    environment:
+      WORDPRESS_CONFIG_EXTRA: "require '/opt/gap-wordpress/config.php';"
+    ports: ["8001:80"]
+    volumes:
+      - wordpress:/var/www/html
+    healthcheck:
+      test: [CMD, php, -r, "exit(is_file('/var/www/html/wp-config.php') && @fsockopen('127.0.0.1', 80) ? 0 : 1);"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+  install:
+    build:
+      context: .
+      dockerfile: Dockerfile.install
+    user: "33:33"
+    restart: unless-stopped
+    depends_on:
+      wordpress:
+        condition: service_healthy
+    env_file:
+      - path: ./runtime.env
+        format: raw
+    environment:
+      WORDPRESS_CONFIG_EXTRA: "require '/opt/gap-wordpress/config.php';"
+    entrypoint: [sh, /opt/gap-wordpress/install.sh]
+    volumes:
+      - wordpress:/var/www/html
+    healthcheck:
+      test: [CMD, test, -f, /tmp/wordpress-installed]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+volumes:
+  database: {}
+  wordpress: {}

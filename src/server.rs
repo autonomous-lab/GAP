@@ -7817,19 +7817,26 @@ pub fn route_with_ip(
         {
             return error_response(&error);
         }
-        let body = if method == "GET" {
-            let params = parse_url_params(raw_path);
-            match params.get("vm_id") {
-                Some(vm_id) if vm_id.strip_prefix("vm_").is_some_and(|id| id.len()==32 && id.bytes().all(|b| b.is_ascii_hexdigit())) => json!({"vm_id":vm_id}),
-                Some(_) => return (400,json!({"error":{"code":"invalid_vm_identity"}})),
-                None => body,
+        let mut body = body;
+        let params = parse_url_params(raw_path);
+        if let Some(vm_id) = params.get("vm_id") {
+            if !vm_id.strip_prefix("vm_").is_some_and(|id| id.len()==32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) {
+                return (400,json!({"error":{"code":"invalid_vm_identity"}}));
             }
-        } else { body };
+            if body.is_null() { body = json!({}); }
+            let Some(fields) = body.as_object_mut() else {
+                return (400,json!({"error":{"code":"invalid_request"}}));
+            };
+            if fields.get("vm_id").is_some_and(|v| v.as_str()!=Some(vm_id.as_str())) {
+                return (400,json!({"error":{"code":"conflicting_vm_identity"}}));
+            }
+            fields.insert("vm_id".into(), json!(vm_id));
+        }
         // Only submit/poll here: guest execution happens asynchronously on the
         // runner. No network call or Compose operation under the state lock.
         let owner_did = project.owner_did.clone();
         drop(guard);
-        let (status, value) = crate::private_node::forward(
+        let (status, mut value) = crate::private_node::forward(
             &runner,
             project_id,
             &owner_did,
@@ -7837,6 +7844,13 @@ pub fn route_with_ip(
             action,
             body,
         );
+        if status == 200 && method == "GET" && action == "ingress" {
+            if let Ok(guard) = state.lock() {
+                vm_http::describe_ingress(&guard, project_id, &owner_did, &mut value);
+            } else {
+                return (503,json!({"error":{"code":"state_unavailable"}}));
+            }
+        }
         // One moment of truth for VM-scoped state: the first time this node is
         // told the microVM is gone, its visitor credentials and custom domains
         // go with it, whether the deletion came from here or another client.

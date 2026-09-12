@@ -154,10 +154,18 @@ This covers the VM and its optional Compose stack without a restart. Historical
 
 For an operator-approved agent on a microVM-enabled node:
 
-1. Create the project and its microVM with `POST /vm`.
-2. Submit the Compose bundle to `POST /stack/releases`; poll its job.
-3. Enable `PUT /vm/ingress` for the guest port and use the returned
-   `https://gap.geta.team/apps/{project_id}/` URL.
+1. Create the project and its microVM; save the returned `vm_id`.
+2. POST `/vm/readiness` with `vm_id` and `request_id`, poll its job and wait for
+   `result.ready: true`. QEMU `running` alone does not mean Docker is ready.
+3. Submit the Compose bundle with `vm_id` to `POST /stack/releases`; poll its job.
+4. Configure visitor credentials with `PUT /vm/http-access`, then enable
+   `PUT /vm/ingress` for the guest port.
+5. Read `/vm/ingress?vm_id=...`, check `access_ready` and verify its exact URL
+   using visitor Basic Auth. Anonymous access requires a verified custom domain.
+
+[WordPress example](./examples/wordpress/README.md): a resumable script creates a
+separate VM, installs the database and CMS, protects and publishes it, then checks
+assets, REST and administrator login.
 
 Paths above are relative to `/v1/cloud/projects/{project_id}`. Configure the
 application's base path; root-relative links are not rewritten. Applications

@@ -692,8 +692,7 @@ affect host availability without resource safeguards.
 
 Each approved agent has a cumulative allocation quota of **1 VM, 2 vCPUs and 4096 MiB
 RAM by default**, shared across all its projects. Running, hibernated, stopped and partially
-created VMs count; destroying a VM releases its CPU/RAM allocation. Disk capacity
-has no agent quota in this version. Allocate the minimum your workload needs
+created VMs count; destroying a VM releases its CPU/RAM allocation. An optional operator disk allocation quota may also apply. Allocate the minimum your workload needs
 (default VM: 1 vCPU, 1024 MiB RAM, 8 GiB disk), measure usage, then resize only
 when necessary. Do not reserve the full quota for every project.
 
@@ -708,7 +707,7 @@ CPU/RAM resize and disk growth require **stop → PATCH /vm → start**. There i
 hot resource resize. Public port mappings and SSH keys can change while running.
 
 Humans can create a VM at `/microvms` after connecting their project with its
-owner token. The form defaults to 1 vCPU, 1024 MiB RAM, 8 GiB disk and stopped
+owner token. The form defaults to 1 vCPU, 1024 MiB RAM, 8 GiB disk and started
 state, with an optional SSH public key. The machine selector switches between VMs
 in the same project. New microVM creates another machine; Delete requires its
 complete VM ID and offers retained storage (still billed) or permanent erasure.
@@ -719,8 +718,14 @@ additional VMs in the same project or across that agent's projects on this node.
 `POST /v1/cloud/projects/{project}/vms` creates another VM with the same creation
 body and idempotent `request_id` as `/vm`. Select a VM for read operations with
 `?vm_id=vm_<32hex>` on `/vm`, `/vm/runtime`, `/vm/ingress`, `/vm/ports` or `/vm/ssh`.
-Mutations continue to require `vm_id` in their JSON body. Legacy `/vm` without
-a selector and `/stack` target the default VM. Additional VMs have separate
+Mutations continue to require `vm_id` in their JSON body. Legacy `/vm` and `/stack` without a selector target the default VM.
+For **every Compose POST** (`releases`, `start`, `stop`, `status`, `logs`), include
+`vm_id` beside `request_id` in the JSON body. A `?vm_id=...` query selector is
+also accepted; conflicting body/query IDs are rejected. The guest bundle itself
+still contains only `request_id`, `compose_file` and `files`: the worker consumes
+the VM selector before forwarding it. Deleting the default VM does not promote
+another VM. List `/vms` and select an existing VM explicitly; never recreate or
+delete a working VM just to obtain the default slot. Additional VMs have separate
 `/apps/{vm_id}/` ingress paths, SSH identities, disks and five-port allocations.
 The project balance, spending budget and 72-hour storage retention deadline are
 shared across its VMs. Deleting one VM leaves the others running.
@@ -842,7 +847,9 @@ python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" set-ports --map 1:22:
 # Poll each mutation before submitting the next.
 python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" set-ingress --guest-port 8000
 python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" start
-python3 scripts/microvm.py --project "$PROJECT" ssh
+# Poll start, then probe readiness and poll its job. Native apps need guest_ready.
+python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" readiness
+python3 scripts/microvm.py --project "$PROJECT" --vm "$VM" ssh
 # Connect using the returned command and verify its host fingerprint.
 ```
 
@@ -854,7 +861,9 @@ cd /root/www
 gap-env sh -c 'exec python3 -m http.server "$GAP_HTTP_PORT" --bind 0.0.0.0'
 ```
 
-It is served through `/apps/{project_id}/` with no container. This foreground
+Before visiting the URL, configure visitor credentials using the HTTP access
+step below. Read `/vm/ingress?vm_id=$VM` for the exact URL; additional VMs use
+`/apps/{vm_id}/`. No container is required. This foreground
 example ends with the session; use OpenRC or another process supervisor for a
 persistent service. For your own Rust/Go binary, upload it with SCP/SFTP, mark it
 executable and run `gap-env ./my-server`. Configure the program to listen on
@@ -870,7 +879,7 @@ runtime. MicroVM access requires operator approval, even on a
 public node. On the public deployment, only explicitly approved agents can use it.
 
 The complete flow is: create a project, create its microVM, deploy a Compose
-release, then enable its application route. No additional DNS record or TLS
+release, configure visitor Basic Auth, then enable its application route. No additional DNS record or TLS
 certificate is needed: visitors use `/apps/{project_id}/` on the existing node.
 
 ```bash
@@ -884,16 +893,44 @@ curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/vm" \
 export VM=vm_returned_by_the_job
 ```
 
-Deploy your bundle with `/stack/releases` as shown in the next section and poll
-that job. The app must listen on the guest port you intend to route, for example
+Wait for the explicit availability probe before deploying:
+
+```bash
+curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/vm/readiness" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"request_id\":\"$(openssl rand -hex 16)\",\"vm_id\":\"$VM\"}"
+# Poll /vm/jobs/{job_id}. result.ready must be true for Compose.
+# If false, wait two seconds and submit a new probe with a fresh request ID.
+# Bound this wait (for example 180 seconds); do not delete the VM on timeout.
+```
+
+`running` describes QEMU only. The readiness job returns `guest_ready` (the
+restricted SSH helper answered), `docker_ready`, `ready` and `reason`. A
+successful probe job can still have `ready: false`; inspect its result. The
+probe never starts/resumes a stopped/hibernated VM, installs anything or checks
+application health. Start or resume explicitly first. Native apps need guest
+readiness but do not require Docker. SSH authentication or host-key failures
+require operator diagnosis, not more RAM or repeated VM replacement.
+
+Deploy your bundle with `/stack/releases` and **`vm_id` in the JSON body** as
+shown in the next section and poll that job. The app must listen on the guest port you intend to route, for example
 `ports: ["8000:8000"]` in Compose. Once it is running, publish its route:
 
 ```bash
+# Set VISITOR_USER and a unique VISITOR_PASSWORD of 12-128 bytes first.
+# Required for ALL shared GAP /apps URLs. Use distinct visitor credentials,
+# never the owner bearer. Store the request securely if it contains a password.
+umask 077
+jq -n --arg vm "$VM" --arg user "$VISITOR_USER" --arg password "$VISITOR_PASSWORD" \
+  '{vm_id:$vm,username:$user,password:$password}' | \
+  curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/vm/http-access" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" --data-binary @-
+
 curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/vm/ingress" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d "{\"request_id\":\"22222222222222222222222222222222\",\"vm_id\":\"$VM\",\"enabled\":true,\"guest_port\":8000}"
 # Poll the returned job, then inspect the resulting URL:
-curl -s "$NODE/v1/cloud/projects/$PROJECT/vm/ingress" \
+curl -s "$NODE/v1/cloud/projects/$PROJECT/vm/ingress?vm_id=$VM" \
   -H "Authorization: Bearer $TOKEN"
 # -> url: https://gap.geta.team/apps/prj_<project-id>/
 #    base_path: /apps/prj_<project-id>/
@@ -904,8 +941,16 @@ HTTP methods, bodies, queries, streaming and WebSocket upgrades are forwarded.
 The gateway supplies `X-Forwarded-Prefix`; configure the app's public base path
 and cookie path, or use relative links. Root-relative assets and redirects are
 not automatically rewritten. Apps share the node's browser origin; keep owner
-bearers server-side. Publication is public: visitor login belongs to the app.
-The returned `routed` flag describes routing configuration, not app health.
+bearers server-side. The URL is reachable from the Internet but requires GAP visitor Basic Auth,
+separately from any application login. Anonymous access requires a verified
+custom domain. `routed` describes worker routing, `http_access.configured`
+describes visitor credentials, and `access_ready` combines both. Missing steps
+are listed in `blocking_reasons`. `application_health: "not_checked"` means an
+HTTP check is still required. With no visitor credentials, a configured route
+can return `https_route_unavailable`; do not keep changing the application port.
+
+For a complete, resumable example covering creation through administrator login,
+see [WordPress on GAP](./examples/wordpress/README.md).
 
 ### Manage the microVM and publication
 
@@ -929,8 +974,7 @@ releases. A stale VM ID cannot mutate a replacement VM.
 whole VM. VM stop/delete withdraws its route; restarting the same VM restores
 an enabled route. Named volumes survive stops, updates and VM resizing.
 Explicit data deletion is irreversible. Retained disks do not have an automated
-restore API. Approval revocation blocks management but does not stop running
-apps or remove visitor routes; operator containment is still required.
+restore API. Approval revocation fences VM execution and forwarding through the worker policy watchdog.
 
 ### Direct SSH and five public TCP/UDP ports
 
@@ -992,8 +1036,7 @@ numbers even when the disk is retained; a replacement VM receives a new host
 identity and does not inherit the old mappings or keys. Disabling a mapping or
 removing a key blocks new access but may leave established sessions alive.
 Guest root can independently modify sshd/keys; this API manages the supplied
-keys and is not a boundary against that VM's root. Revoking agent approval
-blocks management, not already published services or SSH sessions.
+keys and is not a boundary against that VM's root. Revoking agent approval fences execution and forwarding through the policy watchdog.
 
 The direct endpoints do not add TLS or visitor authentication to TCP/UDP
 services: configure those in your application. Guest `ports` from `POST/PATCH
@@ -1081,6 +1124,7 @@ They are not part of the native application workflow.
 ```json
 {
   "request_id": "0123456789abcdef0123456789abcdef",
+  "vm_id": "vm_returned_by_creation",
   "compose_file": "compose.yaml",
   "files": {
     "compose.yaml": "<base64-file-content>",
@@ -1100,8 +1144,9 @@ export REQUEST_ID=$(openssl rand -hex 16)
 COMPOSE_BASE64=$(base64 < compose.yaml | tr -d '\n')
 
 # Save this request before sending so a network retry uses identical input.
-jq -n --arg id "$REQUEST_ID" --arg source "$COMPOSE_BASE64" \
-  '{request_id:$id,compose_file:"compose.yaml",files:{"compose.yaml":$source}}' \
+umask 077
+jq -n --arg id "$REQUEST_ID" --arg vm "$VM" --arg source "$COMPOSE_BASE64" \
+  '{request_id:$id,vm_id:$vm,compose_file:"compose.yaml",files:{"compose.yaml":$source}}' \
   > compose-request.json
 
 curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/releases" \
@@ -1143,22 +1188,22 @@ All four are asynchronous POST operations and return a job to poll:
 # Start existing containers (not a redeploy).
 curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/start" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d "{\"request_id\":\"$(openssl rand -hex 16)\"}"
+  -d "{\"request_id\":\"$(openssl rand -hex 16)\",\"vm_id\":\"$VM\"}"
 
 # Stop app containers; preserve guest, containers and volumes.
 curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/stop" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d "{\"request_id\":\"$(openssl rand -hex 16)\"}"
+  -d "{\"request_id\":\"$(openssl rand -hex 16)\",\"vm_id\":\"$VM\"}"
 
 # Run Docker Compose ps --all --format json inside the guest.
 curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/status" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d "{\"request_id\":\"$(openssl rand -hex 16)\"}"
+  -d "{\"request_id\":\"$(openssl rand -hex 16)\",\"vm_id\":\"$VM\"}"
 
 # Fetch bounded recent output: Docker Compose logs --tail 200.
 curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/logs" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d "{\"request_id\":\"$(openssl rand -hex 16)\"}"
+  -d "{\"request_id\":\"$(openssl rand -hex 16)\",\"vm_id\":\"$VM\"}"
 ```
 
 Use a fresh id for a new operation; **save and reuse the original id/body when
@@ -1186,7 +1231,7 @@ deletion are available through `/vm`; see the [VM API](./runtime/compose/README.
 Apps publish at `https://gap.geta.team/apps/{project_id}/` through
 `GET/PUT /vm/ingress`, using the existing DNS and TLS certificate.
 See [setup, API and base-path contract](./runtime/compose/README.md#application-paths-on-the-existing-gap-origin).
-Custom customer app domains, rollback, backup and HA are **not implemented**.
+Verified custom app domains are supported (see below). Automatic rollback, backup and fleet HA are not implemented.
 Public TCP/UDP forwarding is available through the five microVM port slots. Your `ports:` publishes
 on the guest, not automatically on the GAT host. Approval revocation blocks management/admission and fences running microVMs
 through the worker policy watchdog. Agent suspension additionally blocks the

@@ -10,6 +10,22 @@ pub(super) struct Record {
 impl Record {
     fn public(&self)->Value {json!({"vm_id":self.vm_id,"basic_auth_required":true,"configured":self.password_hash.is_some(),"username":self.username,"password_recoverable":self.password_sealed.is_some()})}
 }
+/// Combine worker routing state with the node-owned visitor access policy.
+pub(super) fn describe_ingress(g:&NodeState, project:&str, owner:&str, value:&mut Value) {
+    let Some(vm) = value["vm_id"].as_str() else {return};
+    let configured = g.vm_http.get(vm).is_some_and(|r|
+        r.project_id==project && r.owner_did==owner && r.password_hash.is_some() && r.username.is_some()
+        && value["base_path"].as_str()==Some(format!("/apps/{}/",r.route_key).as_str()));
+    let routed = value["routed"].as_bool()==Some(true);
+    value["http_access"] = json!({"basic_auth_required":true,"configured":configured,
+        "configuration_endpoint":format!("/v1/cloud/projects/{project}/vm/http-access")});
+    value["access_ready"] = json!(routed && configured);
+    value["application_health"] = json!("not_checked");
+    value["blocking_reasons"] = json!(
+        [(!routed).then_some("ingress_not_routed"), (!configured).then_some("visitor_credentials_not_configured")]
+            .into_iter().flatten().collect::<Vec<_>>());
+}
+
 fn valid_vm(v:&str)->bool {v.strip_prefix("vm_").is_some_and(|v|v.len()==32 && v.bytes().all(|b|b.is_ascii_hexdigit()))}
 fn save_record(g:&mut NodeState,r:&Record)->Result<()> {
     let conflicts:Vec<_>=g.vm_http.values().filter(|old|old.route_key==r.route_key && old.vm_id!=r.vm_id).cloned().collect();
@@ -158,6 +174,25 @@ pub fn admit_vm_http(state:&Arc<Mutex<NodeState>>,secret:&str,host:&str,path:&st
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ingress_reports_missing_credentials_and_never_claims_health() {
+        let mut state=NodeState::new(Box::new(crate::storage::sqlite::SqliteStorage::open(":memory:").unwrap()));
+        let mut value=json!({"vm_id":"vm_test","base_path":"/apps/prj_test/","routed":true});
+        describe_ingress(&state,"prj_test","owner",&mut value);
+        assert_eq!(value["access_ready"],false);
+        assert_eq!(value["blocking_reasons"],json!(["visitor_credentials_not_configured"]));
+        let record=Record{vm_id:"vm_test".into(),project_id:"prj_test".into(),owner_did:"owner".into(),route_key:"prj_test".into(),username:Some("visitor".into()),password_hash:Some("sensitive".into()),password_sealed:None};
+        state.vm_http.insert("vm_test".into(),record);
+        describe_ingress(&state,"prj_test","owner",&mut value);
+        assert_eq!(value["access_ready"],true);
+        assert_eq!(value["application_health"],"not_checked");
+        assert!(!value.to_string().contains("sensitive"));
+        describe_ingress(&state,"prj_test","other",&mut value);
+        assert_eq!(value["access_ready"],false);
+        value["routed"]=json!(false);
+        describe_ingress(&state,"prj_test","owner",&mut value);
+        assert_eq!(value["access_ready"],false);
+    }
     #[test]
     fn canonical_path_cannot_introduce_a_second_decode_or_header() {
         assert_eq!(encode_path("/hello world/%2e%2e/?#\r\n"),"/hello%20world/%252e%252e/%3F%23%0D%0A");
