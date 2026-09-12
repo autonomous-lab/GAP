@@ -58,10 +58,12 @@ class Ledger:
                 payload TEXT NOT NULL, created REAL NOT NULL);
             ''')
             finance.schema(db)
+            from wallet_migration import schema
+            schema(db)
             if not db.in_transaction: db.execute('BEGIN IMMEDIATE')
             self.compact_legacy(db)
             finance.initialize(db,self.clock())
-            self.fenced_projects={r[0] for r in db.execute('SELECT project FROM fleet_bindings')}
+            self.fenced_projects={r[0] for r in db.execute('SELECT project FROM fleet_bindings UNION SELECT project FROM wallet_migrations')}
         Path(self.path).chmod(0o600)
 
     def fleet_allows(self,project):
@@ -133,6 +135,8 @@ class Ledger:
     def ensure(self, db, project, owner):
         if not re.fullmatch(r'prj_[0-9a-f]{24}', project) or not re.fullmatch(r'did:gap:[0-9a-f]{64}', owner):
             raise BillingError('invalid_billing_identity')
+        if db.execute("SELECT 1 FROM wallet_migrations WHERE project=? AND state='fenced'",(project,)).fetchone():
+            raise BillingError('legacy_wallet_fenced')
         if db.execute('SELECT 1 FROM fleet_bindings WHERE project=?',(project,)).fetchone() and not self.fleet_allows(project):
             raise BillingError('fleet_configuration_required')
         db.execute('INSERT OR IGNORE INTO accounts(project,owner) VALUES(?,?)', (project,owner))

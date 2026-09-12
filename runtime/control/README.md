@@ -434,8 +434,10 @@ The account authority accepts an explicit connection from a node's identity
 gateway. `POST /v1/fleet/connect` on the project node takes the existing local
 owner bearer and `{ "request_id": "unique-operation", "project_id": "prj_..." }`.
 The node checks project ownership, suspension and its durable verified-email
-record before contacting the authority. An unverified legacy identity must first
-complete the separate verified-email migration; this endpoint cannot invent a proof.
+record before contacting the authority. An unverified legacy identity first uses
+`POST /v1/identity/email` and `/v1/identity/email/verify` with its existing bearer.
+The one-use code is bound to that DID; successful verification preserves its DID,
+bearer, projects and balances. No existing verified address is silently replaced.
 
 The authority associates the verified email with one customer per operator and
 pins each agent to its source node. Email case is normalized; aliases and plus
@@ -510,3 +512,55 @@ Validation: `python3 -m unittest discover -s runtime/control -p 'test_*.py'`;
 `GAP_TEST_BINARY=/path/to/gap-node python3 runtime/control/access_integration.py`
 starts two isolated real nodes, an authority and a local SMTP sink. No email leaves
 the fixture and no production database or wallet is used.
+
+## Legacy wallet migration with a durable source fence
+
+This migration path is limited to projects with **no VM assets**: no running,
+stopped or hibernated VM and no retained disk. It never deletes or stops workloads
+to make a project eligible. Projects with assets need a separate capacity/storage
+migration. Billing must be enforced, historical estimated and debited usage must
+agree, and no storage-deletion claim may exist. Reconcile discrepancies explicitly.
+
+First attach the verified owner and project to the correct operator customer.
+Back up the control SQLite database, worker ledger, capacity database and private
+configuration using SQLite's backup API. Do not copy a live database without WAL.
+Then use these private worker operations via `scripts/microvm-billing.py`:
+
+1. `prepare-wallet-migration --project prj_... --owner did:gap:...` persists a
+   capacity fence before a money fence. The result contains an immutable
+   `transfer_id`, final `snapshot`, and `snapshot_digest`. No money is credited.
+   Local spending, top-ups, budget changes and retention deletion are blocked.
+2. Review the exact snapshot. POST `/operator` to the control authority with
+   `action: "authorize-wallet-import"`, a unique `request_id`, and the returned
+   `node_id`, `project_id`, `owner_did`, `transfer_id`, `snapshot`, `snapshot_digest`.
+   This records approval of that exact amount; it still credits nothing.
+3. `commit-wallet-migration --project prj_... --owner did:gap:...` asks the authority
+   to apply the authorized transfer. Worker credentials alone cannot create a new
+   import or change an approved amount. Credit and historical spent totals are
+   applied once, even after a lost reply or concurrent retries. The worker then
+   zeros its frozen local balance and records the receipt and historical baselines.
+4. Add the project to that worker's `fleet_billing.projects` and restart the worker
+   after verifying the host has no active VMs/jobs. The next allowance comes from
+   the shared wallet. Historical usage is not charged again; fractional carries,
+   budget counters and local financial history are preserved.
+
+`wallet-migration-status` reads the durable source state. Repeating prepare/commit
+reuses the original generation. If the authority credits the import but its reply
+is lost, the source stays fenced until the same commit succeeds; never compensate
+with a manual top-up or a second import. These fences do not expire and survive
+removing the fleet configuration. The capacity fence also survives disabling the
+serverless runtime. Preparation is an explicit cutover operation, with no automatic
+cancel/unfence endpoint. A failure between the capacity and money fences is safe
+to retry and has not credited money.
+
+The transfer is recorded as `legacy_transfer`, not new cash or promotional funding.
+Staged inventory remains audit data and is excluded from the pending amount once
+the actual source transfer is credited. After a committed import, **do not restore
+an old source ledger or downgrade the worker independently of the authority**:
+doing so would restore previously transferred spending rights or replay historical
+usage. Recovery must preserve both the credited central record and the source fence.
+
+The isolated `runtime/compose/wallet_migration_kvm_test.py` acceptance test migrates
+a funded fixture wallet, loses the credit acknowledgement, restores the ledger,
+and then runs the real VM lifecycle and quota/partition tests. It preserves the
+historical spend baseline and never mounts production catalogs or credit databases.

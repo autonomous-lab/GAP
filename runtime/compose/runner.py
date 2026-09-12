@@ -529,6 +529,9 @@ class Runner:
         if not self.runtime: raise Failure(409,'serverless_not_configured')
         ledger=self.runtime.ledger
         action=body.get('action')
+        if action in ('prepare-wallet-migration','commit-wallet-migration','wallet-migration-status'):
+            from wallet_migration import operate
+            return operate(self,action,body['project_id'],body['owner_did'])
         if action=='pricing': return ledger.pricing()
         if action=='finance':return ledger.finance_report(body['start'],body['end'],body.get('project_id'))
         if action=='set-costs':return ledger.finance_costs(body['costs'],body['expected_version'])

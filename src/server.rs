@@ -7786,6 +7786,39 @@ pub fn route_with_ip(
         return (200,json!({"verification_required":guard.registration.is_some()}));
     }
 
+    if matches!(path,"/v1/identity/email"|"/v1/identity/email/verify") {
+        let did=match guard.agent_by_token(token.unwrap_or("")) {
+            Ok(agent)=>agent.identity.did().to_string(),Err(e)=>return error_response(&e),
+        };
+        let existing=match guard.storage.get_state("cloud_verified_agent_emails",&did) {
+            Ok(value)=>value,Err(_)=>return (503,json!({"error":{"code":"verified_identity_unavailable"}})),
+        };
+        if method=="GET" && path=="/v1/identity/email" {return (200,json!({"did":did,"email_verified":existing.is_some()}))}
+        if method!="POST" {return (405,json!({"error":{"code":"method_not_allowed"}}))}
+        if existing.is_some(){return (409,json!({"error":{"code":"email_already_verified"}}))}
+        let Some(registration)=guard.registration.clone() else {return (409,json!({"error":{"code":"email_verification_not_configured"}}))};
+        if let Err(e)=guard.check_rate_limit(token,client_ip) {return error_response(&e)}
+        drop(guard);
+        if path=="/v1/identity/email" {
+            return match registration.request_link(body["email"].as_str().unwrap_or(""),client_ip.unwrap_or("unknown"),now_unix(),&did) {
+                Ok(v)=>(202,v),Err(e)=>e.response(),
+            };
+        }
+        let email=match registration.verify_link(body["challenge_id"].as_str().unwrap_or(""),body["code"].as_str().unwrap_or(""),now_unix(),&did) {
+            Ok(email)=>email,Err(e)=>return e.response(),
+        };
+        let mut guard=match state.lock(){Ok(g)=>g,Err(_)=>return (503,json!({"error":{"code":"verified_identity_unavailable"}}))};
+        let result=(||->Result<Value> {
+            // Revalidate after delivery/verification outside the state lock.
+            if guard.agent_by_token(token.unwrap_or(""))?.identity.did().to_string()!=did {return Err(Error::Unauthorized("identity changed".into()))}
+            if guard.storage.get_state("cloud_verified_agent_emails",&did)?.is_some(){return Err(Error::Other("email_already_verified".into()))}
+            guard.storage.upsert_state(&crate::storage::StateRecord{scope:"cloud_verified_agent_emails".into(),key:did.clone(),
+                value:json!({"email":email,"verified_at":now_unix()}).to_string(),updated_at:now_unix()})?;
+            Ok(json!({"did":did,"email_verified":true}))
+        })();
+        return match result{Ok(v)=>(200,v),Err(_)=>(503,json!({"error":{"code":"verified_identity_unavailable","message":"Request a fresh verification code and retry."}}))};
+    }
+
     if method == "POST" && matches!(path, "/v1/identity" | "/v1/identity/verify") {
         if let Some(registration) = guard.registration.clone() {
             if guard.private_node.as_ref().is_some_and(|policy| policy.private)

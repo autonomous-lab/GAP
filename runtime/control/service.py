@@ -63,8 +63,9 @@ class Application:
                 row = db.execute("SELECT value FROM metadata WHERE key='operator'").fetchone()
                 if not row or row[0] != self.authority.operator:
                     raise Failure('authority_unavailable', 503)
+                migrated = db.execute("SELECT count(*) FROM wallet_imports WHERE state='credited'").fetchone()[0]
             return {'ok': True, 'operator_id': self.authority.operator, 'phase': 'reservations',
-                    'legacy_cutover': False, 'worker_metering_mode': 'opt_in',
+                    'legacy_cutover': migrated > 0, 'wallet_migration_protocol': 1, 'worker_metering_mode': 'opt_in',
                     'reservation_protocol': 1, 'reservations_enabled': self.allow_reservations,
                     'capacity_protocol': 2, 'capacity_enabled': self.allow_capacity,
                     'worker_capacity_enforcement': 'explicit_project_opt_in',
@@ -99,6 +100,9 @@ class Application:
                 return a.topup('operator', request, body['customer_id'], body['amount_microcredits'], body['source'])
             if action == 'stage-import':
                 return a.stage_import('operator', request, body['customer_id'], body['node_id'], body['project_id'], body['snapshot'])
+            if action == 'authorize-wallet-import':
+                from wallet_import import authorize
+                return authorize(a,request,body['node_id'],body['project_id'],body['owner_did'],body['transfer_id'],body['snapshot'],body['snapshot_digest'])
             if action == 'wallet':
                 return a.wallet(body['customer_id'])
             if action == 'quotas':
@@ -117,6 +121,9 @@ class Application:
         if method == 'POST' and parsed.path == '/node':
             if kind != 'node':
                 raise Failure('node_credentials_required', 403)
+            if body.get('action') == 'wallet-import':
+                from wallet_import import receive
+                return receive(a,actor,body['request_id'],body['project_id'],body['owner_did'],body['transfer_id'],body['snapshot_digest'])
             if body.get('action') in ('capacity-get', 'capacity-prepare', 'capacity-finish', 'capacity-cancel-create', 'capacity-abort-resize'):
                 if not self.allow_capacity:
                     raise Failure('capacity_disabled', 409)

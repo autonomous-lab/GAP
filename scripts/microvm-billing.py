@@ -42,7 +42,7 @@ def main():
     price=sub.add_parser('set-pricing')
     price.add_argument('--mode',choices=('shadow','enforced'),required=True)
     price.add_argument('--tariff-file',help='JSON: version and five microcredit unit prices (legacy GiB or commercial GB/730-hour month)')
-    for action in ('account','topup'):
+    for action in ('account','topup','prepare-wallet-migration','commit-wallet-migration','wallet-migration-status'):
         command=sub.add_parser(action)
         command.add_argument('--project',required=True)
         command.add_argument('--owner',required=True)
@@ -74,7 +74,7 @@ def main():
     if args.action=='set-pricing':
         body['mode']=args.mode
         if args.tariff_file: body['tariff']=json.loads(Path(args.tariff_file).read_text())
-    if args.action in ('account','topup'): body.update(project_id=args.project,owner_did=args.owner)
+    if args.action in ('account','topup','prepare-wallet-migration','commit-wallet-migration','wallet-migration-status'): body.update(project_id=args.project,owner_did=args.owner)
     if args.action=='topup': body.update(amount_microcredits=args.amount_microcredits,request_id=args.request_id)
     token=Path(args.token_file).read_text().strip()
     req=urllib.request.Request(args.endpoint,data=json.dumps(body).encode(),

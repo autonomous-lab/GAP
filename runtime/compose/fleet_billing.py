@@ -120,7 +120,8 @@ class FleetLedger(Ledger):
                 row=db.execute('SELECT * FROM fleet_bindings WHERE project=?',(project,)).fetchone()
                 pending=json.loads(row['pending']) if row['pending'] else dict(action='checkpoint',request_id=uuid.uuid4().hex,
                     project_id=project,owner_did=owner,reservation_id=row['reservation'],
-                    consumed_microcredits=account['spent'],unpaid_microcredits=max(0,account['estimated']-account['spent']),
+                    consumed_microcredits=account['spent']-row['legacy_spent'],
+                    unpaid_microcredits=max(0,(account['estimated']-row['legacy_estimated'])-(account['spent']-row['legacy_spent'])),
                     target_microcredits=self.target,lease_seconds=self.lease_seconds)
                 encoded=json.dumps(pending,sort_keys=True)
                 db.execute('UPDATE fleet_bindings SET pending=? WHERE project=?',(encoded,project))

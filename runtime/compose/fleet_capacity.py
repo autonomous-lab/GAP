@@ -66,6 +66,19 @@ class Capacity:
             db.execute('INSERT INTO bindings VALUES(?,?,?,?)',(project,owner,self.config['operator_id'],self.config['node_id']))
         self.bound.add(project)
 
+    def fence_legacy_wallet(self, project, owner, config):
+        if not re.fullmatch(r'prj_[0-9a-f]{24}',project) or not re.fullmatch(r'did:gap:[0-9a-f]{64}',owner):
+            raise VMError('invalid_migration_identity')
+        with self.db() as db:
+            old=db.execute('SELECT * FROM bindings WHERE project=?',(project,)).fetchone()
+            expected=(owner,config['operator_id'],config['node_id'])
+            if old and (old['owner'],old['operator'],old['node'])!=expected:
+                raise VMError('fleet_capacity_binding_mismatch')
+            if any(m['state']!='destroyed' for m in self.manager.list(project,owner)):
+                raise VMError('legacy_vm_capacity_migration_required')
+            db.execute('INSERT OR IGNORE INTO bindings VALUES(?,?,?,?)',(project,*expected))
+        self.bound.add(project)
+
     def put(self, record):
         with self.db() as db:
             db.execute('INSERT OR REPLACE INTO intents VALUES(?,?,?,?)',

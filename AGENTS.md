@@ -54,6 +54,15 @@ be renewed, including when used with a dashboard browser session. Logout through
 five minutes. Operator accounts and credentials are independent across operators.
 
 Keep the returned API `token` server-side and use `Authorization: Bearer <token>`.
+
+Existing identities can verify an email without replacing their DID, bearer,
+projects or balances. Use the existing local bearer on `GET /v1/identity/email`
+to check status. `POST /v1/identity/email` with `{"email":"you@example.com"}`
+sends a one-use code; `POST /v1/identity/email/verify` with `challenge_id` and
+`code` attaches the verified address. The code is bound to that existing DID and
+cannot be used for signup or another DID. A verified address cannot be replaced
+through this endpoint. Existing tokens remain valid during the transition.
+
 Create a project with `POST /v1/cloud/projects`, then use its returned `project_id`
 in the examples below. Never expose the owner bearer in deployed browser code.
 

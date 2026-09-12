@@ -91,6 +91,8 @@ class Authority:
             ):
                 db.execute(sql)
             db.execute("INSERT OR IGNORE INTO metadata VALUES('operator',?)", (operator,))
+            from wallet_import import schema
+            schema(db)
             if db.execute("SELECT value FROM metadata WHERE key='operator'").fetchone()[0] != operator:
                 raise Failure('operator_database_mismatch', 409)
 
@@ -477,7 +479,7 @@ class Authority:
     def wallet(self, customer):
         with self.db() as db:
             row = self.customer(db, customer)
-            pending = list(db.execute('SELECT source,project,payload FROM imports WHERE customer=?', (customer,)))
+            pending = list(db.execute("SELECT source,project,payload FROM imports i WHERE customer=? AND NOT EXISTS (SELECT 1 FROM wallet_imports m WHERE m.node=i.source AND m.project=i.project AND m.state='credited')", (customer,)))
             reserved = db.execute('SELECT coalesce(sum(allocated-consumed),0) FROM reservations WHERE customer=? AND closed=0', (customer,)).fetchone()[0]
             return dict(operator_id=self.operator, customer_id=customer, balance_microcredits=row['balance'],
                         reserved_microcredits=reserved, total_remaining_microcredits=row['balance']+reserved,

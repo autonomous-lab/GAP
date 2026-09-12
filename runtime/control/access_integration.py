@@ -73,15 +73,37 @@ class FleetIdentityIntegration(unittest.TestCase):
                         time.sleep(.05)
                     self.fail('isolated node startup timeout')
                 proc=start()
-                status,challenge=request(base,'/v1/identity',body={'email':'same-owner@example.com'})
+                legacy=node=='node-one'
+                if legacy:
+                    # Create an old identity while verification is disabled,
+                    # then enable it without replacing the existing DID/token.
+                    proc.terminate();proc.wait(timeout=10);env['GAP_EMAIL_VERIFICATION_REQUIRED']='0';proc=start()
+                    status,identity=request(base,'/v1/identity',body={});self.assertEqual(status,200)
+                    _,other_identity=request(base,'/v1/identity',body={})
+                    status,project=request(base,'/v1/cloud/projects',identity['token'],{});self.assertEqual(status,200)
+                    proc.terminate();proc.wait(timeout=10);env['GAP_EMAIL_VERIFICATION_REQUIRED']='1';proc=start()
+                    self.assertFalse(request(base,'/v1/identity/email',identity['token'])[1]['email_verified'])
+                    self.assertEqual(request(base,'/v1/fleet/connect',identity['token'],{'project_id':project['project_id'],'request_id':'before-proof'})[0],403)
+                endpoint='/v1/identity/email' if legacy else '/v1/identity'
+                status,challenge=request(base,endpoint,identity['token'] if legacy else None,body={'email':'same-owner@example.com'})
                 self.assertEqual(status,202,challenge)
                 message=email.message_from_bytes(smtp.messages.get(timeout=5))
                 text=''.join(p.get_payload(decode=True).decode() for p in message.walk() if p.get_content_type()=='text/plain')
                 code=re.search(r'\b([0-9]{6})\b',text).group(1)
-                status,identity=request(base,'/v1/identity/verify',body={'challenge_id':challenge['challenge_id'],'code':code})
-                self.assertEqual(status,201,identity)
-                status,project=request(base,'/v1/cloud/projects',identity['token'],{})
-                self.assertEqual(status,200,project)
+                proof={'challenge_id':challenge['challenge_id'],'code':code}
+                if legacy:
+                    self.assertIn(identity['did'],text)
+                    self.assertEqual(request(base,'/v1/identity/email/verify',other_identity['token'],proof)[0],400)
+                    self.assertEqual(request(base,'/v1/identity/verify',body=proof)[0],400)
+                    status,linked_identity=request(base,'/v1/identity/email/verify',identity['token'],proof)
+                    self.assertEqual(status,200,linked_identity);self.assertEqual(linked_identity['did'],identity['did'])
+                    self.assertEqual(request(base,'/v1/identity/email/verify',identity['token'],proof)[0],409)
+                    self.assertEqual(request(base,'/v1/cloud/projects',identity['token'])[1]['projects'][0]['project_id'],project['project_id'])
+                else:
+                    status,identity=request(base,'/v1/identity/verify',body=proof)
+                    self.assertEqual(status,201,identity)
+                    status,project=request(base,'/v1/cloud/projects',identity['token'],{})
+                    self.assertEqual(status,200,project)
                 status,linked=request(base,'/v1/fleet/connect',identity['token'],{'project_id':project['project_id'],'request_id':uuid.uuid4().hex})
                 self.assertEqual(status,200,linked)
                 nodes.append(dict(base=base,identity=identity,project=project['project_id'],linked=linked,proc=proc,start=start,env=env))

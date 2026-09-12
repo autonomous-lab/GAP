@@ -116,6 +116,11 @@ impl Registration {
             CREATE INDEX IF NOT EXISTS email_challenge_ip ON email_challenges(ip_key,created);",
         )
         .map_err(unavailable)?;
+        let columns:Vec<String>=db.prepare("PRAGMA table_info(email_challenges)").map_err(unavailable)?
+            .query_map([],|r|r.get(1)).map_err(unavailable)?.collect::<std::result::Result<_,_>>().map_err(unavailable)?;
+        if !columns.iter().any(|c|c=="context") {
+            db.execute("ALTER TABLE email_challenges ADD COLUMN context TEXT NOT NULL DEFAULT ''",[]).map_err(unavailable)?;
+        }
         Ok(Self {
             db: Mutex::new(db),
             key,
@@ -152,7 +157,11 @@ impl Registration {
             address.domain().to_ascii_lowercase()
         ))
     }
+    #[cfg(test)]
     fn prepare(&self, email: &str, ip: &str, now: u64) -> Result<(String, String, String)> {
+        self.prepare_for(email,ip,now,"")
+    }
+    fn prepare_for(&self, email: &str, ip: &str, now: u64, context:&str) -> Result<(String, String, String)> {
         let now = i64::try_from(now).map_err(unavailable)?;
         let email = Self::email(email)?;
         let email_key = hex::encode(self.digest("email-rate", &email.to_ascii_lowercase()));
@@ -178,23 +187,33 @@ impl Registration {
         rand::rngs::OsRng.fill_bytes(&mut bytes);
         let id = hex::encode(bytes);
         let code = format!("{:06}", rand::rngs::OsRng.gen_range(0..1_000_000u32));
-        let digest = self.digest("code", &format!("{id}:{code}"));
+        let digest = self.digest("code", &Self::code_message(&id,&code,context));
         // The previous challenge stops working when a new one is requested.
         tx.execute(
             "UPDATE email_challenges SET consumed=1 WHERE email_key=?",
             [&email_key],
         )
         .map_err(unavailable)?;
-        tx.execute("INSERT INTO email_challenges(id,email,email_key,ip_key,digest,created) VALUES(?,?,?,?,?,?)",
-            params![id,email,email_key,ip_key,digest,now]).map_err(unavailable)?;
+        tx.execute("INSERT INTO email_challenges(id,email,email_key,ip_key,digest,created,context) VALUES(?,?,?,?,?,?,?)",
+            params![id,email,email_key,ip_key,digest,now,context]).map_err(unavailable)?;
         tx.commit().map_err(unavailable)?;
         Ok((id, email, code))
     }
     pub fn request(&self, email: &str, ip: &str, now: u64) -> Result<Value> {
-        let (id, email, code) = self.prepare(email, ip, now)?;
+        self.request_for(email,ip,now,"")
+    }
+    pub fn request_link(&self,email:&str,ip:&str,now:u64,did:&str)->Result<Value> {
+        self.request_for(email,ip,now,did)
+    }
+    fn code_message(id:&str,code:&str,context:&str)->String {
+        if context.is_empty(){format!("{id}:{code}")}else{format!("{id}:{context}:{code}")}
+    }
+    fn request_for(&self,email:&str,ip:&str,now:u64,context:&str)->Result<Value> {
+        let (id, email, code) = self.prepare_for(email, ip, now,context)?;
+        let purpose=if context.is_empty(){String::new()}else{format!("Attach this email to existing GAP identity: {context}\n")};
         let message = Message::builder().from(self.from.clone()).to(email.parse().map_err(unavailable)?)
             .subject("Your GAP verification code")
-            .body(format!("Your GAP verification code is: {code}\n\nRequested for: {}\nThis code expires in 10 minutes and can be used once.\nIf you did not request it, ignore this email.\nNever share this code with anyone.\n", self.origin))
+            .body(format!("Your GAP verification code is: {code}\n\nRequested for: {}\n{purpose}This code expires in 10 minutes and can be used once.\nIf you did not request it, ignore this email.\nNever share this code with anyone.\n", self.origin))
             .map_err(unavailable)?;
         // No global NodeState lock is held during network I/O.
         self.smtp
@@ -208,6 +227,12 @@ impl Registration {
         Ok(json!({"verification_required":true,"challenge_id":id,"expires_in":600}))
     }
     pub fn verify(&self, id: &str, code: &str, now: u64) -> Result<String> {
+        self.verify_for(id,code,now,"")
+    }
+    pub fn verify_link(&self,id:&str,code:&str,now:u64,did:&str)->Result<String> {
+        self.verify_for(id,code,now,did)
+    }
+    fn verify_for(&self, id: &str, code: &str, now: u64, context:&str) -> Result<String> {
         if id.len() != 64
             || !id.bytes().all(|b| b.is_ascii_hexdigit())
             || code.len() != 6
@@ -221,7 +246,7 @@ impl Registration {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(unavailable)?;
         let found: Option<(String,Vec<u8>,i64,u32,bool,bool)> = tx.query_row(
-            "SELECT email,digest,created,attempts,ready,consumed FROM email_challenges WHERE id=?", [id],
+            "SELECT email,digest,created,attempts,ready,consumed FROM email_challenges WHERE id=? AND context=?", params![id,context],
             |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(unavailable)?;
         let Some((email, digest, created, attempts, ready, consumed)) = found else {
             return Err(invalid());
@@ -236,7 +261,7 @@ impl Registration {
         }
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.key).expect("HMAC key length");
         mac.update(b"gap-email-verification-v1\0code\0");
-        mac.update(format!("{id}:{code}").as_bytes());
+        mac.update(Self::code_message(id,code,context).as_bytes());
         let valid = mac.verify_slice(&digest).is_ok();
         tx.execute(
             "UPDATE email_challenges SET attempts=attempts+1,consumed=? WHERE id=?",
@@ -271,6 +296,18 @@ mod tests {
             .unwrap()
             .execute("UPDATE email_challenges SET ready=1 WHERE id=?", [id])
             .unwrap();
+    }
+    #[test]
+    fn linking_challenges_are_bound_to_identity_and_cannot_create_another_identity() {
+        let s=service();
+        let (id,_,code)=s.prepare_for("owner@example.com","ip",100,"did:gap:one").unwrap();ready(&s,&id);
+        assert!(s.verify(&id,&code,101).is_err());
+        assert!(s.verify_link(&id,&code,101,"did:gap:two").is_err());
+        assert_eq!(s.verify_link(&id,&code,101,"did:gap:one").unwrap(),"owner@example.com");
+        assert!(s.verify_link(&id,&code,101,"did:gap:one").is_err());
+        let (id,_,code)=s.prepare("new@example.com","ip",200).unwrap();ready(&s,&id);
+        assert!(s.verify_link(&id,&code,201,"did:gap:one").is_err());
+        assert!(s.verify(&id,&code,201).is_ok());
     }
     #[test]
     fn one_use_expiry_attempts_delivery_and_reissue() {
