@@ -361,7 +361,7 @@ class Integration(unittest.TestCase):
                 self.assertFalse(request('GET', prefix + '/ingress', token)[1]['routed'])
                 with self.assertRaises(urllib.error.HTTPError) as disabled:
                     app_request()
-                self.assertEqual(disabled.exception.code, 401)
+                self.assertEqual(disabled.exception.code, 404)
                 operation('PUT', '/ingress', {**identity, 'enabled': True, 'guest_port': 8000})
             self.assertEqual(len(persisted), 36)
             operation("POST", "/vm/stop", identity)

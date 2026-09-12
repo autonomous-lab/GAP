@@ -111,7 +111,16 @@ class Ingress:
                     match['header']['X-GAP-VM-Admission']=[self.admission_token]
         else:
             routes=[]; applied=set()
-        routes.append({'handle': [{'handler':'static_response','status_code':401,'headers':{'WWW-Authenticate':['Basic realm="GAP microVM"']}}]})
+        if self.admission_token:
+            routes.append({'match': [{'header': {'X-GAP-VM-Admission': [self.admission_token]}}],
+                           'handle': [{'handler': 'static_response', 'status_code': 404,
+                                       'headers': {'Content-Type': ['application/json'], 'Cache-Control': ['no-store']},
+                                       'body': json.dumps({'error': {'code': 'https_route_unavailable',
+                                           'message': 'HTTPS routing is unavailable. Configure and enable an application port in the MicroVM dashboard.'}})}],
+                           'terminal': True})
+        # Only the public edge challenges credentials. A missing private route
+        # must never start another browser Basic Auth prompt after admission.
+        routes.append({'handle': [{'handler': 'static_response', 'status_code': 403}]})
         config = {'admin': {'listen': 'unix/' + self.admin_socket},
                   'apps': {'http': {'servers': {'compose': {
                       'listen': [':' + str(self.http_port)],

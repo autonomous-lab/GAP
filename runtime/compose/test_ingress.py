@@ -56,7 +56,18 @@ class IngressTests(unittest.TestCase):
         closed = Ingress(config, self.manager)
         routes, applied = closed.configuration()
         self.assertEqual(applied, set())
-        self.assertEqual(routes['apps']['http']['servers']['compose']['routes'][0]['handle'][0]['status_code'], 401)
+        self.assertEqual(routes['apps']['http']['servers']['compose']['routes'][0]['handle'][0]['status_code'], 403)
+
+    def test_unconfigured_route_does_not_challenge_valid_credentials(self):
+        config, applied = self.ingress.configuration()
+        self.assertEqual(applied, set())
+        routes = config['apps']['http']['servers']['compose']['routes']
+        self.assertEqual(routes[-2]['match'][0]['header']['X-GAP-VM-Admission'], ['ab' * 32])
+        response = routes[-2]['handle'][0]
+        self.assertEqual(response['status_code'], 404)
+        self.assertEqual(json.loads(response['body'])['error']['code'], 'https_route_unavailable')
+        self.assertNotIn('WWW-Authenticate', response['headers'])
+        self.assertEqual(routes[-1]['handle'][0]['status_code'], 403)
 
     def test_secret_guards_redirect_and_is_removed_before_guest(self):
         self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 8000})

@@ -100,9 +100,10 @@ def main():
             for path in [app,app[:-1],'/apps%2f'+PROJECT+'/',app+'ws','/other/../apps/'+PROJECT+'/']:
                 status,_,h=req(path);assert status==401,(path,status);assert 'Basic' in h['WWW-Authenticate']
             assert req(app,extra={'X-GAP-VM-Admission':SECRET,'X-GAP-VM-URI':app,'X-GAP-VM-Strip-Auth':'1'})[0]==401
-            assert req(app,target=caddy_port)[0]==401
-            assert req(app,target=caddy_port,extra={'X-GAP-VM-Admission':'wrong'})[0]==401
-            assert req(app,target=caddy_port,extra={'X-GAP-VM-Admission':SECRET,'X-GAP-VM-Identity':'vm_wrong'})[0]==401
+            assert req(app,target=caddy_port)[0]==403
+            assert req(app,target=caddy_port,extra={'X-GAP-VM-Admission':'wrong'})[0]==403
+            status,data,h=req(app,target=caddy_port,extra={'X-GAP-VM-Admission':SECRET,'X-GAP-VM-Identity':'vm_wrong'})
+            assert status==404 and 'WWW-Authenticate' not in h and data['error']['code']=='https_route_unavailable'
             status,data,h=req(app+'hello%20world?q=1',auth=BASIC)
             assert status==200,(status,data);assert data['kind']=='guest';assert data['path']=='/hello%20world?q=1',data
             assert 'Authorization' not in data['headers'];assert 'X-Gap-Vm-Admission' not in data['headers'];assert SECRET not in json.dumps(data);assert h['Cache-Control']=='no-store';assert data['headers'].get('X-Forwarded-Prefix')=='/apps/'+PROJECT
