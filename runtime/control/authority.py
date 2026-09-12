@@ -14,6 +14,8 @@ import sqlite3
 import time
 
 MAX_CREDITS = 10**15
+DEFAULT_QUOTAS = dict(max_vms=1, cpu_quarters=4, memory_mib=1024)
+MAX_QUOTAS = dict(max_vms=1000000, cpu_quarters=4000000, memory_mib=2**40)
 
 
 class Failure(ValueError):
@@ -78,6 +80,14 @@ class Authority:
                    unpaid INTEGER NOT NULL DEFAULT 0, expires INTEGER NOT NULL DEFAULT 0,
                    closed INTEGER NOT NULL DEFAULT 0)''',
                 'CREATE UNIQUE INDEX IF NOT EXISTS active_reservation ON reservations(node,project) WHERE closed=0',
+                '''CREATE TABLE IF NOT EXISTS quotas(customer TEXT PRIMARY KEY REFERENCES customers(id),
+                   max_vms INTEGER NOT NULL, cpu_quarters INTEGER NOT NULL, memory_mib INTEGER NOT NULL,
+                   revision INTEGER NOT NULL)''',
+                '''CREATE TABLE IF NOT EXISTS capacity(vm TEXT PRIMARY KEY, node TEXT NOT NULL,
+                   project TEXT NOT NULL REFERENCES projects(id), customer TEXT NOT NULL REFERENCES customers(id),
+                   state TEXT NOT NULL, revision INTEGER NOT NULL, cpu INTEGER NOT NULL, memory INTEGER NOT NULL,
+                   target_cpu INTEGER NOT NULL, target_memory INTEGER NOT NULL, pending TEXT)''',
+                'CREATE INDEX IF NOT EXISTS capacity_customer ON capacity(customer,state,vm)',
             ):
                 db.execute(sql)
             db.execute("INSERT OR IGNORE INTO metadata VALUES('operator',?)", (operator,))
@@ -196,6 +206,155 @@ class Authority:
         if not row:
             raise Failure('project_node_mismatch', 403)
         return row
+
+    @staticmethod
+    def capacity_number(value, maximum, minimum=0):
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise Failure('invalid_capacity_value')
+        return value
+
+    def quota_state(self, db, customer):
+        self.customer(db, customer)
+        row = db.execute('SELECT * FROM quotas WHERE customer=?', (customer,)).fetchone()
+        limits = {k: row[k] for k in DEFAULT_QUOTAS} if row else dict(DEFAULT_QUOTAS)
+        # A pending resize holds the componentwise maximum of old and new
+        # allocations. Never lend out a reduction before the worker applies it.
+        used = db.execute('''SELECT count(*) AS max_vms,
+            coalesce(sum(max(cpu,target_cpu)),0) AS cpu_quarters,
+            coalesce(sum(max(memory,target_memory)),0) AS memory_mib
+            FROM capacity WHERE customer=? AND state!='released' ''', (customer,)).fetchone()
+        return dict(operator_id=self.operator, customer_id=customer, limits=limits,
+                    allocated=dict(used), revision=row['revision'] if row else 0,
+                    over_limit=[k for k in limits if used[k] > limits[k]])
+
+    def quotas(self, customer):
+        with self.db() as db:
+            return self.quota_state(db, customer)
+
+    def set_quotas(self, actor, request, customer, limits, expected_revision):
+        self.capacity_number(expected_revision, 2**53-1)
+        if not isinstance(limits, dict) or set(limits) != set(DEFAULT_QUOTAS):
+            raise Failure('invalid_capacity_limits')
+        for key, value in limits.items():
+            self.capacity_number(value, MAX_QUOTAS[key])
+        body = dict(action='set_quotas', customer=customer, limits=limits, expected_revision=expected_revision)
+        def apply(db):
+            current = self.quota_state(db, customer)
+            if current['revision'] != expected_revision:
+                raise Failure('quota_revision_conflict', 409)
+            db.execute('''INSERT INTO quotas VALUES(?,?,?,?,?) ON CONFLICT(customer) DO UPDATE SET
+                max_vms=excluded.max_vms,cpu_quarters=excluded.cpu_quarters,
+                memory_mib=excluded.memory_mib,revision=excluded.revision''',
+                (customer, limits['max_vms'], limits['cpu_quarters'], limits['memory_mib'], expected_revision+1))
+            return self.quota_state(db, customer)
+        return self.mutation(actor, request, body, apply)
+
+    @staticmethod
+    def capacity_view(row):
+        return dict(vm_id=row['vm'], node_id=row['node'], project_id=row['project'], customer_id=row['customer'],
+                    state=row['state'], revision=row['revision'], transition_id=row['pending'],
+                    committed=dict(cpu_quarters=row['cpu'], memory_mib=row['memory']),
+                    target=dict(cpu_quarters=row['target_cpu'], memory_mib=row['target_memory']))
+
+    def capacity_row(self, db, node, project, vm):
+        self.node_project(db, node, project)
+        if not isinstance(vm, str) or not re.fullmatch(r'vm_[0-9a-f]{32}', vm):
+            raise Failure('invalid_vm_id')
+        row = db.execute('SELECT * FROM capacity WHERE vm=?', (vm,)).fetchone()
+        if row and (row['node'], row['project']) != (node, project):
+            raise Failure('capacity_binding_mismatch', 403)
+        return row
+
+    def capacity_get(self, node, project, vm):
+        with self.db() as db:
+            row = self.capacity_row(db, node, project, vm)
+            if not row:
+                raise Failure('capacity_not_found', 404)
+            return dict(operator_id=self.operator, **self.capacity_view(row))
+
+    def capacity_list(self, customer, after=''):
+        if not isinstance(after, str) or len(after) > 128:
+            raise Failure('invalid_capacity_cursor')
+        with self.db() as db:
+            self.customer(db, customer)
+            rows = db.execute('SELECT * FROM capacity WHERE customer=? AND vm>? ORDER BY vm LIMIT 101',
+                              (customer, after)).fetchall()
+            return dict(operator_id=self.operator, customer_id=customer,
+                        allocations=[self.capacity_view(r) for r in rows[:100]],
+                        next_cursor=rows[99]['vm'] if len(rows) > 100 else None)
+
+    def capacity_prepare(self, node, request, project, owner, vm, cpu, memory, expected_revision):
+        self.capacity_number(cpu, MAX_QUOTAS['cpu_quarters'], 1)
+        self.capacity_number(memory, MAX_QUOTAS['memory_mib'], 256)
+        self.capacity_number(expected_revision, 2**53-1)
+        body = dict(action='capacity_prepare', project=project, owner=owner, vm=vm,
+                    cpu=cpu, memory=memory, expected_revision=expected_revision)
+        def apply(db):
+            placement = self.node_project(db, node, project)
+            if placement['owner'] != owner:
+                raise Failure('project_owner_mismatch', 403)
+            row = self.capacity_row(db, node, project, vm)
+            if row and row['state'] == 'released':
+                raise Failure('capacity_released', 409)
+            if (row['revision'] if row else 0) != expected_revision:
+                raise Failure('capacity_revision_conflict', 409)
+            if row and row['state'] != 'active':
+                raise Failure('capacity_transition_pending', 409)
+            current = self.quota_state(db, placement['customer'])
+            growth = dict(max_vms=0 if row else 1,
+                          cpu_quarters=max(0, cpu-(row['cpu'] if row else 0)),
+                          memory_mib=max(0, memory-(row['memory'] if row else 0)))
+            for key, delta in growth.items():
+                # Lowered quotas do not kill existing VMs or block reductions.
+                if delta and current['allocated'][key]+delta > current['limits'][key]:
+                    raise Failure('customer_quota_exceeded_'+key, 409)
+            if row:
+                db.execute('''UPDATE capacity SET state='pending',revision=revision+1,
+                    target_cpu=?,target_memory=?,pending=? WHERE vm=?''', (cpu,memory,request,vm))
+            else:
+                db.execute("INSERT INTO capacity VALUES(?,?,?,?,'pending',1,0,0,?,?,?)",
+                           (vm,node,project,placement['customer'],cpu,memory,request))
+            return dict(operator_id=self.operator, **self.capacity_view(self.capacity_row(db,node,project,vm)))
+        return self.mutation('node:'+node, request, body, apply)
+
+    def capacity_finish(self, node, request, project, vm, expected_revision, transition, outcome, evidence):
+        """A trusted node asserts a DURABLE local result, not a timeout guess.
+
+        Evidence is an audit receipt ID, not cryptographic proof of host state.
+        No operator force-release or expiry can bypass reconciliation here.
+        """
+        self.capacity_number(expected_revision, 2**53-1, 1)
+        identifier(evidence)
+        if outcome not in ('commit', 'abort', 'release'):
+            raise Failure('invalid_capacity_outcome')
+        if outcome != 'release':
+            identifier(transition)
+        elif transition is not None:
+            raise Failure('invalid_capacity_transition')
+        body = dict(action='capacity_finish', project=project, vm=vm, expected_revision=expected_revision,
+                    transition=transition, outcome=outcome, evidence=evidence)
+        def apply(db):
+            row = self.capacity_row(db, node, project, vm)
+            if not row:
+                raise Failure('capacity_not_found', 404)
+            if row['revision'] != expected_revision:
+                raise Failure('capacity_revision_conflict', 409)
+            if row['state'] == 'released':
+                raise Failure('capacity_released', 409)
+            if outcome == 'release':
+                if row['state'] != 'active':
+                    raise Failure('capacity_transition_pending', 409)
+                cpu, memory, state = 0, 0, 'released'
+            else:
+                if row['state'] != 'pending' or row['pending'] != transition:
+                    raise Failure('capacity_transition_mismatch', 409)
+                cpu, memory = (row['target_cpu'], row['target_memory']) if outcome == 'commit' else (row['cpu'],row['memory'])
+                state = 'active' if cpu else 'released'
+            db.execute('''UPDATE capacity SET state=?,revision=revision+1,cpu=?,memory=?,
+                target_cpu=?,target_memory=?,pending=NULL WHERE vm=?''', (state,cpu,memory,cpu,memory,vm))
+            return dict(operator_id=self.operator, evidence_id=evidence, outcome=outcome,
+                        **self.capacity_view(self.capacity_row(db,node,project,vm)))
+        return self.mutation('node:'+node, request, body, apply)
 
     def entry(self, db, customer, project, node, kind, delta, source, actor, request):
         db.execute('INSERT INTO wallet_entries(customer,project,node,kind,delta,source,actor,operation,created) VALUES(?,?,?,?,?,?,?,?,?)',

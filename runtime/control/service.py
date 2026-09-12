@@ -27,12 +27,15 @@ def secret(path):
 
 
 class Application:
-    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False):
+    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False, allow_capacity=False):
         self.authority, self.admin, self.nodes = authority, admin, dict(nodes)
         self.allow_debits = allow_debits
         if type(allow_reservations) is not bool:
             raise ValueError('invalid reservation configuration')
         self.allow_reservations = allow_reservations
+        if type(allow_capacity) is not bool:
+            raise ValueError('invalid capacity configuration')
+        self.allow_capacity = allow_capacity
         if type(allow_debits) is not bool or len(set([admin, *nodes.values()])) != 1 + len(nodes):
             raise ValueError('control credentials must be distinct')
         for node in nodes:
@@ -56,6 +59,8 @@ class Application:
             return {'ok': True, 'operator_id': self.authority.operator, 'phase': 'reservations',
                     'legacy_cutover': False, 'worker_metering_mode': 'opt_in',
                     'reservation_protocol': 1, 'reservations_enabled': self.allow_reservations,
+                    'capacity_protocol': 1, 'capacity_enabled': self.allow_capacity,
+                    'worker_capacity_enforcement': False,
                     'online_debits_enabled': self.allow_debits}
         kind, actor = self.actor(token)
         a = self.authority
@@ -80,6 +85,12 @@ class Application:
                 return a.stage_import('operator', request, body['customer_id'], body['node_id'], body['project_id'], body['snapshot'])
             if action == 'wallet':
                 return a.wallet(body['customer_id'])
+            if action == 'quotas':
+                return a.quotas(body['customer_id'])
+            if action == 'set-quotas':
+                return a.set_quotas('operator', request, body['customer_id'], body['limits'], body['expected_revision'])
+            if action == 'capacity-list':
+                return a.capacity_list(body['customer_id'], body.get('after', ''))
             if action == 'projects':
                 return a.projects(body['customer_id'], after=body.get('after', ''))
             if action == 'issue-token':
@@ -90,6 +101,16 @@ class Application:
         if method == 'POST' and parsed.path == '/node':
             if kind != 'node':
                 raise Failure('node_credentials_required', 403)
+            if body.get('action') in ('capacity-get', 'capacity-prepare', 'capacity-finish'):
+                if not self.allow_capacity:
+                    raise Failure('capacity_disabled', 409)
+                if body['action'] == 'capacity-get':
+                    return a.capacity_get(actor, body['project_id'], body['vm_id'])
+                if body['action'] == 'capacity-prepare':
+                    return a.capacity_prepare(actor, body['request_id'], body['project_id'], body['owner_did'],
+                        body['vm_id'], body['cpu_quarters'], body['memory_mib'], body['expected_revision'])
+                return a.capacity_finish(actor, body['request_id'], body['project_id'], body['vm_id'],
+                    body['expected_revision'], body.get('transition_id'), body['outcome'], body['evidence_id'])
             if body.get('action') == 'project':
                 with a.db() as db:
                     placement = dict(a.node_project(db, actor, body['project_id']))
@@ -112,6 +133,9 @@ class Application:
             return {'operator_id': a.operator, 'customer_id': actor['customer'], 'agent_did': actor['agent']}
         if method == 'GET' and parsed.path == '/v1/wallet':
             return a.wallet(actor['customer'])
+        if method == 'GET' and parsed.path == '/v1/quotas':
+            # Aggregate only: no other agent's project/VM identifiers disclosed.
+            return a.quotas(actor['customer'])
         if method == 'GET' and parsed.path == '/v1/projects':
             after = parse_qs(parsed.query).get('after', [''])[0]
             return a.projects(actor['customer'], actor['agent'], after)
@@ -207,7 +231,8 @@ def main():
         authority = Authority(config['database'], config['operator_id'])
         app = Application(authority, secret(config['operator_token_file']),
                           {node: secret(path) for node, path in config['node_token_files'].items()},
-                          config.get('allow_online_debits', False), config.get('allow_reservations',False))
+                          config.get('allow_online_debits', False), config.get('allow_reservations',False),
+                          config.get('allow_capacity', False))
     except (OSError, ValueError, KeyError, sqlite3.Error):
         raise SystemExit('Cannot initialize operator authority; inspect configuration privately.') from None
     Server((args.bind, args.port), app).serve_forever()

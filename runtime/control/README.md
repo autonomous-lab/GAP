@@ -14,7 +14,9 @@ through spending reservations and short execution leases. Existing node login,
 email registration and project ownership checks still use their local authorities.
 Existing workloads and balances continue using their original ledger until a
 separate, fenced migration is completed. Installing this service does not migrate
-them. Global VM-count/CPU/RAM quota reservations remain to implement.
+them. The central VM-count/CPU/RAM reservation protocol is implemented below;
+existing worker create/resize/destroy operations do not call it yet. Global
+capacity enforcement is therefore **not active for existing workloads**.
 
 ## State and trust
 
@@ -94,6 +96,9 @@ POST `/operator`, using the operator token file. Supported `action` values:
 | `grant` | `request_id`, `project_id`, `agent_did`, `role` (`viewer`/`operator`/`none`) |
 | `topup` | `request_id`, `customer_id`, `amount_microcredits`, `source` |
 | `wallet` | `customer_id` |
+| `quotas` | `customer_id` |
+| `set-quotas` | `request_id`, `customer_id`, `expected_revision`, `limits` (`max_vms`, `cpu_quarters`, `memory_mib`) |
+| `capacity-list` | `customer_id`, optional `after` cursor |
 | `projects` | `customer_id`, optional `after` cursor |
 | `issue-token` | `customer_id`, optional `agent_did`, optional `ttl_seconds` (60–3600) |
 | `stage-import` | `request_id`, `customer_id`, `node_id`, `project_id`, `snapshot` |
@@ -202,6 +207,98 @@ Their retention remains `preserve_until_authoritative_reconciliation` until a
 customer-wide retention decision protocol is delivered. Do not activate legacy
 production projects before that migration/retention gate is complete.
 
+## Global capacity admission protocol
+
+Set `allow_capacity: true` in the private control configuration to enable the
+node protocol. This flag enables the API only: `/health` deliberately reports
+`worker_capacity_enforcement: false` until worker lifecycle integration is delivered.
+It neither scans nor adopts existing VM catalogs. Keep the existing local quota
+checks and physical-host admission checks; they solve different constraints.
+No client is migrated by enabling this flag.
+
+Each customer defaults to one VM, 4 CPU quarters (1 vCPU) and 1024 MiB RAM.
+`set-quotas` replaces all three limits in one audited transaction and requires
+the current quota revision (`0` for defaults). Zero is allowed; increasing a
+limit requires operator credentials. Integer CPU quarters preserve fractional
+allocations without float arithmetic. These are provisioned allocations, counted
+across the customer's agents, projects and trusted nodes, including stopped and
+hibernated VMs. They are not measures of current CPU consumption or free host RAM.
+Disk quotas, scheduler placement and central retention are separate work.
+
+Client GET `/v1/quotas` returns only the authenticated customer's aggregate
+limits, allocations, revision and `over_limit` dimensions, including for an agent
+credential. It does not expose other agents' project or VM identifiers.
+Operator `capacity-list` paginates at 100 records with `next_cursor`, including
+released tombstones. A node can inspect only its own project's exact VM using
+`capacity-get`. Administrative quota reductions preserve existing and pending
+allocations, report over-limit dimensions, and allow reductions. They do not
+pause workloads or cancel an already reserved creation.
+
+All node actions use POST `/node` (or the existing HTTPS `/v1/fleet/node` relay):
+
+| Action | Required fields |
+| --- | --- |
+| `capacity-get` | `project_id`, `vm_id` |
+| `capacity-prepare` | `request_id`, `project_id`, `owner_did`, `vm_id`, `expected_revision`, `cpu_quarters`, `memory_mib` |
+| `capacity-finish` | `request_id`, `project_id`, `vm_id`, `expected_revision`, `outcome`, `evidence_id`, and `transition_id` for commit/abort |
+
+The authenticated node determines placement; a supplied node/customer identity
+cannot override it. Project ownership and the immutable VM/project/node binding
+are checked before mutation. Each response includes `operator_id`, binding,
+`revision`, `state`, `transition_id`, `committed` and `target` resources. Completion
+responses also persist the local evidence receipt ID and outcome in the operation
+log. Quota conflicts return `409 customer_quota_exceeded_max_vms`,
+`customer_quota_exceeded_cpu_quarters` or `customer_quota_exceeded_memory_mib`.
+Storage/transport failures remain unavailable errors, never a quota result.
+
+The protocol is deliberately conservative:
+
+1. **Prepare creation:** the node durably chooses a fresh `vm_` generation and
+   stable request ID *before* sending `capacity-prepare`, with revision 0. The
+   authority reserves count, CPU and RAM atomically and returns `pending`.
+   Concurrent nodes cannot both consume the same last place.
+2. **Apply and confirm:** after durably applying the local allocation, send
+   `capacity-finish`, outcome `commit`, using the returned revision and
+   `transition_id`. The state becomes `active` with a new revision.
+3. **Resize:** prepare with the current active revision and desired full CPU/RAM
+   allocation. Until confirmation, the reservation holds the componentwise
+   maximum of old and new resources. A pending CPU reduction cannot fund a new
+   VM before the old allocation is actually reduced. Only one transition can be
+   pending for a VM.
+4. **Abort:** only after durably preventing the uncertain creation from ever
+   executing, or restoring the previous resource configuration for a resize,
+   finish with outcome `abort` and the pending transition/revision. Aborted
+   creation leaves a permanent released tombstone; an aborted resize returns to
+   the previous active allocation. Do not abort merely because a job timed out.
+5. **Release:** after successful destruction and a durable fence preventing
+   restart, finish an active allocation with outcome `release`, its current
+   revision and no `transition_id`. A pending transition must be reconciled first.
+   Stopping or hibernating a VM is never grounds for releasing its quota.
+
+`evidence_id` is a stable identifier of the trusted node's durable local result.
+The central service records that assertion; it does not independently inspect
+QEMU or cryptographically prove destruction. Workers must retain the referenced
+receipt, serialize local operations per VM and fence abandoned generations.
+Future worker integration must test interruption before/after every local and
+remote write, including destruction acknowledgement loss and pending resize
+recovery. Until that integration exists, do not drive this API manually as a
+substitute for tracking actual worker resources.
+
+There is **no capacity timeout, expiry refund or operator force-release**.
+Unknown outcomes continue consuming quota across controller restart, even after
+credit execution leases expire. Use `capacity-get` and inspect the node's durable
+state to reconcile. Never infer absence from an unreachable node. Retry a lost
+response with the identical request ID/body. Idempotency responses are historical:
+an old successful prepare can be replayed after its VM was released. It is not a
+fresh authorization to execute. Read current state and check the expected revision
+and locally fenced generation before acting. A released VM ID can never reserve
+capacity again; create a new generation instead.
+
+Online SQLite backups preserve pending holds, revisions, receipts and tombstones.
+A restored old database must never replace the live authority without fencing and
+reconciling every worker; otherwise it can forget newer reservations. This is the
+same single-writer recovery boundary as for shared wallet balances.
+
 ## Legacy migration staging
 
 On each existing worker host, export one consistent **read-only** SQLite snapshot:
@@ -249,6 +346,18 @@ off-host backup/key management remain separate delivery gates.
 ```sh
 python3 -m unittest discover -s runtime/control -p 'test_*.py'
 python3 -m unittest discover -s runtime/compose -p 'test_*.py'
+```
+
+To test the control image in isolation, mount only the CLI used by its tool
+tests; that operator script is intentionally outside the service image:
+
+```sh
+docker build -t gap-control-candidate -f runtime/control/Dockerfile .
+docker run --rm --read-only --tmpfs /tmp:rw,nosuid,nodev --network none \
+  --cap-drop ALL --security-opt no-new-privileges \
+  -v "$PWD/scripts/fleet-control.py:/scripts/fleet-control.py:ro" \
+  --entrypoint python3 gap-control-candidate \
+  -m unittest discover -s /opt/control -p 'test_*.py'
 ```
 
 Tests exercise real HTTP, two authenticated node actors sharing one wallet,

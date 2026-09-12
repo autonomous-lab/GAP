@@ -51,7 +51,7 @@ def main():
     call = sub.add_parser('call')
     call.add_argument('--endpoint', default='http://172.17.0.1:8096')
     call.add_argument('--token-file', default='data/gap-control/config/operator.token')
-    call.add_argument('--path', choices=('/operator', '/node', '/v1/account', '/v1/wallet', '/v1/projects', '/v1/logout'), default='/operator')
+    call.add_argument('--path', choices=('/operator', '/node', '/v1/account', '/v1/wallet', '/v1/quotas', '/v1/projects', '/v1/logout'), default='/operator')
     call.add_argument('--request-file', help='JSON body; omitted for a GET')
     call.add_argument('--output', help='Required for issue-token. New private file, never overwritten.')
     args = parser.parse_args()

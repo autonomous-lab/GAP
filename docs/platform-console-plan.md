@@ -88,8 +88,13 @@ cannot extend a cached lease on replay. Independent metering and a watchdog cove
 long deployment locks; controller loss preserves disks instead of applying the
 local credit-depletion purge. The HTTPS relay exposes only node-scoped control
 operations. Financially used legacy projects cannot opt in without migration.
-Customer-wide count/resource admission and authoritative retention decisions are
-still pending; the two existing wallets have not been transferred.
+The central customer-wide count/CPU/RAM reservation state machine is implemented:
+transactional preparation, revision-checked confirmation/abort/release, and no
+expiry refunds for unknown outcomes. Pending resizes hold the maximum of old/new
+resources until confirmation. Its node API is separately enabled and tested;
+worker create/resize/destroy integration remains pending, so this is not yet
+production-wide admission enforcement. Authoritative retention decisions also
+remain pending; the two existing wallets have not been transferred.
 
 ## Confirmed requirements
 
