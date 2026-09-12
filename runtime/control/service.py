@@ -27,8 +27,11 @@ def secret(path):
 
 
 class Application:
-    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False, allow_capacity=False, access=None, identity_nodes=None):
+    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False, allow_capacity=False, access=None, identity_nodes=None, console_paths=None):
         self.authority, self.admin, self.nodes = authority, admin, dict(nodes)
+        self.console_paths=dict(console_paths or {})
+        if len(set(self.console_paths.values()))!=len(self.console_paths) or any(n not in nodes or p not in ('','/nodes/'+n) for n,p in self.console_paths.items()):
+            raise ValueError('invalid management console mapping')
         self.allow_debits = allow_debits
         self.access, self.identity_nodes = access, dict(identity_nodes or {})
         if type(allow_reservations) is not bool:
@@ -175,6 +178,8 @@ class Application:
             raise Failure('unknown_node_action', 404)
         if kind != 'client':
             raise Failure('client_credentials_required', 403)
+        if method=='GET' and parsed.path=='/v1/nodes':
+            return {'nodes':[{'node_id':n,'console_path':self.console_paths.get(n)} for n in sorted(self.nodes)]}
         if parsed.path == '/v1/members' and self.access:
             if method=='GET':return self.access.members(actor)
             if method=='POST':return self.access.membership(actor,body)
@@ -193,7 +198,7 @@ class Application:
         if method == 'POST' and parsed.path == '/v1/project-token':
             if not self.access:
                 raise Failure('fleet_access_disabled', 409)
-            return self.access.issue(actor, body['project_id'], body.get('ttl_seconds', 120))
+            return self.access.issue(actor, body['project_id'], body.get('ttl_seconds', 120),body.get('read_only',False))
         raise Failure('not_found', 404)
 
 
@@ -290,7 +295,8 @@ def main():
                           {node: secret(path) for node, path in config['node_token_files'].items()},
                           config.get('allow_online_debits', False), config.get('allow_reservations',False),
                           config.get('allow_capacity', False), access,
-                          {node: secret(path) for node, path in config.get('identity_token_files', {}).items()})
+                          {node: secret(path) for node, path in config.get('identity_token_files', {}).items()},
+                          config.get('console_paths',{}))
     except (OSError, ValueError, KeyError, sqlite3.Error):
         raise SystemExit('Cannot initialize operator authority; inspect configuration privately.') from None
     Server((args.bind, args.port), app).serve_forever()

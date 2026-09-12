@@ -66,6 +66,12 @@ impl Access {
     }
 
     pub fn verify(&self, token: &str, project: &str, now: u64) -> Option<Claims> {
+        self.verify_scope(token,project,now,false)
+    }
+    pub fn verify_vm_read(&self, token: &str, project: &str, now: u64) -> Option<Claims> {
+        self.verify_scope(token,project,now,true)
+    }
+    fn verify_scope(&self, token: &str, project: &str, now: u64, read_only:bool) -> Option<Claims> {
         if token.len() > 2048 { return None; }
         let rest = token.strip_prefix("gapf1.")?;
         let (payload, signature) = rest.split_once('.')?;
@@ -76,7 +82,7 @@ impl Access {
             || claims.project_id != project || !hex_id(project, "prj_", 24)
             || !hex_id(&claims.customer_id, "cus_", 32) || !hex_id(&claims.owner_did, "did:gap:", 64)
             || claims.agent_did.as_ref().is_some_and(|a| !hex_id(a, "did:gap:", 64))
-            || !hex_id(&claims.nonce, "", 32) || claims.scope != "project.manage"
+            || !hex_id(&claims.nonce, "", 32) || claims.scope != if read_only {"project.vm.read"} else {"project.manage"}
             || claims.issued_at > now || claims.expires_at <= now
             || claims.expires_at.checked_sub(claims.issued_at).is_none_or(|ttl| !(30..=300).contains(&ttl)) {
             return None;
@@ -94,7 +100,7 @@ impl Access {
 pub fn relay_path(method: &str, path: &str) -> Option<String> {
     match (method, path) {
         ("POST", "/v1/fleet/identity") => Some("/identity".into()),
-        ("GET", "/v1/fleet/account" | "/v1/fleet/projects" | "/v1/fleet/wallet" | "/v1/fleet/quotas" | "/v1/fleet/members")
+        ("GET", "/v1/fleet/account" | "/v1/fleet/projects" | "/v1/fleet/wallet" | "/v1/fleet/quotas" | "/v1/fleet/members" | "/v1/fleet/nodes")
         | ("POST", "/v1/fleet/project-token" | "/v1/fleet/logout" | "/v1/fleet/members") => Some(path.replacen("/v1/fleet/", "/v1/", 1)),
         _ => None,
     }
@@ -117,6 +123,11 @@ mod tests {
     fn sign(key:&SigningKey, value:&Value)->String {
         let message=format!("gapf1.{}",URL_SAFE_NO_PAD.encode(serde_json::to_vec(value).unwrap()));
         format!("{message}.{}",URL_SAFE_NO_PAD.encode(key.sign(message.as_bytes()).to_bytes()))
+    }
+    #[test] fn read_capability_never_grants_management() {
+        let (a,k,mut v)=fixture();v["scope"]=json!("project.vm.read");let token=sign(&k,&v);let project=v["project_id"].as_str().unwrap();
+        assert!(a.verify_vm_read(&token,project,101).is_some());assert!(a.verify(&token,project,101).is_none());
+        assert!(a.verify_vm_read(&token,"prj_bbbbbbbbbbbbbbbbbbbbbbbb",101).is_none());
     }
     #[test] fn rejects_wrong_audience_scope_project_times_and_signature() {
         let (a,k,v)=fixture(); let project=v["project_id"].as_str().unwrap();

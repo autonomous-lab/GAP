@@ -2852,6 +2852,14 @@ the content inline"
             .is_some_and(|site| site.enabled && site.active_version.is_some())
     }
 
+    fn cloud_vm_read_project(&self, token:&str, project_id:&str) -> Result<crate::cloud::ProjectRecord> {
+        let claims=self.fleet_access.as_ref().and_then(|a|a.verify_vm_read(token,project_id,now_unix())).ok_or_else(crate::fleet_access::denied)?;
+        if claims.agent_did.as_ref().is_some_and(|a|self.agent_suspended(a)) {return Err(crate::fleet_access::denied())}
+        let project=self.cloud_projects.get(project_id).filter(|p|p.owner_did==claims.owner_did && self.active_cloud_project(project_id)).cloned().ok_or_else(crate::fleet_access::denied)?;
+        if let Some(policy)=&self.private_node {policy.authorize(&project.owner_did)?;}
+        Ok(project)
+    }
+
     fn cloud_owned_project(
         &self,
         token: &str,
@@ -7945,10 +7953,12 @@ pub fn route_with_ip(
                 )
             }
         };
-        let project = match guard.cloud_owned_project(token.unwrap_or(""), project_id) {
-            Ok(project) => project,
-            Err(error) => return error_response(&error),
-        };
+        let selected=guard.cloud_owned_project(token.unwrap_or(""),project_id).or_else(|error|{
+            if method=="GET" && matches!(action,"vms"|"vm"|"ssh"|"ports"|"metrics"|"runtime"|"credits"|"ingress") {
+                guard.cloud_vm_read_project(token.unwrap_or(""),project_id)
+            } else {Err(error)}
+        });
+        let project=match selected {Ok(p)=>p,Err(error)=>return error_response(&error)};
         if let Err(error) = guard
             .private_node
             .as_ref()

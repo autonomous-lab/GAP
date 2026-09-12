@@ -475,7 +475,9 @@ fn main() -> Result<()> {
                 } else { body };
                 let mut response = Response::from_string(body).with_status_code(200);
                 if vm_console {
-                    for (name,value) in [("Cache-Control","no-store"),("X-Frame-Options","DENY"),("Referrer-Policy","no-referrer"),("Content-Security-Policy","frame-ancestors 'none'; base-uri 'none'")] {response.add_header(Header::from_bytes(name,value).unwrap());}
+                    let frame=if clean_path=="/microvms" {"SAMEORIGIN"} else {"DENY"};
+                    let csp=if clean_path=="/microvms" {"frame-ancestors 'self'; base-uri 'none'"} else {"frame-ancestors 'none'; base-uri 'none'"};
+                    for (name,value) in [("Cache-Control","no-store"),("X-Frame-Options",frame),("Referrer-Policy","no-referrer"),("Content-Security-Policy",csp)] {response.add_header(Header::from_bytes(name,value).unwrap());}
                 }
                 response.add_header(
                     Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap(),
@@ -503,10 +505,15 @@ fn main() -> Result<()> {
                     // and current approval before issuing any session cookie.
                     let (status,result)=route_with_ip(&state,"GET",&format!("/v1/cloud/projects/{project}/vms"),&[],auth.as_deref(),client_ip.as_deref());
                     if status!=200 {(status,result,None)} else if let Some(token)=auth.as_deref() {
-                        match gap::cloud_vm_session::issue(project,token) {
+                        if !session_csrf.is_empty() {
+                            match gap::cloud_vm_session::renew(project,token,session_cookie,session_csrf) {
+                                Ok(body)=>(200,body,None),
+                                Err(())=>(403,serde_json::json!({"error":{"code":"session_renewal_denied"}}),None)
+                            }
+                        } else {match gap::cloud_vm_session::issue(project,token) {
                             Ok((body,cookie))=>(201,body,Some(cookie)),
                             Err(())=>(503,serde_json::json!({"error":{"code":"sessions_unavailable"}}),None)
-                        }
+                        }}
                     } else {(401,serde_json::json!({"error":{"code":"unauthorized"}}),None)}
                 } else if method=="DELETE" {
                     // Origin was checked above. Allow idempotent logout even

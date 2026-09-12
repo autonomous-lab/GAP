@@ -621,3 +621,14 @@ including after a top-up, until the worker has removed all generations and retai
 data and acknowledged `retention-finish`. Other projects may use the new funds.
 Claims and local deletion progress survive restarts and lost acknowledgements.
 Destroy operations also reconcile global capacity before completing retention.
+
+
+The optional `console_paths` mapping names trusted same-origin management paths,
+for example `{"node-01":"","node-02":"/nodes/node-02"}`. Paths must be unique,
+empty for the local node or exactly `/nodes/<registered-node-id>`. Missing mappings
+are reported as unavailable; the client never constructs a URL from a tenant field.
+The account console loads all authorized project pages and aggregates VM inventory
+with at most four concurrent node requests. A failed node is shown as incomplete
+inventory. Management embeds the existing dashboard and renews its five-minute
+capability every two minutes while the account credential remains valid. Renewal
+preserves the CSRF value and does not revive a revoked browser session.

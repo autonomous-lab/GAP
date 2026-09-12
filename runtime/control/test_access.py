@@ -83,6 +83,17 @@ class AccessTests(unittest.TestCase):
         with self.assertRaisesRegex(Failure,'invalid_control_credentials'):
             self.app.handle('POST','/v1/project-token',token,{'project_id':PROJECT})
 
+    def test_viewer_gets_only_explicit_read_capability(self):
+        first=self.connect();self.connect('node-two',AGENT,SECOND,request='second')
+        self.a.grant('operator','read',PROJECT,AGENT,'viewer')
+        actor=self.a.authenticate(self.a.issue(first['customer_id'],AGENT)['token'])
+        with self.assertRaisesRegex(Failure,'project_management_required'):self.access.issue(actor,PROJECT)
+        result=self.access.issue(actor,PROJECT,read_only=True)
+        claims=json.loads(base64.urlsafe_b64decode(result['token'].split('.')[1]+'=='))
+        self.assertEqual(claims['scope'],'project.vm.read')
+        self.a.grant('operator','revoke',PROJECT,AGENT,'none')
+        with self.assertRaises(Failure):self.access.issue(actor,PROJECT,read_only=True)
+
     def test_worker_client_and_operator_cannot_assert_identity(self):
         body=dict(action='connect',request_id='connect',email='owner@example.com',agent_did=OWNER,project_id=PROJECT)
         for token in ['worker1','worker2','admin','garbage']:

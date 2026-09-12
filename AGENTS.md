@@ -53,6 +53,20 @@ be renewed, including when used with a dashboard browser session. Logout through
 `POST /v1/fleet/logout` blocks new issuance; existing project tokens expire within
 five minutes. Operator accounts and credentials are independent across operators.
 
+The account page also lists every authorized MicroVM across the configured
+nodes, with node/project filters and SSH/HTTPS details. Create and manage actions
+open that project's existing MicroVM dashboard on the selected node. New project
+placement remains an operator binding; choosing another existing project does
+not move its VMs. The dashboard keeps project bearers in encrypted HttpOnly
+server sessions, renewed while the account page is connected.
+
+`GET /v1/fleet/nodes` returns trusted management path mappings. For an inventory
+client, request a project token with `"read_only":true`. The resulting
+`project.vm.read` capability permits only GET VM inventory, state, SSH metadata,
+ports, metrics, runtime, credit and ingress information. Viewer grants can obtain
+these read capabilities; they cannot obtain management tokens. A read token
+cannot open a terminal, change state, read project KV or provision a project.
+
 Keep the returned API `token` server-side and use `Authorization: Bearer <token>`.
 
 Humans can open `/account` on the operator gateway to view their common wallet,

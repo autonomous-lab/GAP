@@ -139,7 +139,8 @@ class Access:
             return dict(updated=True,action=action,agent_did=agent)
         return self.a.mutation('human:'+customer,request,body,apply)
 
-    def issue(self, actor, project, ttl=120):
+    def issue(self, actor, project, ttl=120, read_only=False):
+        if type(read_only) is not bool:raise Failure('invalid_read_only')
         if type(ttl) is not int or not 30 <= ttl <= 300:
             raise Failure('invalid_token_lifetime')
         with self.a.db() as db:
@@ -148,15 +149,15 @@ class Access:
                 raise Failure('project_membership_required', 403)
             if actor['agent'] is not None:
                 grant = db.execute('SELECT role FROM grants WHERE project=? AND agent=?', (project, actor['agent'])).fetchone()
-                if not grant or grant[0] not in ('owner', 'operator'):
+                if not grant or grant[0] not in (('owner','operator','viewer') if read_only else ('owner','operator')):
                     raise Failure('project_management_required', 403)
             now = int(self.a.clock())
             claims = dict(version=1, operator_id=self.a.operator, node_id=row['node'],
                           customer_id=row['customer'], project_id=project, owner_did=row['owner'],
-                          agent_did=actor['agent'], scope='project.manage', issued_at=now,
+                          agent_did=actor['agent'], scope='project.vm.read' if read_only else 'project.manage', issued_at=now,
                           expires_at=now+ttl, nonce=secrets.token_hex(16))
         payload = base64.urlsafe_b64encode(encode(claims).encode()).rstrip(b'=')
         message = b'gapf1.' + payload
         signature = base64.urlsafe_b64encode(self.key.sign(message)).rstrip(b'=')
         return dict(token=(message+b'.'+signature).decode(), expires_at=now+ttl,
-                    operator_id=self.a.operator, node_id=row['node'], project_id=project, scope='project.manage')
+                    operator_id=self.a.operator, node_id=row['node'], project_id=project, scope=claims['scope'])

@@ -61,6 +61,19 @@ impl Store {
         if !path.starts_with(&prefix) || !console_path(path) {return None}
         Some(session.token)
     }
+    fn renew(&self,project:&str,token:&str,cookies:&str,csrf:&str,at:u64)->Result<Value,()> {
+        if csrf.is_empty(){return Err(())}
+        let id_hash=crate::sha256_hex(cookie_id(cookies).ok_or(())?.as_bytes());
+        let db=self.db.lock().map_err(|_|())?;
+        let (payload,expires):(String,i64)=db.query_row("SELECT payload,expires FROM vm_sessions WHERE id_hash=?",params![id_hash],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|_|())?;
+        if !payload.starts_with("enc:v1:"){return Err(())}
+        let mut session:Session=serde_json::from_str(&self.vault.open(&payload).map_err(|_|())?).map_err(|_|())?;
+        if session.project!=project || session.id_hash!=id_hash || session.expires<=at || i64::try_from(session.expires).map_err(|_|())?!=expires || session.csrf_hash!=crate::sha256_hex(csrf.as_bytes()){return Err(())}
+        session.token=token.into();
+        let updated=self.vault.seal(&serde_json::to_string(&session).map_err(|_|())?);
+        if db.execute("UPDATE vm_sessions SET payload=? WHERE id_hash=? AND payload=?",params![updated,id_hash,payload]).map_err(|_|())?!=1{return Err(())}
+        Ok(json!({"project_id":project,"csrf":csrf}))
+    }
     fn revoke(&self,cookies:&str) -> Result<String,()> {
         if let Some(id)=cookie_id(cookies) {
             self.db.lock().map_err(|_|())?.execute("DELETE FROM vm_sessions WHERE id_hash=?",params![crate::sha256_hex(id.as_bytes())]).map_err(|_|())?;
@@ -77,6 +90,7 @@ fn cookie(value:&str,clear:bool)->String {
 }
 pub fn issue(project:&str,token:&str)->Result<(Value,String),()> {store()?.issue(project,token,now())}
 pub fn authorization(path:&str,cookies:&str,csrf:&str)->Option<String> {store().ok()?.authorization(path,cookies,csrf,now())}
+pub fn renew(project:&str,token:&str,cookies:&str,csrf:&str)->Result<Value,()> {store()?.renew(project,token,cookies,csrf,now())}
 pub fn revoke(cookies:&str)->Result<String,()> {store()?.revoke(cookies)}
 /// Only the isolated gateway may serve these GET resources without a CSRF header.
 /// An unguessable live ticket and a valid project cookie are both required.
@@ -124,6 +138,14 @@ pub fn console_path(path: &str) -> bool {
         s.revoke(c).unwrap();drop(s);
         assert!(Store::open(&path,&key).unwrap().authorization(&url,c,csrf,101).is_none());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test] fn renew_preserves_csrf_and_cannot_revive_revocation() {
+        let s=Store::open(Path::new(":memory:"),&[1u8;32]).unwrap();let project="prj_aaaaaaaaaaaaaaaaaaaaaaaa";
+        let (body,set)=s.issue(project,"Bearer old",100).unwrap();let cookies=set.split(';').next().unwrap();let csrf=body["csrf"].as_str().unwrap();
+        assert!(s.renew(project,"Bearer new",cookies,"wrong",101).is_err());
+        let renewed=s.renew(project,"Bearer new",cookies,csrf,101).unwrap();assert_eq!(renewed["csrf"],csrf);
+        assert_eq!(s.authorization(&format!("/v1/cloud/projects/{project}/vms"),cookies,csrf,102).unwrap(),"Bearer new");
+        s.revoke(cookies).unwrap();assert!(s.renew(project,"Bearer bad",cookies,csrf,103).is_err());
     }
     #[test] fn changed_expiry_or_unencrypted_record_is_rejected() {
         let s=Store::open(Path::new(":memory:"),&[1u8;32]).unwrap();
