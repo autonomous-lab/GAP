@@ -358,4 +358,49 @@ seconds or on demand, without waking a VM. See [network and metrics](AGENTS.md#m
 for measurement scope, and [HTTP access and domains](AGENTS.md#microvm-http-authentication-and-custom-domains)
 for setup and the owner API.
 
-MicroVM direct public ports use the operator-configured pool `24000-53999` by default (30,000 numbers, available in TCP and UDP), with five reserved numbers per VM. Host range DNAT avoids individual Docker publications; see `runtime/compose/README.md` for firewall setup and reconciliation. Per-agent VM and resource quotas still apply.
+### MicroVM public ports: operator setup
+
+The default pool is **24000-53999 inclusive: 30,000 port numbers, available in
+TCP and UDP**. Each MicroVM reserves five numbers; per-agent VM/resource quotas
+still apply. Reserve the pool exclusively for GAP on each worker node.
+
+1. Set `hypervisor.public_network.first_port` to `24000` and `last_port` to
+   `53999` in `data/gap-compose/config/runner.json`.
+2. Allow this entire range in **both TCP and UDP** in your provider firewall
+   and host forwarding firewall. Use a hostname pointing directly to the node;
+   ordinary Cloudflare HTTP proxying does not carry these ports.
+3. Install range forwarding to the MicroVM edge container, from the repo root:
+
+   ```sh
+   sudo python3 scripts/configure-microvm-firewall.py --apply --container gap-compose-compose-edge-1
+   ```
+
+   This adds two port-preserving DNAT rules and two forwarding rules. Do not
+   publish 30,000 ports individually in Docker Compose. The legacy 100-port
+   Compose publication alone does **not** expose the expanded pool.
+4. Copy `runtime/compose/gap-microvm-firewall.service` and `.timer` to
+   `/etc/systemd/system/`. Adapt the service's `WorkingDirectory` to your checkout
+   and its container name to your deployment, then run:
+
+   ```sh
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now gap-microvm-firewall.timer
+   sudo systemctl start gap-microvm-firewall.service
+   ```
+
+   Reconciliation runs every 15 seconds after boot and follows changes to the
+   container bridge address. On hosts without `/opt/docker-firewall-rules.sh`,
+   add `--no-provider-script` to the helper command and service `ExecStart`;
+   the timer supplies persistence without an Elestio-specific script.
+
+A node without a MicroVM worker can prepare forwarding permissions using the
+helper **without** `--container`, with `--config` pointing to a JSON file
+containing the same `hypervisor.public_network` range. This does not create a
+worker, VM listener, or DNAT route: install the worker and enable `--container`
+when bringing MicroVM hosting online. Check the first and last allocated ports
+externally in both protocols with an actual listener; firewall rules alone do
+not prove end-to-end connectivity.
+
+When expanding an existing pool, retain existing reservations, hibernate running
+VMs before restarting the worker with its new configuration, then resume them.
+See [the MicroVM operator guide](runtime/compose/README.md#large-pool-routing).
