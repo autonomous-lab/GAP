@@ -7,7 +7,8 @@ product behavior, dependencies, migration boundaries and acceptance criteria.
 ## Implementation progress
 
 Implemented, tested and deployed to both node web servers in the first delivery
-(the microVM execution worker is present only on node 01):
+(the execution worker is now installed on both nodes; node-02 customer-path
+validation remains a separate acceptance gate):
 
 - Human microVM creation, selection and deletion at `/microvms`; multiple VMs
   within a project, independent routes/ports/disks and shared project credits.
@@ -34,7 +35,7 @@ Implemented, tested and deployed to both node web servers in the first delivery
 - Elestio Postfix configuration discovered from the actual provisioning scripts.
   SMTP transport and registration were tested with an isolated mail sink; local
   relay connectivity and envelope acceptance were checked from both node network
-  namespaces. Actual recipient-inbox delivery has not been confirmed.
+  namespaces. Joseph has subsequently confirmed recipient-inbox delivery.
 
 Individual administrator authentication is now deployed on node 01 at its
 dedicated Elestio HTTPS origin: passwords, isolated email codes, revocable
@@ -68,6 +69,18 @@ aggregation; public tariff discovery; federation explorer; verified
 operator badges; encrypted volumes, snapshots and backups with external keys.
 Stripe remains a later phase. Do not present the local email registry or
 per-agent count limit as the completed account/federation architecture.
+
+The first account-authority foundation is implemented in
+[`runtime/control`](../runtime/control/README.md): one operator-bound transactional
+SQLite registry, customer/principal/project bindings, explicit agent grants,
+short-lived hashed control credentials, integer shared-wallet operations and
+non-spendable legacy import staging. Private node credentials are distinct and
+restricted to that node's projects. Existing node authentication and worker
+metering have not been switched over. Online debits are disabled by default.
+Legacy exports are read-only and do not fence or transfer live balances. Remaining
+gates include verified human linkage, node-scoped credential integration, final
+source fencing and exactly-once balance transfer, reservations and leases. This
+foundation must not be reported as completed fleet accounts or quotas.
 
 ## Confirmed requirements
 

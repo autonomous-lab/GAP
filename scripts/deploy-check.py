@@ -11,7 +11,8 @@ FILES = ["docker-compose.yml", "docker-compose.scale.yml", ".env.example",
          "runtime/edge/nginx.conf", "runtime/edge/entrypoint.sh", "runtime/compose/Dockerfile",
          "runtime/compose/image/Dockerfile", "runtime/compose/deploy.yml",
          "runtime/compose/caddy-bootstrap.json", "runtime/compose/runner.example.json",
-         "runtime/compose/gap-compose-ports.service"]
+         "runtime/compose/gap-compose-ports.service", "runtime/control/Dockerfile",
+         "runtime/control/deploy.yml"]
 bad = []
 for f in FILES:
     p = pathlib.Path(f)
