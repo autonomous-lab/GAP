@@ -35,12 +35,14 @@ class MicroVMTests(unittest.TestCase):
     def test_resource_steps_apply_to_create_and_resize(self):
         for action in ('vm/create','vm/update'):
             base={'request_id':'d'*32,'vm_id':VM} if action=='vm/update' else {'request_id':'d'*32}
-            for cpu,ram in ((0.25,256),(0.5,512),(0.75,768),(1.25,1280)):
+            for cpu,ram in ((0.25,256),(0.5,512),(0.75,768),(1.25,1280),(4,8192)):
                 validate(action,dict(base,vcpus=cpu,memory_mib=ram))
-            for ram in (128,255,257,384,768.0,True):
+            for ram in (128,255,257,384,768.0,True,8448):
                 with self.assertRaises(VMError):validate(action,dict(base,memory_mib=ram))
-            for cpu in (0.1,0.3,0.6,True):
+            for cpu in (0.1,0.3,0.6,True,4.25):
                 with self.assertRaises(VMError):validate(action,dict(base,vcpus=cpu))
+            validate(action,dict(base,disk_gib=100))
+            with self.assertRaises(VMError):validate(action,dict(base,disk_gib=101))
             # A disk-only update does not force an existing VM's RAM to change.
             validate(action,dict(base,disk_gib=8))
 

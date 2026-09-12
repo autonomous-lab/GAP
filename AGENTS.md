@@ -1683,3 +1683,10 @@ most every 30 seconds. It uses configured node endpoints only, and returns
 `available: false` when a tariff cannot be obtained or validated. Current tariffs
 are labelled separately from historical usage and provider-cost versions in
 fleet finance. Prices can differ between nodes; compare before choosing a host.
+
+
+MicroVM allocation limits: at most 4 vCPU, 8192 MiB RAM and 100 GiB disk per VM.
+CPU uses increments of 0.25, RAM increments of 256 MiB, disk increments of
+1 GiB. Creation selectors also respect remaining owner quotas and the minimum
+disk size required by the guest image. API creation and resize enforce these
+limits; existing allocations are not automatically changed.

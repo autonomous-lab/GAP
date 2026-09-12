@@ -77,6 +77,8 @@ def validate(action, body):
             raise VMError('invalid_' + key)
     if 'memory_mib' in body and (body['memory_mib']<256 or body['memory_mib']%256):
         raise VMError('memory_must_be_multiple_of_256_mib')
+    for key,maximum in (('vcpus',4),('memory_mib',8192),('disk_gib',100)):
+        if key in body and body[key]>maximum:raise VMError(key+'_exceeds_vm_limit')
     for key in ('start', 'force', 'delete_data', 'confirm_data_loss', 'new_vm'):
         if key in body and type(body[key]) is not bool:
             raise VMError('invalid_' + key)
