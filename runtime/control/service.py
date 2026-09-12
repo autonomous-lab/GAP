@@ -149,6 +149,9 @@ class Application:
         if method == 'POST' and parsed.path == '/node':
             if kind != 'node':
                 raise Failure('node_credentials_required', 403)
+            if body.get('action') == 'readiness':
+                return dict(operator_id=a.operator,node_id=actor,protocol='fleet-admission-v1',
+                            reservations=self.allow_reservations,capacity=self.allow_capacity)
             if body.get('action') in ('retention-status','retention-claim','retention-finish'):
                 import retention
                 args=(a,actor,body['project_id'],body['owner_did'])

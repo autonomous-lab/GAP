@@ -420,6 +420,10 @@ class Runner:
                 return 200, self.public_job(old)
             if db.execute("SELECT 1 FROM jobs WHERE project=? AND status IN ('queued','running')", (project,)).fetchone():
                 raise Failure(409, "stack_operation_in_progress")
+            if action=='vm/create' and self.runtime:
+                from admission import check
+                readiness=check(self.runtime.ledger)
+                if not readiness['ready']:raise Failure(503,readiness['errors'][0])
             job = "job_" + uuid.uuid4().hex
             db.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?,?,'queued',NULL,?)",
                        (job, project, owner, request_id, digest, action, payload, int(time.time())))
@@ -532,6 +536,9 @@ class Runner:
         if action in ('prepare-wallet-migration','commit-wallet-migration','wallet-migration-status'):
             from wallet_migration import operate
             return operate(self,action,body['project_id'],body['owner_did'])
+        if action=='admission-readiness':
+            from admission import check
+            return check(ledger)
         if action=='pricing': return ledger.pricing()
         if action=='finance':return ledger.finance_report(body['start'],body['end'],body.get('project_id'))
         if action=='set-costs':return ledger.finance_costs(body['costs'],body['expected_version'])

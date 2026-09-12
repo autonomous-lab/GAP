@@ -74,6 +74,15 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.call('/node', 'node-two-test', dict(action='project', project_id=PROJECT))[0], 403)
         self.assertEqual(self.call('/node', 'admin-test', dict(action='project', project_id=PROJECT))[0], 403)
 
+    def test_readiness_uses_node_identity_and_live_feature_flags(self):
+        status,data=self.call('/node','node-one-test',dict(action='readiness'))
+        self.assertEqual(status,200);self.assertEqual(data['node_id'],'node-one')
+        self.assertEqual(data['protocol'],'fleet-admission-v1')
+        self.assertFalse(data['reservations']);self.assertFalse(data['capacity'])
+        self.app.allow_reservations=True;self.app.allow_capacity=True
+        self.assertTrue(self.call('/node','node-two-test',dict(action='readiness'))[1]['capacity'])
+        self.assertIn(self.call('/node','wrong',dict(action='readiness'))[0],(401,403))
+
     def test_disabled_debits_cannot_accidentally_activate_production_billing(self):
         self.customer()
         status, health = self.call('/health')

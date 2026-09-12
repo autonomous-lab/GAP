@@ -667,3 +667,9 @@ timing. Node summaries are capped at 500 accounts and wallet lists at 1,000
 customers, with explicit incomplete-coverage flags. No finance request changes
 credits, tariffs, costs or billing state. Source cost versions remain maintained
 through the existing operator cost configuration on each worker.
+
+Node credentials may submit `POST /node` with `{"action":"readiness"}`. This
+read-only probe returns the authenticated node and operator identities,
+`protocol: fleet-admission-v1`, and the reservation/capacity feature flags. Workers
+check it before admitting new VM creations. It does not extend an existing lease
+or allocate capacity/credits; normal checkpoint and capacity checks still apply.

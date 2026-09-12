@@ -939,3 +939,27 @@ above 500 accounts. The public node forwards this only for its dedicated finance
 source credential; no worker operator token is exposed. The 31-day fleet window
 keeps hourly reports bounded. Costs remain versioned at the worker and unknown
 provider values never turn into zero-cost or profitable estimates.
+
+### Fleet admission gate
+
+Before connecting a fleet worker, set `fleet_billing.expected_tariff` in
+`runner.json` to the full intended tariff object (version and all five integer
+prices). Apply that tariff through the existing version-controlled pricing
+operator action, in `enforced` mode. The intent and active registry must match;
+merely setting the node's `.env` does not activate billing.
+
+After deploying the authority and worker, run this mandatory deployment gate
+from the host checkout before accepting new client workloads:
+
+```sh
+python3 scripts/check-microvm-admission.py --token-file data/gap-compose/config/billing-admin.token
+```
+
+It exits nonzero with specific diagnostics if billing is not enforced, the
+expected tariff is missing or differs, the authority rejects the node credential,
+is unavailable, or lacks the reservation/capacity admission protocol. The probe
+uses the actual node credential and performs no allocation, debit or lease renewal.
+Every new VM creation also runs this gate before inserting a job. Existing job
+retries, lease enforcement, stop/delete and resource release remain available.
+Process health alone is not admission readiness. Deploy the authority first when
+upgrading the readiness protocol; older authorities reject the probe.
