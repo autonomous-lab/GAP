@@ -1667,3 +1667,19 @@ this secret to tenants. Main edge and private Caddy both require this admission
 chain; without it VM routing fails closed. See the worker README for rollout.
 
 MicroVM direct public ports use the operator-configured pool `24000-53999` by default (30,000 numbers, available in TCP and UDP), with five reserved numbers per VM. Host range DNAT avoids individual Docker publications; see `runtime/compose/README.md` for firewall setup and reconciliation. Per-agent VM and resource quotas still apply.
+
+
+### Active MicroVM pricing discovery
+
+`GET /v1/pricing` returns this host's active billing registry (USD, one million
+microcredits per credit), `mode`, `tariff`, `checked_at` and `available`. Only an
+active enforced tariff is available for sale. An unavailable worker or shadow
+billing is not a zero price. `/pricing` displays these same values and estimates
+CPU/RAM charges; the MicroVM creation form uses the connected project's active
+registry. Operator provider costs remain private and are not sale prices.
+
+Authenticated `GET /v1/fleet/nodes` includes each node's `pricing`, refreshed at
+most every 30 seconds. It uses configured node endpoints only, and returns
+`available: false` when a tariff cannot be obtained or validated. Current tariffs
+are labelled separately from historical usage and provider-cost versions in
+fleet finance. Prices can differ between nodes; compare before choosing a host.

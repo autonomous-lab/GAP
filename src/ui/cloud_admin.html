@@ -47,7 +47,7 @@ if(kind==='finance'){
   const filters=node('div',null,'toolbar');
   for(const [id,label,options,value,set]of [['finance-node','All hosts',data.node_options||[],financeNode,v=>financeNode=v],['finance-customer','All customers',data.customer_options||[],financeCustomer,v=>financeCustomer=v]]){const select=node('select');select.id=id;select.setAttribute('aria-label',label);select.append(new Option(label,''));for(const o of options)select.append(new Option(o.label||o.node_id,o.id||o.node_id));select.value=value;select.onchange=()=>act(async()=>{set(select.value);financeProject='';await load()});filters.append(select)}content.append(filters);
   if(!data.coverage_complete)content.append(node('p','A host report is unavailable or incomplete. Totals below are partial; no fleet margin is calculated.','alert'));
-  content.append(section('Host coverage · whole-node reports',table(['Host','Provider','Report','Usage charges','Known costs','Cost coverage'],(data.sources||[]).map(s=>[s.node_id,s.provider,s.available?'Available':'Unavailable',dollars(s.usage_microcredits),dollars(s.known_infra_cost_microdollars),s.cost_complete?'Complete':'Incomplete']))));
+  content.append(section('Host coverage · whole-node reports',table(['Host','Provider','Report','Current sale tariff','Usage charges','Known costs','Cost coverage'],(data.sources||[]).map(s=>[s.node_id,s.provider,s.available?'Available':'Unavailable',s.active_pricing?.tariff?.version||'Not available',dollars(s.usage_microcredits),dollars(s.known_infra_cost_microdollars),s.cost_complete?'Complete':'Incomplete']))));
  }
 
  if(!data.available){content.append(node('p','Usage finance is not configured on this node.','muted'));return}

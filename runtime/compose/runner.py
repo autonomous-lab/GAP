@@ -284,10 +284,15 @@ class Runner:
                 if self.ingress:view['ingress']=self.ingress.public(meta)
                 values.append(view)
             return 200,{'vms':values,'total':len(paths),'offset':offset,'limit':100,'available':True}
+        if rpc.get('action')=='admin/pricing' and rpc.get('method')=='GET':
+            if not self.runtime:return 503,{'available':False}
+            pricing=self.runtime.ledger.pricing()
+            return 200,dict(pricing,available=pricing['mode']=='enforced' and pricing['tariff'] is not None,
+                            currency='USD',checked_at=int(time.time()))
         if rpc.get('action')=='admin/finance' and rpc.get('method')=='GET':
             if not self.runtime:return 200,{'available':False}
             body=rpc.get('body') or {}
-            return 200,dict(self.runtime.ledger.finance_report(body['start'],body['end'],body.get('project_id'),body.get('include_projects',False)),available=True)
+            return 200,dict(self.runtime.ledger.finance_report(body['start'],body['end'],body.get('project_id'),body.get('include_projects',False)),available=True,active_pricing=self.runtime.ledger.pricing())
         project, owner = rpc.get("project_id", ""), rpc.get("owner_did", "")
         if not isinstance(project, str) or not PROJECT.fullmatch(project) or not isinstance(owner, str):
             raise Failure(400, "invalid_project")

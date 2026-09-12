@@ -7830,6 +7830,17 @@ pub fn route_with_ip(
         return crate::fleet_relay::forward("http://172.17.0.1:8096/node",method,auth,body_bytes);
     }
 
+    if path == "/v1/pricing" {
+        if method != "GET" {return (405,json!({"error":{"code":"method_not_allowed"}}))}
+        if let Err(e)=guard.check_rate_limit(token,client_ip) {return error_response(&e)}
+        let runner=guard.private_node.as_ref().and_then(|p|p.runner.clone());
+        drop(guard);
+        return match runner {
+            Some(r)=>crate::private_node::forward(&r,"","","GET","admin/pricing",json!({})),
+            None=>(503,json!({"available":false})),
+        };
+    }
+
     if method == "GET" && path == "/v1/registration" {
         return (200,json!({"verification_required":guard.registration.is_some()}));
     }

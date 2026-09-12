@@ -194,7 +194,8 @@ class Application:
         if kind != 'client':
             raise Failure('client_credentials_required', 403)
         if method=='GET' and parsed.path=='/v1/nodes':
-            return {'nodes':[{'node_id':n,'console_path':self.console_paths.get(n)} for n in sorted(self.nodes)]}
+            prices=self.finance.prices.get() if self.finance else {}
+            return {'nodes':[{'node_id':n,'console_path':self.console_paths.get(n),'pricing':prices.get(n,{'available':False})} for n in sorted(self.nodes)]}
         if parsed.path == '/v1/members' and self.access:
             if method=='GET':return self.access.members(actor)
             if method=='POST':return self.access.membership(actor,body)

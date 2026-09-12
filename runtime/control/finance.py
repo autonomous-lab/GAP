@@ -33,6 +33,9 @@ class Finance:
             if not re.fullmatch(r'[A-Za-z0-9_-]{43,128}',source['token']):raise ValueError('invalid finance credential')
             self.sources.append(source)
 
+        from pricing import Prices
+        self.prices=Prices(self.sources)
+
     @staticmethod
     def fetch(source,start,end,project):
         query={'start':start,'end':end}
@@ -111,6 +114,7 @@ class Finance:
             cost_complete=cost_complete and valid_cost
             historical=historical or result['historical_apportionment']
             versions.extend(dict(v,node_id=source['node_id'],provider=source['provider']) for v in result.get('cost_versions',[]))
+            entry['active_pricing']=result.get('active_pricing')
             entry.update(usage_microcredits=result['usage']['debited_microcredits'],known_infra_cost_microdollars=cost,cost_complete=valid_cost,projects_complete=result.get('projects_complete') is True)
             details.append(entry)
         selected_customer=customer or mappings.get(project)
