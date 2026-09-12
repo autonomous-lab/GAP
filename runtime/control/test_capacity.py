@@ -192,6 +192,17 @@ class CapacityTests(unittest.TestCase):
         current=self.a.capacity_get('node-one',PROJECT,VM)
         self.assertEqual(self.used()['max_vms'],int(current['state']=='active'))
 
+    def test_cancel_before_prepare_and_abort_before_resize_fence_late_requests(self):
+        cancelled=self.a.capacity_cancel_create('node-one','cancel',PROJECT,OWNER,VM,'local-fence')
+        self.assertEqual(cancelled['state'],'released')
+        self.fails('capacity_released',lambda:self.prepare())
+        active=self.finish(self.prepare(OTHER,request='other-create'))
+        self.a.capacity_abort_resize('node-one','abort',PROJECT,OTHER,active['revision'],'late-resize','local-old-config')
+        self.fails('capacity_revision_conflict',lambda:self.prepare(OTHER,request='late-resize',cpu=2,revision=active['revision']))
+        self.assertEqual(self.used(),dict(max_vms=1,cpu_quarters=4,memory_mib=1024))
+        self.fails('project_node_mismatch',lambda:self.a.capacity_cancel_create('node-two','steal',PROJECT,OWNER,VM,'fake'))
+        self.fails('capacity_already_committed',lambda:self.a.capacity_cancel_create('node-one','bad',PROJECT,OWNER,OTHER,'fake'))
+
 
 class CapacityHTTPTests(unittest.TestCase):
     setUp=test_service.ServiceTests.setUp
@@ -226,7 +237,7 @@ class CapacityHTTPTests(unittest.TestCase):
         self.assertNotIn(VM,json.dumps(summary))
         health=self.call('/health')[1]
         self.assertTrue(health['capacity_enabled'])
-        self.assertFalse(health['worker_capacity_enforcement'])
+        self.assertEqual(health['worker_capacity_enforcement'],'explicit_project_opt_in')
 
     def test_operator_revision_and_capacity_get_survive_http_response_loss(self):
         customer=self.customer()
@@ -266,6 +277,16 @@ class CapacityHTTPTests(unittest.TestCase):
             path.rmdir()
             saved.rename(path)
         self.assertEqual(self.a.quotas(customer)['allocated']['max_vms'],0)
+
+    def test_node_cancel_fences_a_prepare_not_yet_received_over_http(self):
+        self.customer();self.app.allow_capacity=True
+        body=dict(action='capacity-cancel-create',request_id='cancel',project_id=PROJECT,owner_did=OWNER,vm_id=VM,evidence_id='local-fence')
+        status,result=self.call('/node','node-one-test',body)
+        self.assertEqual(status,200);self.assertEqual(result['state'],'released')
+        self.assertEqual(self.call('/node','node-one-test',body),(status,result))
+        status,result=self.call('/node','node-one-test',dict(action='capacity-prepare',request_id='late',project_id=PROJECT,
+            owner_did=OWNER,vm_id=VM,cpu_quarters=4,memory_mib=1024,expected_revision=0))
+        self.assertEqual((status,result['error']['code']),(409,'capacity_released'))
 
 
 if __name__=='__main__':

@@ -52,7 +52,7 @@ class FleetAcceptance(integration_test.Integration):
     def start_controller(self):
         self.authority=Authority(self.authority_path,'test-operator')
         self.control=Server(('127.0.0.1',self.control_port),Application(self.authority,'o'*64,
-                     {'test-node':self.control_node_token},allow_reservations=True))
+                     {'test-node':self.control_node_token},allow_reservations=True,allow_capacity=True))
         self.control_thread=threading.Thread(target=self.control.serve_forever,daemon=True)
         self.control_thread.start()
 
@@ -66,13 +66,17 @@ class FleetAcceptance(integration_test.Integration):
         runtime=runner.runtime;manager=runner.hypervisor;meta=None
         key=root/'owner-key'
         subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(key)],check=True)
-        def op(method,path,body):
+        def op(method,path,body,expected_error=None):
             status,job=request(method,prefix+path,token,dict(request_id=uuid.uuid4().hex,**body))
             self.assertEqual(status,202,job)
             deadline=time.monotonic()+120
             while time.monotonic()<deadline:
                 _,result=request('GET',prefix+'/jobs/'+job['job_id'],token)
                 if result['status'] not in ('queued','running'):
+                    if expected_error:
+                        self.assertEqual(result['status'],'failed',result)
+                        self.assertEqual(result['result']['error'],expected_error,result)
+                        return result['result']
                     self.assertEqual(result['status'],'succeeded',result)
                     return result['result']
                 time.sleep(.1)
@@ -83,8 +87,12 @@ class FleetAcceptance(integration_test.Integration):
                 '-o','HostKeyAlias='+meta['vm_id'],'-i',str(key),'-p',str(meta['ssh_port']),
                 'root@127.0.0.1',command],input=input,text=True,capture_output=True,check=True,timeout=10).stdout
         try:
+            approval.write_text(json.dumps({'agents':[owner],'quotas':{owner:{'max_vms':10,'vcpus':4,'memory_mib':4096}}}))
             op('POST','',{'ports':[8001],'ssh_keys':[Path(str(key)+'.pub').read_text().strip()]})
             meta=manager.read(project,owner)
+            self.assertEqual(self.authority.quotas(self.customer)['allocated']['max_vms'],1)
+            op('POST','',{'new_vm':True},expected_error='customer_quota_exceeded_max_vms')
+            self.assertEqual(len([m for m in manager.list(project,owner) if m['state']!='destroyed']),1)
             for _ in range(45):
                 try:ssh('true');break
                 except subprocess.SubprocessError:time.sleep(.5)
@@ -121,6 +129,7 @@ class FleetAcceptance(integration_test.Integration):
             runtime.tick()
             self.assertTrue(manager.folder(meta).exists())
             self.start_controller()
+            self.assertEqual(self.authority.quotas(self.customer)['allocated']['max_vms'],1)
             deadline=time.monotonic()+20
             while not runtime.ledger.lease_allowed(project) and time.monotonic()<deadline:
                 runtime.ledger.sync(project,owner,True);time.sleep(.1)
@@ -129,14 +138,40 @@ class FleetAcceptance(integration_test.Integration):
                 tcp.sendall(b'probe');self.assertEqual(tcp.recv(100),baseline)
             meta=manager.read(project,owner)
             self.assertEqual(ssh('cat /root/fleet-preserved'),'preserved')
+            op('POST','/stop',{'vm_id':meta['vm_id']})
+            op('PATCH','',{'vm_id':meta['vm_id'],'memory_mib':512})
+            self.assertEqual(self.authority.quotas(self.customer)['allocated']['memory_mib'],512)
+            op('PATCH','',{'vm_id':meta['vm_id'],'memory_mib':1280},expected_error='customer_quota_exceeded_memory_mib')
+            op('POST','/start',{'vm_id':meta['vm_id']})
+            meta=manager.read(project,owner)
+            for _ in range(45):
+                try:
+                    self.assertEqual(ssh('cat /root/fleet-preserved'),'preserved');break
+                except subprocess.SubprocessError:time.sleep(.5)
+            else:self.fail('resized VM SSH timeout')
             runtime.closed=True;time.sleep(1.5)
             manager.hibernate(meta);runtime.sample(meta)
             runtime.ledger.sync(project,owner,True)
             self.assertEqual(self.authority.wallet(self.customer)['spent_microcredits'],runtime.ledger.view(project,owner)['spent_microcredits'])
-            print('PASS: real HTTP reservations, metering under job lock, controller loss, TCP closure, CPU preemption, retained snapshot, exact settlement and preserved-memory resume',flush=True)
+            from billing import BillingError
+            from fleet_capacity import Capacity
+            original=manager.capacity.transport
+            def lose_release(body):
+                reply=original(body)
+                if body.get('outcome')=='release':raise BillingError('fleet_authority_unavailable')
+                return reply
+            manager.capacity.transport=lose_release
+            op('DELETE','',{'vm_id':meta['vm_id'],'delete_data':True,'confirm_data_loss':True},expected_error='fleet_authority_unavailable')
+            config=manager.capacity.config
+            manager.capacity=Capacity(manager);manager.capacity.configure(config)
+            with runtime.lock(project),manager.owner_lock(owner):manager.capacity.reconcile_project(project,owner)
+            self.assertEqual(self.authority.quotas(self.customer)['allocated']['max_vms'],0)
+            self.assertFalse(manager.folder(meta).exists())
+            print('PASS: KVM capacity admission, denied second VM, resize and denied growth, lost destruction ack recovery, credit partition, preserved RAM/file and exact settlement',flush=True)
         finally:
             runtime.closed=True
             if meta:
+                if not self.control:self.start_controller()
                 current=manager.read(project,owner)
                 if manager.alive(current):manager.stop(current,True)
                 if current['state']!='destroyed':manager.perform(project,owner,'vm/destroy',{'vm_id':current['vm_id'],'delete_data':True,'confirm_data_loss':True})

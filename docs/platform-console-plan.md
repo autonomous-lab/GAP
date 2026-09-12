@@ -79,7 +79,7 @@ restricted to that node's projects. Existing node authentication and worker
 metering have not been switched over. Online debits are disabled by default.
 Legacy exports are read-only and do not fence or transfer live balances. Remaining
 gates include verified human linkage, node-scoped credential integration, final
-source fencing and exactly-once balance transfer, and global capacity admission. This
+source fencing and exactly-once balance transfer, and legacy capacity adoption. This
 foundation must not be reported as completed fleet accounts or quotas.
 
 Worker spending reservations and execution leases are now implemented for explicit
@@ -91,9 +91,12 @@ operations. Financially used legacy projects cannot opt in without migration.
 The central customer-wide count/CPU/RAM reservation state machine is implemented:
 transactional preparation, revision-checked confirmation/abort/release, and no
 expiry refunds for unknown outcomes. Pending resizes hold the maximum of old/new
-resources until confirmation. Its node API is separately enabled and tested;
-worker create/resize/destroy integration remains pending, so this is not yet
-production-wide admission enforcement. Authoritative retention decisions also
+resources until confirmation. Worker create/resize/destroy now enforce it for explicit new-project opt-in,
+using a durable intent registry separate from job payloads. Cancellation fences
+late create/resize requests, recovery verifies current authority state and local
+resources, and destruction acknowledgements can be replayed without resurrection.
+Existing workloads have not been adopted; global admission is not retroactively
+applied to legacy projects. Authoritative retention decisions also
 remain pending; the two existing wallets have not been transferred.
 
 ## Confirmed requirements

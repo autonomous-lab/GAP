@@ -23,6 +23,7 @@ class Runtime:
             self.ledger=FleetLedger(ledger_path,config['fleet_billing'])
         else:
             self.ledger=Ledger(ledger_path)
+        self.manager.capacity.configure(config.get('fleet_billing'))
         self.incarnation=uuid.uuid4().hex
         self.locks={}; self.guard=threading.Lock(); self.states={}
         self.capacity_lock=threading.RLock()
@@ -366,6 +367,13 @@ class Runtime:
 
     def tick(self):
         errors=[]
+        # Includes intents with no catalog entry (crash before first VM save).
+        capacity=self.manager.capacity
+        for project,owner in {(r['project'],r['owner']) for r in capacity.records() if r['phase']!='closed'}:
+            if project not in capacity.projects:continue
+            with self.lock(project),self.manager.owner_lock(owner):
+                try:capacity.reconcile_project(project,owner)
+                except Exception:errors.append(project+':fleet_capacity_reconciliation_pending')
         for path in (self.manager.root/'catalog').glob('*.json'):
             with self.lock(json.loads(path.read_text())['project_id']):
                 try: self.tick_project(path)

@@ -93,6 +93,7 @@ def validate(action, body):
 
 class MicroVMs:
     def execution_allowed(self,meta):
+        if not self.capacity.allows(meta):return False
         if not self.runtime:return True
         ledger=getattr(self.runtime,'ledger',None)
         return self.runtime.check_policy(meta,force=True) and (ledger is None or ledger.lease_allowed(meta['project_id']))
@@ -120,6 +121,8 @@ class MicroVMs:
             self.network = Network(self, config['public_network'])
         for folder in ('catalog', 'vms', 'retained', 'locks'):
             (self.root / folder).mkdir(parents=True, exist_ok=True, mode=0o700)
+        from fleet_capacity import Capacity
+        self.capacity=Capacity(self)
 
     @contextmanager
     def lock(self, project):
@@ -450,7 +453,7 @@ class MicroVMs:
             self.save(meta)
         except Exception:
             if self.alive(meta):
-                if self.runtime and not self.execution_allowed(meta):
+                if not self.execution_allowed(meta):
                     self.stop(meta,True)
                 else:
                     self.qmp(meta,'cont')
@@ -485,7 +488,7 @@ class MicroVMs:
             # Mark resumed before executing guest instructions: never replay an old
             # memory snapshot after a crash following an externally visible write.
             meta['state']='running'; self.save(meta)
-            if self.runtime and not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
+            if not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
             self.qmp(meta,'cont')
             if self.runtime: self.runtime.execution_started(meta)
             response=self.qmp(meta,'human-monitor-command',{'command-line':'delvm '+tag})
@@ -502,7 +505,7 @@ class MicroVMs:
             raise
 
     def start(self, meta):
-        if self.runtime and not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
+        if not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
         if meta['state'] == 'creating':
             raise VMError('vm_creation_incomplete_destroy_and_retry')
         if self.public(meta)['state'] == 'running':
@@ -534,7 +537,7 @@ class MicroVMs:
                 raise error
             try:
                 if self.qmp(meta, 'query-status')['status'] in ('prelaunch','paused'):
-                    if self.runtime and not self.execution_allowed(meta):
+                    if not self.execution_allowed(meta):
                         process.terminate(); process.wait(timeout=10)
                         raise VMError('microvm_suspended_or_policy_unavailable')
                     self.qmp(meta, 'cont')
@@ -546,7 +549,7 @@ class MicroVMs:
             process.terminate()
             process.wait(timeout=10)
             raise VMError('hypervisor_start_timeout')
-        if self.runtime and not self.execution_allowed(meta):
+        if not self.execution_allowed(meta):
             self.stop(meta,True)
             raise VMError('microvm_suspended_or_policy_unavailable')
         if self.runtime: self.runtime.execution_started(meta,cold=True)
@@ -657,9 +660,11 @@ class MicroVMs:
             if (action == 'vm/create' and (not meta or meta['state'] == 'destroyed')
                     and self.vm_count(owner) >= limits.get('max_vms', 1)):
                 raise VMError('agent_quota_exceeded_max_vms')
+            if self.capacity.managed(project):
+                return self.capacity.execute(project,owner,action,body)
             return self._perform(project, owner, action, body)
 
-    def _perform(self, project, owner, action, body):
+    def _perform(self, project, owner, action, body, created_vm_id=None, defer_start=False):
         validate(action, body)
         with self.lock(project):
             meta = None if action=='vm/create' and body.get('new_vm') else self.read(project, owner, body.get('vm_id'))
@@ -674,7 +679,7 @@ class MicroVMs:
                         previous['catalog_key']=previous['vm_id']
                         self.catalog(project).replace(self.catalog(previous['vm_id']))
                         self.save(previous)
-                    meta = {'vm_id': 'vm_' + uuid.uuid4().hex, 'project_id': project, 'owner_did': owner,
+                    meta = {'vm_id': created_vm_id or 'vm_' + uuid.uuid4().hex, 'project_id': project, 'owner_did': owner,
                             'state': 'creating', 'vcpus': body.get('vcpus', 1),
                             'execution_mode': body.get('execution_mode','serverless'),
                             'memory_mib': body.get('memory_mib', 1024), 'disk_gib': body.get('disk_gib', 8),
@@ -694,7 +699,7 @@ class MicroVMs:
                 self.prepare(meta)
                 meta['state'] = 'stopped'
                 self.save(meta)
-                if body.get('start', True):
+                if body.get('start', True) and not defer_start:
                     self.start(meta)
             else:
                 if not meta or meta['state'] == 'destroyed':

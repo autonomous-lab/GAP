@@ -59,8 +59,8 @@ class Application:
             return {'ok': True, 'operator_id': self.authority.operator, 'phase': 'reservations',
                     'legacy_cutover': False, 'worker_metering_mode': 'opt_in',
                     'reservation_protocol': 1, 'reservations_enabled': self.allow_reservations,
-                    'capacity_protocol': 1, 'capacity_enabled': self.allow_capacity,
-                    'worker_capacity_enforcement': False,
+                    'capacity_protocol': 2, 'capacity_enabled': self.allow_capacity,
+                    'worker_capacity_enforcement': 'explicit_project_opt_in',
                     'online_debits_enabled': self.allow_debits}
         kind, actor = self.actor(token)
         a = self.authority
@@ -101,7 +101,7 @@ class Application:
         if method == 'POST' and parsed.path == '/node':
             if kind != 'node':
                 raise Failure('node_credentials_required', 403)
-            if body.get('action') in ('capacity-get', 'capacity-prepare', 'capacity-finish'):
+            if body.get('action') in ('capacity-get', 'capacity-prepare', 'capacity-finish', 'capacity-cancel-create', 'capacity-abort-resize'):
                 if not self.allow_capacity:
                     raise Failure('capacity_disabled', 409)
                 if body['action'] == 'capacity-get':
@@ -109,6 +109,10 @@ class Application:
                 if body['action'] == 'capacity-prepare':
                     return a.capacity_prepare(actor, body['request_id'], body['project_id'], body['owner_did'],
                         body['vm_id'], body['cpu_quarters'], body['memory_mib'], body['expected_revision'])
+                if body['action'] == 'capacity-cancel-create':
+                    return a.capacity_cancel_create(actor,body['request_id'],body['project_id'],body['owner_did'],body['vm_id'],body['evidence_id'])
+                if body['action'] == 'capacity-abort-resize':
+                    return a.capacity_abort_resize(actor,body['request_id'],body['project_id'],body['vm_id'],body['expected_revision'],body['transition_id'],body['evidence_id'])
                 return a.capacity_finish(actor, body['request_id'], body['project_id'], body['vm_id'],
                     body['expected_revision'], body.get('transition_id'), body['outcome'], body['evidence_id'])
             if body.get('action') == 'project':

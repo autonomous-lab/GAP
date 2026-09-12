@@ -47,6 +47,15 @@ class Client:
             return result
         except urllib.error.HTTPError as error:
             code='fleet_authority_denied' if error.code in (401,403) else 'fleet_reconciliation_required' if error.code==409 else 'fleet_authority_unavailable'
+            if str(body.get('action','')).startswith('capacity-'):
+                try:
+                    value=json.loads(error.read(65537)).get('error',{}).get('code')
+                    if value in ('capacity_not_found','capacity_released','capacity_revision_conflict',
+                                 'capacity_transition_pending','capacity_transition_mismatch','capacity_disabled',
+                                 'customer_quota_exceeded_max_vms','customer_quota_exceeded_cpu_quarters',
+                                 'customer_quota_exceeded_memory_mib'):
+                        code=value
+                except (ValueError,TypeError,AttributeError):pass
             error.close()
             raise BillingError(code) from None
         except (OSError,ValueError):

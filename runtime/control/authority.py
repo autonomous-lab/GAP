@@ -356,6 +356,39 @@ class Authority:
                         **self.capacity_view(self.capacity_row(db,node,project,vm)))
         return self.mutation('node:'+node, request, body, apply)
 
+    def capacity_cancel_create(self, node, request, project, owner, vm, evidence):
+        """Fence an abandoned creation even when its prepare has not arrived yet."""
+        identifier(evidence)
+        body = dict(action='capacity_cancel_create',project=project,owner=owner,vm=vm,evidence=evidence)
+        def apply(db):
+            placement=self.node_project(db,node,project)
+            if placement['owner']!=owner: raise Failure('project_owner_mismatch',403)
+            row=self.capacity_row(db,node,project,vm)
+            if row and row['state']=='active': raise Failure('capacity_already_committed',409)
+            if row and row['cpu']: raise Failure('capacity_resize_cannot_cancel_creation',409)
+            if row:
+                if row['state']!='released':
+                    db.execute("UPDATE capacity SET state='released',revision=revision+1,target_cpu=0,target_memory=0,pending=NULL WHERE vm=?",(vm,))
+            else:
+                db.execute("INSERT INTO capacity VALUES(?,?,?,?,'released',1,0,0,0,0,NULL)",
+                           (vm,node,project,placement['customer']))
+            return dict(operator_id=self.operator,evidence_id=evidence,
+                        **self.capacity_view(self.capacity_row(db,node,project,vm)))
+        return self.mutation('node:'+node,request,body,apply)
+
+    def capacity_abort_resize(self,node,request,project,vm,revision,transition,evidence):
+        self.capacity_number(revision,2**53-1,1);identifier(transition);identifier(evidence)
+        body=dict(action='capacity_abort_resize',project=project,vm=vm,revision=revision,transition=transition,evidence=evidence)
+        def apply(db):
+            row=self.capacity_row(db,node,project,vm)
+            if not row:raise Failure('capacity_not_found',404)
+            unreceived=row['state']=='active' and row['revision']==revision
+            pending=row['state']=='pending' and row['revision']==revision+1 and row['pending']==transition and row['cpu']>0
+            if not (unreceived or pending):raise Failure('capacity_revision_conflict',409)
+            db.execute("UPDATE capacity SET state='active',revision=revision+1,target_cpu=cpu,target_memory=memory,pending=NULL WHERE vm=?",(vm,))
+            return dict(operator_id=self.operator,evidence_id=evidence,**self.capacity_view(self.capacity_row(db,node,project,vm)))
+        return self.mutation('node:'+node,request,body,apply)
+
     def entry(self, db, customer, project, node, kind, delta, source, actor, request):
         db.execute('INSERT INTO wallet_entries(customer,project,node,kind,delta,source,actor,operation,created) VALUES(?,?,?,?,?,?,?,?,?)',
                    (customer, project, node, kind, delta, source, actor, request, int(self.clock())))

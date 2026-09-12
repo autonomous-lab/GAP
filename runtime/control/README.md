@@ -15,8 +15,8 @@ email registration and project ownership checks still use their local authoritie
 Existing workloads and balances continue using their original ledger until a
 separate, fenced migration is completed. Installing this service does not migrate
 them. The central VM-count/CPU/RAM reservation protocol is implemented below;
-existing worker create/resize/destroy operations do not call it yet. Global
-capacity enforcement is therefore **not active for existing workloads**.
+worker create/resize/destroy operations enforce it for explicitly opted-in, new
+projects. Existing workloads are **not adopted or migrated automatically**.
 
 ## State and trust
 
@@ -210,9 +210,10 @@ production projects before that migration/retention gate is complete.
 ## Global capacity admission protocol
 
 Set `allow_capacity: true` in the private control configuration to enable the
-node protocol. This flag enables the API only: `/health` deliberately reports
-`worker_capacity_enforcement: false` until worker lifecycle integration is delivered.
-It neither scans nor adopts existing VM catalogs. Keep the existing local quota
+node protocol. Deploy protocol version 2 before enabling worker opt-in. `/health`
+reports `capacity_protocol: 2` and
+`worker_capacity_enforcement: "explicit_project_opt_in"`.
+The authority neither scans nor adopts existing VM catalogs. Keep the existing local quota
 checks and physical-host admission checks; they solve different constraints.
 No client is migrated by enabling this flag.
 
@@ -241,6 +242,8 @@ All node actions use POST `/node` (or the existing HTTPS `/v1/fleet/node` relay)
 | `capacity-get` | `project_id`, `vm_id` |
 | `capacity-prepare` | `request_id`, `project_id`, `owner_did`, `vm_id`, `expected_revision`, `cpu_quarters`, `memory_mib` |
 | `capacity-finish` | `request_id`, `project_id`, `vm_id`, `expected_revision`, `outcome`, `evidence_id`, and `transition_id` for commit/abort |
+| `capacity-cancel-create` | `request_id`, `project_id`, `owner_did`, `vm_id`, `evidence_id` |
+| `capacity-abort-resize` | `request_id`, `project_id`, `vm_id`, `expected_revision` (before prepare), `transition_id`, `evidence_id` |
 
 The authenticated node determines placement; a supplied node/customer identity
 cannot override it. Project ownership and the immutable VM/project/node binding
@@ -279,10 +282,44 @@ The protocol is deliberately conservative:
 The central service records that assertion; it does not independently inspect
 QEMU or cryptographically prove destruction. Workers must retain the referenced
 receipt, serialize local operations per VM and fence abandoned generations.
-Future worker integration must test interruption before/after every local and
-remote write, including destruction acknowledgement loss and pending resize
-recovery. Until that integration exists, do not drive this API manually as a
-substitute for tracking actual worker resources.
+The worker implements this protocol using a separate `fleet-capacity.sqlite` under
+its hypervisor state root, independent of jobs whose payloads can be discarded.
+Bindings persist the operator, node and owner. Each intent keeps its VM generation,
+request IDs, target/previous resources, completion/cancellation receipts and phase.
+Do not edit these records or issue manual capacity completions for live workers.
+
+Opting a project into `fleet_billing.projects` also requires capacity admission;
+there is no independent switch permitting credit-managed VMs to skip quotas.
+A project with existing non-destroyed VMs cannot be silently adopted. Financially
+used wallets still require the separate fenced migration. Removing the fleet
+configuration, including disabling serverless mode, does not remove persisted
+capacity fences: execution fails until the correct configuration and authority
+are restored. Local count/resource limits and physical-host admission still apply.
+
+A fresh generation and prepare request are durable before any local allocation.
+CPU execution waits for a confirmed active allocation plus credit and policy
+checks. Recovery reads the current central state before permitting execution;
+process-local admission is never restored from a cached response alone. Stopped
+and hibernated VMs continue consuming their full provisioned quotas.
+
+Recovery never replays VM creation or resize. An absent creation is locally fenced
+before `capacity-cancel-create`, which writes a released tombstone even if prepare
+has not yet arrived. This prevents a delayed request from reserving an abandoned
+generation. A resize still at its old resources uses `capacity-abort-resize`:
+it cancels that exact pending transition or advances the old active revision to
+reject a prepare still in transit. Thus a refused resize does not wedge the
+existing VM. Applied target resources are committed instead; mismatches hold the
+reservation and block execution for reconciliation. A partially created catalog
+can retain an active allocation while remaining `creating`; destroy it explicitly
+before retrying with a new generation.
+
+Destruction records the exact VM and retain/delete choice before touching disks.
+Recovery may finish that already authorized local destruction, including a crash
+after disk removal/move but before the catalog update. It then releases capacity
+with a durable receipt. A lost acknowledgement is replayed verbatim. Controller
+outages never free quota speculatively, and pending intents with no catalog are
+also reconciled by the lifecycle loop. An existing credit lease can continue
+until its own deadline; capacity reservations are not expiring execution leases.
 
 There is **no capacity timeout, expiry refund or operator force-release**.
 Unknown outcomes continue consuming quota across controller restart, even after
@@ -370,6 +407,11 @@ The real KVM test uses isolated node/worker/controller state and only a read-onl
 guest base image mount. It stops the controller while holding a deployment lock,
 checks open TCP closure and CPU preemption, verifies retained hibernation, then
 restarts the controller and checks exact settlement and preserved-memory resume.
+It also rejects a second VM through global admission, verifies an allowed resize
+and rejected growth, then loses a destruction acknowledgement and reconstructs
+the capacity adapter before reconciling the released allocation. Use graceful
+guest shutdown before resize: an explicit forced power-off can lose unflushed
+guest writes and is not a disk-durability test.
 Run on a KVM host from the repository root (node image argument varies by host):
 
 ```sh
