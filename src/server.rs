@@ -4433,6 +4433,45 @@ directly rather than reasoning about its metadata"
         }
     }
 
+    /// A destroyed microVM must not leave anything addressable behind.
+    ///
+    /// Visitor credentials carry a route fingerprint and a recoverable
+    /// password, and a custom domain still resolves to this node; nothing
+    /// can reach either once the VM is gone, but a replacement VM in the
+    /// same project must not inherit them, and a visitor must not be asked
+    /// for credentials on a route that no longer exists.
+    pub(crate) fn purge_destroyed_vm_records(
+        &mut self,
+        project_id: &str,
+        owner_did: &str,
+        vm_id: &str,
+    ) {
+        let credentials = self
+            .vm_http
+            .get(vm_id)
+            .is_some_and(|r| r.project_id == project_id && r.owner_did == owner_did);
+        if credentials {
+            self.forget_state("cloud_vm_http", vm_id);
+            self.vm_http.remove(vm_id);
+        }
+        let hostnames: Vec<String> = self
+            .custom_domains
+            .iter()
+            .filter(|(_, d)| d.project_id == project_id && d.vm_id.as_deref() == Some(vm_id))
+            .map(|(h, _)| h.clone())
+            .collect();
+        for hostname in &hostnames {
+            self.forget_state("cloud_domains", hostname);
+            self.custom_domains.remove(hostname);
+        }
+        if credentials || !hostnames.is_empty() {
+            eprintln!(
+                "gap-node: purged destroyed microVM {vm_id} (credentials={credentials}, domains={})",
+                hostnames.len()
+            );
+        }
+    }
+
     // ---- custody & balances (RFC-0016) ---------------------------
 
     /// What this node declares about custody.
@@ -7619,6 +7658,28 @@ pub fn gateway_serve(
     Some((status, media, payload)).map(|(s, m, p)| (s, format!("{m}; gap-job={job_ref}"), p))
 }
 
+/// The microVM identity that a runner response marks as destroyed, if any.
+///
+/// Destructive reads arrive at three depths: `GET /vm` answers with the view
+/// itself, an action answers `{"ok":true,"vm":{...}}`, and a polled job
+/// answers `{"result":{"vm":{...}}}`. Only an explicit `destroyed` state
+/// counts — a failed, queued or pending job must never purge live state.
+fn destroyed_vm_identity(value: &Value) -> Option<&str> {
+    [
+        Some(value),
+        value.get("vm"),
+        value.get("result"),
+        value.get("result").and_then(|result| result.get("vm")),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|candidate| {
+        (candidate.get("state").and_then(Value::as_str) == Some("destroyed"))
+            .then(|| candidate.get("vm_id").and_then(Value::as_str))
+            .flatten()
+    })
+}
+
 pub fn route_with_ip(
     state: &Arc<Mutex<NodeState>>,
     method: &str,
@@ -7766,15 +7827,28 @@ pub fn route_with_ip(
         } else { body };
         // Only submit/poll here: guest execution happens asynchronously on the
         // runner. No network call or Compose operation under the state lock.
+        let owner_did = project.owner_did.clone();
         drop(guard);
-        return crate::private_node::forward(
+        let (status, value) = crate::private_node::forward(
             &runner,
             project_id,
-            &project.owner_did,
+            &owner_did,
             method,
             action,
             body,
         );
+        // One moment of truth for VM-scoped state: the first time this node is
+        // told the microVM is gone, its visitor credentials and custom domains
+        // go with it, whether the deletion came from here or another client.
+        if status == 200 {
+            if let Some(vm_id) = destroyed_vm_identity(&value) {
+                match state.lock() {
+                    Ok(mut guard) => guard.purge_destroyed_vm_records(project_id, &owner_did, vm_id),
+                    Err(_) => eprintln!("gap-node: cannot purge destroyed microVM {vm_id}"),
+                }
+            }
+        }
+        return (status, value);
     }
 
     // Caddy calls this over the bridge address before issuing an on-demand
@@ -10128,6 +10202,83 @@ mod tests {
         Arc::new(Mutex::new(NodeState::new(Box::new(
             SqliteStorage::open(":memory:").unwrap(),
         ))))
+    }
+
+    #[test]
+    fn only_an_explicit_destroyed_state_triggers_a_purge() {
+        let vm = "vm_0123456789abcdef0123456789abcdef";
+        for response in [
+            json!({"vm_id":vm,"state":"destroyed"}),
+            json!({"ok":true,"vm":{"vm_id":vm,"state":"destroyed"}}),
+            json!({"job_id":"job_x","status":"succeeded","result":{"vm":{"vm_id":vm,"state":"destroyed"}}}),
+            json!({"result":{"vm_id":vm,"state":"destroyed"}}),
+        ] {
+            assert_eq!(destroyed_vm_identity(&response), Some(vm), "{response}");
+        }
+        for response in [
+            json!({"vm_id":vm,"state":"running"}),
+            json!({"vm_id":vm,"state":"hibernated"}),
+            json!({"vm_id":vm,"state":"stopped"}),
+            json!({"result":{"vm":{"vm_id":vm,"state":"resuming"}}}),
+            json!({"job_id":"job_x","status":"queued"}),
+            json!({"error":{"code":"compose_runner_unavailable"}}),
+            json!({"state":"destroyed"}),
+        ] {
+            assert_eq!(destroyed_vm_identity(&response), None, "{response}");
+        }
+    }
+
+    #[test]
+    fn destroying_a_microvm_purges_its_credentials_and_domains() {
+        let arc = state();
+        let mut state = arc.lock().unwrap();
+        let (project, owner, vm, other) = (
+            "prj_0123456789abcdef01234567",
+            "did:gap:aaaaaaaa",
+            "vm_0123456789abcdef0123456789abcdef",
+            "vm_fedcba9876543210fedcba9876543210",
+        );
+        let record = |vm_id: &str, owner_did: &str| vm_http::Record {
+            vm_id: vm_id.into(),
+            project_id: project.into(),
+            owner_did: owner_did.into(),
+            route_key: project.into(),
+            username: Some("visitor".into()),
+            password_hash: Some("hash".into()),
+            password_sealed: Some("enc:v1:x".into()),
+        };
+        state.vm_http.insert(vm.into(), record(vm, owner));
+        state.vm_http.insert(other.into(), record(other, owner));
+        for (hostname, domain_vm) in [
+            ("vm-domain.test", Some(vm)),
+            ("other-vm.test", Some(other)),
+            ("static-site.test", None),
+        ] {
+            state.custom_domains.insert(hostname.into(), crate::cloud::SiteDomain {
+                vm_id: domain_vm.map(str::to_owned),
+                hostname: hostname.into(),
+                project_id: project.into(),
+                access: "public".into(),
+                status: "active".into(),
+                verification_name: "_gap-verify".into(),
+                verification_value: "value".into(),
+                created_at: 1,
+                updated_at: 1,
+                verified_at: None,
+            });
+        }
+        state.purge_destroyed_vm_records(project, owner, vm);
+        assert!(!state.vm_http.contains_key(vm), "credentials go with the VM");
+        assert!(!state.custom_domains.contains_key("vm-domain.test"), "its own domain goes too");
+        assert!(state.custom_domains.contains_key("other-vm.test"), "another VM keeps its domain");
+        assert!(state.custom_domains.contains_key("static-site.test"), "a static site has no vm_id");
+        assert!(state.vm_http.contains_key(other), "another VM keeps its credentials");
+        assert!(state.storage.get_state("cloud_vm_http", vm).unwrap().is_none());
+        assert!(state.storage.get_state("cloud_domains", "vm-domain.test").unwrap().is_none());
+        // A recycled identity from another owner is never this VM's state.
+        state.vm_http.insert(vm.into(), record(vm, "did:gap:bbbbbbbb"));
+        state.purge_destroyed_vm_records(project, owner, vm);
+        assert!(state.vm_http.contains_key(vm), "owner mismatch must not purge");
     }
 
     #[test]
