@@ -10,8 +10,9 @@ Human membership uses an opaque subject ID; email proof still belongs to the
 registration service. Operator assertions do not migrate email verification.
 
 **Delivery boundary:** worker metering now supports explicit per-project opt-in
-through spending reservations and short execution leases. Existing node login,
-email registration and project ownership checks still use their local authorities.
+through spending reservations and short execution leases. Verified local identities
+can explicitly connect to the operator account and obtain project-scoped signed
+credentials; local email proof and project ownership remain on their source node.
 Existing workloads and balances continue using their original ledger until a
 separate, fenced migration is completed. Installing this service does not migrate
 them. The central VM-count/CPU/RAM reservation protocol is implemented below;
@@ -35,8 +36,9 @@ projects, and cannot supply a different customer or node identity in the body.
 Do not send these credentials to untrusted federated discovery endpoints.
 
 Control client tokens are not node bearer tokens. Do not forward them to execution
-nodes. Destination-scoped signed execution credentials, human sign-in integration,
-node revocation and membership lifecycle remain in the integration phase.
+nodes. Exchange them for destination-scoped project credentials as described below.
+Human single-sign-on UI, node revocation and the full membership lifecycle remain
+in the integration phase.
 
 Wallet amounts are integer microcredits (1,000,000 per USD credit). One customer
 wallet covers its projects on all trusted nodes. Funding is classified as paid,
@@ -82,7 +84,7 @@ The bridge listener is `172.17.0.1:8096`, not an Internet endpoint. Remote acces
 must use the operator's verified TLS edge or an authenticated tunnel; never open
 8096 on a public interface. Do not mount execution-node state or Docker sockets.
 The container has no capabilities and a read-only root filesystem. `/health`
-explicitly reports the foundation phase and whether debits are enabled.
+explicitly reports which reservation and project-access protocols are enabled.
 
 ## Operator API and CLI
 
@@ -426,3 +428,85 @@ docker run --rm --device /dev/kvm --group-add "$(stat -c %g /dev/kvm)" \
 Do not mount a production VM catalog, wallet, customer volume or Docker socket
 in this acceptance container. `/dev/kvm` needs its host group in the container;
 passing `--device` alone does not grant UID 10001 access to a mode-0660 device.
+# Verified account connection and project access
+
+The account authority accepts an explicit connection from a node's identity
+gateway. `POST /v1/fleet/connect` on the project node takes the existing local
+owner bearer and `{ "request_id": "unique-operation", "project_id": "prj_..." }`.
+The node checks project ownership, suspension and its durable verified-email
+record before contacting the authority. An unverified legacy identity must first
+complete the separate verified-email migration; this endpoint cannot invent a proof.
+
+The authority associates the verified email with one customer per operator and
+pins each agent to its source node. Email case is normalized; aliases and plus
+addresses are not merged. Agents with the same verified address share a customer
+but do not automatically receive rights to each other's projects. An existing
+conflicting operator binding returns `legacy_identity_reconciliation_required`;
+there is no automatic account merge. Repeating a request preserves the association
+and issues a fresh short-lived credential without storing the token in operation
+receipts. The connection does not import money or opt a project into worker billing.
+
+The response contains `credential.token` (audience `control`, at most one hour).
+On the authority's public gateway (node 01 for Elestio), use that credential with:
+
+```text
+GET  /v1/fleet/account
+GET  /v1/fleet/projects?after=prj_...
+GET  /v1/fleet/wallet
+GET  /v1/fleet/quotas
+POST /v1/fleet/project-token  {"project_id":"prj_...","ttl_seconds":120}
+POST /v1/fleet/logout        {}
+```
+
+The projects list is filtered by the agent's grants and paginated in batches of
+100. A project token requires owner/operator rights; viewer grants cannot mint a
+management token. The returned `gapf1.` token is signed with Ed25519 and restricted
+to the operator, destination node, exact project, owner and `project.manage` scope.
+It works as a bearer on that project's existing Cloud and MicroVM management APIs,
+including the dashboard browser-session exchange. It cannot create another project,
+list an agent's other projects, connect an identity, or administer a node.
+No agent seed, local owner bearer or email is embedded in the capability.
+
+Nodes validate signatures and expiry locally, including after restart, and retain
+their existing project/agent suspension and MicroVM approval checks. App ingress
+does not require a central account lookup. Tokens default to 120 seconds and allow
+30–300 seconds. Logout and grant removal block new issuance; an already issued
+capability remains valid until expiry (at most five minutes), subject to local
+suspension. A stored browser session does not extend the token's lifetime: clients
+must obtain a new capability and reconnect when it expires. This API connection is
+not yet a human single-sign-on UI or automatic cross-node project provisioning.
+
+## Account-access deployment
+
+Keep a private, persistent 32-byte hex signing seed on the control host only. Add
+`signing_seed_file` and `identity_token_files` (node ID to private token file) to
+`control.json`. Identity gateway credentials must be distinct from all worker and
+operator credentials; workers cannot assert identities or mint account credentials.
+The control image uses Alpine's `py3-cryptography` package for Ed25519 signing.
+
+Configure the execution node with:
+
+```text
+GAP_FLEET_ACCESS_ENABLED=1
+GAP_FLEET_OPERATOR_ID=elestio
+GAP_FLEET_NODE_ID=node-01
+GAP_FLEET_PUBLIC_KEY=<32-byte Ed25519 public key in hex>
+GAP_FLEET_IDENTITY_URL=http://172.17.0.1:8096/identity
+GAP_FLEET_IDENTITY_TOKEN=<this node's private identity gateway credential>
+```
+
+For node 02, use its own node ID/credential and
+`https://gap.geta.team/v1/fleet/identity`. HTTPS certificates are verified,
+redirects refused, transport bounded to two seconds and 64 KiB. Cleartext is
+accepted only for a loopback or the local Docker bridge. No caller can choose
+an upstream URL. `GAP_FLEET_RELAY_ENABLED=1` on node 01 exposes only the exact
+identity/client route allowlist, never `/operator`. The signing seed stays off
+execution nodes; deploy its public key through trusted configuration. Coordinate
+key rotation with the five-minute token lifetime; replacing the sole trusted
+public key immediately invalidates older tokens. Disabling access rejects fleet
+capabilities while preserving local owner bearers.
+
+Validation: `python3 -m unittest discover -s runtime/control -p 'test_*.py'`;
+`GAP_TEST_BINARY=/path/to/gap-node python3 runtime/control/access_integration.py`
+starts two isolated real nodes, an authority and a local SMTP sink. No email leaves
+the fixture and no production database or wallet is used.

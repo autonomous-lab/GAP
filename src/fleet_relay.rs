@@ -4,6 +4,11 @@ use serde_json::{json,Value};
 
 pub fn forward(target:&str,method:&str,auth:Option<&str>,body:&[u8])->(u16,Value) {
     if method!="POST" {return (405,json!({"error":{"code":"method_not_allowed"}}))}
+    forward_client(target,method,auth,body)
+}
+
+pub fn forward_client(target:&str,method:&str,auth:Option<&str>,body:&[u8])->(u16,Value) {
+    if !matches!(method,"GET"|"POST") {return (405,json!({"error":{"code":"method_not_allowed"}}))}
     if body.len()>65536 {return (413,json!({"error":{"code":"request_too_large"}}))}
     let Some(token)=auth.and_then(|s|s.strip_prefix("Bearer ")).filter(|s|
         (43..=128).contains(&s.len()) && s.bytes().all(|b|b.is_ascii_alphanumeric() || b==b'_' || b==b'-'))
@@ -12,8 +17,12 @@ pub fn forward(target:&str,method:&str,auth:Option<&str>,body:&[u8])->(u16,Value
         .timeout_global(Some(std::time::Duration::from_secs(2)))
         .max_redirects(0).http_status_as_error(false).build().new_agent();
     let response=(|| {
-        let mut response=agent.post(target).header("Authorization",&format!("Bearer {token}"))
-            .header("Content-Type","application/json").send(body).ok()?;
+        let mut response=if method=="GET" {
+            agent.get(target).header("Authorization",&format!("Bearer {token}")).header("User-Agent","GAP-Identity/1.0").call().ok()?
+        } else {
+            agent.post(target).header("Authorization",&format!("Bearer {token}"))
+                .header("User-Agent","GAP-Identity/1.0").header("Content-Type","application/json").send(body).ok()?
+        };
         let status=response.status().as_u16();
         if !(200..300).contains(&status) && ![400,401,402,403,404,409,413,429,503].contains(&status) {return None}
         let bytes=response.body_mut().with_config().limit(65536).read_to_vec().ok()?;

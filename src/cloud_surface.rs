@@ -2,6 +2,7 @@
 
 pub fn allowed_api(path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
+    if path=="/v1/fleet/connect" || crate::fleet_access::relay_path("GET",path).is_some() || crate::fleet_access::relay_path("POST",path).is_some() {return true}
     matches!(path, "/health" | "/v1/registration" | "/v1/identity" | "/v1/identity/verify" | "/v1/cloud/projects" | "/v1/fleet/node")
         || path.starts_with("/v1/cloud/projects/")
         || path.starts_with("/v1/admin/cloud/projects/")

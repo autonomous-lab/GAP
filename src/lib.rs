@@ -59,6 +59,7 @@ pub mod receipt_chain;
 pub mod relayer;
 pub mod registration;
 pub mod fleet_relay;
+pub mod fleet_access;
 pub mod runtime;
 pub mod sealed;
 pub mod server;

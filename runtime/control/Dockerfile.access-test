@@ -1,0 +1,11 @@
+ARG GAP_TEST_NODE_IMAGE=gap-access-node-candidate
+FROM ${GAP_TEST_NODE_IMAGE} AS node
+FROM alpine:3.23
+RUN apk add --no-cache python3 py3-cryptography && adduser -D -u 10001 tester
+COPY --from=node /usr/local/bin/gap-node /usr/local/bin/gap-node
+COPY runtime/control/*.py /repo/runtime/control/
+COPY scripts/fleet-control.py scripts/test_admin_http.py /repo/scripts/
+ENV GAP_TEST_BINARY=/usr/local/bin/gap-node GAP_TEST_REPO=/repo
+WORKDIR /repo
+USER 10001:10001
+ENTRYPOINT ["python3", "runtime/control/access_integration.py"]

@@ -127,6 +127,7 @@ fn main() -> Result<()> {
     state.private_node = private_node;
     state.registration = gap::registration::Registration::from_env()
         .map_err(gap::Error::Other)?.map(Arc::new);
+    state.fleet_access = gap::fleet_access::Access::from_env().map_err(gap::Error::Other)?;
     state.cloud_admin = gap::cloud_admin::Admin::from_env()
         .map_err(gap::Error::Other)?.map(Arc::new);
     if let Ok(admin_token) = env::var("GAP_ADMIN_TOKEN") {

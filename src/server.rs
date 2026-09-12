@@ -494,6 +494,7 @@ pub struct NodeState {
     cloud_project_suspensions: HashMap<String, crate::cloud_suspension::Record>,
     pub private_node: Option<crate::private_node::PrivateNode>,
     pub registration: Option<Arc<crate::registration::Registration>>,
+    pub fleet_access: Option<crate::fleet_access::Access>,
     pub cloud_admin: Option<Arc<crate::cloud_admin::Admin>>,
     /// Verified custom hostname -> project mapping. Kept globally so a TLS
     /// handshake and a Host-routed request are O(1), not a scan of tenant DBs.
@@ -956,6 +957,7 @@ impl NodeState {
             cloud_project_suspensions,
             private_node: None,
             registration: None,
+            fleet_access: None,
             cloud_admin: None,
             custom_domains,
             vm_http,
@@ -2834,7 +2836,15 @@ the content inline"
         token: &str,
         project_id: &str,
     ) -> Result<crate::cloud::ProjectRecord> {
-        let owner = self.agent_by_token(token)?.identity.did().to_string();
+        let owner = if token.starts_with("gapf1.") {
+            let access = self.fleet_access.as_ref().ok_or_else(crate::fleet_access::denied)?;
+            let claims = access.verify(token, project_id, now_unix()).ok_or_else(crate::fleet_access::denied)?;
+            if claims.agent_did.as_ref().is_some_and(|a| self.agent_suspended(a)) {
+                return Err(crate::fleet_access::denied());
+            }
+            if let Some(policy) = &self.private_node { policy.authorize(&claims.owner_did)?; }
+            claims.owner_did
+        } else { self.agent_by_token(token)?.identity.did().to_string() };
         let project = self
             .cloud_projects
             .get(project_id)
@@ -7721,6 +7731,47 @@ pub fn route_with_ip(
     };
 
     let token = auth.and_then(|h| h.strip_prefix("Bearer "));
+
+    if path == "/v1/fleet/connect" && method == "POST" {
+        let Some(access) = guard.fleet_access.clone() else {return (409,json!({"error":{"code":"fleet_access_disabled"}}))};
+        if let Err(e)=guard.check_rate_limit(token,client_ip) {return error_response(&e)}
+        // Only a local owner bearer can attest a local verified identity.
+        let agent = match guard.agent_by_token(token.unwrap_or("")) {
+            Ok(a)=>a.identity.did().to_string(), Err(e)=>return error_response(&e),
+        };
+        let project = match guard.cloud_owned_project(token.unwrap_or(""), body["project_id"].as_str().unwrap_or("")) {
+            Ok(p)=>p, Err(e)=>return error_response(&e),
+        };
+        let record = match guard.storage.get_state("cloud_verified_agent_emails", &agent) {
+            Ok(Some(r))=>r, Ok(None)=>return (403,json!({"error":{"code":"verified_email_required"}})),
+            Err(_)=>return (503,json!({"error":{"code":"verified_identity_unavailable"}})),
+        };
+        let proof:Value = match serde_json::from_str(&record.value) {
+            Ok(v)=>v, Err(_)=>return (503,json!({"error":{"code":"verified_identity_unavailable"}})),
+        };
+        let Some(email)=proof["email"].as_str().filter(|_|proof["verified_at"].as_u64().is_some())
+            else {return (403,json!({"error":{"code":"verified_email_required"}}))};
+        let request=json!({"action":"connect","request_id":body["request_id"],"project_id":project.project_id,"agent_did":agent,"email":email});
+        drop(guard);
+        return access.connect(&request);
+    }
+
+    if let Some(target)=crate::fleet_access::relay_path(method,path) {
+        if std::env::var("GAP_FLEET_RELAY_ENABLED").as_deref()!=Ok("1") {return (404,json!({"error":{"code":"not_found"}}))}
+        if let Err(e)=guard.check_rate_limit(token,client_ip) {return error_response(&e)}
+        // Forward only the documented pagination argument. No caller URL or
+        // arbitrary path ever influences the destination.
+        let query=if path=="/v1/fleet/projects" {
+            let params=parse_url_params(raw_path);
+            match params.get("after") {
+                Some(v) if v.len()==28 && v.starts_with("prj_") && v[4..].bytes().all(|b|b.is_ascii_hexdigit()) => format!("?after={v}"),
+                Some(_) => return (400,json!({"error":{"code":"invalid_cursor"}})),
+                None=>String::new(),
+            }
+        } else {String::new()};
+        drop(guard);
+        return crate::fleet_relay::forward_client(&format!("http://172.17.0.1:8096{target}{query}"),method,auth,body_bytes);
+    }
 
     if path == "/v1/fleet/node" {
         if std::env::var("GAP_FLEET_RELAY_ENABLED").as_deref()!=Ok("1") {

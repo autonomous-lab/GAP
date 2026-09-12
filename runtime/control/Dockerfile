@@ -1,5 +1,5 @@
 FROM alpine:3.23
-RUN apk add --no-cache python3 && adduser -D -u 10001 control
+RUN apk add --no-cache python3 py3-cryptography && adduser -D -u 10001 control
 WORKDIR /opt/control
 COPY runtime/control/*.py ./
 USER 10001:10001

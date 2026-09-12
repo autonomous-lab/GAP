@@ -33,8 +33,25 @@ Self-hosted nodes may leave verification disabled: `POST /v1/identity` then
 returns an identity directly. Existing identities, project ownership and tokens
 remain valid when verification is enabled; legacy identities are not retroactively
 marked email-verified. Human signup is available at `/signup` on enabled nodes.
-The current email registry is local to the node; shared operator accounts and
-cross-node identity routing are not implemented by this registration step.
+The email proof registry is local to the node. Where fleet access is enabled,
+explicitly connect a verified identity and its project to the operator account
+with `POST /v1/fleet/connect` using the local owner bearer and
+`{"request_id":"unique-operation","project_id":"prj_..."}`. The response includes
+`credential.token`, a short-lived control credential. This does not transfer old
+balances or change the project's billing mode.
+
+Use the control credential on the operator gateway (Elestio: `https://gap.geta.team`)
+with `GET /v1/fleet/account`, `/v1/fleet/projects`, `/v1/fleet/wallet` and
+`/v1/fleet/quotas`. Projects are restricted to this agent's grants; follow
+`next_cursor` as `?after=...`. `POST /v1/fleet/project-token` with
+`{"project_id":"prj_...","ttl_seconds":120}` returns a signed management bearer
+for that exact project and node. Send it to the node where the project resides;
+it cannot create other projects or administer the node. Owner/operator grants
+are required; viewer grants do not permit management. Node-local suspension and
+MicroVM approval checks still apply. Tokens expire after 30–300 seconds and must
+be renewed, including when used with a dashboard browser session. Logout through
+`POST /v1/fleet/logout` blocks new issuance; existing project tokens expire within
+five minutes. Operator accounts and credentials are independent across operators.
 
 Keep the returned API `token` server-side and use `Authorization: Bearer <token>`.
 Create a project with `POST /v1/cloud/projects`, then use its returned `project_id`

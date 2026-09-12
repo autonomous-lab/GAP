@@ -51,7 +51,9 @@ def main():
     call = sub.add_parser('call')
     call.add_argument('--endpoint', default='http://172.17.0.1:8096')
     call.add_argument('--token-file', default='data/gap-control/config/operator.token')
-    call.add_argument('--path', choices=('/operator', '/node', '/v1/account', '/v1/wallet', '/v1/quotas', '/v1/projects', '/v1/logout'), default='/operator')
+    call.add_argument('--path', choices=('/operator', '/node', '/v1/account', '/v1/wallet', '/v1/quotas', '/v1/projects', '/v1/logout',
+        '/v1/project-token', '/v1/fleet/connect', '/v1/fleet/account', '/v1/fleet/wallet', '/v1/fleet/quotas',
+        '/v1/fleet/projects', '/v1/fleet/project-token', '/v1/fleet/logout'), default='/operator')
     call.add_argument('--request-file', help='JSON body; omitted for a GET')
     call.add_argument('--output', help='Required for issue-token. New private file, never overwritten.')
     args = parser.parse_args()
@@ -71,8 +73,8 @@ def main():
         body = json.loads(Path(args.request_file).read_text()) if args.request_file else None
         if body is not None and not isinstance(body, dict):
             raise ValueError()
-        if body and body.get('action') == 'issue-token' and not args.output:
-            raise ValueError('issue-token requires --output')
+        if (body and body.get('action') == 'issue-token' or args.path in ('/v1/project-token','/v1/fleet/connect','/v1/fleet/project-token')) and not args.output:
+            raise ValueError('credential issuance requires --output')
         if args.output and Path(args.output).exists():
             raise ValueError('output already exists')
         token = Path(args.token_file).read_text().strip()
@@ -100,7 +102,7 @@ def main():
             write_private(args.output, value)
             print(json.dumps({'path': str(Path(args.output).resolve())}))
         else:
-            if 'token' in value:
+            if 'token' in value or 'credential' in value:
                 raise ValueError()
             print(json.dumps(value, indent=2))
     except (OSError, ValueError, TypeError, sqlite3.Error):

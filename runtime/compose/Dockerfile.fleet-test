@@ -3,6 +3,7 @@ ARG GAP_TEST_RUNNER_IMAGE=gap-fleet-runner-candidate
 FROM ${GAP_TEST_NODE_IMAGE} AS node
 FROM ${GAP_TEST_RUNNER_IMAGE}
 USER root
+RUN apk add --no-cache py3-cryptography
 COPY --from=node /usr/local/bin/gap-node /usr/local/bin/gap-node
 COPY runtime/control/*.py /opt/control/
 COPY scripts/fleet-control.py /repo/scripts/fleet-control.py

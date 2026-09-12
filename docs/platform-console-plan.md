@@ -101,6 +101,15 @@ remain pending; the two existing wallets have not been transferred.
 
 ## Confirmed requirements
 
+Verified local identities can now explicitly connect a project to the operator
+account through `/v1/fleet/connect`. Separate identity-gateway credentials attest
+the node's existing email proof; worker credentials cannot perform this action.
+The shared account API issues short-lived signed capabilities for an exact
+project and destination node. Nodes verify them locally and retain suspension
+and approval checks. This does not import old balances, enable worker billing,
+or provide a human single-sign-on UI. See `runtime/control/README.md` for rollout
+and the two-node isolated email/authentication acceptance test.
+
 - Humans can create microVMs from the web console.
 - A customer may own multiple microVMs. The default total is one, and an
   administrator can approve a larger limit without restarting the stack.
@@ -138,7 +147,7 @@ performing a central identity/database lookup for every application request.
 
 Creation uses a transactional global quota reservation and node capacity admission.
 The controller records the selected node and VM ownership before dispatch, using
-idempotent operation IDs and expiring creation reservations. Reconciliation handles
+idempotent operation IDs and durable creation reservations. Reconciliation handles
 crashes and failed provisioning without leaking slots or granting two final slots.
 One creation reservation becoming stale does not authorize a second live owner:
 worker fencing and durable generation checks must resolve unknown execution first.

@@ -27,17 +27,21 @@ def secret(path):
 
 
 class Application:
-    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False, allow_capacity=False):
+    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False, allow_capacity=False, access=None, identity_nodes=None):
         self.authority, self.admin, self.nodes = authority, admin, dict(nodes)
         self.allow_debits = allow_debits
+        self.access, self.identity_nodes = access, dict(identity_nodes or {})
         if type(allow_reservations) is not bool:
             raise ValueError('invalid reservation configuration')
         self.allow_reservations = allow_reservations
         if type(allow_capacity) is not bool:
             raise ValueError('invalid capacity configuration')
         self.allow_capacity = allow_capacity
-        if type(allow_debits) is not bool or len(set([admin, *nodes.values()])) != 1 + len(nodes):
+        credentials = [admin, *nodes.values(), *self.identity_nodes.values()]
+        if type(allow_debits) is not bool or len(set(credentials)) != len(credentials):
             raise ValueError('control credentials must be distinct')
+        if not set(self.identity_nodes).issubset(nodes):
+            raise ValueError('unknown identity gateway')
         for node in nodes:
             identifier(node)
 
@@ -47,6 +51,9 @@ class Application:
         for node, credential in self.nodes.items():
             if hmac.compare_digest(token, credential):
                 return 'node', node
+        for node, credential in self.identity_nodes.items():
+            if hmac.compare_digest(token, credential):
+                return 'identity', node
         return 'client', self.authority.authenticate(token)
 
     def handle(self, method, path, token, body):
@@ -61,9 +68,18 @@ class Application:
                     'reservation_protocol': 1, 'reservations_enabled': self.allow_reservations,
                     'capacity_protocol': 2, 'capacity_enabled': self.allow_capacity,
                     'worker_capacity_enforcement': 'explicit_project_opt_in',
+                    'project_access_enabled': self.access is not None,
                     'online_debits_enabled': self.allow_debits}
         kind, actor = self.actor(token)
         a = self.authority
+        if method == 'POST' and parsed.path == '/identity':
+            if kind != 'identity':
+                raise Failure('identity_gateway_credentials_required', 403)
+            if not self.access:
+                raise Failure('fleet_access_disabled', 409)
+            if body.get('action') != 'connect':
+                raise Failure('unknown_identity_action', 404)
+            return self.access.connect(actor, body['request_id'], body['email'], body['agent_did'], body['project_id'])
         if method == 'POST' and parsed.path == '/operator':
             if kind != 'operator':
                 raise Failure('operator_credentials_required', 403)
@@ -145,6 +161,10 @@ class Application:
             return a.projects(actor['customer'], actor['agent'], after)
         if method == 'POST' and parsed.path == '/v1/logout':
             return a.revoke(token)
+        if method == 'POST' and parsed.path == '/v1/project-token':
+            if not self.access:
+                raise Failure('fleet_access_disabled', 409)
+            return self.access.issue(actor, body['project_id'], body.get('ttl_seconds', 120))
         raise Failure('not_found', 404)
 
 
@@ -233,10 +253,15 @@ def main():
     try:
         config = json.loads(Path(args.config).read_text())
         authority = Authority(config['database'], config['operator_id'])
+        access = None
+        if config.get('signing_seed_file'):
+            from access import Access
+            access = Access(authority, bytes.fromhex(Path(config['signing_seed_file']).read_text().strip()))
         app = Application(authority, secret(config['operator_token_file']),
                           {node: secret(path) for node, path in config['node_token_files'].items()},
                           config.get('allow_online_debits', False), config.get('allow_reservations',False),
-                          config.get('allow_capacity', False))
+                          config.get('allow_capacity', False), access,
+                          {node: secret(path) for node, path in config.get('identity_token_files', {}).items()})
     except (OSError, ValueError, KeyError, sqlite3.Error):
         raise SystemExit('Cannot initialize operator authority; inspect configuration privately.') from None
     Server((args.bind, args.port), app).serve_forever()
