@@ -632,3 +632,38 @@ with at most four concurrent node requests. A failed node is shown as incomplete
 inventory. Management embeds the existing dashboard and renews its five-minute
 capability every two minutes while the account credential remains valid. Renewal
 preserves the CSRF value and does not revive a revoked browser session.
+
+### Consolidated finance
+
+Set `finance_sources` to trusted node records with `node_id`, `provider`, `url`
+(the exact HTTPS `/v1/fleet/node-finance` endpoint) and private `token_file`.
+Only the local bridge may use HTTP. Configure a separate `report_token_file`
+for the gateway's read-only reporting credential. It cannot mutate the authority
+or access client account APIs. Individual node report tokens are distinct from
+node, identity, operator and report-gateway credentials.
+
+On each node set `GAP_FLEET_REPORT_TOKEN` to its source token. On the central
+management node set `GAP_FLEET_FINANCE_URL=http://172.17.0.1:8096/v1/finance` and
+`GAP_FLEET_FINANCE_TOKEN` to the gateway reporting credential. The existing
+administrator finance page then defaults to the fleet report. `scope=node`
+retains the local view. Public node report requests require the source token;
+ordinary account and project credentials grant no access to financial reporting.
+
+`GET /v1/finance?start=...&end=...` accepts complete UTC hours over at most 31
+days, with optional `customer_id`, `project_id` or `node_id`. Operator CLI users
+can also call `/operator` with action `finance` and the same fields. Reports
+aggregate consumption and provider costs, preserve missing-source status, and
+show current common wallets separately. Node allowances and legacy imports are
+transfers, never new receipts. Paid control credits have no inferred cash value:
+without recorded cash receipts, cash coverage remains incomplete. Usage margin
+may include promotional credits and is not cash profit.
+
+Customer/project views do not allocate an entire host's shared infrastructure
+costs to a single customer. Customer period totals have no invented hourly split.
+A host filter does not allocate shared-wallet funding to that host. Cumulative
+node charges are compared with central settled charges only when source and
+customer attribution are complete; a snapshot difference can reflect checkpoint
+timing. Node summaries are capped at 500 accounts and wallet lists at 1,000
+customers, with explicit incomplete-coverage flags. No finance request changes
+credits, tariffs, costs or billing state. Source cost versions remain maintained
+through the existing operator cost configuration on each worker.

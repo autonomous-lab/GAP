@@ -276,6 +276,11 @@ pub fn handle(state:&Arc<Mutex<crate::server::NodeState>>,method:&str,path:&str,
         let start=param("start").and_then(|v|v.parse::<u64>().ok()).unwrap_or(end.saturating_sub(86400));
         let end=param("end").and_then(|v|v.parse::<u64>().ok()).unwrap_or(end);
         if start%3600!=0 || end%3600!=0 || end<=start || end>now/3600*3600 || end-start>366*86400 {return response(Err(Failure(400,"invalid_finance_window")))}
+        if param("scope").as_deref()!=Some("node") {
+            if let Some((status,body))=crate::fleet_finance::fleet_report(start,end,param("project_id").as_deref(),param("customer_id").as_deref(),param("node_id").as_deref()) {
+                return HttpResponse{status,body,cookie:None};
+            }
+        }
         let runner=state.lock().ok().and_then(|s|s.private_node.as_ref().and_then(|p|p.runner.clone()));
         return match runner {
             Some(r)=>{let (status,body)=crate::private_node::forward(&r,"","","GET","admin/finance",json!({"start":start,"end":end,"project_id":param("project_id")}));HttpResponse{status,body,cookie:None}},

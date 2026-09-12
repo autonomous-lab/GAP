@@ -3,7 +3,7 @@
 pub fn allowed_api(path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     if matches!(path,"/v1/fleet/connect" | "/v1/fleet/login" | "/v1/fleet/login/verify") || crate::fleet_access::relay_path("GET",path).is_some() || crate::fleet_access::relay_path("POST",path).is_some() {return true}
-    matches!(path, "/health" | "/v1/registration" | "/v1/identity" | "/v1/identity/verify" | "/v1/identity/email" | "/v1/identity/email/verify" | "/v1/cloud/projects" | "/v1/fleet/node")
+    matches!(path, "/health" | "/v1/registration" | "/v1/identity" | "/v1/identity/verify" | "/v1/identity/email" | "/v1/identity/email/verify" | "/v1/cloud/projects" | "/v1/fleet/node" | "/v1/fleet/node-finance")
         || path.starts_with("/v1/cloud/projects/")
         || path.starts_with("/v1/admin/cloud/projects/")
         || path.starts_with("/functions/")
@@ -221,12 +221,14 @@ mod tests {
             "/v1/discover",
             "/x402/a",
             "/v1/cloud/projects-evil",
+            "/v1/fleet/node-finance-evil",
         ] {
             assert!(!allowed_api(path), "{path}");
         }
         for path in [
             "/health",
             "/v1/identity",
+            "/v1/fleet/node-finance?start=0&end=3600",
             "/v1/cloud/projects",
             "/v1/cloud/projects/prj_a/realtime/tokens",
             "/functions/prj_a/api",

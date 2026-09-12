@@ -135,3 +135,22 @@ def report(db,start,end,project=None):
                      'Costs start when configured. Missing provider costs remain unknown, never zero.',
                      'Monthly fixed costs use 730 hours. Hourly usage is apportioned within each metering interval.',
                      'Project reports do not allocate shared node infrastructure costs.']}
+
+
+def project_summaries(db,start,end,project=None):
+    """Compact account totals for reconciliation, without repeating hourly data."""
+    accounts=list(db.execute('SELECT project,spent FROM accounts WHERE (? IS NULL OR project=?) ORDER BY project LIMIT 501',(project,project)))
+    bound={r[0] for r in db.execute('SELECT project FROM fleet_bindings')}
+    result={r['project']:dict(project_id=r['project'],lifetime_spent_microcredits=r['spent'],fleet_bound=r['project'] in bound,
+        usage={k:0 for k in FIELDS},funding={'paid_credits_microcredits':0,'promotional_credits_microcredits':0,'unclassified_credits_microcredits':0,'recorded_cash_microdollars':0}) for r in accounts[:500]}
+    for row in db.execute('SELECT project,data FROM finance_hours WHERE hour>=? AND hour<? AND (? IS NULL OR project=?)',(start//3600,end//3600,project,project)):
+        if row['project'] in result:
+            data=json.loads(row['data'])
+            for key in FIELDS:result[row['project']]['usage'][key]+=data[key]
+    for row in db.execute('SELECT e.project,e.payload,f.source,f.cash_microdollars FROM entries e LEFT JOIN finance_funding f ON f.project=e.project AND f.operation=e.operation WHERE e.created>=? AND e.created<? AND (? IS NULL OR e.project=?)',(start,end,project,project)):
+        if row['project'] not in result:continue
+        entry=json.loads(row['payload'])
+        if entry.get('kind')!='topup':continue
+        target=result[row['project']]['funding'];target[(row['source'] or 'unclassified')+'_credits_microcredits']+=entry['amount_microcredits']
+        target['recorded_cash_microdollars']+=row['cash_microdollars'] or 0
+    return dict(projects=list(result.values()),projects_complete=len(accounts)<=500)

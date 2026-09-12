@@ -20,6 +20,15 @@ class FinanceTests(unittest.TestCase):
         return dict(version=version,node_month_microdollars=55_000_000,
                     extra_disk_month_microdollars=0,network_in_gb_microdollars=network,
                     network_out_gb_microdollars=network)
+    def test_project_summaries_preserve_funding_and_do_not_change_balance(self):
+        self.ledger.topup(P,O,100,'funding')
+        before=self.ledger.view(P,O)['balance_microcredits']
+        report=self.ledger.finance_report(0,3600,include_projects=True)
+        self.assertTrue(report['projects_complete'])
+        self.assertEqual(report['projects'][0]['funding'],report['funding'])
+        self.assertEqual(report['projects'][0]['lifetime_spent_microcredits'],0)
+        self.assertEqual(self.ledger.view(P,O)['balance_microcredits'],before)
+
     def test_hour_split_conserves_big_resource_and_money_totals(self):
         item={'usage':{'ram_byte_ms':4*1024**3*7200000,'bytes_in':11},'debited_microcredits':7}
         with self.ledger.db() as db:finance.record(db,P,item,3599,7201)

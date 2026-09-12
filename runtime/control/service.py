@@ -27,8 +27,9 @@ def secret(path):
 
 
 class Application:
-    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False, allow_capacity=False, access=None, identity_nodes=None, console_paths=None):
+    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False, allow_capacity=False, access=None, identity_nodes=None, console_paths=None, finance=None, report_token=None):
         self.authority, self.admin, self.nodes = authority, admin, dict(nodes)
+        self.finance,self.report_token=finance,report_token
         self.console_paths=dict(console_paths or {})
         if len(set(self.console_paths.values()))!=len(self.console_paths) or any(n not in nodes or p not in ('','/nodes/'+n) for n,p in self.console_paths.items()):
             raise ValueError('invalid management console mapping')
@@ -40,7 +41,7 @@ class Application:
         if type(allow_capacity) is not bool:
             raise ValueError('invalid capacity configuration')
         self.allow_capacity = allow_capacity
-        credentials = [admin, *nodes.values(), *self.identity_nodes.values()]
+        credentials = [admin, *nodes.values(), *self.identity_nodes.values(), *([report_token] if report_token else [])]
         if type(allow_debits) is not bool or len(set(credentials)) != len(credentials):
             raise ValueError('control credentials must be distinct')
         if not set(self.identity_nodes).issubset(nodes):
@@ -51,6 +52,7 @@ class Application:
     def actor(self, token):
         if hmac.compare_digest(token, self.admin):
             return 'operator', None
+        if self.report_token and hmac.compare_digest(token,self.report_token):return 'report',None
         for node, credential in self.nodes.items():
             if hmac.compare_digest(token, credential):
                 return 'node', node
@@ -88,6 +90,13 @@ class Application:
             if body.get('action') != 'connect':
                 raise Failure('unknown_identity_action', 404)
             return self.access.connect(actor, body['request_id'], body['email'], body['agent_did'], body['project_id'])
+        if method=='GET' and parsed.path=='/v1/finance':
+            if kind not in ('operator','report'):raise Failure('finance_operator_required',403)
+            if not self.finance:raise Failure('fleet_finance_not_configured',409)
+            q=parse_qs(parsed.query)
+            if set(q)-{'start','end','project_id','customer_id','node_id'} or any(len(v)!=1 for v in q.values()):raise Failure('invalid_finance_filter')
+            get=lambda k:q.get(k,[None])[0]
+            return self.finance.report(int(get('start')),int(get('end')),get('project_id'),get('customer_id'),get('node_id'))
         if method == 'POST' and parsed.path == '/operator':
             if kind != 'operator':
                 raise Failure('operator_credentials_required', 403)
@@ -102,6 +111,9 @@ class Application:
                     raise Failure('unknown_trusted_node')
                 return self.access.connect(body['node_id'], request, body['email'],
                                            body['agent_did'], body['project_id'], body['reason'])
+            if action=='finance':
+                if not self.finance:raise Failure('fleet_finance_not_configured',409)
+                return self.finance.report(body['start'],body['end'],body.get('project_id'),body.get('customer_id'),body.get('node_id'))
             if action == 'create-customer':
                 return a.create_customer('operator', request, body['label'])
             if action == 'attach-principal':
@@ -291,12 +303,17 @@ def main():
         if config.get('signing_seed_file'):
             from access import Access
             access = Access(authority, bytes.fromhex(Path(config['signing_seed_file']).read_text().strip()))
+        finance=None
+        if config.get('finance_sources'):
+            from finance import Finance
+            finance=Finance(authority,config['finance_sources'],config['node_token_files'])
         app = Application(authority, secret(config['operator_token_file']),
                           {node: secret(path) for node, path in config['node_token_files'].items()},
                           config.get('allow_online_debits', False), config.get('allow_reservations',False),
                           config.get('allow_capacity', False), access,
                           {node: secret(path) for node, path in config.get('identity_token_files', {}).items()},
-                          config.get('console_paths',{}))
+                          config.get('console_paths',{}),finance,
+                          secret(config['report_token_file']) if config.get('report_token_file') else None)
     except (OSError, ValueError, KeyError, sqlite3.Error):
         raise SystemExit('Cannot initialize operator authority; inspect configuration privately.') from None
     Server((args.bind, args.port), app).serve_forever()

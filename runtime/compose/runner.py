@@ -287,7 +287,7 @@ class Runner:
         if rpc.get('action')=='admin/finance' and rpc.get('method')=='GET':
             if not self.runtime:return 200,{'available':False}
             body=rpc.get('body') or {}
-            return 200,dict(self.runtime.ledger.finance_report(body['start'],body['end'],body.get('project_id')),available=True)
+            return 200,dict(self.runtime.ledger.finance_report(body['start'],body['end'],body.get('project_id'),body.get('include_projects',False)),available=True)
         project, owner = rpc.get("project_id", ""), rpc.get("owner_did", "")
         if not isinstance(project, str) or not PROJECT.fullmatch(project) or not isinstance(owner, str):
             raise Failure(400, "invalid_project")

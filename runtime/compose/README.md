@@ -931,3 +931,11 @@ The target must use the same isolated management boundary; never point this
 setting at tenant-controlled infrastructure. The public node02 origin continues
 to serve applications, but cannot admit terminal cookies. This explicit two-node
 management mapping is independent of workload placement and does not move VMs.
+
+Fleet finance uses the existing administrator report with `include_projects`
+to add compact per-project usage/funding and lifetime spent summaries. It reads
+all account records, including idle projects, and marks attribution incomplete
+above 500 accounts. The public node forwards this only for its dedicated finance
+source credential; no worker operator token is exposed. The 31-day fleet window
+keeps hourly reports bounded. Costs remain versioned at the worker and unknown
+provider values never turn into zero-cost or profitable estimates.

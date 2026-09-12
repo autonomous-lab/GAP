@@ -7747,6 +7747,7 @@ pub fn route_with_ip(
         }
     };
 
+    if let Some(result)=crate::fleet_finance::node_report(state,method,raw_path,auth) {return result}
     if let Some(result)=vm_http::manage(state,method,raw_path,&body,auth) {return result}
 
     let mut guard = match state.lock() {

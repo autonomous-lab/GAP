@@ -189,9 +189,12 @@ class Ledger:
                 db.execute('UPDATE accounts SET exhausted_at=COALESCE(exhausted_at,?) WHERE balance=0',(self.clock(),))
         return self.pricing()
 
-    def finance_report(self,start,end,project=None):
+    def finance_report(self,start,end,project=None,include_projects=False):
         with self.db() as db:
-            try: return finance.report(db,start,end,project)
+            try:
+                result=finance.report(db,start,end,project)
+                if include_projects:result.update(finance.project_summaries(db,start,end,project))
+                return result
             except ValueError as error: raise BillingError(str(error)) from error
 
     def finance_costs(self,values,expected):
