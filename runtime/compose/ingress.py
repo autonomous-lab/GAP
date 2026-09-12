@@ -149,7 +149,7 @@ class Ingress:
                            'handle': [{'handler': 'static_response', 'status_code': 404,
                                        'headers': {'Content-Type': ['application/json'], 'Cache-Control': ['no-store']},
                                        'body': json.dumps({'error': {'code': 'https_route_unavailable',
-                                           'message': 'HTTPS routing is unavailable. Configure and enable an application port in the MicroVM dashboard.'}})}],
+                                           'message': 'HTTPS routing is unavailable for this URL. In the MicroVM dashboard, enable an application port and set visitor credentials.'}})}],
                            'terminal': True})
         # Only the public edge challenges credentials. A missing private route
         # must never start another browser Basic Auth prompt after admission.

@@ -126,7 +126,13 @@ pub fn admit_vm_http(state:&Arc<Mutex<NodeState>>,secret:&str,host:&str,path:&st
         let key=path.strip_prefix("/apps/").unwrap().split('/').next().unwrap_or("");
         g.vm_http.values().find(|r|r.route_key==key).cloned()
     };
-    let Some(record)=record else{return answer(if private {401}else{403})};
+    // No credentials on record, so no route can be reached either: the edge
+    // sets the VM identity only from this response, and the private Caddy
+    // matches that identity exactly, so an anonymous request cannot select a
+    // route. Let it through to fail on the routing surface's explicit 404
+    // instead of starting a Basic Auth prompt that no password can satisfy —
+    // which is what a visitor of a deleted or never-configured VM saw.
+    let Some(record)=record else{return answer(if private {200}else{403})};
     if !g.active_cloud_project(&record.project_id) {return answer(403)}
     let Some(policy)=g.private_node.as_ref() else{return answer(403)};
     if policy.authorize_compose(&record.owner_did).is_err(){return answer(403)}

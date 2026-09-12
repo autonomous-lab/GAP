@@ -216,7 +216,13 @@ class AdminHTTP(unittest.TestCase):
                     with patch.object(runner,'rpc',return_value=(200,ingress)) as mock:
                         self.assertEqual(request('GET',vm_base+'/http-access?vm_id='+vm_id,host='client.test')[0],401)
                         self.assertEqual(request('GET',vm_base+'/domains?vm_id='+vm_id,host='client.test',bearer='wrong')[0],401)
-                        self.assertEqual(admission()[0],401)
+                        # No credentials on record means no route can be selected, so the
+                        # request must reach the routing surface's explicit 404 instead of
+                        # starting a Basic Auth prompt that no password could satisfy.
+                        status,body,headers=admission()
+                        self.assertEqual(status,200)
+                        self.assertNotIn('WWW-Authenticate',headers)
+                        self.assertNotIn('X-GAP-VM-Identity',headers)
                         self.assertEqual(admission(secret='wrong')[0],403)
                         self.assertEqual(admission('/health')[0],200)
                         mock.assert_not_called() # admission must not call back into the worker
