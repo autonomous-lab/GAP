@@ -357,3 +357,5 @@ resident RAM, occupied storage and inbound/outbound traffic refresh every ten
 seconds or on demand, without waking a VM. See [network and metrics](AGENTS.md#microvm-network-and-live-metrics)
 for measurement scope, and [HTTP access and domains](AGENTS.md#microvm-http-authentication-and-custom-domains)
 for setup and the owner API.
+
+MicroVM direct public ports use the operator-configured pool `24000-53999` by default (30,000 numbers, available in TCP and UDP), with five reserved numbers per VM. Host range DNAT avoids individual Docker publications; see `runtime/compose/README.md` for firewall setup and reconciliation. Per-agent VM and resource quotas still apply.

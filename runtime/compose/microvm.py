@@ -150,7 +150,7 @@ class MicroVMs:
         occupied=self.reserved_ports()|set(used)
         for _ in range(1000):
             port=free_port()
-            if port not in occupied: return port
+            if port not in occupied and not (self.network and self.network.first <= port <= self.network.last): return port
         raise VMError('internal_port_pool_exhausted')
 
     def catalog(self, project):

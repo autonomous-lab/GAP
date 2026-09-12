@@ -82,17 +82,20 @@ submit `/stack/releases` once the VM is ready.
 ## Direct public ports and owner SSH
 
 `runner.example.json` enables `hypervisor.public_network` with hostname
-`sites.gap.geta.team` and pool `24000..24099`. `deploy.yml` publishes exactly
-that range in TCP and UDP in the shared worker/edge network namespace. This
-initial pool can reserve five numbers for up to 20 VMs; it is pool capacity,
+`sites.gap.geta.team` and pool `24000..53999` (30,000 port numbers, TCP and UDP).
+The host range-routing helper forwards this pool to the shared worker/edge
+bridge address using two DNAT rules. The legacy 100-port Docker publications
+remain compatible but do not define capacity. Five numbers per VM permit
+up to 6,000 reservations before internal legacy reservations; this is pool capacity,
 not a new per-agent quota. Only configured slots listen. Reserve this range
 exclusively for GAP and allow it in provider/host firewalls. The hostname must
 resolve directly to the server, without the Cloudflare HTTP proxy. Keep the
 private worker RPC and Caddy admin socket private.
 
-To expand capacity, coordinate the configured pool, published Docker range and
+To expand capacity, coordinate the configured pool, host range routing and
 firewall; existing allocations must remain in the range. Infrastructure range
-changes require redeploying the worker/edge and stop its VMs; ordinary mapping
+changes require restarting the worker after hibernating its running VMs; resume
+them afterwards. The range helper follows the edge bridge address; ordinary mapping
 and SSH-key changes use the API at runtime and require no restart. The controller
 uses a durable catalog and a global allocation lock, reserving both protocols
 for each of the five numbers. Stop keeps reservations, destruction releases them.
@@ -856,7 +859,22 @@ python3 scripts/configure-microvm-firewall.py --apply
 The helper reads `hypervisor.public_network.first_port/last_port`, restricts
 rules to that port pool, preserves other firewall rules, and updates the
 provider's restoration script for reboot. It does not restart Docker or VMs.
-The GAP node01 pool is 24000-24099. Only mapped guest ports have listeners;
+The GAP node01 pool is 24000-53999. Only mapped guest ports have listeners;
 internal worker/API ports are not opened. Verify external SSH host fingerprints
 against GET `/vm/ssh` before authenticating. If the provider replaces its
 restoration script during a firewall edit, run this helper again.
+
+### Large pool routing
+
+Run the firewall helper with `--container gap-compose-compose-edge-1` to
+install port-preserving TCP/UDP range DNAT. Never publish 30,000 individual
+Docker ports. A host systemd timer must rerun the helper every 15 seconds to
+restore rules after boot and reconcile a changed container bridge address.
+The helper manages only its own NAT chain and tagged forwarding rules.
+Private QEMU forwards bind loopback; new internal reservations exclude the
+public pool. Existing internal reservations are excluded from allocation.
+
+Node01 installs `gap-microvm-firewall.service` and `.timer` from this directory
+into `/etc/systemd/system/`, then runs `systemctl enable --now
+gap-microvm-firewall.timer`. Adjust WorkingDirectory and container name for
+other nodes. Only nodes with a MicroVM worker need these rules.

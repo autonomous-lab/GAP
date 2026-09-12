@@ -89,7 +89,7 @@ class Network:
     def allocate(self, meta):
         # Caller holds the cross-project catalog allocation lock until save.
         import json
-        used = set()
+        used = self.manager.reserved_ports()
         for path in (self.manager.root / 'catalog').glob('*.json'):
             other = json.loads(path.read_text())
             if other['state'] != 'destroyed':

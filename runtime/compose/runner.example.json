@@ -10,7 +10,7 @@
     "public_network": {
       "hostname": "sites.gap.geta.team",
       "first_port": 24000,
-      "last_port": 24099
+      "last_port": 53999
     }
   },
   "ingress": {

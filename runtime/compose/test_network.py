@@ -33,6 +33,19 @@ class NetworkTests(unittest.TestCase):
             self.net.allocate(meta)
             self.manager.save(meta)
 
+    def test_large_pool_preserves_internal_and_public_reservations(self):
+        self.net.last = 53999
+        self.meta['ssh_port'] = 24000
+        self.manager.save(self.meta)
+        self.reserve(self.meta)
+        self.assertNotIn(24000, self.meta['public_ports'])
+        with patch('microvm.free_port', side_effect=[33000, 55000]):
+            self.assertEqual(self.manager.reserved_port(), 55000)
+        self.net.first = 53995
+        other = dict(self.meta, vm_id='vm_'+'d'*32, public_ports=[])
+        self.reserve(other)
+        self.assertEqual(other['public_ports'], list(range(53995, 54000)))
+
     def test_fractional_catalog_usage_across_projects(self):
         self.meta['vcpus']=.25; self.manager.save(self.meta)
         other=dict(self.meta,project_id='prj_'+'d'*24,vm_id='vm_'+'e'*32,vcpus=.5)

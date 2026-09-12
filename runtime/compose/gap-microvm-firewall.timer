@@ -1,0 +1,11 @@
+[Unit]
+Description=Restore GAP MicroVM routing after Docker or firewall changes
+
+[Timer]
+OnBootSec=20
+OnUnitActiveSec=15
+AccuracySec=1
+Unit=gap-microvm-firewall.service
+
+[Install]
+WantedBy=timers.target

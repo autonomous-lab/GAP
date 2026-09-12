@@ -1553,3 +1553,5 @@ node `.env`. Put the same value in the worker's private `/config/http-edge.token
 and set `ingress.admission_token_file` to that path in `runner.json`. Never expose
 this secret to tenants. Main edge and private Caddy both require this admission
 chain; without it VM routing fails closed. See the worker README for rollout.
+
+MicroVM direct public ports use the operator-configured pool `24000-53999` by default (30,000 numbers, available in TCP and UDP), with five reserved numbers per VM. Host range DNAT avoids individual Docker publications; see `runtime/compose/README.md` for firewall setup and reconciliation. Per-agent VM and resource quotas still apply.

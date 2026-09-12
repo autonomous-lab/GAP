@@ -6,16 +6,17 @@ from pathlib import Path
 import re
 import subprocess
 import shlex
+import ipaddress
 
 BEGIN = '# BEGIN GAP MICROVM PUBLIC PORTS'
 END = '# END GAP MICROVM PUBLIC PORTS'
 MARKER = '# Block all new external connections to Docker ports not explicitly allowed above'
 
 
-def configure(config, script, apply=False):
+def configure(config, script, apply=False, container=None):
     network=json.loads(Path(config).read_text())['hypervisor']['public_network']
     first,last=network['first_port'],network['last_port']
-    if type(first) is not int or type(last) is not int or not 1024<=first<=last<=65535 or last-first>=1000:
+    if type(first) is not int or type(last) is not int or not 1024<=first<=last<=65535:
         raise ValueError('Invalid managed public port pool')
     if any(first<=port<=last for port in (8080,8090,8091,8092,8093,8094,8123,9000)):
         raise ValueError('Public pool overlaps internal control ports')
@@ -44,6 +45,25 @@ def configure(config, script, apply=False):
     for rule in rules:
         exists=subprocess.run(['iptables','-w','5','-C','DOCKER-USER',*rule],capture_output=True).returncode==0
         if not exists:subprocess.run(['iptables','-w','5','-I','DOCKER-USER',*rule],check=True)
+    if container:
+        inspection=json.loads(subprocess.check_output(['docker','inspect',container],text=True))[0]
+        addresses=[v['IPAddress'] for v in inspection['NetworkSettings']['Networks'].values() if v.get('IPAddress')]
+        if len(addresses)!=1:raise ValueError('Expected exactly one worker bridge address')
+        address=str(ipaddress.IPv4Address(addresses[0]))
+        # DNAT without a target port preserves the original destination port.
+        # Two range rules replace tens of thousands of Docker publications.
+        subprocess.run(['iptables','-w','5','-t','nat','-N','GAP-VM-PORTS'],capture_output=True)
+        wanted=[['-p',proto,'-m',proto,'--dport',f'{first}:{last}','-j','DNAT','--to-destination',address] for proto in ('tcp','udp')]
+        current=subprocess.check_output(['iptables','-w','5','-t','nat','-S','GAP-VM-PORTS'],text=True)
+        existing=[shlex.split(line)[2:] for line in current.splitlines() if line.startswith('-A ')]
+        if existing!=wanted:
+            # Atomically replace our chain only; preserve Docker/provider chains.
+            payload='*nat\n-F GAP-VM-PORTS\n'+''.join('-A GAP-VM-PORTS '+' '.join(rule)+'\n' for rule in wanted)+'COMMIT\n'
+            subprocess.run(['iptables-restore','--wait','5','--noflush'],input=payload,text=True,check=True)
+        jump=['-m','addrtype','--dst-type','LOCAL','-j','GAP-VM-PORTS']
+        if subprocess.run(['iptables','-w','5','-t','nat','-C','PREROUTING',*jump],capture_output=True).returncode:
+            subprocess.run(['iptables','-w','5','-t','nat','-I','PREROUTING',*jump],check=True)
+        print('Range routing targets '+address)
     print('Rules applied and persisted in '+str(path))
 
 
@@ -52,4 +72,5 @@ if __name__=='__main__':
     p.add_argument('--config',default='data/gap-compose/config/runner.json')
     p.add_argument('--script',default='/opt/docker-firewall-rules.sh')
     p.add_argument('--apply',action='store_true')
-    a=p.parse_args();configure(a.config,a.script,a.apply)
+    p.add_argument('--container',help='Bridge-network edge container for scalable range DNAT')
+    a=p.parse_args();configure(a.config,a.script,a.apply,a.container)

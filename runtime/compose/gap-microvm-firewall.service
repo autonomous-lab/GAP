@@ -1,0 +1,9 @@
+[Unit]
+Description=Reconcile GAP MicroVM public port range
+After=docker.service docker-firewall.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/app/gap-node-01
+ExecStart=/usr/bin/python3 scripts/configure-microvm-firewall.py --apply --container gap-compose-compose-edge-1
