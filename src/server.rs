@@ -7693,6 +7693,7 @@ pub fn route_with_ip(
     // (parsing and serialization are the parallelizable parts).
     let raw_path = path;
     let path = raw_path.split('?').next().unwrap_or(raw_path);
+    let body_bytes = body;
     let body: Value = if body.is_empty() {
         Value::Null
     } else {
@@ -7720,6 +7721,15 @@ pub fn route_with_ip(
     };
 
     let token = auth.and_then(|h| h.strip_prefix("Bearer "));
+
+    if path == "/v1/fleet/node" {
+        if std::env::var("GAP_FLEET_RELAY_ENABLED").as_deref()!=Ok("1") {
+            return (404,json!({"error":{"code":"not_found"}}));
+        }
+        if let Err(e)=guard.check_rate_limit(token,client_ip) {return error_response(&e)}
+        drop(guard);
+        return crate::fleet_relay::forward("http://172.17.0.1:8096/node",method,auth,body_bytes);
+    }
 
     if method == "GET" && path == "/v1/registration" {
         return (200,json!({"verification_required":guard.registration.is_some()}));

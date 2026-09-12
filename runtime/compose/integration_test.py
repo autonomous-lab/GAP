@@ -129,6 +129,8 @@ class Integration(unittest.TestCase):
                                 self.fail('test Caddy exited')
                             time.sleep(.05)
                 config_path = root / "runner.json"
+                if hasattr(self,'configure_fleet_fixture'):
+                    self.configure_fleet_fixture(config,root,project_id,owner)
                 config_path.write_text(json.dumps(config))
                 executions = []
                 def execute(vm, payload):

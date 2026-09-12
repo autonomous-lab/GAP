@@ -121,6 +121,23 @@ class ServiceTests(unittest.TestCase):
             saved.rename(path)
         self.assertEqual(self.call('/health')[0], 200)
 
+    def test_cached_checkpoint_includes_fresh_time_without_extending_its_lease(self):
+        customer=self.customer()
+        self.operator('topup','fund',customer_id=customer,amount_microcredits=100,source='promotional')
+        self.app.allow_reservations=True
+        self.a.clock=lambda:1000
+        body=dict(action='checkpoint',request_id='reserve',project_id=PROJECT,owner_did=OWNER,
+                  reservation_id='reservation',consumed_microcredits=0,unpaid_microcredits=0,
+                  target_microcredits=100,lease_seconds=10)
+        status,first=self.call('/node','node-one-test',body)
+        self.assertEqual(status,200)
+        self.a.clock=lambda:1015
+        status,retry=self.call('/node','node-one-test',body)
+        self.assertEqual(status,200)
+        self.assertEqual(first['lease_expires_at'],retry['lease_expires_at'])
+        self.assertGreater(retry['authority_now'],retry['lease_expires_at'])
+        self.assertEqual(self.a.wallet(customer)['reserved_microcredits'],100)
+
 
 if __name__ == '__main__':
     unittest.main()

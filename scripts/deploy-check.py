@@ -12,7 +12,7 @@ FILES = ["docker-compose.yml", "docker-compose.scale.yml", ".env.example",
          "runtime/compose/image/Dockerfile", "runtime/compose/deploy.yml",
          "runtime/compose/caddy-bootstrap.json", "runtime/compose/runner.example.json",
          "runtime/compose/gap-compose-ports.service", "runtime/control/Dockerfile",
-         "runtime/control/deploy.yml"]
+         "runtime/control/deploy.yml", "runtime/compose/Dockerfile.fleet-test"]
 bad = []
 for f in FILES:
     p = pathlib.Path(f)

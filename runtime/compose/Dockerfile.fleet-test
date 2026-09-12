@@ -1,0 +1,14 @@
+ARG GAP_TEST_NODE_IMAGE=gap-node-01-gap-node
+ARG GAP_TEST_RUNNER_IMAGE=gap-fleet-runner-candidate
+FROM ${GAP_TEST_NODE_IMAGE} AS node
+FROM ${GAP_TEST_RUNNER_IMAGE}
+USER root
+COPY --from=node /usr/local/bin/gap-node /usr/local/bin/gap-node
+COPY runtime/control/*.py /opt/control/
+COPY scripts/fleet-control.py /repo/scripts/fleet-control.py
+ENV GAP_TEST_CONTROL=/opt/control GAP_TEST_REPO=/repo \
+    GAP_TEST_BINARY=/usr/local/bin/gap-node GAP_TEST_SERVERLESS=1 \
+    GAP_TEST_FLEET=1 GAP_VM_TEST_ALLOW_CREATE=1 \
+    GAP_VM_TEST_STATE_DIR=/tmp/fleet-vms GAP_VM_TEST_IMAGE_DIR=/images
+USER 10001:10001
+ENTRYPOINT ["python3", "fleet_kvm_test.py"]

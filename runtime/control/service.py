@@ -8,6 +8,7 @@ import argparse
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,9 +27,12 @@ def secret(path):
 
 
 class Application:
-    def __init__(self, authority, admin, nodes, allow_debits=False):
+    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False):
         self.authority, self.admin, self.nodes = authority, admin, dict(nodes)
         self.allow_debits = allow_debits
+        if type(allow_reservations) is not bool:
+            raise ValueError('invalid reservation configuration')
+        self.allow_reservations = allow_reservations
         if type(allow_debits) is not bool or len(set([admin, *nodes.values()])) != 1 + len(nodes):
             raise ValueError('control credentials must be distinct')
         for node in nodes:
@@ -49,8 +53,9 @@ class Application:
                 row = db.execute("SELECT value FROM metadata WHERE key='operator'").fetchone()
                 if not row or row[0] != self.authority.operator:
                     raise Failure('authority_unavailable', 503)
-            return {'ok': True, 'operator_id': self.authority.operator, 'phase': 'foundation',
-                    'legacy_cutover': False, 'worker_metering_connected': False,
+            return {'ok': True, 'operator_id': self.authority.operator, 'phase': 'reservations',
+                    'legacy_cutover': False, 'worker_metering_mode': 'opt_in',
+                    'reservation_protocol': 1, 'reservations_enabled': self.allow_reservations,
                     'online_debits_enabled': self.allow_debits}
         kind, actor = self.actor(token)
         a = self.authority
@@ -93,6 +98,13 @@ class Application:
                 if not self.allow_debits:
                     raise Failure('online_debits_disabled', 409)
                 return a.debit(actor, body['request_id'], body['project_id'], body['amount_microcredits'])
+            if body.get('action') == 'checkpoint':
+                if not self.allow_reservations:
+                    raise Failure('reservations_disabled', 409)
+                result = a.checkpoint(actor,body['request_id'],body['project_id'],body['owner_did'],
+                    body['reservation_id'],body['consumed_microcredits'],body['unpaid_microcredits'],
+                    body['target_microcredits'],body['lease_seconds'],body.get('close',False))
+                return dict(result,authority_now=math.ceil(a.clock()))
             raise Failure('unknown_node_action', 404)
         if kind != 'client':
             raise Failure('client_credentials_required', 403)
@@ -195,7 +207,7 @@ def main():
         authority = Authority(config['database'], config['operator_id'])
         app = Application(authority, secret(config['operator_token_file']),
                           {node: secret(path) for node, path in config['node_token_files'].items()},
-                          config.get('allow_online_debits', False))
+                          config.get('allow_online_debits', False), config.get('allow_reservations',False))
     except (OSError, ValueError, KeyError, sqlite3.Error):
         raise SystemExit('Cannot initialize operator authority; inspect configuration privately.') from None
     Server((args.bind, args.port), app).serve_forever()

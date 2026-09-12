@@ -196,6 +196,9 @@ class Runner:
         if self.runtime:
             threading.Thread(target=self.runtime.run,daemon=True).start()
             threading.Thread(target=self.runtime.policy_watchdog,daemon=True).start()
+            if config.get('fleet_billing') is not None:
+                threading.Thread(target=self.runtime.fleet_meter_loop,daemon=True).start()
+                threading.Thread(target=self.runtime.fleet_lease_watchdog,daemon=True).start()
 
     @contextmanager
     def db(self):

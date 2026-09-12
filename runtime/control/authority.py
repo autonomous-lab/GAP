@@ -72,6 +72,12 @@ class Authority:
                    state TEXT NOT NULL DEFAULT 'staged',PRIMARY KEY(source,project))''',
                 '''CREATE TABLE IF NOT EXISTS credentials(hash TEXT PRIMARY KEY,customer TEXT NOT NULL REFERENCES customers(id),
                    agent TEXT,expires INTEGER NOT NULL,revoked INTEGER NOT NULL DEFAULT 0)''',
+                '''CREATE TABLE IF NOT EXISTS reservations(id TEXT PRIMARY KEY,node TEXT NOT NULL,
+                   project TEXT NOT NULL REFERENCES projects(id), customer TEXT NOT NULL REFERENCES customers(id),
+                   allocated INTEGER NOT NULL DEFAULT 0, consumed INTEGER NOT NULL DEFAULT 0,
+                   unpaid INTEGER NOT NULL DEFAULT 0, expires INTEGER NOT NULL DEFAULT 0,
+                   closed INTEGER NOT NULL DEFAULT 0)''',
+                'CREATE UNIQUE INDEX IF NOT EXISTS active_reservation ON reservations(node,project) WHERE closed=0',
             ):
                 db.execute(sql)
             db.execute("INSERT OR IGNORE INTO metadata VALUES('operator',?)", (operator,))
@@ -202,6 +208,8 @@ class Authority:
         body = dict(action='topup', customer=customer, amount=value, source=source)
         def apply(db):
             row = self.customer(db, customer)
+            held = db.execute('SELECT coalesce(sum(allocated-consumed),0) FROM reservations WHERE customer=? AND closed=0',(customer,)).fetchone()[0]
+            amount(row['balance']+held+value)
             balance = amount(row['balance'] + value)
             db.execute('UPDATE customers SET balance=? WHERE id=?', (balance, customer))
             self.entry(db, customer, None, None, 'funding', value, source, actor, request)
@@ -209,7 +217,7 @@ class Authority:
         return self.mutation(actor, request, body, apply)
 
     def debit(self, node, request, project, value):
-        """Atomic online debit. Worker lease/reservation integration is a later gate.
+        """Direct online primitive; workers use checkpoint reservations instead.
 
         Reject insufficient funds as a whole; a caller must never interpret a
         transport failure as zero credit or silently retry under a new ID.
@@ -278,10 +286,71 @@ class Authority:
         with self.db() as db:
             row = self.customer(db, customer)
             pending = list(db.execute('SELECT source,project,payload FROM imports WHERE customer=?', (customer,)))
+            reserved = db.execute('SELECT coalesce(sum(allocated-consumed),0) FROM reservations WHERE customer=? AND closed=0', (customer,)).fetchone()[0]
             return dict(operator_id=self.operator, customer_id=customer, balance_microcredits=row['balance'],
+                        reserved_microcredits=reserved, total_remaining_microcredits=row['balance']+reserved,
                         spent_microcredits=row['spent'], microcredits_per_credit=1_000_000,
                         staged_legacy_microcredits=sum(json.loads(r['payload'])['balance'] for r in pending),
                         staged_legacy_spendable=False)
+
+    def checkpoint(self, node, request, project, owner, reservation, consumed, unpaid, target, lease_seconds, close=False):
+        """Settle a durable cumulative checkpoint, then reserve/renew atomically.
+
+        Expiry fences execution; it NEVER refunds an unknown node's allocation.
+        Only an explicit final checkpoint can release unused reserved credits.
+        The transport adds fresh authority time to every response, including a
+        cached retry, so replay cannot manufacture another lease lifetime.
+        """
+        identifier(reservation)
+        for value in (consumed, unpaid, target):
+            amount(value)
+        if target > 1_000_000 or type(lease_seconds) is not int or not 10 <= lease_seconds <= 60 or type(close) is not bool:
+            raise Failure('invalid_reservation_limits')
+        body = dict(action='checkpoint', project=project, owner=owner, reservation=reservation,
+                    consumed=consumed, unpaid=unpaid, target=target, lease_seconds=lease_seconds, close=close)
+        def apply(db):
+            placement = self.node_project(db, node, project)
+            if placement['owner'] != owner:
+                raise Failure('reservation_owner_mismatch', 403)
+            customer = self.customer(db, placement['customer'])
+            old = db.execute('SELECT * FROM reservations WHERE id=?', (reservation,)).fetchone()
+            if old is None:
+                if consumed or unpaid or close:
+                    raise Failure('unknown_reservation', 409)
+                if db.execute('SELECT 1 FROM reservations WHERE node=? AND project=? AND closed=0', (node, project)).fetchone():
+                    raise Failure('active_reservation_exists', 409)
+                db.execute('INSERT INTO reservations(id,node,project,customer) VALUES(?,?,?,?)', (reservation,node,project,customer['id']))
+                old = db.execute('SELECT * FROM reservations WHERE id=?', (reservation,)).fetchone()
+            if (old['node'],old['project'],old['customer']) != (node,project,customer['id']):
+                raise Failure('reservation_binding_mismatch', 403)
+            if old['closed']:
+                raise Failure('reservation_closed', 409)
+            if not old['consumed'] <= consumed <= old['allocated']:
+                raise Failure('invalid_consumption_checkpoint', 409)
+            debit = consumed-old['consumed']
+            amount(customer['spent']+debit)
+            if debit:
+                db.execute('UPDATE customers SET spent=spent+? WHERE id=?', (debit,customer['id']))
+                self.entry(db,customer['id'],project,node,'usage',-debit,'reservation','node:'+node,request)
+            held = old['allocated']-consumed
+            if close:
+                if unpaid:
+                    raise Failure('unpaid_usage_requires_reconciliation', 409)
+                db.execute('UPDATE customers SET balance=balance+? WHERE id=?', (held,customer['id']))
+                allocated, expires = old['allocated'], 0
+            else:
+                extra = min(max(0,target-held),customer['balance'])
+                allocated = amount(old['allocated']+extra)
+                db.execute('UPDATE customers SET balance=balance-? WHERE id=?', (extra,customer['id']))
+                expires = int(self.clock())+lease_seconds if held+extra else 0
+            db.execute('UPDATE reservations SET allocated=?,consumed=?,unpaid=?,expires=?,closed=? WHERE id=?',
+                       (allocated,consumed,unpaid,expires,int(close),reservation))
+            remaining=db.execute('SELECT coalesce(sum(allocated-consumed),0) FROM reservations WHERE customer=? AND closed=0',(customer['id'],)).fetchone()[0]
+            return dict(operator_id=self.operator,node_id=node,project_id=project,owner_did=owner,
+                        reservation_id=reservation,allocated_microcredits=allocated,consumed_microcredits=consumed,
+                        unpaid_microcredits=unpaid,lease_expires_at=expires,closed=close,
+                        funding_status='available' if expires else 'fully_reserved' if remaining else 'exhausted')
+        return self.mutation('node:'+node,request,body,apply)
 
     def projects(self, customer, agent=None, after=''):
         with self.db() as db:

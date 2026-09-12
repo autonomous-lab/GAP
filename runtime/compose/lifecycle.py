@@ -17,7 +17,12 @@ class Runtime:
     def __init__(self,runner,config):
         self.runner=runner; self.manager=runner.hypervisor
         self.manager.runtime=self
-        self.ledger=Ledger(Path(config['state_dir'])/'microvm-credits.sqlite')
+        ledger_path=Path(config['state_dir'])/'microvm-credits.sqlite'
+        if config.get('fleet_billing') is not None:
+            from fleet_billing import FleetLedger
+            self.ledger=FleetLedger(ledger_path,config['fleet_billing'])
+        else:
+            self.ledger=Ledger(ledger_path)
         self.incarnation=uuid.uuid4().hex
         self.locks={}; self.guard=threading.Lock(); self.states={}
         self.capacity_lock=threading.RLock()
@@ -38,6 +43,8 @@ class Runtime:
 
     def execution_started(self,meta,cold=False):
         state=self.state(meta)
+        state['policy_preempted']=False;state.pop('fleet_preempted',None)
+        state.pop('meter_stop_ms',None)
         if cold:
             state['guest_clock']=0; state['tcp_ports'].clear();state['tcp_port_order'].clear()
             meta.pop('tcp_recent_ports',None);meta.pop('guest_clock_seconds',None)
@@ -60,6 +67,7 @@ class Runtime:
 
     def execution_stopping(self,meta):
         state=self.state(meta);state['guest_clock']=self.guest_clock(state);state['running_since']=None
+        state.setdefault('meter_stop_ms',int(time.time()*1000))
         meta['guest_clock_seconds']=state['guest_clock']
         meta['tcp_recent_ports']={p:t for p,t in state['tcp_ports'].items() if t>state['guest_clock']-120}
 
@@ -131,7 +139,7 @@ class Runtime:
             path=self.manager.folder(meta)/'network-counts.json'
             counters=json.loads(path.read_text()) if path.exists() else {'in':0,'out':0}
             incoming,outgoing=counters['in'],counters['out']
-        self.ledger.sample(meta,int(time.time()*1000),self.manager.alive(meta),
+        self.ledger.sample(dict(meta,meter_stop_ms=state.get('meter_stop_ms')),int(time.time()*1000),self.manager.alive(meta) and not state.get('policy_preempted',False),
                            self.storage_bytes(meta),incoming,outgoing,self.incarnation)
         state['last_sample']=time.monotonic()
 
@@ -157,7 +165,7 @@ class Runtime:
         if valid:
             state['policy_generation']=policy['generation'];meta['policy_generation']=policy['generation']
             state['operator_suspended']=bool(policy.get('suspended'));meta['operator_suspended']=state['operator_suspended']
-            if state['policy_allowed']:state['policy_preempted']=False
+            if state['policy_allowed'] and not state.get('fleet_preempted'):state['policy_preempted']=False
         meta['policy_blocked']=not state['policy_allowed']
         return state['policy_allowed']
 
@@ -179,7 +187,14 @@ class Runtime:
                 metas=[m for m in metas if self.manager.alive(m)]
                 if metas:
                     policies=self.runner.workload_policies({m['project_id'] for m in metas})
-                    blocked=[m for m in metas if not self.accept_policy(m,policies.get(m['project_id'],{}))]
+                    blocked=[]
+                    for m in metas:
+                        policy_allowed=self.accept_policy(m,policies.get(m['project_id'],{}))
+                        ledger=getattr(self,'ledger',None)
+                        lease_allowed=not ledger or ledger.lease_allowed(m['project_id'])
+                        if not lease_allowed:self.state(m)['fleet_preempted']=True
+                        if not policy_allowed or not lease_allowed:
+                            blocked.append(m)
                     for meta in blocked:self.disconnect(meta)
                     for meta in blocked:
                         state=self.state(meta)
@@ -204,7 +219,12 @@ class Runtime:
             time.sleep(1)
 
     def check_credit(self,meta):
+        if hasattr(self.ledger,'sync'):self.ledger.sync(meta['project_id'],meta['owner_did'])
         view=self.ledger.view(meta['project_id'],meta['owner_did'],include_entries=False)
+        if view.get('fleet') and not view['fleet']['lease_valid']:
+            if not view['fleet']['authority_error'] and view['fleet']['funding_status']=='exhausted':
+                raise VMError('microvm_credits_or_budget_exhausted')
+            raise VMError('fleet_allowance_or_lease_unavailable')
         if not view['execution_allowed']: raise VMError('microvm_credits_or_budget_exhausted')
 
     def configure(self,project,owner,body):
@@ -315,15 +335,17 @@ class Runtime:
         state=self.state(meta)
         self.sample(meta,force=False)
         account=self.ledger.view(project,meta['owner_did'],include_entries=False)
+        if meta['state'] in ('hibernated','stopped') and not self.manager.alive(meta):
+            state.pop('fleet_preempted',None)
         if account['deletion_committed'] or (account['billing_mode']=='enforced' and account['delete_after'] is not None and time.time()>=account['delete_after']):
             self.expire(meta); return
-        blocked=not account['execution_allowed'] or not self.check_policy(meta)
+        blocked=not account['execution_allowed'] or not self.check_policy(meta) or state.get('fleet_preempted',False)
         if not blocked and meta.get('execution_mode')=='always_on' and time.time()-state.get('policy_checked',0)>=30:
             try: approved=self.runner.authorize(project,meta['owner_did']).get('always_on_allowed')
             except Exception: approved=False
             state['policy_checked']=time.time()
             if not approved: meta['execution_mode']='serverless'; self.manager.save(meta)
-        blocked=not account['execution_allowed'] or not self.check_policy(meta)
+        blocked=not account['execution_allowed'] or not self.check_policy(meta) or state.get('fleet_preempted',False)
         idle=(meta.get('execution_mode','serverless')=='serverless'
               and time.time()-state['last_incoming']>=meta.get('idle_timeout_seconds',900) and not state['active_http'])
         with self.runner.db() as db:
@@ -332,6 +354,7 @@ class Runtime:
             self.disconnect(meta)
             self.manager.hibernate(meta)
             self.sample(meta)
+            state.pop('fleet_preempted',None)
         meta['last_incoming_at']=state['last_incoming']; self.manager.save(meta)
         if meta.get('execution_mode')=='always_on' and meta['state'] in ('hibernated','stopped') and not meta.get('manual_stop') and not blocked and not busy:
             if self.runner.authorize(project,meta['owner_did']).get('always_on_allowed'):
@@ -364,4 +387,38 @@ class Runtime:
                 if self.gateway: self.gateway.reconcile()
             except Exception as error:
                 self.last_error=str(error)
+            time.sleep(1)
+
+    def fleet_meter_loop(self):
+        # Long guest deployments hold lifecycle locks. Fleet metering and lease
+        # renewal must continue independently, while the separate watchdog can
+        # still preempt a VM during a stalled control request.
+        while not self.closed:
+            for path in (self.manager.root/'catalog').glob('*.json'):
+                try:
+                    meta=json.loads(path.read_text())
+                    if self.ledger.fleet_allows(meta['project_id']):self.sample(meta,force=False)
+                except Exception:
+                    self.last_error='fleet_meter_unavailable'
+            time.sleep(1)
+
+    def fleet_lease_watchdog(self):
+        # No HTTP calls or lifecycle locks here: even a blocked policy callback
+        # or controller connection cannot extend an expired execution lease.
+        while not self.closed:
+            try:
+                for path in (self.manager.root/'catalog').glob('*.json'):
+                    meta=json.loads(path.read_text())
+                    if self.ledger.lease_allowed(meta['project_id']) or not self.manager.alive(meta):continue
+                    state=self.state(meta);state['fleet_preempted']=True
+                    self.disconnect(meta)
+                    if meta['state'] in ('hibernating','resuming') or state.get('policy_preempted'):continue
+                    try:
+                        self.manager.qmp(meta,'stop');self.execution_stopping(meta);state['policy_preempted']=True
+                    except Exception:
+                        child=self.manager.children.get(meta['vm_id'])
+                        if child and child.poll() is None:child.terminate()
+            except Exception:
+                self.ledger.deadlines.clear()
+                self.last_error='fleet_lease_watchdog_unavailable'
             time.sleep(1)

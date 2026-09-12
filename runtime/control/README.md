@@ -1,4 +1,4 @@
-# Operator account authority: foundation
+# Operator accounts, spending reservations and worker leases
 
 This service is the single transactional registry and wallet for **one operator**.
 It supports customers, human/agent membership, project placement and explicit
@@ -9,12 +9,12 @@ membership alone does not give access to every project in the customer account.
 Human membership uses an opaque subject ID; email proof still belongs to the
 registration service. Operator assertions do not migrate email verification.
 
-**Delivery boundary:** existing node login, email registration, project ownership
-checks and worker metering are not connected to this service yet. The default
-configuration disables online debits. Existing workloads and balances continue
-using their original node. No production authentication or billing cutover is
-performed by installing this service. This does not complete the shared-account
-kanban card or global quota/lease enforcement.
+**Delivery boundary:** worker metering now supports explicit per-project opt-in
+through spending reservations and short execution leases. Existing node login,
+email registration and project ownership checks still use their local authorities.
+Existing workloads and balances continue using their original ledger until a
+separate, fenced migration is completed. Installing this service does not migrate
+them. Global VM-count/CPU/RAM quota reservations remain to implement.
 
 ## State and trust
 
@@ -117,6 +117,91 @@ POST `/node` authenticates a configured node and accepts `action: project` with
 `project_id`. Its `debit` action additionally requires `request_id` and
 `amount_microcredits`, and is disabled by default.
 
+## Worker connection and partition behavior
+
+Enable `allow_reservations: true` in the private control configuration. Keep
+`allow_online_debits: false`: workers use cumulative checkpoints, not direct debits.
+On the control host only, set `GAP_FLEET_RELAY_ENABLED=1` in the node's `.env`
+and recreate its web service. This exposes POST `/v1/fleet/node` through the
+existing verified HTTPS origin and relays **only** to `/node` on the fixed local
+bridge authority. It does not expose `/operator`, accept caller-selected URLs,
+follow redirects or forward human/admin sessions. The private service authenticates
+each distinct node credential. The relay applies the node's rate limits; size
+them for fleet checkpoint traffic before increasing the customer/node limits.
+
+The worker's `runner.json` accepts:
+
+```json
+{
+  "fleet_billing": {
+    "url": "https://gap.geta.team/v1/fleet",
+    "operator_id": "elestio",
+    "node_id": "node-02",
+    "token_file": "/config/fleet-node.token",
+    "projects": [],
+    "target_microcredits": 100000,
+    "lease_seconds": 30
+  }
+}
+```
+
+Node 01 can use `http://172.17.0.1:8096` locally. Copy only that node's credential
+into its private worker configuration, never the operator credential or another
+node's credential. The client verifies HTTPS certificates, refuses redirects and
+allows cleartext only for loopback/the local Docker bridge. Configuration and
+credentials are loaded at worker startup. Preserve running VMs before replacing
+their worker container.
+
+`projects: []` prepares the connection without changing billing for any project.
+Opt-in is accepted only for a financially empty project, with enforced pricing
+and an existing authoritative customer/agent/project binding. A funded or used
+legacy wallet returns `legacy_wallet_migration_required`; it is never copied into
+the authority automatically. A durable local binding blocks local top-ups and
+shadow mode. Removing the fleet configuration does not reactivate the local
+spending path; it fences execution until correct configuration is restored.
+Bindings also pin their operator and node identities. Do not clone a writable
+worker ledger onto another host or restore an old checkpoint as current state;
+that requires fencing and reconciliation, not an automatic lease renewal.
+
+POST `/node` with action `checkpoint` carries a stable `request_id`, `project_id`,
+`owner_did`, durable `reservation_id`, cumulative `consumed_microcredits`, current
+`unpaid_microcredits`, `target_microcredits` (up to 1,000,000) and `lease_seconds`
+(10–60). It settles newly reported consumption and reserves additional funds in
+one transaction. A node can operate only on its registered projects. An active
+reservation prevents a second reservation for the same node/project. Wallets show
+free, reserved, total remaining and spent microcredits separately.
+
+The worker records the pending request before sending it and applies each returned
+allocation exactly once. A lost response or restart reuses that request. Every
+response includes fresh authority time, even for a cached operation; replaying an
+old response cannot issue a fresh lease. Worker deadlines use a monotonic clock,
+start before the HTTP request, and are never restored from disk after a restart.
+The worker must contact the authority before execution can resume after reboot.
+
+An independent meter continues during long deployments that hold lifecycle locks.
+A separate watchdog makes no HTTP calls and does not take those locks. Expiry
+closes tracked connections and pauses guest CPUs, then the lifecycle loop hibernates
+the VM. Checks before QEMU execution/resume prevent an expired lease from starting
+guest instructions. Preemption is checked once per second, plus the bounded QMP
+monitor timeout; this is not a promise of zero scheduling latency.
+
+Controller failures, confirmed exhausted credit and credit already reserved by
+another node have distinct states. Failure never becomes a zero-balance response.
+Reservation expiry never refunds credits that may already have been consumed.
+An explicit final checkpoint with `close: true`, after the worker is fenced and
+all usage settled, returns the unused amount. The current worker intentionally
+does not close reservations automatically after VM destruction; operator-driven
+drain/reconciliation is required before releasing a possibly outstanding balance.
+
+Retained disks continue to accumulate usage during a partition. Any unpaid usage
+is repaid from the next allocation before execution resumes, with a separate
+arrears entry and conserving finance projections. The local allowance is labelled
+`balance_scope: node_reservation`; it must not be presented as the total customer
+wallet. **Managed projects cannot use the old 72-hour local deletion timer.**
+Their retention remains `preserve_until_authoritative_reconciliation` until a
+customer-wide retention decision protocol is delivered. Do not activate legacy
+production projects before that migration/retention gate is complete.
+
 ## Legacy migration staging
 
 On each existing worker host, export one consistent **read-only** SQLite snapshot:
@@ -141,7 +226,7 @@ imports idempotent. A changed snapshot is rejected rather than silently replacin
 the reviewed checkpoint. A staged import has **zero effect on spendable balance**.
 The wallet reports staged credits separately and explicitly as non-spendable.
 
-There is intentionally no activation endpoint in this first delivery. The next
+There is intentionally no legacy activation endpoint in this delivery. The next
 cutover must provide all of the following before funds become spendable:
 
 1. Fence the source writer durably, flush its final metering sample and archive
@@ -163,6 +248,7 @@ off-host backup/key management remain separate delivery gates.
 
 ```sh
 python3 -m unittest discover -s runtime/control -p 'test_*.py'
+python3 -m unittest discover -s runtime/compose -p 'test_*.py'
 ```
 
 Tests exercise real HTTP, two authenticated node actors sharing one wallet,
@@ -170,3 +256,22 @@ concurrent final-credit spending, restart/replay, token expiry/revocation,
 cross-operator rejection, project grants, funding overflow rollback, and legacy
 staging that cannot duplicate or spend live balances. Existing worker metering
 and node HTTP suites remain required when connecting the service to those paths.
+
+The real KVM test uses isolated node/worker/controller state and only a read-only
+guest base image mount. It stops the controller while holding a deployment lock,
+checks open TCP closure and CPU preemption, verifies retained hibernation, then
+restarts the controller and checks exact settlement and preserved-memory resume.
+Run on a KVM host from the repository root (node image argument varies by host):
+
+```sh
+docker build -t gap-fleet-runner-candidate -f runtime/compose/Dockerfile .
+docker build -t gap-fleet-kvm-test -f runtime/compose/Dockerfile.fleet-test \
+  --build-arg GAP_TEST_NODE_IMAGE=gap-node-01-gap-node .
+docker run --rm --device /dev/kvm --group-add "$(stat -c %g /dev/kvm)" \
+  --memory 4g --cpus 3 \
+  -v "$PWD/data/gap-compose/guest-image:/images:ro" gap-fleet-kvm-test
+```
+
+Do not mount a production VM catalog, wallet, customer volume or Docker socket
+in this acceptance container. `/dev/kvm` needs its host group in the container;
+passing `--device` alone does not grant UID 10001 access to a mode-0660 device.

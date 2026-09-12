@@ -92,6 +92,10 @@ def validate(action, body):
 
 
 class MicroVMs:
+    def execution_allowed(self,meta):
+        if not self.runtime:return True
+        ledger=getattr(self.runtime,'ledger',None)
+        return self.runtime.check_policy(meta,force=True) and (ledger is None or ledger.lease_allowed(meta['project_id']))
     def __init__(self, config, execute_guest):
         self.root = Path(config['state_dir']).resolve()
         self.images = Path(config['image_dir']).resolve()
@@ -446,7 +450,7 @@ class MicroVMs:
             self.save(meta)
         except Exception:
             if self.alive(meta):
-                if self.runtime and not self.runtime.check_policy(meta,force=True):
+                if self.runtime and not self.execution_allowed(meta):
                     self.stop(meta,True)
                 else:
                     self.qmp(meta,'cont')
@@ -481,7 +485,7 @@ class MicroVMs:
             # Mark resumed before executing guest instructions: never replay an old
             # memory snapshot after a crash following an externally visible write.
             meta['state']='running'; self.save(meta)
-            if self.runtime and not self.runtime.check_policy(meta,force=True):raise VMError('microvm_suspended_or_policy_unavailable')
+            if self.runtime and not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
             self.qmp(meta,'cont')
             if self.runtime: self.runtime.execution_started(meta)
             response=self.qmp(meta,'human-monitor-command',{'command-line':'delvm '+tag})
@@ -498,7 +502,7 @@ class MicroVMs:
             raise
 
     def start(self, meta):
-        if self.runtime and not self.runtime.check_policy(meta,force=True):raise VMError('microvm_suspended_or_policy_unavailable')
+        if self.runtime and not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
         if meta['state'] == 'creating':
             raise VMError('vm_creation_incomplete_destroy_and_retry')
         if self.public(meta)['state'] == 'running':
@@ -530,7 +534,7 @@ class MicroVMs:
                 raise error
             try:
                 if self.qmp(meta, 'query-status')['status'] in ('prelaunch','paused'):
-                    if self.runtime and not self.runtime.check_policy(meta,force=True):
+                    if self.runtime and not self.execution_allowed(meta):
                         process.terminate(); process.wait(timeout=10)
                         raise VMError('microvm_suspended_or_policy_unavailable')
                     self.qmp(meta, 'cont')
@@ -542,7 +546,7 @@ class MicroVMs:
             process.terminate()
             process.wait(timeout=10)
             raise VMError('hypervisor_start_timeout')
-        if self.runtime and not self.runtime.check_policy(meta,force=True):
+        if self.runtime and not self.execution_allowed(meta):
             self.stop(meta,True)
             raise VMError('microvm_suspended_or_policy_unavailable')
         if self.runtime: self.runtime.execution_started(meta,cold=True)

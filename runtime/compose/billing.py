@@ -50,6 +50,9 @@ class Ledger:
                 project TEXT NOT NULL, operation TEXT NOT NULL, digest TEXT NOT NULL,
                 payload TEXT NOT NULL, created REAL NOT NULL, UNIQUE(project,operation));
             CREATE TABLE IF NOT EXISTS samples(vm TEXT PRIMARY KEY, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS fleet_bindings(project TEXT PRIMARY KEY,owner TEXT NOT NULL,
+                reservation TEXT NOT NULL,operator TEXT NOT NULL,node TEXT NOT NULL,
+                allocated INTEGER NOT NULL DEFAULT 0,pending TEXT);
             CREATE TABLE IF NOT EXISTS legacy_meter_entries(id INTEGER PRIMARY KEY,
                 project TEXT NOT NULL, operation TEXT NOT NULL, digest TEXT NOT NULL,
                 payload TEXT NOT NULL, created REAL NOT NULL);
@@ -58,7 +61,14 @@ class Ledger:
             if not db.in_transaction: db.execute('BEGIN IMMEDIATE')
             self.compact_legacy(db)
             finance.initialize(db,self.clock())
+            self.fenced_projects={r[0] for r in db.execute('SELECT project FROM fleet_bindings')}
         Path(self.path).chmod(0o600)
+
+    def fleet_allows(self,project):
+        return False
+
+    def lease_allowed(self,project):
+        return project not in self.fenced_projects
 
     def compact_legacy(self, db):
         """Keep old raw measurements for audit; display consolidated historical periods.
@@ -123,6 +133,8 @@ class Ledger:
     def ensure(self, db, project, owner):
         if not re.fullmatch(r'prj_[0-9a-f]{24}', project) or not re.fullmatch(r'did:gap:[0-9a-f]{64}', owner):
             raise BillingError('invalid_billing_identity')
+        if db.execute('SELECT 1 FROM fleet_bindings WHERE project=?',(project,)).fetchone() and not self.fleet_allows(project):
+            raise BillingError('fleet_configuration_required')
         db.execute('INSERT OR IGNORE INTO accounts(project,owner) VALUES(?,?)', (project,owner))
         account = db.execute('SELECT * FROM accounts WHERE project=?',(project,)).fetchone()
         if account['owner'] != owner: raise BillingError('billing_owner_mismatch')
@@ -142,6 +154,8 @@ class Ledger:
     def set_pricing(self, mode, tariff=None, expected_version=...):
         if mode not in ('shadow','enforced'): raise BillingError('invalid_billing_mode')
         with self.db() as db:
+            if mode!='enforced' and db.execute('SELECT 1 FROM fleet_bindings LIMIT 1').fetchone():
+                raise BillingError('fleet_requires_enforced_billing')
             _, current = self.tariff(db)
             if expected_version is not ...:
                 if expected_version is not None and not isinstance(expected_version,str):
@@ -203,6 +217,8 @@ class Ledger:
         integer(amount,1)
         with self.db() as db:
             account=self.ensure(db,project,owner)
+            if db.execute('SELECT 1 FROM fleet_bindings WHERE project=?',(project,)).fetchone():
+                raise BillingError('use_authoritative_customer_wallet')
             digest,old=self.operation(db,project,'topup:'+key,{'amount':amount})
             if old is not None: return old
             if account['retention_claim']: raise BillingError('storage_deletion_already_committed')
@@ -286,6 +302,8 @@ class Ledger:
             if old:
                 elapsed=now_ms-old['at']
                 on=elapsed if old['running'] and old['incarnation']==incarnation else 0
+                if on and type(meta.get('meter_stop_ms')) is int:
+                    on=max(0,min(now_ms,meta['meter_stop_ms'])-old['at'])
                 cpu_quarters = int(old['vcpus']*4)*on + old.get('cpu_quarter_remainder',0)
                 sample['cpu_quarter_remainder'] = cpu_quarters % 4
                 usage={'vcpu_ms':cpu_quarters//4,'ram_byte_ms':old['memory_mib']*1024**2*on,
@@ -326,6 +344,8 @@ class Ledger:
         """Atomic boundary with concurrent top-ups; once claimed, deletion wins."""
         with self.db() as db:
             account=self.ensure(db,project,owner)
+            if db.execute('SELECT 1 FROM fleet_bindings WHERE project=?',(project,)).fetchone():
+                return False  # Fleet retention needs an explicit authority decision.
             mode,_=self.tariff(db)
             if account['retention_claim']: return account['retention_claim']==vm_id
             if (mode!='enforced' or account['balance'] or account['exhausted_at'] is None

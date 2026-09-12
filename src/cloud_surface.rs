@@ -2,7 +2,7 @@
 
 pub fn allowed_api(path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
-    matches!(path, "/health" | "/v1/registration" | "/v1/identity" | "/v1/identity/verify" | "/v1/cloud/projects")
+    matches!(path, "/health" | "/v1/registration" | "/v1/identity" | "/v1/identity/verify" | "/v1/cloud/projects" | "/v1/fleet/node")
         || path.starts_with("/v1/cloud/projects/")
         || path.starts_with("/v1/admin/cloud/projects/")
         || path.starts_with("/functions/")

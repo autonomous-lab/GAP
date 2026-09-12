@@ -79,8 +79,17 @@ restricted to that node's projects. Existing node authentication and worker
 metering have not been switched over. Online debits are disabled by default.
 Legacy exports are read-only and do not fence or transfer live balances. Remaining
 gates include verified human linkage, node-scoped credential integration, final
-source fencing and exactly-once balance transfer, reservations and leases. This
+source fencing and exactly-once balance transfer, and global capacity admission. This
 foundation must not be reported as completed fleet accounts or quotas.
+
+Worker spending reservations and execution leases are now implemented for explicit
+project opt-in. Cumulative checkpoints settle once, reserve funds atomically and
+cannot extend a cached lease on replay. Independent metering and a watchdog cover
+long deployment locks; controller loss preserves disks instead of applying the
+local credit-depletion purge. The HTTPS relay exposes only node-scoped control
+operations. Financially used legacy projects cannot opt in without migration.
+Customer-wide count/resource admission and authoritative retention decisions are
+still pending; the two existing wallets have not been transferred.
 
 ## Confirmed requirements
 
