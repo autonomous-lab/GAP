@@ -8,6 +8,7 @@ import queue
 import re
 import socket
 import socketserver
+import sqlite3
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -222,7 +223,18 @@ class AdminHTTP(unittest.TestCase):
                         self.assertEqual(request('PUT',vm_base+'/http-access',{'vm_id':vm_id,'username':'visitor','password':'too short'},host='client.test',bearer=agent['token'])[0],400)
                         credentials={'vm_id':vm_id,'username':'visitor','password':'isolated VM password'}
                         status,access,_=request('PUT',vm_base+'/http-access',credentials,host='client.test',bearer=agent['token'])
-                        self.assertEqual(status,200,access);self.assertTrue(access['configured']);self.assertNotIn('password',json.dumps(access))
+                        self.assertEqual(status,200,access);self.assertTrue(access['configured']);self.assertNotIn('password',access);self.assertNotIn('password_hash',access);self.assertTrue(access['password_recoverable'])
+                        reveal=vm_base+'/http-access/reveal'
+                        self.assertEqual(request('POST',reveal,{'vm_id':vm_id},host='client.test')[0],401)
+                        self.assertEqual(request('POST',reveal,{'vm_id':vm_id},host='client.test',bearer='wrong')[0],401)
+                        st,revealed,rh=request('POST',reveal,{'vm_id':vm_id},host='client.test',bearer=agent['token'])
+                        self.assertEqual(st,200,revealed);self.assertEqual(revealed['password'],credentials['password']);self.assertIn('no-store',rh['Cache-Control'])
+                        self.assertEqual(request('POST',reveal.replace(project_id,other_project['project_id']),{'vm_id':vm_id},host='client.test',bearer=agent['token'])[0],400)
+                        _,owner_session,owner_headers=request('POST',vm_session,host='admin.test',bearer=agent['token'])
+                        owner_cookie=owner_headers['Set-Cookie'].split(';')[0]
+                        self.assertEqual(request('POST',reveal,{'vm_id':vm_id},cookie=owner_cookie)[0],401)
+                        self.assertEqual(request('POST',reveal,{'vm_id':vm_id},cookie=owner_cookie,vm_csrf=owner_session['csrf'])[1]['password'],credentials['password'])
+                        self.assertEqual(request('POST',reveal,{'vm_id':vm_id},cookie=owner_cookie,vm_csrf=owner_session['csrf'],origin='https://client.test')[0],403)
                         self.assertEqual(admission(basic='visitor:wrong')[0],401)
                         status,_,headers=admission(basic='visitor:isolated VM password')
                         self.assertEqual(status,200);self.assertEqual(headers['X-GAP-VM-URI'],ingress['base_path']);self.assertEqual(headers['X-GAP-VM-Strip-Auth'],'1')
@@ -244,8 +256,26 @@ class AdminHTTP(unittest.TestCase):
                         self.assertEqual(admission()[0],401) # custom domain never unlocks the shared origin
                         self.assertEqual(request('GET','/internal/tls/ask?token='+('f'*64)+'&domain='+payload['hostname'],host='client.test')[0],200)
                         restart('1')
+                        self.assertEqual(request('POST',reveal,{'vm_id':vm_id},host='client.test',bearer=agent['token'])[1]['password'],credentials['password'])
                         self.assertEqual(admission(basic='visitor:isolated VM password')[0],200)
                         self.assertEqual(admission('/hello',hostname=payload['hostname'])[0],200)
+                        with sqlite3.connect(root/'node.sqlite') as db:
+                            stored=db.execute("SELECT value FROM node_state WHERE scope='cloud_vm_http' AND key=?",(vm_id,)).fetchone()[0]
+                        self.assertNotIn(credentials['password'],stored)
+                        original_record=json.loads(stored)
+                        self.assertTrue(original_record['password_sealed'].startswith('enc:v1:'))
+                        for altered in ({k:v for k,v in original_record.items() if k!='password_sealed'},
+                                        {**original_record,'password_sealed':'plaintext is forbidden'},
+                                        {**original_record,'username':'swapped-username'}):
+                            with sqlite3.connect(root/'node.sqlite') as db:
+                                db.execute("UPDATE node_state SET value=? WHERE scope='cloud_vm_http' AND key=?",(json.dumps(altered),vm_id))
+                            restart('1')
+                            self.assertEqual(request('POST',reveal,{'vm_id':vm_id},host='client.test',bearer=agent['token'])[0],400)
+                        with sqlite3.connect(root/'node.sqlite') as db:
+                            db.execute("UPDATE node_state SET value=? WHERE scope='cloud_vm_http' AND key=?",(stored,vm_id))
+                        restart('1')
+                        self.assertEqual(request('POST',reveal,{'vm_id':vm_id},host='client.test',bearer=agent['token'])[1]['password'],credentials['password'])
+
                         st,_,_=request('DELETE',vm_base+'/domains/'+payload['hostname'],{'vm_id':vm_id},host='client.test',bearer=agent['token']);self.assertEqual(st,200)
                         self.assertNotIn('X-GAP-VM-URI',admission('/hello',hostname=payload['hostname'])[2])
                     self.assertNotIn(agent['token'], json.dumps(request('GET', api+'agents', cookie=cookie)[1]))

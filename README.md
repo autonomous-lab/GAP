@@ -350,7 +350,7 @@ requires no public port or private key upload. Hibernated VMs resume before
 connection. Terminal limits and API details are in [AGENTS.md](AGENTS.md#ssh-connection-details-and-browser-terminal).
 
 The microVM console also displays public IP/hostname, all five port mappings,
-the HTTPS routing URL, mandatory visitor Basic Auth settings, and native custom-domain
+the HTTPS routing URL, mandatory visitor Basic Auth settings with owner-only password reveal/copy beside the URL, and native custom-domain
 attachment with DNS verification and automatic HTTPS. Verified custom domains
 are public without GAP Basic Auth; shared GAP URLs always remain protected. Host CPU,
 resident RAM, occupied storage and inbound/outbound traffic refresh every ten

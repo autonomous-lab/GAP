@@ -840,3 +840,23 @@ gateway must use the existing authenticated `/internal/tls/ask` integration and
 forward verified custom hosts to the main edge. Set `GAP_CUSTOM_DOMAIN_TARGET`
 to this node's direct public DNS target. Raw TCP/UDP ports remain separate from
 HTTP authentication and require application-level access controls.
+
+### Elestio host firewall and public VM ports
+
+Docker publishing does not override a provider DOCKER-USER deny rule. If SSH
+works inside the worker but `ssh -p 24000 root@sites.gap.geta.team` times out
+externally, check that the configured public TCP/UDP pool is allowed there.
+On Elestio nodes using `/opt/docker-firewall-rules.sh`, preview then apply:
+
+```bash
+python3 scripts/configure-microvm-firewall.py
+python3 scripts/configure-microvm-firewall.py --apply
+```
+
+The helper reads `hypervisor.public_network.first_port/last_port`, restricts
+rules to that port pool, preserves other firewall rules, and updates the
+provider's restoration script for reboot. It does not restart Docker or VMs.
+The GAP node01 pool is 24000-24099. Only mapped guest ports have listeners;
+internal worker/API ports are not opened. Verify external SSH host fingerprints
+against GET `/vm/ssh` before authenticating. If the provider replaces its
+restoration script during a firewall edit, run this helper again.

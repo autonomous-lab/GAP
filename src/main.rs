@@ -471,6 +471,9 @@ fn main() -> Result<()> {
             let header = |name: &'static str| request.headers().iter().find(|h|h.field.equiv(name)).map(|h|h.value.as_str()).unwrap_or("");
             let session_cookie=header("Cookie");
             let session_csrf=header("X-GAP-VM-Session");
+            if clean_path.ends_with("/vm/http-access/reveal") && on_admin_host && auth.is_none() && !session_cookie.is_empty() && header("Origin")!=admin_origin.trim_end_matches('/') {
+                let _=request.respond(Response::from_string(r#"{"error":{"code":"origin_required"}}"#).with_status_code(403).with_header(Header::from_bytes("Cache-Control","no-store").unwrap()).with_header(Header::from_bytes("Content-Type","application/json").unwrap()));continue;
+            }
             if !custom_domain_request && on_admin_host && auth.is_none() {
                 auth=gap::cloud_vm_session::authorization(&path,session_cookie,session_csrf);
             }
@@ -521,7 +524,7 @@ fn main() -> Result<()> {
             };
 
             let mut response = Response::from_string(json_str).with_status_code(status);
-            if vm_console {response.add_header(Header::from_bytes("Cache-Control","no-store").unwrap());}
+            if vm_console || clean_path.ends_with("/vm/http-access/reveal") {response.add_header(Header::from_bytes("Cache-Control","no-store").unwrap());}
             response.add_header(
                 Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
             );

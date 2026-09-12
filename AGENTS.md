@@ -1489,7 +1489,7 @@ applications exposed on those ports must enforce their own access policy.
 
 In **MicroVMs → Network & application access → GAP URL protection**, choose a
 visitor username and a new password (12–128 bytes). These are separate from your
-owner bearer token. GAP stores an Argon2 hash and removes visitor Authorization
+owner bearer token. GAP stores an Argon2 hash and an encrypted recoverable copy, and removes visitor Authorization
 before forwarding to the guest. Changing credentials takes effect on new HTTP
 requests and WebSocket handshakes; an already open stream is not reauthenticated.
 A WebSocket client on the shared origin must support the Basic handshake;
@@ -1503,8 +1503,15 @@ PUT /v1/cloud/projects/{project}/vm/http-access
     {"vm_id":"vm_...","username":"visitor","password":"your-unique-visitor-password"}
 ```
 
-The GET response includes `configured` and `username`, never the password or
-hash. There is no credential default. Use your secret manager to deliver the
+The GET response includes `configured`, `username` and `password_recoverable`,
+never the password or hash. The owner can explicitly POST `/vm/http-access/reveal`
+with `vm_id` to retrieve the visitor password. Browser sessions require their
+usual CSRF header. The console shows the login beside the base URL and provides
+Show/Hide and Copy buttons; revealed passwords are hidden after 30 seconds.
+Saving credentials requires `GAP_MASTER_KEY`; the recoverable copy is encrypted
+and bound to the VM, project and username. Existing hash-only passwords continue
+to authenticate but must be saved again to support reveal. No secret is stored
+in browser storage or embedded in application URLs. There is no credential default. Use your secret manager to deliver the
 chosen password to authorized visitors; never place it in a public URL.
 
 To publish without GAP Basic Auth, use **Custom domains** in the same panel:

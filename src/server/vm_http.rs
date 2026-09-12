@@ -5,9 +5,10 @@ use super::*;
 pub(super) struct Record {
     pub vm_id:String, pub project_id:String, pub owner_did:String, pub route_key:String,
     pub username:Option<String>, pub password_hash:Option<String>,
+    #[serde(default)] pub password_sealed:Option<String>,
 }
 impl Record {
-    fn public(&self)->Value {json!({"vm_id":self.vm_id,"basic_auth_required":true,"configured":self.password_hash.is_some(),"username":self.username})}
+    fn public(&self)->Value {json!({"vm_id":self.vm_id,"basic_auth_required":true,"configured":self.password_hash.is_some(),"username":self.username,"password_recoverable":self.password_sealed.is_some()})}
 }
 fn valid_vm(v:&str)->bool {v.strip_prefix("vm_").is_some_and(|v|v.len()==32 && v.bytes().all(|b|b.is_ascii_hexdigit()))}
 fn save_record(g:&mut NodeState,r:&Record)->Result<()> {
@@ -24,7 +25,7 @@ fn denied(message:&str)->Error {Error::Other(message.into())}
 pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Value,auth:Option<&str>)->Option<(u16,Value)> {
     let path=raw.split('?').next()?;
     let (project,tail)=path.strip_prefix("/v1/cloud/projects/")?.split_once("/vm/")?;
-    if tail!="http-access" && tail!="domains" && !tail.starts_with("domains/") {return None}
+    if tail!="http-access" && tail!="http-access/reveal" && tail!="domains" && !tail.starts_with("domains/") {return None}
     let result=(|| -> Result<Value> {
         let params=parse_url_params(raw);
         let vm=body["vm_id"].as_str().or_else(||params.get("vm_id").map(String::as_str)).unwrap_or("");
@@ -35,6 +36,14 @@ pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Val
         let policy=g.private_node.as_ref().ok_or_else(||denied("microVM hosting not configured"))?;
         policy.authorize_compose(&owner)?;
         let runner=policy.runner.clone().ok_or_else(||denied("microVM hosting not configured"))?;
+        if method=="POST" && tail=="http-access/reveal" {
+            let r=g.vm_http.get(vm).filter(|r|r.project_id==project && r.owner_did==owner).ok_or_else(||denied("visitor credentials not configured"))?;
+            let sealed=r.password_sealed.as_deref().filter(|s|crate::vault::Vault::is_sealed(s)).ok_or_else(||denied("password unavailable: save visitor credentials once to enable reveal"))?;
+            let vault=g.vault.as_ref().ok_or_else(||denied("credential vault unavailable"))?;
+            let data:Value=serde_json::from_str(&vault.open(sealed)?).map_err(|_|denied("invalid encrypted credentials"))?;
+            if data["purpose"]!="vm-http-password-v1" || data["vm_id"]!=vm || data["project_id"]!=project || data["username"].as_str()!=r.username.as_deref() {return Err(denied("credential binding mismatch"))}
+            return Ok(json!({"vm_id":vm,"username":r.username,"password":data["password"]}))
+        }
         if method=="GET" && tail=="http-access" {
             return Ok(g.vm_http.get(vm).filter(|r|r.project_id==project && r.owner_did==owner).map(Record::public)
                 .unwrap_or(json!({"vm_id":vm,"basic_auth_required":true,"configured":false,"username":null})))
@@ -56,10 +65,13 @@ pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Val
             if route!=vm && route!=project {return Err(denied("VM route identity mismatch"))}
             g=state.lock().map_err(|_|denied("state unavailable"))?;
             g.cloud_owned_project(token,project)?;g.private_node.as_ref().ok_or_else(||denied("hosting disabled"))?.authorize_compose(&owner)?;
-            let mut record=g.vm_http.get(vm).cloned().unwrap_or(Record{vm_id:vm.into(),project_id:project.into(),owner_did:owner.clone(),route_key:route.into(),username:None,password_hash:None});
+            let mut record=g.vm_http.get(vm).cloned().unwrap_or(Record{vm_id:vm.into(),project_id:project.into(),owner_did:owner.clone(),route_key:route.into(),username:None,password_hash:None,password_sealed:None});
             if record.project_id!=project || record.owner_did!=owner {return Err(denied("VM owner mismatch"))}
             record.route_key=route.into();
-            if let Some(hash)=hash {record.username=body["username"].as_str().map(str::to_owned);record.password_hash=Some(hash)}
+            if let Some(hash)=hash {record.username=body["username"].as_str().map(str::to_owned);record.password_hash=Some(hash);
+                let vault=g.vault.as_ref().ok_or_else(||denied("GAP_MASTER_KEY is required to save recoverable visitor credentials"))?;
+                record.password_sealed=Some(vault.seal(&json!({"purpose":"vm-http-password-v1","vm_id":vm,"project_id":project,"username":record.username,"password":body["password"]}).to_string()));
+            }
             save_record(&mut g,&record)?;
             if tail=="http-access" {return Ok(record.public())}
             let hostname=body["hostname"].as_str().unwrap_or("");
@@ -147,14 +159,14 @@ mod tests {
     }
     #[test]
     fn visitor_passwords_never_appear_in_public_settings() {
-        let record=Record{vm_id:"vm_test".into(),project_id:"prj_test".into(),owner_did:"owner".into(),route_key:"prj_test".into(),username:Some("visitor".into()),password_hash:Some("sensitive-hash".into())};
+        let record=Record{vm_id:"vm_test".into(),project_id:"prj_test".into(),owner_did:"owner".into(),route_key:"prj_test".into(),username:Some("visitor".into()),password_hash:Some("sensitive-hash".into()),password_sealed:Some("sensitive-ciphertext".into())};
         assert_eq!(record.public()["configured"],true);
         assert!(!record.public().to_string().contains("sensitive"));
     }
     #[test]
     fn replaced_legacy_routes_are_removed_and_cross_owner_collisions_rejected() {
         let mut state=NodeState::new(Box::new(crate::storage::sqlite::SqliteStorage::open(":memory:").unwrap()));
-        let original=Record{vm_id:"vm_old".into(),project_id:"prj_test".into(),owner_did:"owner".into(),route_key:"prj_test".into(),username:None,password_hash:None};
+        let original=Record{vm_id:"vm_old".into(),project_id:"prj_test".into(),owner_did:"owner".into(),route_key:"prj_test".into(),username:None,password_hash:None,password_sealed:None};
         save_record(&mut state,&original).unwrap();
         let mut replacement=original.clone();replacement.vm_id="vm_new".into();replacement.owner_did="intruder".into();
         assert!(save_record(&mut state,&replacement).is_err());
