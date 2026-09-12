@@ -797,18 +797,28 @@ the broker setting. CPU accounting includes QEMU overhead within the quota.
 
 `terminal.py` provides bounded owner/project/VM-scoped SSH PTYs through the
 private runner RPC. Public routes allow only terminal/prepare, terminal/open, terminal/io and
-terminal/close. Preparation runs as a tracked job and installs a separate
+terminal/close and terminal/keepalive. Preparation runs as a tracked job and installs a separate
 forced-shell key without relaxing the forced deployment command. Every request passes normal owner approval; runtime policy
 and prepaid credit checks apply throughout. Idle polling never touches VM
 activity. The service runs as UID 10001 and launches only the controller's
 fixed SSH command, with host-key verification and forwarding disabled.
 
-The browser uses vendored xterm.js 6.0.0 and addon-fit 0.11.0, including their
-MIT license files under src/ui/vendor. No runtime CDN or attach addon is used.
-The terminal is transient: worker restart closes it. A lost HTTP response can
-be retried with identical input sequence and output cursor without rerunning
-input. Output is bounded and never interpreted as HTML. There is no terminal
-transcript logging or private key browser transfer.
+The dashboard uses ttyd 1.7.7 (pinned Alpine package), with one loopback-only
+process per session and a fixed SSH command. `ttyd_terminal.py` forwards HTTP and
+WebSocket traffic; it accepts only the private edge admission token and a live
+project-scoped ticket. The isolated management edge authenticates the project
+cookie first; no tenant app origin can access the stream. Configure the same
+`GAP_VM_EDGE_TOKEN` and ingress admission token already used by HTTP applications.
+No new public port, guest service, or guest password is required.
+
+The parent dashboard sends CSRF-protected terminal/keepalive requests every ten
+seconds. Streams expire after thirty seconds without that pulse, including when
+the browser credential expires. Typing resets inbound activity; output, resize
+and ping frames do not. A reconnect opens a fresh SSH shell. Worker restart closes
+all sessions. The legacy HTTP PTY transport remains available for API clients.
+Run the focused `test_ttyd_terminal` test inside the worker image, and opt in to
+real disposable guest coverage with `GAP_TEST_TERMINAL=1 GAP_TEST_TTYD=1` and
+`python3 terminal_kvm_test.py`. Never use the production VM catalog for this test.
 
 ### Host metrics
 
@@ -908,3 +918,16 @@ GET `/vm/ingress?vm_id=...` on the node adds `http_access.configured`,
 `/apps/` URL requires visitor credentials through `/vm/http-access`. The worker
 alone cannot report that node-owned policy. A configured route is not a healthy
 application. See the [complete WordPress example](../../examples/wordpress/README.md).
+
+
+For a second node without a separate DNS name, its MicroVM console can share
+node01's isolated management origin at `/nodes/node-02/microvms`. On the central
+edge set `GAP_FLEET_NODE02_HOST` to the trusted node02 public DNS hostname. On
+node02 set `GAP_ADMIN_ORIGIN` to node01's isolated HTTPS origin and
+`GAP_VM_CONSOLE_PREFIX=/nodes/node-02`. Keep node02's `GAP_PUBLIC_URL` unchanged.
+The edge verifies upstream TLS, preserves the management Host/Origin, scopes
+its project cookie to the node prefix, and rewrites management resource paths.
+The target must use the same isolated management boundary; never point this
+setting at tenant-controlled infrastructure. The public node02 origin continues
+to serve applications, but cannot admit terminal cookies. This explicit two-node
+management mapping is independent of workload placement and does not move VMs.

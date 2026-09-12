@@ -7,6 +7,8 @@
 //! escrows, and the audit spine. Agents speak HTTPS to it; they never
 //! implement GAP themselves.
 
+mod terminal_http;
+pub use terminal_http::admit_terminal;
 mod vm_http;
 pub use vm_http::admit_vm_http;
 

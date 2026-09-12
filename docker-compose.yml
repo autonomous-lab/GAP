@@ -43,6 +43,7 @@ services:
       GAP_CLOUD_ADMIN_ENABLED: "${GAP_CLOUD_ADMIN_ENABLED:-0}"
       GAP_ADMIN_EMAILS: "${GAP_ADMIN_EMAILS:-}"
       GAP_ADMIN_ORIGIN: "${GAP_ADMIN_ORIGIN:-}"
+      GAP_VM_CONSOLE_PREFIX: "${GAP_VM_CONSOLE_PREFIX:-}"
       GAP_VM_EDGE_TOKEN: "${GAP_VM_EDGE_TOKEN:-}"
       GAP_WORKERS: "${GAP_WORKERS:-24}"
       # Rate limiting is a SECURITY control, not a tuning knob: the
@@ -139,6 +140,7 @@ services:
     environment:
       GAP_VM_EDGE_TOKEN: "${GAP_VM_EDGE_TOKEN:-}"
       GAP_ADMIN_ORIGIN: "${GAP_ADMIN_ORIGIN:-}"
+      GAP_FLEET_NODE02_HOST: "${GAP_FLEET_NODE02_HOST:-}"
     ports:
       - "172.17.0.1:8080:8080"
     depends_on:

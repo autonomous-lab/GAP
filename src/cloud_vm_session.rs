@@ -48,14 +48,15 @@ impl Store {
         Ok((json!({"project_id":project,"csrf":csrf}),cookie(&id,false)))
     }
     fn authorization(&self,path:&str,cookies:&str,csrf:&str,at:u64) -> Option<String> {
-        if csrf.is_empty() {return None}
+        let viewer=terminal_view(path).is_some();
+        if csrf.is_empty() && !viewer {return None}
         let id_hash=crate::sha256_hex(cookie_id(cookies)?.as_bytes());
         let (payload,expires):(String,i64)=self.db.lock().ok()?.query_row("SELECT payload,expires FROM vm_sessions WHERE id_hash=?",params![id_hash],|r|Ok((r.get(0)?,r.get(1)?))).optional().ok()??;
         let expires=u64::try_from(expires).ok()?;
         if expires<=at || !payload.starts_with("enc:v1:") {return None}
         let session:Session=serde_json::from_str(&self.vault.open(&payload).ok()?).ok()?;
         // Bind the authenticated ciphertext to both the lookup key and expiry.
-        if session.expires!=expires || session.id_hash!=id_hash || session.csrf_hash!=crate::sha256_hex(csrf.as_bytes()) {return None}
+        if session.expires!=expires || session.id_hash!=id_hash || (!viewer && session.csrf_hash!=crate::sha256_hex(csrf.as_bytes())) {return None}
         let prefix=format!("/v1/cloud/projects/{}/",session.project);
         if !path.starts_with(&prefix) || !console_path(path) {return None}
         Some(session.token)
@@ -77,6 +78,17 @@ fn cookie(value:&str,clear:bool)->String {
 pub fn issue(project:&str,token:&str)->Result<(Value,String),()> {store()?.issue(project,token,now())}
 pub fn authorization(path:&str,cookies:&str,csrf:&str)->Option<String> {store().ok()?.authorization(path,cookies,csrf,now())}
 pub fn revoke(cookies:&str)->Result<String,()> {store()?.revoke(cookies)}
+/// Only the isolated gateway may serve these GET resources without a CSRF header.
+/// An unguessable live ticket and a valid project cookie are both required.
+pub fn terminal_view(path: &str) -> Option<(&str,&str)> {
+    if path.len()>4096 || path.contains(['?', '#', '%', '\\']) || path.bytes().any(|b|b<32) {return None}
+    let rest=path.strip_prefix("/v1/cloud/projects/")?;
+    let (project,rest)=rest.split_once("/vm/t/")?;
+    let (ticket,asset)=rest.split_once('/')?;
+    let hex=|s:&str|s.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if project.len()!=28 || !project.starts_with("prj_") || !hex(&project[4..]) || ticket.len()!=48 || !hex(ticket) || asset.split('/').any(|s|s=="." || s=="..") {return None}
+    Some((project,ticket))
+}
 pub fn console_path(path: &str) -> bool {
     let path=path.split('?').next().unwrap_or(path);
     if matches!(path,"/microvms" | "/microvms/assets/xterm.js" | "/microvms/assets/xterm.css" | "/microvms/assets/xterm-fit.js") {return true}
@@ -97,6 +109,11 @@ pub fn console_path(path: &str) -> bool {
         let s=Store::open(&path,&key).unwrap();
         assert_eq!(s.authorization(&url,c,csrf,101).as_deref(),Some("Bearer secret-test"));
         assert!(s.authorization(&url,c,"",101).is_none());
+        let view=format!("/v1/cloud/projects/{project}/vm/t/{}/ws","a".repeat(48));
+        assert!(s.authorization(&view,c,"",101).is_some());
+        assert!(s.authorization(&view.replace("/ws","/../close"),c,"",101).is_none());
+        assert!(s.authorization(&view.replace(&"a".repeat(48),"short"),c,"",101).is_none());
+        assert!(s.authorization(&view.replace(project,"prj_bbbbbbbbbbbbbbbbbbbbbbbb"),c,"",101).is_none());
         assert!(s.authorization(&url,&format!("{c}; {c}"),csrf,101).is_none());
         assert!(s.authorization("/v1/cloud/projects/prj_bbbbbbbbbbbbbbbbbbbbbbbb/vms",c,csrf,101).is_none());
         assert!(s.authorization(&url.replace("/vms","/kv"),c,csrf,101).is_none());

@@ -22,10 +22,22 @@ def main():
             meta=m.read(project,owner)
             runner=Runner.__new__(Runner);runner.hypervisor=m
             runner.runtime=SimpleNamespace(check_policy=lambda meta:True,check_credit=lambda meta:None,touch=lambda meta:None)
+            deadline=time.monotonic()+60
+            while True:
+                try:
+                    if execute_guest(m.guest(project,owner,meta['vm_id']),{'action':'vm_probe','body':{}},timeout=5).get('ok'):break
+                except Exception:
+                    if time.monotonic()>=deadline:raise
+                if time.monotonic()>=deadline:raise AssertionError('guest readiness timeout')
+                time.sleep(1)
             result=runner.dispatch_job({'project':project,'owner':owner},{},{'action':'terminal/prepare','body':{'vm_id':meta['vm_id']}})
             assert result['ok']
             guest=m.guest(project,owner,meta['vm_id']);guest['ssh_key']=str(m.folder(meta)/'terminal_key')
             command=ssh_command(guest);command[command.index('-T')]='-tt';command[command.index('ServerAliveInterval=10')]='ServerAliveInterval=0';command[-1]='exec /bin/sh -l'
+            if os.environ.get('GAP_TEST_TTYD')=='1':
+                from test_ttyd_terminal import acceptance
+                acceptance(command)
+                return
             s=Session(command,(project,owner,meta['vm_id']),80,24)
             seq=0;cursor=0;output=b''
             def send(data=b'',cols=80,rows=24):

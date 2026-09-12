@@ -296,6 +296,13 @@ fn main() -> Result<()> {
                 .map(str::to_string)
                 .or_else(|| request.remote_addr().map(|addr| addr.ip().to_string()));
 
+            if path.split('?').next()==Some("/internal/terminal-admission") {
+                let h=|name:&'static str|request.headers().iter().find(|h|h.field.equiv(name)).map(|h|h.value.as_str()).unwrap_or("");
+                let status=gap::server::admit_terminal(&state,h("X-GAP-Edge-Token"),h("X-GAP-Original-Host"),h("X-GAP-Original-Path"),h("X-GAP-Original-Cookie"),h("X-GAP-Original-Origin"));
+                let _=request.respond(Response::from_string("").with_status_code(status).with_header(Header::from_bytes("Cache-Control","no-store").unwrap()));
+                continue;
+            }
+
             // Private nginx auth subrequest. The dedicated edge secret never
             // reaches a guest and is unrelated to owner/admin credentials.
             if path.split('?').next()==Some("/internal/vm-http-admission") {
@@ -327,7 +334,8 @@ fn main() -> Result<()> {
                 }
             }
             if matches!(clean_path,"/microvms" | "/account") && !custom_domain_request && !on_admin_host && !admin_host.is_empty() {
-                let _=request.respond(Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{}{clean_path}",admin_origin.trim_end_matches('/'))).unwrap()));continue;
+                let prefix=if clean_path=="/microvms" {env::var("GAP_VM_CONSOLE_PREFIX").ok().filter(|p|p=="/nodes/node-02").unwrap_or_default()} else {String::new()};
+                let _=request.respond(Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{}{prefix}{clean_path}",admin_origin.trim_end_matches('/'))).unwrap()));continue;
             }
             if (on_admin_host && !vm_console) || clean_path=="/admin" || admin_api {
                 let header=|name:&'static str|request.headers().iter().find(|h|h.field.equiv(name)).map(|h|h.value.as_str().to_string()).unwrap_or_default();

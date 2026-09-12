@@ -132,10 +132,14 @@ class Terminals:
                 if s.identity[2] == vm_id: s.close('vm_disconnected')
 
     def rpc(self, project, owner, action, body):
+        if isinstance(body,dict) and action=='authorize':
+            with self.lock:s=self.sessions.get(body.get('terminal_id',''))
+            if s is None or s.identity[:2]!=(project,owner):raise TerminalError('terminal_not_found')
+            body=dict(body,vm_id=s.identity[2])
         if not isinstance(body, dict) or not isinstance(body.get('vm_id'), str):
             raise TerminalError('terminal_vm_required')
         identity = project, owner, body['vm_id']
-        if action not in ('open', 'io', 'close'): raise TerminalError('unknown_terminal_action')
+        if action not in ('open', 'io', 'close', 'authorize', 'keepalive'): raise TerminalError('unknown_terminal_action')
         if action != 'open':
             with self.lock: s = self.sessions.get(body.get('terminal_id', ''))
             if s is None or s.identity != identity: raise TerminalError('terminal_not_found')
@@ -146,6 +150,9 @@ class Terminals:
             if meta['state'] != 'running' or not self.runner.runtime.check_policy(meta):
                 s.close('vm_unavailable'); raise TerminalError('vm_unavailable')
             self.runner.runtime.check_credit(meta)
+            if action in ('authorize','keepalive'):
+                if action=='keepalive':s.seen=time.monotonic()
+                return {'terminal_id':s.id,'closed':s.closed,'reason':s.reason}
             previous = s.typed
             result = s.exchange(body)
             if s.typed != previous: self.runner.runtime.touch(meta)
@@ -175,10 +182,13 @@ class Terminals:
                 live = [s for s in self.sessions.values() if not s.closed]
                 if len(self.sessions) >= 128 or len(live) >= 32 or sum(s.identity[1] == owner for s in live) >= 2:
                     raise TerminalError('terminal_limit_reached')
-                s = Session(command, identity, cols, rows)
+                if body.get('transport')=='ttyd':
+                    from ttyd_terminal import TtydSession
+                    s=TtydSession(command,identity,cols,rows)
+                else:s = Session(command, identity, cols, rows)
                 self.sessions[s.id] = s
             self.runner.runtime.touch(meta)
-            return {'terminal_id':s.id, 'transport':'ssh-pty', 'idle_seconds':900}
+            return {'terminal_id':s.id,'transport':'ttyd' if hasattr(s,'prefix') else 'ssh-pty','url':s.prefix+'/' if hasattr(s,'prefix') else None,'idle_seconds':900}
         finally:
             lock.release()
 
@@ -190,6 +200,7 @@ class Terminals:
                 now = time.monotonic()
                 try:
                     if not s.closed:
+                        if s.process.poll() is not None:s.close('shell_exited')
                         if now-s.seen > 30 or now-s.typed > 900 or now-s.created > 8*3600:
                             s.close('terminal_expired')
                         else:

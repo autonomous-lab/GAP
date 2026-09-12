@@ -257,6 +257,7 @@ pub fn runtime_route(path: &str) -> Option<(&str, &str)> {
         "vm/terminal/prepare" => return Some((project, "terminal/prepare")),
         "vm/terminal/open" => return Some((project, "terminal/open")),
         "vm/terminal/io" => return Some((project, "terminal/io")),
+        "vm/terminal/keepalive" => return Some((project, "terminal/keepalive")),
         "vm/terminal/close" => return Some((project, "terminal/close")),
         "vm/ingress" => return Some((project, "ingress")),
         _ => {}

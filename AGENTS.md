@@ -1500,6 +1500,19 @@ job first; a stopped VM must be started first. Owner authorization, quota
 approval, workload suspension and credit checks apply. Browser sessions remain
 on the isolated management origin.
 
+The dashboard embeds ttyd 1.7.7 over a WebSocket on that isolated origin.
+It supports resizing, clipboard operations and reconnecting. Reconnecting opens
+a new SSH shell; keep long-running tasks under a supervisor. The dashboard sends
+an authenticated keepalive every ten seconds; output and WebSocket pings alone
+cannot preserve authorization or keep the VM awake.
+
+For this transport, add `"transport":"ttyd"` to terminal/open. Embed the returned
+relative `url` on the same management origin using the project browser session.
+The opaque URL alone grants no access: a valid HttpOnly project cookie is required.
+POST terminal/keepalive with `vm_id` and `terminal_id` at least every ten seconds,
+using the browser session CSRF header. Close uses the same terminal/close route.
+The older HTTP exchange transport below remains available for API clients.
+
 Before opening a terminal, POST `/v1/cloud/projects/{project}/vm/terminal/prepare`
 with `vm_id` and `request_id` (32 lower-case hex characters) and await its job.
 This installs a separate forced-shell key, preserving the restricted deployment key
@@ -1512,7 +1525,7 @@ the same sequence and input. Decode base64 `output`; `closed` marks EOF and
 `truncated` indicates discarded old output. POST `/vm/terminal/close` with
 `vm_id` and `terminal_id` to close. All requests require project owner auth.
 
-Limits: two live terminals per owner, 32 per node, 16 KiB input per exchange,
+Limits: two live terminals per owner, 32 per node. The HTTP exchange transport has 16 KiB input per exchange,
 64 KiB output per response and a 1 MiB output ring per terminal. Terminals
 expire after 30 seconds without browser exchanges, 15 minutes without input,
 or eight hours total. Polling/output alone does not reset VM inbound activity;

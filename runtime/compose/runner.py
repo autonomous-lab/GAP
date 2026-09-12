@@ -568,6 +568,12 @@ def handler_for(runner):
             self.end_headers()
             self.wfile.write(body)
 
+        def do_GET(self):
+            from ttyd_terminal import proxy
+            try:proxy(self,runner)
+            except Exception:
+                self.close_connection=True
+
         def do_POST(self):
             self.connection.settimeout(10)
             try:
