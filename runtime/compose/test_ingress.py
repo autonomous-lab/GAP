@@ -20,7 +20,7 @@ class IngressTests(unittest.TestCase):
         self.manager = MicroVMs({'state_dir': str(root), 'image_dir': str(root)}, None)
         self.meta = {'vm_id': VM, 'project_id': PROJECT, 'owner_did': OWNER, 'state': 'running',
                      'ports': [{'guest_port': 8000, 'worker_port': 23000}], 'vcpus': 1,
-                     'memory_mib': 1024, 'disk_gib': 4}
+                     'memory_mib': 1024, 'disk_gib': 4, 'ssh_port': 23001, 'public_ports': [], 'public_mappings': [], 'public_targets': {}}
         sync = patch.object(self.manager, 'sync_environment')
         sync.start()
         self.addCleanup(sync.stop)
@@ -35,7 +35,7 @@ class IngressTests(unittest.TestCase):
         self.ingress = Ingress(self.config, self.manager)
 
     def test_only_project_path_and_configured_guest_port(self):
-        for extra in ({'hostname': 'other.test'}, {'upstream': '127.0.0.1:8080'}, {'guest_port': 22}, {'guest_port': 9000}):
+        for extra in ({'hostname': 'other.test'}, {'upstream': '127.0.0.1:8080'}, {'guest_port': 22}, {'guest_port': 0}, {'guest_port': 65536}):
             with self.assertRaises(VMError):
                 self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 8000, **extra})
         result = self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 8000})
@@ -48,6 +48,42 @@ class IngressTests(unittest.TestCase):
         self.assertEqual(route['handle'][1]['upstreams'], [{'dial': '127.0.0.1:23000'}])
         self.assertTrue(config['admin']['listen'].startswith('unix/'))
         self.assertNotIn('tls', config['apps'])  # normal automatic public TLS
+
+    def test_undeclared_guest_port_is_forwarded_without_a_public_slot(self):
+        # An application port must not need a public slot or a VM restart to be routed.
+        self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 9000})
+        meta = self.manager.read(PROJECT, OWNER, VM)
+        entry = next(p for p in meta['ports'] if p['guest_port'] == 9000)
+        self.assertIsInstance(entry['worker_port'], int)
+        self.assertEqual(meta.get('public_mappings', []), [])
+        config, applied = self.ingress.configuration()
+        self.assertEqual(applied, {VM})
+        route = config['apps']['http']['servers']['compose']['routes'][1]
+        self.assertEqual(route['handle'][1]['upstreams'], [{'dial': '127.0.0.1:%d' % entry['worker_port']}])
+        # Re-enabling reuses the recorded forward instead of allocating another one.
+        self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 9000})
+        self.assertEqual([p for p in self.manager.read(PROJECT, OWNER, VM)['ports'] if p['guest_port'] == 9000],
+                         [{'guest_port': 9000, 'worker_port': entry['worker_port']}])
+        # The guest environment advertises the routed port.
+        self.assertEqual(self.manager.environment(meta)['GAP_HTTP_PORT'], '9000')
+        self.assertEqual(self.manager.environment(meta)['GAP_INGRESS_ENABLED'], '1')
+
+    def test_running_vm_gets_a_live_forward_and_a_failed_add_is_not_kept(self):
+        with patch.object(self.manager, 'alive', return_value=True), \
+             patch.object(self.manager, 'qmp', return_value='') as monitor:
+            self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 9000})
+        self.assertEqual(monitor.call_args[0][1], 'human-monitor-command')
+        self.assertEqual(monitor.call_args[0][2]['command-line'],
+                         'hostfwd_add net0 tcp:127.0.0.1:%d-:9000' % next(
+                             p['worker_port'] for p in self.manager.read(PROJECT, OWNER, VM)['ports']
+                             if p['guest_port'] == 9000))
+        with patch.object(self.manager, 'alive', return_value=True), \
+             patch.object(self.manager, 'qmp', return_value='Could not set up host forwarding rule'):
+            with self.assertRaisesRegex(VMError, 'ingress_port_forward_failed'):
+                self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 9100})
+        meta = self.manager.read(PROJECT, OWNER, VM)
+        self.assertEqual([p for p in meta['ports'] if p['guest_port'] == 9100], [])
+        self.assertFalse(meta.get('ingress', {}).get('enabled') and meta['ingress'].get('guest_port') == 9100)
 
     def test_missing_secret_fails_closed(self):
         self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 8000})

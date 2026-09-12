@@ -67,6 +67,39 @@ class Ingress:
         self.manager.catalog(project)
         return '/apps/' + project
 
+    def application_forward(self, meta, guest_port):
+        """Return a host-loopback forwarding port for the guest port, creating it if absent.
+
+        HTTPS routing only needs host-side reachability of the guest port. The
+        forward is recorded in the VM's port allocation so it survives stop,
+        resume and hibernation, and is applied immediately through QMP when the
+        VM is already running. The guest port therefore neither occupies one of
+        the five public slots nor requires a VM restart.
+        """
+        for entry in meta.get('ports', []):
+            if entry['guest_port'] == guest_port:
+                return entry['worker_port']
+        with self.manager.allocation_lock():
+            used = {p['worker_port'] for p in meta.get('ports', [])}
+            if meta.get('ssh_port') is not None:
+                used.add(meta['ssh_port'])
+            worker = self.manager.reserved_port(used)
+            meta.setdefault('ports', []).append({'guest_port': guest_port, 'worker_port': worker})
+            self.manager.save(meta)
+        try:
+            if self.manager.alive(meta):
+                rule = f'tcp:127.0.0.1:{worker}-:{guest_port}'
+                response = self.manager.qmp(meta, 'human-monitor-command',
+                                            {'command-line': 'hostfwd_add net0 ' + rule})
+                if response.strip():
+                    raise VMError('ingress_port_forward_failed')
+        except Exception:
+            # Never leave an allocation the live VM does not actually have.
+            meta['ports'] = [p for p in meta['ports'] if p['worker_port'] != worker]
+            self.manager.save(meta)
+            raise
+        return worker
+
     def public(self, meta):
         if not meta or meta['state'] == 'destroyed':
             return {'enabled': False, 'routed': False}
@@ -151,8 +184,8 @@ class Ingress:
                 raise VMError('vm_not_found')
             if meta['vm_id'] != body['vm_id']:
                 raise VMError('vm_generation_mismatch')
-            if body['enabled'] and not any(p['guest_port'] == body['guest_port'] for p in meta['ports']):
-                raise VMError('ingress_port_not_forwarded_by_vm')
+            if body['enabled']:
+                self.application_forward(meta, body['guest_port'])
             meta['ingress'] = {'enabled': body['enabled']}
             if body['enabled']:
                 meta['ingress']['guest_port'] = body['guest_port']

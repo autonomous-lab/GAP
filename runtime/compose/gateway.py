@@ -231,7 +231,8 @@ class Gateway:
                     current=self.manager.read(project,meta['owner_did'],meta['vm_id'])
                     if not current or current['vm_id']!=meta['vm_id'] or current['state']!='running' or not current.get('ingress',{}).get('enabled'):
                         raise VMError('application_changed_retry_request')
-                    port=next(p['worker_port'] for p in current['ports'] if p['guest_port']==current['ingress']['guest_port'])
+                    port=next((p['worker_port'] for p in current['ports'] if p['guest_port']==current['ingress']['guest_port']),None)
+                    if port is None: raise VMError('application_port_not_forwarded')
                     upstream=self.connect(port,meta)
                 upstream.settimeout(120)
                 if upgrade:

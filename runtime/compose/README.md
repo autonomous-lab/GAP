@@ -452,7 +452,9 @@ Cloud/function/realtime routes retain their current handling.
 
 The worker assigns each project's path and resolves its selected guest port to
 the correct managed microVM. Agents cannot supply upstream IPs or host paths.
-Only an explicitly enabled, running VM with that forwarded port is routed.
+Only an explicitly enabled, running (or hibernated) VM with a host forward for
+that port is routed; the forward is created for any guest port on demand, so the
+port need not be declared in `ports` first and no public slot is consumed.
 
 Operator configuration (also in `runner.example.json`):
 
@@ -474,8 +476,9 @@ loopback services. Never point it at the shared production edge's admin socket.
 
 ### Publish, inspect and disable
 
-First create the VM with the guest port in `ports`, then deploy the application.
-Publish that port through the authenticated project API:
+First create the VM and deploy the application. Publish the guest port it
+listens on through the authenticated project API; the host forward is created
+for you, live, whether the port was declared in `ports` or not:
 
 ```bash
 curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/vm/ingress" \

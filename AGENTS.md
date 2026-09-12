@@ -885,7 +885,7 @@ export VM=vm_returned_by_the_job
 ```
 
 Deploy your bundle with `/stack/releases` as shown in the next section and poll
-that job. The app must listen on a published guest port, for example
+that job. The app must listen on the guest port you intend to route, for example
 `ports: ["8000:8000"]` in Compose. Once it is running, publish its route:
 
 ```bash
@@ -922,7 +922,7 @@ releases. A stale VM ID cannot mutate a replacement VM.
 | POST `/vm/start` | none | Restart the same VM with its data |
 | DELETE `/vm` | optional `delete_data: true`, `confirm_data_loss: true` | Destroy stopped VM; retain data by default |
 | GET `/vm/ingress` | none | Inspect publication and application URL |
-| PUT `/vm/ingress` | `enabled: true`, `guest_port` | Publish one configured guest port |
+| PUT `/vm/ingress` | `enabled: true`, `guest_port` | Publish any guest application port, creating its forward on demand |
 | PUT `/vm/ingress` | `enabled: false` | Withdraw publication; omit guest_port |
 
 `POST /stack/stop` stops application containers; `POST /vm/stop` stops the
@@ -996,9 +996,11 @@ keys and is not a boundary against that VM's root. Revoking agent approval
 blocks management, not already published services or SSH sessions.
 
 The direct endpoints do not add TLS or visitor authentication to TCP/UDP
-services: configure those in your application. HTTP-only guest `ports` from
-`POST/PATCH /vm` remain separate internal forwards; public mappings can
-target any guest port without changing that list or rebooting the VM.
+services: configure those in your application. Guest `ports` from `POST/PATCH
+/vm` are internal host forwards used by HTTPS routing; public mappings are a
+separate list of five slots. Either can target any guest port without a reboot.
+Enabling HTTPS routing creates its internal forward automatically, so a port
+does not need to be declared first and never consumes a public slot.
 
 ### Runtime environment inside the microVM
 
@@ -1443,16 +1445,15 @@ ports and disabled HTTP routing are explicitly marked. A published route does
 not certify application health. Use **Refresh metrics & network** or the
 10-second automatic refresh; neither wakes a VM or resets inbound inactivity.
 
-For HTTPS routing, the application's port must be in the VM's `ports` allocation.
-At creation use `ports: [8000]`. For an existing VM, inspect GET `/vm?vm_id=...`
-and preserve its existing guest port list. If a new guest port is needed, stop
-the VM first (resume a hibernated VM before stopping), await that job, then
-PATCH `/vm` with `request_id`, `vm_id` and `ports: [8000, ...existing_ports]`.
-This reconfiguration requires downtime; it is not performed by opening the
-network panel. Await the update job, PUT `/vm/ingress` with `request_id`, `vm_id`,
-`enabled: true`, `guest_port: 8000`, await that job, then start the VM. The app
-must listen on that port inside the guest. GET `/vm/ingress?vm_id=...` returns
-the exact URL; do not guess a project path when the VM has its own identity.
+For HTTPS routing, enter the guest port your application listens on and enable
+routing from the network panel, or PUT `/vm/ingress` with `request_id`, `vm_id`,
+`enabled: true` and `guest_port`. Any guest port 1-65535 other than 22 is
+accepted: GAP creates the host-side forward itself, live, so routing needs
+neither downtime nor one of the five public slots, and a hibernated VM wakes on
+request. Declaring the port in `ports` at creation (for example `ports: [8000]`)
+or through PATCH `/vm` is still supported and is the right choice when the port
+is also published publicly. GET `/vm/ingress?vm_id=...` returns the exact URL;
+do not guess a project path when the VM has its own identity.
 
 GAP application URLs require visitor Basic Auth, even when a public custom
 domain is attached. Configure access and domains from the network panel;
