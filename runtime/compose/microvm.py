@@ -75,6 +75,8 @@ def validate(action, body):
     for key in ('memory_mib', 'disk_gib'):
         if key in body and (type(body[key]) is not int or not 0 < body[key] < 2**31):
             raise VMError('invalid_' + key)
+    if 'memory_mib' in body and (body['memory_mib']<256 or body['memory_mib']%256):
+        raise VMError('memory_must_be_multiple_of_256_mib')
     for key in ('start', 'force', 'delete_data', 'confirm_data_loss', 'new_vm'):
         if key in body and type(body[key]) is not bool:
             raise VMError('invalid_' + key)
