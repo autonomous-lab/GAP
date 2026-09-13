@@ -16,9 +16,10 @@ chmod 644 /etc/cron.d/gap-caddy
 cd /opt/elestio/caddy && docker compose up -d
 ```
 
-Create `.env` from `.env.example`. `GAP_CADDY_ASK_TOKEN` must equal the value
-in GAP's live `.env`; never commit it. Set `GAP_CUSTOM_DOMAIN_TARGET` in GAP to
-the public A-record target shown to agents.
+Create `/opt/elestio/caddy/.env` with `CADDY_ACME_EMAIL` and
+`GAP_CADDY_ASK_TOKEN`. The latter must equal the value in GAP's live `.env` for
+that same node; never commit it. Set `GAP_CUSTOM_DOMAIN_TARGET` in GAP to the
+public A-record target shown to agents. Protect the file with mode 600.
 
 The historical GAP names use Elestio's mounted wildcard origin certificate.
 Caddy manages customer certificates in `/opt/elestio/caddy/data`. The cron
@@ -74,6 +75,20 @@ For node-02 the explicit block is:
 
 ```caddyfile
 gap-node-02-u3.vm.elestio.app, gap-node-01-u3.vm.elestio.app {
+    tls /certs/fullchain.cer /certs/vm.elestio.app.key
+    @internal path /internal/*
+    respond @internal 404
+    reverse_proxy 172.17.0.1:8080 {
+        header_up Host {host}
+        header_up -X-GAP-Custom-Domain
+    }
+}
+```
+
+For node-03, use the same block with its own hostname:
+
+```caddyfile
+gap-node-03-u3.vm.elestio.app, gap-node-01-u3.vm.elestio.app {
     tls /certs/fullchain.cer /certs/vm.elestio.app.key
     @internal path /internal/*
     respond @internal 404

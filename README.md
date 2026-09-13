@@ -62,19 +62,195 @@ custom origins for browser-storage isolation and never store owner bearers there
 
 ## Run a node
 
-Copy `.env.example` to `.env`, configure the persistent node identity,
-master key, operator token, sandbox token and realtime signing secret, then:
+A GAP node has three separate layers: the application Compose stack (the node,
+ClickHouse, sandbox, realtime and the private edge), the optional microVM/Compose
+worker, and the public Caddy edge. Keep the layers separate: the application
+edge listens on the Docker bridge at `172.17.0.1:8080`; only Caddy owns host
+ports 80 and 443.
+
+### 1. Prepare the host and checkout
+
+The host needs Docker Engine with Compose v2, enough disk for `./data`, and a
+DNS name whose A/AAAA record points to the host. If microVMs are enabled, check
+that `/dev/kvm` exists and that the provider firewall allows the configured
+public port pool. Keep one checkout and one state directory per node; do not
+copy another node's database, seed, ledger or credentials. The current fleet
+inventory and host-specific values are in [docs/nodes](./docs/nodes.md).
+
+```bash
+export NODE_DIR=/opt/app/gap-node-XX
+cd "$NODE_DIR"
+cp .env.example .env
+chmod 600 .env
+```
+
+Set the node-specific public metadata in `.env`, at minimum:
+`GAP_PUBLIC_URL`, `GAP_FLEET_NODE_ID`, `GAP_PUBLIC_OPERATOR`,
+`GAP_PUBLIC_COUNTRY`, `GAP_PUBLIC_REGION`, `GAP_PUBLIC_EXPLORER_NODES`,
+`GAP_PUBLIC_ELESTIO_NODES`, `GAP_ADMIN_ORIGIN` (on a secondary node), and
+`GAP_CUSTOM_DOMAIN_TARGET`. A secondary node's public URL must be its own
+origin. Public explorer fields contain metadata only; never put a token there.
+
+Configure ClickHouse with a stable `CLICKHOUSE_USER` and
+`CLICKHOUSE_PASSWORD`, and set the persistent identity and encryption values
+(`GAP_NODE_SEED`, `GAP_MASTER_KEY`, `GAP_ADMIN_TOKEN`). The node also needs
+separate random values for `GAP_FUNCTION_SANDBOX_TOKEN`,
+`GAP_REALTIME_SECRET`, `GAP_VM_EDGE_TOKEN` and `GAP_CADDY_ASK_TOKEN`.
+`GAP_CADDY_ASK_TOKEN` is shared only with this node's Caddy instance; it is
+different from the VM edge token. Generate secrets with a password manager or
+`openssl rand -hex 32`; never commit `.env`, print it, or reuse a node seed.
+
+Initialize missing runtime secrets, then validate the deployment files before
+starting anything:
 
 ```bash
 python3 scripts/init-runtime-secrets.py
-docker compose up -d --build
-curl http://172.17.0.1:8080/health
+python3 scripts/deploy-check.py
+docker compose config --quiet
 ```
 
-The stack contains GAP Cloud, ClickHouse, the function sandbox, realtime and
-an HTTP/WebSocket edge proxy. Persistent state lives under `./data`.
-Back up that directory and your secrets together using a consistent backup.
-Custom-domain TLS deployment is described in [deploy/caddy](./deploy/caddy/README.md).
+### 2. Start and verify the application stack
+
+```bash
+docker compose up -d --build
+docker compose ps
+curl -fsS http://172.17.0.1:8080/health
+```
+
+Every service must be `healthy` before the node is put behind a public edge.
+Persistent state is under `./data`; back up it and the live secrets together,
+using a consistent backup. On a fresh node with Compose enabled, create the
+operator-owned approval file before starting the stack:
+
+```bash
+mkdir -p data/gap-node
+printf '%s\n' '{"agents":[]}' > data/gap-node/compose-agents.json
+chmod 600 data/gap-node/compose-agents.json
+```
+
+Set `GAP_COMPOSE_ENABLED=1` and
+`GAP_COMPOSE_APPROVALS_FILE=/data/compose-agents.json` only when the separate
+worker is ready. Without that file the node fails closed with
+`private approval file unavailable`.
+
+### 3. Deploy the optional microVM/Compose worker
+
+The worker runs from the same checkout but has its own private state and
+configuration. Follow the complete [worker guide](./runtime/compose/README.md)
+for guest-image creation, `runner.json`, `service.token`, `billing-admin.token`,
+UID/GID 10001 ownership, and the `/dev/kvm` group. The minimal deployment is:
+
+```bash
+mkdir -p data/gap-compose/{config,worker,caddy-data,caddy-config,guest-image,admin}
+docker compose --project-directory . -f runtime/compose/deploy.yml config
+docker compose --project-directory . -f runtime/compose/deploy.yml up -d --build
+docker compose --project-directory . -f runtime/compose/deploy.yml ps
+```
+
+Before admitting workloads, apply the versioned tariff in shadow mode, record
+authorized balances, then enforce it and run the read-only admission gate.
+Editing `.env` or restarting does not activate billing:
+
+```bash
+python3 scripts/microvm-billing.py set-pricing \
+  --mode shadow --tariff-file runtime/compose/pricing-usd-v1.json
+python3 scripts/microvm-billing.py set-pricing --mode enforced
+python3 scripts/check-microvm-admission.py \
+  --token-file data/gap-compose/config/billing-admin.token
+```
+
+The gate must pass before new VM creation is accepted. Register the node's
+identity and worker credentials with the control plane only through the private
+operator configuration described in [docs/nodes](./docs/nodes.md) and the
+[worker guide](./runtime/compose/README.md); never expose those credentials in
+the public explorer metadata.
+
+### 4. Put Caddy in front and disable legacy nginx
+
+Caddy is a host-level deployment, independent of application Compose. Install
+the supplied files in `/opt/elestio/caddy`, create its private `.env`, and use
+the same node-local `GAP_CADDY_ASK_TOKEN` as the application `.env`:
+
+```bash
+install -d -m 700 /opt/elestio/caddy
+cp deploy/caddy/{Caddyfile,docker-compose.yml,reload-origin-cert.sh} /opt/elestio/caddy/
+cp deploy/caddy/gap-caddy.cron /etc/cron.d/gap-caddy
+install -m 600 /dev/null /opt/elestio/caddy/.env
+${EDITOR:-vi} /opt/elestio/caddy/.env
+chmod 755 /opt/elestio/caddy/reload-origin-cert.sh
+chmod 644 /etc/cron.d/gap-caddy
+```
+
+Set `GAP_CADDY_ASK_TOKEN` and `CADDY_ACME_EMAIL` in Caddy's `.env`. Mount the
+Elestio wildcard certificate at `/root/.acme.sh/vm.elestio.app` as shown in the
+template. On a secondary node, the explicit site block must contain both its
+own hostname and the central control hostname, for example:
+
+```caddyfile
+gap-node-03-u3.vm.elestio.app, gap-node-01-u3.vm.elestio.app {
+    tls /certs/fullchain.cer /certs/vm.elestio.app.key
+    @internal path /internal/*
+    respond @internal 404
+    reverse_proxy 172.17.0.1:8080 {
+        header_up Host {host}
+        header_up -X-GAP-Custom-Domain
+    }
+}
+```
+
+Keep the catch-all block from the template: it marks tenant traffic and the
+public `/internal/*` route must stay a 404. Validate before switching ports,
+then stop nginx and start Caddy:
+
+```bash
+cd /opt/elestio/caddy
+docker compose config
+docker run --rm --env-file .env \
+  -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  -v /root/.acme.sh/vm.elestio.app:/certs:ro \
+  caddy:2.10.2-alpine caddy validate --config /etc/caddy/Caddyfile
+docker update --restart=no elestio-nginx
+docker stop elestio-nginx
+docker compose up -d
+docker compose ps
+ss -ltnp | egrep ':(80|443)\\b'
+```
+
+Verify both TLS and the private boundary from outside the host:
+
+```bash
+curl -fsS https://<node-host>/health
+curl -sS -o /dev/null -w '%{http_code}\n' https://<node-host>/internal/tls/ask
+```
+
+The first request must return 200 and the second 404. To roll back, stop only
+Caddy, restore nginx's restart policy, and start the retained nginx checkout:
+
+```bash
+cd /opt/elestio/caddy && docker compose down
+docker update --restart=always elestio-nginx
+cd /opt/elestio/nginx && docker compose up -d
+```
+
+For Caddy's DNS, Cloudflare behaviour, certificate reload cron and full routing
+details, see [deploy/caddy](./deploy/caddy/README.md).
+
+### 5. Fleet checks after a deployment
+
+```bash
+cd "$NODE_DIR"
+curl -fsS https://<node-host>/v1/public-node
+curl -fsS https://<control-origin>/v1/explorer
+docker compose logs gap-node | tail -20
+```
+
+Check every node after a repository push. A 502 during the rebuild is expected
+only while the new container starts; do not declare success until all services
+are healthy and the public health endpoint is 200. ClickHouse startup errors are
+written inside its mounted log directory, not necessarily to container stdout.
+Never run `clickhouse-server` as root while debugging: it changes volume
+ownership and can break first-run authentication. If that trap is triggered,
+reset only the disposable ClickHouse volume and reinitialize it before retrying.
 
 The server exposes Cloud services and identity creation. The legacy contract
 API returns HTTP 410. Automatic contract settlement and legacy delivery
