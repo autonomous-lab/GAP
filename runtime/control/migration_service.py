@@ -58,7 +58,13 @@ class Migrations:
         except Exception:raise Failure('migration_node_unavailable',503) from None
 
     def worker(self,node,identity,operation,**body):
-        return self.call(node,'/v1/fleet/migration-worker',body=dict(migration_id=identity,operation=operation,**body))
+        for attempt in range(3):
+            try:
+                return self.call(node,'/v1/fleet/migration-worker',body=dict(migration_id=identity,operation=operation,**body))
+            except Failure as error:
+                if error.code not in ('migration_node_unavailable','fleet_authority_unavailable','fleet_authority_rate_limited') or attempt==2:raise
+                # Worker operations and chunks are idempotent; retain the same payload.
+                time.sleep(30)
 
     def cap(self,row,node):
         with self.a.db() as db:customer=journal.row_for(db,row['migration_id'])['customer']
@@ -175,11 +181,16 @@ class Migrations:
         credentials=self.vm_api(row,node,'/vm/http-access/reveal','POST',dict(vm_id=row['vm_id']))
         authorization=base64.b64encode((credentials['username']+':'+credentials['password']).encode()).decode()
         request=urllib.request.Request(url,headers={'Authorization':'Basic '+authorization,'User-Agent':'GAP-Migration/1.0'})
-        try:
-            with urllib.request.build_opener(NoRedirect()).open(request,timeout=30) as response:response.read(4096)
-        except urllib.error.HTTPError as error:
-            if error.code in (401,502,503,504):raise Failure('migration_https_route_unavailable',409) from None
-        except Exception:raise Failure('migration_https_route_unavailable',409) from None
+        for attempt in range(12):
+            try:
+                with urllib.request.build_opener(NoRedirect()).open(request,timeout=5) as response:response.read(4096)
+                return
+            except urllib.error.HTTPError as error:
+                if error.code not in (401,502,503,504):return
+            except Exception:pass
+            if attempt==11:raise Failure('migration_https_route_unavailable',409) from None
+            # A running guest still needs time to start the published service.
+            time.sleep(5)
 
     def transfer(self,row):
         identity=row['migration_id'];source=row['source_node'];target=row['target_node']

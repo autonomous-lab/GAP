@@ -46,7 +46,7 @@ class Client:
             if not isinstance(result,dict):raise ValueError()
             return result
         except urllib.error.HTTPError as error:
-            code='fleet_authority_denied' if error.code in (401,403) else 'fleet_reconciliation_required' if error.code==409 else 'fleet_authority_unavailable'
+            code='fleet_authority_rate_limited' if error.code==429 else 'fleet_authority_denied' if error.code in (401,403) else 'fleet_reconciliation_required' if error.code==409 else 'fleet_authority_unavailable'
             if str(body.get('action','')).startswith('capacity-'):
                 try:
                     value=json.loads(error.read(65537)).get('error',{}).get('code')

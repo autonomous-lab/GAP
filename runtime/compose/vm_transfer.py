@@ -144,7 +144,7 @@ class Transfers:
                 self.tasks[identity]=thread;thread.start()
                 return {'phase':action+'ing'}
             if action=='read':
-                self.authority(identity,'source')
+                if row['source_node']!=self.runner.runtime.ledger.config['node_id']:raise VMError('migration_node_mismatch')
                 if row['phase'] not in ('source_fenced','target_staged'):raise VMError('migration_phase_conflict')
                 offset=body['offset']
                 if type(offset) is not int or offset<0:raise VMError('invalid_transfer_offset')
@@ -153,7 +153,7 @@ class Transfers:
                 with path.open('rb') as f:f.seek(offset);data=f.read(CHUNK)
                 return dict(offset=offset,data_base64=base64.b64encode(data).decode(),size=path.stat().st_size)
             if action=='write':
-                self.authority(identity,'target')
+                if row['target_node']!=self.runner.runtime.ledger.config['node_id']:raise VMError('migration_node_mismatch')
                 if row['phase']!='source_fenced':raise VMError('migration_phase_conflict')
                 offset=body['offset'];size=body['size'];digest=body['archive_sha256']
                 if type(offset) is not int or offset<0 or type(size) is not int or not 0<size<=102*1024**3:

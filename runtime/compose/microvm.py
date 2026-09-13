@@ -154,7 +154,7 @@ class MicroVMs:
         occupied=set()
         for path in (self.root/'catalog').glob('*.json'):
             other=json.loads(path.read_text())
-            if other['state']=='destroyed': continue
+            if other['state'] in ('destroyed','migrated'): continue
             occupied.add(other['ssh_port'])
             occupied.update(p['worker_port'] for p in other.get('ports',[]))
             occupied.update(other.get('public_targets',{}).values())
@@ -624,7 +624,7 @@ class MicroVMs:
             meta = json.loads(path.read_text())
             if include_disk and meta['owner_did']==owner and meta['state']=='destroyed' and meta.get('retained'):
                 usage['disk_gib']+=meta['disk_gib']
-            if meta['owner_did'] == owner and meta['state'] != 'destroyed':
+            if meta['owner_did'] == owner and meta['state'] not in ('destroyed','migrated'):
                 for key in usage:
                     value = meta[key]
                     if key == 'vcpus':
@@ -639,7 +639,7 @@ class MicroVMs:
     def vm_count(self, owner):
         return sum(1 for path in (self.root / 'catalog').glob('*.json')
                    if (meta := json.loads(path.read_text()))['owner_did'] == owner
-                   and meta['state'] != 'destroyed')
+                   and meta['state'] not in ('destroyed','migrated'))
 
     def quota_view(self, project, owner):
         with self.owner_lock(owner):

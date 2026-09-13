@@ -32,6 +32,14 @@ class MicroVMTests(unittest.TestCase):
         self.manager.save(self.meta)
         self.manager.folder(self.meta).mkdir()
 
+    def test_migrated_route_stub_consumes_no_local_quota_or_ports(self):
+        self.assertEqual(self.manager.vm_count(OWNER),1)
+        self.meta['state']='migrated';self.manager.save(self.meta)
+        self.assertEqual(self.manager.vm_count(OWNER),0)
+        self.assertEqual(self.manager.quota_usage(OWNER,include_disk=True),dict(vcpus=0,memory_mib=0,disk_gib=0))
+        self.assertNotIn(self.meta['ssh_port'],self.manager.reserved_ports())
+        self.assertEqual(self.manager.read(PROJECT,OWNER,VM)['state'],'migrated')
+
     def test_migration_fence_survives_failed_shutdown_and_controller_restart(self):
         transfer = 'move_' + 'd' * 32
         with patch.object(self.manager, 'stop', side_effect=VMError('shutdown_failed')):

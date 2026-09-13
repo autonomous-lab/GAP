@@ -58,7 +58,8 @@ Reuse the identical request ID and body if the initial response is lost.
 
 3. Poll `GET /v1/fleet/migrations?migration_id=move_...`. An unfiltered GET lists
    up to 100 recent moves authorized for the caller. No hop password or node
-   credential is returned.
+   credential is returned. Temporary transport failures are retried; an authority
+   rate limit pauses the copy before retrying the same chunk. Received bytes persist.
 4. On a recoverable failure, POST `{"action":"resume","migration_id":"move_..."}`.
    Before commit, POST `{"action":"cancel","migration_id":"move_..."}` to remove
    the target copy and restore the source. A committed move must be completed or
@@ -98,8 +99,11 @@ Each worker's private configuration enables `migration_transfers` and provides
 `token_file`. Never place the credentials in a client script or ticket.
 The control configuration enables `allow_migration_journal`, existing reservation
 and capacity enforcement, and `migration_peers` with the same origin/token-file
-mapping. Project signing and node pricing sources are required. Activate the
-coordinator last, after both nodes and workers are ready.
+mapping. Use distinct filenames such as `migration-node-01.token`; never overwrite
+the existing `node_token_files` credentials used for fleet billing. Project signing and node pricing sources are required. Activate the
+coordinator last, after both nodes and workers are ready. Each worker
+`hypervisor.public_network.hostname` must resolve to its own public TCP address;
+do not reuse the original node hostname on a destination node.
 
 The migration does not require a private inter-host network. TLS validation is
 mandatory; no redirect, caller-selected upstream URL or anonymous app route is
