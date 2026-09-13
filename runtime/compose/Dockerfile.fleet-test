@@ -6,6 +6,7 @@ USER root
 RUN apk add --no-cache py3-cryptography
 COPY --from=node /usr/local/bin/gap-node /usr/local/bin/gap-node
 COPY runtime/control/*.py /opt/control/
+COPY runtime/compose/fleet_kvm_test.py /opt/runner/fleet_kvm_test.py
 COPY scripts/fleet-control.py /repo/scripts/fleet-control.py
 ENV GAP_TEST_CONTROL=/opt/control GAP_TEST_REPO=/repo \
     GAP_TEST_BINARY=/usr/local/bin/gap-node GAP_TEST_SERVERLESS=1 \

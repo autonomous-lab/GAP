@@ -10,7 +10,7 @@ import time
 import unittest
 import uuid
 
-sys.path.insert(0,os.environ.get('GAP_TEST_CONTROL',str(Path(__file__).resolve().parents[1]/'control')))
+sys.path.append(os.environ.get('GAP_TEST_CONTROL',str(Path(__file__).resolve().parents[1]/'control')))
 from authority import Authority
 from service import Application,Server
 import integration_test
@@ -46,8 +46,10 @@ class FleetAcceptance(integration_test.Integration):
         config['fleet_billing']=dict(url=f'http://127.0.0.1:{self.control_port}',token_file=str(token),
              operator_id='test-operator',node_id='test-node',projects=[project],target_microcredits=100000,lease_seconds=15)
         Path(config['state_dir']).mkdir(mode=0o700,parents=True,exist_ok=True)
-        Ledger(Path(config['state_dir'])/'microvm-credits.sqlite').set_pricing('enforced',
+        ledger=Ledger(Path(config['state_dir'])/'microvm-credits.sqlite')
+        ledger.set_pricing('enforced',
             {'version':'fleet-kvm-test','vcpu_hour':10000,'gib_ram_hour':10000,'gb_disk_month':100000,'gb_in':10000,'gb_out':10000})
+        config['fleet_billing']['expected_tariff']=ledger.pricing()['tariff']
 
     def start_controller(self):
         self.authority=Authority(self.authority_path,'test-operator')
@@ -87,8 +89,8 @@ class FleetAcceptance(integration_test.Integration):
                 '-o','HostKeyAlias='+meta['vm_id'],'-i',str(key),'-p',str(meta['ssh_port']),
                 'root@127.0.0.1',command],input=input,text=True,capture_output=True,check=True,timeout=10).stdout
         try:
-            approval.write_text(json.dumps({'agents':[owner],'quotas':{owner:{'max_vms':10,'vcpus':4,'memory_mib':4096}}}))
-            op('POST','',{'ports':[8001],'ssh_keys':[Path(str(key)+'.pub').read_text().strip()]})
+            approval.write_text(json.dumps({'agents':[owner],'always_on_agents':[owner],'quotas':{owner:{'max_vms':10,'vcpus':4,'memory_mib':4096}}}))
+            op('POST','',{'execution_mode':'always_on','ports':[8001],'ssh_keys':[Path(str(key)+'.pub').read_text().strip()]})
             meta=manager.read(project,owner)
             self.assertEqual(self.authority.quotas(self.customer)['allocated']['max_vms'],1)
             op('POST','',{'new_vm':True},expected_error='customer_quota_exceeded_max_vms')
@@ -134,6 +136,16 @@ class FleetAcceptance(integration_test.Integration):
             while not runtime.ledger.lease_allowed(project) and time.monotonic()<deadline:
                 runtime.ledger.sync(project,owner,True);time.sleep(.1)
             self.assertTrue(runtime.ledger.lease_allowed(project))
+            # No incoming traffic may trigger this recovery: always-on must
+            # resume itself after the controller returns.
+            deadline=time.monotonic()+60
+            while time.monotonic()<deadline:
+                current=manager.read(project,owner)
+                if manager.public(current)['state']=='running':break
+                time.sleep(.1)
+            self.assertEqual(manager.public(manager.read(project,owner))['state'],'running',runtime.last_error)
+            self.assertFalse(runtime.state(meta).get('policy_preempted',False))
+            print('PASS: automatic always-on recovery before any incoming connection',flush=True)
             with socket.create_connection(('127.0.0.1',meta['public_ports'][0]),timeout=60) as tcp:
                 tcp.sendall(b'probe');self.assertEqual(tcp.recv(100),baseline)
             meta=manager.read(project,owner)
