@@ -256,8 +256,16 @@ class Runner:
             return {'allowed':False,'unavailable':True,'generation':0}
         return policy
 
-    def authorize(self, project, owner):
+    def authorize(self, project, owner, placement_id=None):
         origin=self.migration_origin(project)
+        ledger=self.runtime.ledger if self.runtime else None
+        if not origin and ledger and hasattr(ledger,'placement_approval') and (placement_id or ledger.dynamically_managed(project)):
+            try:approval=ledger.placement_approval(project,owner,placement_id)
+            except Exception:raise Failure(403,'placement_approval_unavailable_or_revoked') from None
+            if self.hypervisor and project not in self.hypervisor.capacity.projects:
+                try:self.hypervisor.capacity.adopt_placed_project(project,owner,approval)
+                except Exception:raise Failure(403,'placement_capacity_binding_failed') from None
+            return approval
         if not origin:return self.authorize_local(project,owner)
         if origin.get('owner_did')!=owner:raise Failure(403,'migration_origin_binding_mismatch')
         config=load_config(self.path)
@@ -348,10 +356,11 @@ class Runner:
             body=rpc.get('body') or {}
             return 200,dict(self.runtime.ledger.finance_report(body['start'],body['end'],body.get('project_id'),body.get('include_projects',False)),available=True,active_pricing=self.runtime.ledger.pricing())
         project, owner = rpc.get("project_id", ""), rpc.get("owner_did", "")
+        method, action, body = rpc.get("method"), rpc.get("action"), rpc.get("body")
         if not isinstance(project, str) or not PROJECT.fullmatch(project) or not isinstance(owner, str):
             raise Failure(400, "invalid_project")
-        self.authorize(project, owner)
-        method, action, body = rpc.get("method"), rpc.get("action"), rpc.get("body")
+        placement_id=body.get('placement_id') if method=='POST' and action=='vms' and isinstance(body,dict) else None
+        self.authorize(project, owner, placement_id)
         selected = body.get('vm_id') if isinstance(body,dict) else None
         if selected is not None and not re.fullmatch(r'vm_[0-9a-f]{32}',str(selected)):
             raise Failure(400,'invalid_vm_identity')
@@ -499,10 +508,11 @@ class Runner:
         try:
             with self.db() as db:
                 row = db.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()
-            guest = self.authorize(row["project"], row["owner"])
+            payload = json.loads(row['payload'])
+            placement_id=payload['body'].get('placement_id') if payload['action']=='vm/create' else None
+            guest = self.authorize(row["project"], row["owner"], placement_id)
             with self.db() as db:
                 db.execute("UPDATE jobs SET status='running' WHERE id=?", (job,))
-            payload = json.loads(row['payload'])
             with self.runtime.lock(row['project']) if self.runtime else nullcontext():
                 if self.runtime:
                     current=self.hypervisor.read(row['project'],row['owner'],payload['body'].get('vm_id'))

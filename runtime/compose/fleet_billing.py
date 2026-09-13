@@ -66,7 +66,8 @@ class Client:
 class FleetLedger(Ledger):
     def __init__(self,path,config,clock=time.time,monotonic=time.monotonic,transport=None):
         self.config=config
-        self.projects=set(config['projects'])
+        self.configured_projects=set(config['projects'])
+        self.projects=set(self.configured_projects)
         if any(not isinstance(p,str) or not re.fullmatch(r'prj_[0-9a-f]{24}',p) for p in self.projects):
             raise ValueError('invalid_fleet_project')
         for key in ('operator_id','node_id'):
@@ -99,6 +100,29 @@ class FleetLedger(Ledger):
         except Exception:
             if not existing:self.projects.discard(project)
             raise
+
+    def placement_approval(self,project,owner,placement_id=None):
+        if placement_id is not None:
+            placed=self.transport(dict(action='placement-get',placement_id=placement_id))
+            expected=(self.config['operator_id'],self.config['node_id'],project,owner,'reserved')
+            actual=(placed.get('operator_id'),placed.get('node_id'),placed.get('project_id'),
+                    placed.get('owner_did'),placed.get('state'))
+            if actual!=expected:raise BillingError('fleet_placement_binding_mismatch')
+        approval=self.transport(dict(action='placement-project',project_id=project,owner_did=owner))
+        expected=(self.config['operator_id'],self.config['node_id'],project,owner,True)
+        actual=(approval.get('operator_id'),approval.get('node'),approval.get('id'),approval.get('owner'),approval.get('managed'))
+        quota=approval.get('quota')
+        if (actual!=expected or not isinstance(quota,dict) or set(quota)!={'max_vms','vcpus','memory_mib','disk_gib'}
+                or type(quota['max_vms']) is not int or quota['max_vms']<1
+                or isinstance(quota['vcpus'],bool) or not isinstance(quota['vcpus'],(int,float)) or quota['vcpus']<=0
+                or any(type(quota[k]) is not int or quota[k]<=0 for k in ('memory_mib','disk_gib'))):
+            raise BillingError('fleet_placement_invalid_response')
+        if project not in self.projects:
+            self.adopt_migrated_project(project,owner)
+        return approval
+
+    def dynamically_managed(self,project):
+        return project in self.projects and project not in self.configured_projects
 
 
     def fleet_allows(self,project):

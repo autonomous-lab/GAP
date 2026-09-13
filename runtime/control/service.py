@@ -27,9 +27,10 @@ def secret(path):
 
 
 class Application:
-    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False, allow_capacity=False, access=None, identity_nodes=None, console_paths=None, finance=None, report_token=None, allow_migration_journal=False):
+    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False, allow_capacity=False, access=None, identity_nodes=None, console_paths=None, finance=None, report_token=None, allow_migration_journal=False, placement=None):
         self.authority, self.admin, self.nodes = authority, admin, dict(nodes)
         self.finance,self.report_token=finance,report_token
+        self.placement=placement
         self.console_paths=dict(console_paths or {})
         if len(set(self.console_paths.values()))!=len(self.console_paths) or any(n not in nodes or p not in ('','/nodes/'+n) for n,p in self.console_paths.items()):
             raise ValueError('invalid management console mapping')
@@ -77,6 +78,7 @@ class Application:
                     'legacy_cutover': migrated > 0, 'wallet_migration_protocol': 1, 'worker_metering_mode': 'opt_in',
                     'reservation_protocol': 1, 'reservations_enabled': self.allow_reservations,
                     'capacity_protocol': 2, 'capacity_enabled': self.allow_capacity,
+                    'placement_protocol': 1, 'placement_enabled': self.placement is not None,
                     'worker_capacity_enforcement': 'explicit_project_opt_in',
                     'project_access_enabled': self.access is not None,
                     'online_debits_enabled': self.allow_debits}
@@ -195,6 +197,16 @@ class Application:
             if body.get('action') == 'readiness':
                 return dict(operator_id=a.operator,node_id=actor,protocol='fleet-admission-v1',
                             reservations=self.allow_reservations,capacity=self.allow_capacity)
+            if body.get('action') == 'placement-get':
+                if not self.placement:
+                    raise Failure('placement_disabled', 409)
+                import placement
+                return placement.get(a, actor, body['placement_id'])
+            if body.get('action') == 'placement-project':
+                if not self.placement:
+                    raise Failure('placement_disabled', 409)
+                import placement
+                return placement.host_approval(a, actor, body['project_id'], body['owner_did'])
             if body.get('action') in ('retention-status','retention-claim','retention-finish'):
                 import retention
                 args=(a,actor,body['project_id'],body['owner_did'])
@@ -210,7 +222,8 @@ class Application:
                     return a.capacity_get(actor, body['project_id'], body['vm_id'])
                 if body['action'] == 'capacity-prepare':
                     return a.capacity_prepare(actor, body['request_id'], body['project_id'], body['owner_did'],
-                        body['vm_id'], body['cpu_quarters'], body['memory_mib'], body['expected_revision'])
+                        body['vm_id'], body['cpu_quarters'], body['memory_mib'], body['expected_revision'],
+                        body.get('placement_id'), body.get('disk_gib', 0))
                 if body['action'] == 'capacity-cancel-create':
                     return a.capacity_cancel_create(actor,body['request_id'],body['project_id'],body['owner_did'],body['vm_id'],body['evidence_id'])
                 if body['action'] == 'capacity-abort-resize':
@@ -239,6 +252,13 @@ class Application:
         if method=='GET' and parsed.path=='/v1/nodes':
             prices=self.finance.prices.get() if self.finance else {}
             return {'nodes':[{'node_id':n,'console_path':self.console_paths.get(n),'pricing':prices.get(n,{'available':False})} for n in sorted(self.nodes)]}
+        if method=='POST' and parsed.path=='/v1/placements':
+            if not self.placement or not self.allow_capacity:
+                raise Failure('placement_disabled',409)
+            import placement
+            return placement.reserve(a,actor,body['request_id'],body['project_id'],body['cpu_quarters'],
+                body['memory_mib'],body['disk_gib'],body.get('region',''),self.placement.snapshots(),
+                body.get('ttl_seconds',120))
         if parsed.path=='/v1/migrations':
             if not self.migrations:raise Failure('migrations_disabled',409)
             if method=='POST':return self.migrations.submit(actor,body)
@@ -369,6 +389,10 @@ def main():
         if config.get('finance_sources'):
             from finance import Finance
             finance=Finance(authority,config['finance_sources'],config['node_token_files'])
+        placement_directory=None
+        if config.get('placement_sources'):
+            from placement import Directory
+            placement_directory=Directory(config['placement_sources'])
         app = Application(authority, secret(config['operator_token_file']),
                           {node: secret(path) for node, path in config['node_token_files'].items()},
                           config.get('allow_online_debits', False), config.get('allow_reservations',False),
@@ -376,7 +400,7 @@ def main():
                           {node: secret(path) for node, path in config.get('identity_token_files', {}).items()},
                           config.get('console_paths',{}),finance,
                           secret(config['report_token_file']) if config.get('report_token_file') else None,
-                          config.get('allow_migration_journal',False))
+                          config.get('allow_migration_journal',False),placement_directory)
         if config.get('migration_peers'):
             if not app.allow_migration_journal or not app.allow_capacity or not app.allow_reservations or not access or not finance:
                 raise ValueError('migration dependencies are required')

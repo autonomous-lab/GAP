@@ -6,11 +6,13 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0,os.environ.get('GAP_TEST_CONTROL',str(Path(__file__).resolve().parents[1]/'control')))
 from authority import Authority,Failure
+from placement import Directory
 from service import Application
 from billing import BillingError
 from fleet_capacity import Capacity
@@ -27,12 +29,23 @@ class CapacityWorkerTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name)
-        self.a=Authority(self.root/'authority.sqlite','operator')
+        self.now=int(time.time())
+        self.a=Authority(self.root/'authority.sqlite','operator',clock=lambda:self.now)
         self.customer=self.a.create_customer('operator','customer','Test')['customer_id']
         self.a.attach_principal('operator','owner',self.customer,'agent',O)
         for project,node in [(P,'one'),(SECOND,'two')]:
             self.a.attach_project('operator',project,self.customer,project,node,O)
-        self.app=Application(self.a,'admin',{'one':'one-token','two':'two-token'},allow_capacity=True)
+        def snapshot(source):
+            return {'protocol':1,'node_id':source['node_id'],'checked_at':self.now,'max_age_seconds':30,
+                'region':source['node_id'],'microvm':{'available':True,'admission_ready':True,
+                    'headroom':{'vcpus':4,'memory_mib':8192,'disk_gib':100},
+                    'pricing':{'available':True,'mode':'enforced','currency':'USD',
+                        'tariff':{'version':'test-v1'}}}}
+        directory=Directory([{'node_id':'one','url':'https://one.example'},
+                             {'node_id':'two','url':'https://two.example'}],
+                            clock=lambda:self.now,fetch=snapshot)
+        self.app=Application(self.a,'admin',{'one':'one-token','two':'two-token'},
+                             allow_capacity=True,placement=directory)
         self.down=False;self.fault=None;self.calls=[]
         self.manager=self.make_manager('one',P)
 
@@ -90,6 +103,18 @@ class CapacityWorkerTests(unittest.TestCase):
         self.assertEqual(other.list(SECOND,O),[])
         self.assertEqual(other.capacity.records()[0]['phase'],'closed')
         self.assertEqual(self.a.quotas(self.customer)['allocated']['max_vms'],1)
+
+    def test_placement_is_forwarded_and_committed_by_the_real_worker_manager(self):
+        token=self.a.issue(self.customer,O)['token']
+        placed=self.app.handle('POST','/v1/placements',token,dict(request_id='place-worker',
+            project_id=P,cpu_quarters=4,memory_mib=1024,disk_gib=8,region='one'))
+        self.assertEqual(placed['node_id'],'one')
+        vm=self.create(placement_id=placed['placement_id'])
+        state=self.app.handle('POST','/node','one-token',
+            {'action':'placement-get','placement_id':placed['placement_id']})
+        self.assertEqual((state['state'],state['vm_id']),('committed',vm['vm_id']))
+        with self.assertRaisesRegex(VMError,'placement_already_consumed'):
+            self.create(placement_id=placed['placement_id'],new_vm=True)
 
     def test_migrated_binding_survives_restart_without_reallocating_quota(self):
         vm=self.create()['vm_id'];other=self.make_manager('two',SECOND)

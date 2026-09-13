@@ -624,9 +624,11 @@ See [the MicroVM operator guide](runtime/compose/README.md#large-pool-routing).
 The public [explorer](https://gap.geta.team/explorer) compares explicitly listed
 nodes, measured host headroom and active tariffs without account credentials.
 The [account page](https://gap.geta.team/account) manages authorized projects and
-MicroVMs across nodes. Manual cold moves preserve disks, keys and HTTPS URLs;
-SSH endpoints change and the original HTTPS host remains a routing dependency.
-Automatic placement and highly available routing are not yet provided.
+MicroVMs across nodes. New MicroVMs are placed automatically from fresh public
+capacity, admission and tariff data; the selected capacity is reserved atomically
+with the customer's global quota before the worker creates the VM. Manual cold
+moves preserve disks, keys and HTTPS URLs; SSH endpoints change and the original
+HTTPS host remains a routing dependency. Highly available routing is not yet provided.
 
 Customer/operator suspension is enforced across configured fleet nodes, alongside
 local project/agent decisions, with bounded data retention and explicit restore.

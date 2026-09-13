@@ -56,7 +56,7 @@ def free_port():
 
 def validate(action, body):
     fields = {
-        'vm/create': {'request_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports', 'start', 'ssh_keys', 'new_vm', 'execution_mode'},
+        'vm/create': {'request_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports', 'start', 'ssh_keys', 'new_vm', 'execution_mode', 'placement_id'},
         'vm/update': {'request_id', 'vm_id', 'vcpus', 'memory_mib', 'disk_gib', 'ports'},
         'vm/start': {'request_id', 'vm_id'},
         'vm/hibernate': {'request_id', 'vm_id'},
@@ -68,6 +68,8 @@ def validate(action, body):
         raise VMError('invalid_vm_operation_fields')
     if action != 'vm/create' and not re.fullmatch(r'vm_[0-9a-f]{32}', str(body.get('vm_id', ''))):
         raise VMError('vm_id_required')
+    if 'placement_id' in body and not re.fullmatch(r'plc_[0-9a-f]{32}', str(body['placement_id'])):
+        raise VMError('invalid_placement_id')
     if 'vcpus' in body:
         from cpu_quota import quarters
         try: quarters(body['vcpus'])

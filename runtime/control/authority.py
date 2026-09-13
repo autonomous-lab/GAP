@@ -103,6 +103,8 @@ class Authority:
             suspension.schema(db)
             import migration_journal
             migration_journal.schema(db)
+            import placement
+            placement.schema(db)
             if db.execute("SELECT value FROM metadata WHERE key='operator'").fetchone()[0] != operator:
                 raise Failure('operator_database_mismatch', 409)
 
@@ -297,20 +299,28 @@ class Authority:
                         allocations=[self.capacity_view(r) for r in rows[:100]],
                         next_cursor=rows[99]['vm'] if len(rows) > 100 else None)
 
-    def capacity_prepare(self, node, request, project, owner, vm, cpu, memory, expected_revision):
+    def capacity_prepare(self, node, request, project, owner, vm, cpu, memory, expected_revision,
+                         placement_id=None, disk=0):
         self.capacity_number(cpu, MAX_QUOTAS['cpu_quarters'], 1)
         self.capacity_number(memory, MAX_QUOTAS['memory_mib'], 256)
         self.capacity_number(expected_revision, 2**53-1)
+        if placement_id is not None:
+            import placement
+            placement.resource(disk, 100)
         body = dict(action='capacity_prepare', project=project, owner=owner, vm=vm,
-                    cpu=cpu, memory=memory, expected_revision=expected_revision)
+                    cpu=cpu, memory=memory, expected_revision=expected_revision,
+                    placement_id=placement_id, disk=disk)
         def apply(db):
-            placement = self.node_project(db, node, project)
+            project_binding = self.node_project(db, node, project)
             import suspension
-            suspension.check(db, placement['customer'])
+            suspension.check(db, project_binding['customer'])
             import migration_journal
             migration_journal.guard_capacity(db, vm)
-            if placement['owner'] != owner:
+            if project_binding['owner'] != owner:
                 raise Failure('project_owner_mismatch', 403)
+            if placement_id is not None:
+                import placement
+                placement.claim(db, self, node, placement_id, project, owner, vm, cpu, memory, disk)
             row = self.capacity_row(db, node, project, vm)
             if row and row['state'] == 'released':
                 raise Failure('capacity_released', 409)
@@ -318,7 +328,7 @@ class Authority:
                 raise Failure('capacity_revision_conflict', 409)
             if row and row['state'] != 'active':
                 raise Failure('capacity_transition_pending', 409)
-            current = self.quota_state(db, placement['customer'])
+            current = self.quota_state(db, project_binding['customer'])
             growth = dict(max_vms=0 if row else 1,
                           cpu_quarters=max(0, cpu-(row['cpu'] if row else 0)),
                           memory_mib=max(0, memory-(row['memory'] if row else 0)))
@@ -331,7 +341,7 @@ class Authority:
                     target_cpu=?,target_memory=?,pending=? WHERE vm=?''', (cpu,memory,request,vm))
             else:
                 db.execute("INSERT INTO capacity VALUES(?,?,?,?,'pending',1,0,0,?,?,?)",
-                           (vm,node,project,placement['customer'],cpu,memory,request))
+                           (vm,node,project,project_binding['customer'],cpu,memory,request))
             return dict(operator_id=self.operator, **self.capacity_view(self.capacity_row(db,node,project,vm)))
         return self.mutation('node:'+node, request, body, apply)
 
@@ -372,6 +382,8 @@ class Authority:
                 state = 'active' if cpu else 'released'
             db.execute('''UPDATE capacity SET state=?,revision=revision+1,cpu=?,memory=?,
                 target_cpu=?,target_memory=?,pending=NULL WHERE vm=?''', (state,cpu,memory,cpu,memory,vm))
+            import placement
+            placement.finish_vm(db, self, vm, outcome)
             return dict(operator_id=self.operator, evidence_id=evidence, outcome=outcome,
                         **self.capacity_view(self.capacity_row(db,node,project,vm)))
         return self.mutation('node:'+node, request, body, apply)
@@ -392,6 +404,8 @@ class Authority:
             else:
                 db.execute("INSERT INTO capacity VALUES(?,?,?,?,'released',1,0,0,0,0,NULL)",
                            (vm,node,project,placement['customer']))
+            import placement as placement_reservation
+            placement_reservation.finish_vm(db, self, vm, 'abort')
             return dict(operator_id=self.operator,evidence_id=evidence,
                         **self.capacity_view(self.capacity_row(db,node,project,vm)))
         return self.mutation('node:'+node,request,body,apply)

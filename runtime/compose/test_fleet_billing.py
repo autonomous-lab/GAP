@@ -7,6 +7,8 @@ import unittest
 
 sys.path.insert(0,os.environ.get('GAP_TEST_CONTROL',str(Path(__file__).resolve().parents[1]/'control')))
 from authority import Authority
+from placement import Directory
+from service import Application
 from billing import Ledger,BillingError,UNITS,RETENTION_SECONDS
 from fleet_billing import FleetLedger
 
@@ -73,6 +75,29 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(target.view(P,O)['balance_microcredits'],0)
         self.assertFalse(target.lease_allowed(P))
         self.assertEqual(self.authority.wallet(self.customer)['balance_microcredits'],10000)
+
+    def test_placement_adopts_a_target_project_with_central_quota(self):
+        now=self.now
+        snapshot=lambda source:{'protocol':1,'node_id':source['node_id'],'checked_at':now,
+            'max_age_seconds':30,'region':'test','microvm':{'available':True,
+            'admission_ready':True,'headroom':{'vcpus':2,'memory_mib':2048,'disk_gib':20},
+            'pricing':{'available':True,'mode':'enforced','currency':'USD',
+                       'tariff':{'version':'test-v1'}}}}
+        directory=Directory([{'node_id':'target','url':'https://target.example'}],
+                            clock=lambda:self.now,fetch=snapshot)
+        app=Application(self.authority,'admin',{'target':'target-token'},
+                        allow_capacity=True,placement=directory)
+        token=self.authority.issue(self.customer,O)['token']
+        placed=app.handle('POST','/v1/placements',token,dict(request_id='place-ledger',
+            project_id=P,cpu_quarters=4,memory_mib=1024,disk_gib=8,region='test'))
+        path=self.path.parent/'placed.sqlite';Ledger(path).set_pricing('enforced',PRICE)
+        config=dict(self.config,projects=[],node_id='target')
+        target=FleetLedger(path,config,lambda:self.now,lambda:self.mono,
+            lambda body:app.handle('POST','/node','target-token',body))
+        approval=target.placement_approval(P,O,placed['placement_id'])
+        self.assertEqual(approval['quota'],dict(max_vms=1,vcpus=1.0,memory_mib=1024,disk_gib=8))
+        self.assertTrue(target.dynamically_managed(P))
+        self.assertEqual(target.view(P,O)['balance_microcredits'],0)
 
     def test_outage_expires_monotonically_and_never_triggers_retention(self):
         self.ledger.sync(P,O,True)

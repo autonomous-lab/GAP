@@ -101,7 +101,7 @@ pub fn relay_path(method: &str, path: &str) -> Option<String> {
     match (method, path) {
         ("POST", "/v1/fleet/identity") => Some("/identity".into()),
         ("GET", "/v1/fleet/account" | "/v1/fleet/projects" | "/v1/fleet/vm-placements" | "/v1/fleet/migrations" | "/v1/fleet/wallet" | "/v1/fleet/quotas" | "/v1/fleet/members" | "/v1/fleet/nodes")
-        | ("POST", "/v1/fleet/migrations" | "/v1/fleet/project-token" | "/v1/fleet/logout" | "/v1/fleet/members") => Some(path.replacen("/v1/fleet/", "/v1/", 1)),
+        | ("POST", "/v1/fleet/migrations" | "/v1/fleet/placements" | "/v1/fleet/project-token" | "/v1/fleet/logout" | "/v1/fleet/members") => Some(path.replacen("/v1/fleet/", "/v1/", 1)),
         _ => None,
     }
 }
@@ -146,6 +146,8 @@ mod tests {
             assert!(relay_path("GET",path).is_none());
         }
         assert_eq!(relay_path("GET","/v1/fleet/account").as_deref(),Some("/v1/account"));
+        assert_eq!(relay_path("POST","/v1/fleet/placements").as_deref(),Some("/v1/placements"));
+        assert!(relay_path("GET","/v1/fleet/placements").is_none());
         assert!(relay_path("GET","/v1/fleet/identity").is_none());
     }
 }

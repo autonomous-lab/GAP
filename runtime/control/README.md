@@ -55,7 +55,7 @@ funds atomically; **it is not an offline execution lease or spending reservation
 Create private configuration/state directories owned by UID 10001, mode 0700:
 `data/gap-control/config/` and `data/gap-control/state/`. Generate distinct random
 credentials (at least 32 random bytes, base64url encoded) in mode-0600 files:
-`operator.token`, `node-01.token`, `node-02.token`. Never commit them or print them.
+`operator.token` and one token per node. Never commit them or print them.
 
 `data/gap-control/config/control.json`:
 
@@ -66,9 +66,16 @@ credentials (at least 32 random bytes, base64url encoded) in mode-0600 files:
   "operator_token_file": "/config/operator.token",
   "node_token_files": {
     "node-01": "/config/node-01.token",
-    "node-02": "/config/node-02.token"
+    "node-02": "/config/node-02.token",
+    "node-03": "/config/node-03.token"
   },
-  "allow_online_debits": false
+  "allow_online_debits": false,
+  "allow_capacity": true,
+  "placement_sources": [
+    {"node_id": "node-01", "url": "https://gap.geta.team"},
+    {"node_id": "node-02", "url": "https://gap-node-02-u3.vm.elestio.app"},
+    {"node_id": "node-03", "url": "https://gap-node-03-u3.vm.elestio.app"}
+  ]
 }
 ```
 
@@ -226,7 +233,9 @@ limit requires operator credentials. Integer CPU quarters preserve fractional
 allocations without float arithmetic. These are provisioned allocations, counted
 across the customer's agents, projects and trusted nodes, including stopped and
 hibernated VMs. They are not measures of current CPU consumption or free host RAM.
-Disk quotas, scheduler placement and central retention are separate work.
+Disk remains a per-project/per-host limit. Central retention is a separate
+protocol. Scheduler reservations described below coordinate physical disk
+headroom, while global customer quota continues to cover VM count, CPU and RAM.
 
 Client GET `/v1/quotas` returns only the authenticated customer's aggregate
 limits, allocations, revision and `over_limit` dimensions, including for an agent
@@ -338,24 +347,40 @@ A restored old database must never replace the live authority without fencing an
 reconciling every worker; otherwise it can forget newer reservations. This is the
 same single-writer recovery boundary as for shared wallet balances.
 
-## Read-only placement dry-run
+## Automatic placement and reservation
 
-The first scheduler integration step is deliberately read-only. From the repository
-root, the operator can evaluate a requested VM against the three public node
-origins:
+Set `placement_sources` to the canonical HTTPS origin of every eligible node.
+The authority reads each node's bounded `/v1/public-node` snapshot in parallel
+and accepts only a fresh, admission-ready node with enforced USD pricing and
+enough CPU, RAM and disk headroom. The optional region is an exact filter.
+
+Authenticated owners and project operators reserve a host through the gateway:
+
+```text
+POST /v1/fleet/placements
+{"request_id":"unique","project_id":"prj_...","cpu_quarters":4,
+ "memory_mib":1024,"disk_gib":8,"region":"","ttl_seconds":300}
+```
+
+The response identifies `placement_id`, `node_id`, resources, tariff version and
+expiry. Account uses it to mint a capability for the selected node, provision the
+project there, and submit `POST /vms` with the same resources and `placement_id`.
+`capacity-prepare` claims the placement and the global quota in one SQLite
+transaction. Concurrent requests therefore cannot consume the same published
+headroom. A reservation expires only before claim; after claim it remains fenced
+until the worker commits or aborts its durable creation intent. A placement ID is
+bound to one node, project, owner and resource tuple and cannot create a second VM.
+
+For operator diagnosis, the read-only planner remains available from the repository
+root:
 
 ```sh
 python3 scripts/fleet-placement-dry-run.py \
   --vcpus 1 --memory-mib 1024 --disk-gib 10
 ```
 
-The command fetches `/v1/public-node` over HTTPS and rejects a node unless its
-admission gate, aggregate headroom and enforced USD tariff are all available. An
-optional `--region Manassas` prefers that region and excludes the others. Output
-contains the selected node, every rejection reason, the observed headroom and
-`mutates: false`; no project, VM, wallet or reservation state is changed. The
-planner is an inspection aid until authenticated project binding and an atomic
-`capacity-prepare` call are wired into VM creation.
+The output contains the selected node, every rejection reason, observed headroom
+and `mutates: false`; it never creates a reservation.
 
 ## Legacy migration staging
 
@@ -476,6 +501,7 @@ GET  /v1/fleet/projects?after=prj_...
 GET  /v1/fleet/wallet
 GET  /v1/fleet/quotas
 POST /v1/fleet/project-token  {"project_id":"prj_...","ttl_seconds":120}
+POST /v1/fleet/placements     {"request_id":"unique","project_id":"prj_...","cpu_quarters":4,"memory_mib":1024,"disk_gib":8,"region":""}
 POST /v1/fleet/logout        {}
 ```
 

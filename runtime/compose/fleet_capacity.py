@@ -67,6 +67,19 @@ class Capacity:
         self.put(record);self.ready.add(vm)
         return reply
 
+    def adopt_placed_project(self,project,owner,approval):
+        expected=(self.config['operator_id'],self.config['node_id'],project,owner,True)
+        actual=(approval.get('operator_id'),approval.get('node'),approval.get('id'),approval.get('owner'),approval.get('managed'))
+        if actual!=expected:raise VMError('fleet_placement_binding_mismatch')
+        existing=project in self.projects
+        self.projects.add(project)
+        try:self.bind(project,owner)
+        except Exception:
+            if not existing:self.projects.discard(project)
+            raise
+        with self.db() as db:
+            db.execute('INSERT OR IGNORE INTO migration_projects VALUES(?,?,?)',(project,self.config['operator_id'],self.config['node_id']))
+
     def managed(self, project):
         return project in self.projects or project in self.bound
 
@@ -219,7 +232,8 @@ class Capacity:
         if action=='vm/create':
             if meta and meta['state']!='destroyed':raise VMError('vm_already_exists')
             vm='vm_'+uuid.uuid4().hex
-            record=dict(vm=vm,project=project,owner=owner,kind='create',phase='preparing')
+            record=dict(vm=vm,project=project,owner=owner,kind='create',phase='preparing',
+                        placement_id=body.get('placement_id'))
             target=dict(vcpus=body.get('vcpus',1),memory_mib=body.get('memory_mib',1024))
             revision=0
         else:
@@ -241,6 +255,8 @@ class Capacity:
             revision=record['remote']['revision']
         record['prepare']=dict(action='capacity-prepare',request_id=uuid.uuid4().hex,
             project_id=project,owner_did=owner,vm_id=record['vm'],expected_revision=revision,**self.resources(target))
+        if record.get('placement_id'):
+            record['prepare'].update(placement_id=record['placement_id'],disk_gib=body.get('disk_gib',8))
         self.ready.discard(record['vm']);self.put(record)
         try:
             self.call(record,record['prepare'])
