@@ -53,7 +53,7 @@ fn product_page(source: &str, active: &str) -> String {
     let navigation = format!(r#"<header class="gap-header"><div class="gap-header-inner">
 <a class="gap-brand" href="/" aria-label="GAP Cloud home"><span class="gap-symbol" aria-hidden="true">G</span><span>GAP <small>CLOUD</small></span></a>
 <nav class="gap-desktop" aria-label="Main navigation">{links}</nav>
-<div class="gap-mobile"><a href="/explorer">Explore</a><a href="/pricing">Pricing</a><details><summary>Menu</summary><nav aria-label="Mobile navigation">{links}</nav></details></div>
+<div class="gap-mobile"><details><summary>Menu</summary><nav aria-label="Mobile navigation">{links}</nav></details></div>
 </div></header>"#);
     let variant = if active == "/" { "gap-home" } else if active == "/microvms" { "gap-compute" } else { "gap-product" };
     source.replace("<!-- GAP-NAV -->", &navigation)
