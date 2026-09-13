@@ -63,19 +63,32 @@ revision. Concurrent preparations for one VM are rejected. Attestations require
 the correct worker, current revision and matching disk digest. Lost-response
 retries return their historical result; status must be read for current state.
 No preparation phase grants destination execution or changes placement/balances.
+Only the explicit commit phase changes placement; it does not itself move funds.
 Authority capacity changes are rejected while a preparation exists. The local
 source fence also refuses resize and destroy before worker side effects.
 
-The journal has no timeout-based unlock or cutover operation yet.
+The journal has no timeout-based unlock. Its authority handoff now continues
+through source_settled -> routing_ready -> committed. The source settlement
+must reference an existing central checkpoint for the correct node, project
+and owner with no unpaid usage. The worker remains responsible for including
+the final VM sample and durably stopping source metering before attestation.
+The routing receipt is an operator assertion that dormant routes are installed.
+Commit atomically changes the capacity node and grants that node project VM
+accounting access. It preserves the project home, customer wallet, quota count
+and historical reservations. Active retention claims block commit.
+A commit response is not execution permission: target billing/policy leases
+must still be obtained, and old responses never authorize a restart.
 Cancellation now proceeds through cancelling -> target_discarded -> cancelled,
-with target attestation required before source restoration. Both attestations
+with target attestation required before source restoration. Committed moves
+cannot be cancelled; moving back requires a new migration. Both attestations
 are revision-bound, retry-safe trusted-worker receipts. These transport actions
 remain disabled in production until the worker orchestration is connected.
 A cancelled record remains available for audit and permits a new migration ID;
 a delayed request for the cancelled migration cannot advance the new one.
-A full orchestration must reconcile worker lifecycle/retention actions, settle
-source metering, prepare destination accounting, and switch routes and placement
-before it can authorize target execution. Central preparation alone does not
+The remaining worker orchestration must reconcile lifecycle/retention actions,
+settle source metering, prepare destination accounting and install routes before
+requesting the central handoff. None of these host actions is performed merely
+by recording a journal receipt. Central preparation alone does not
 stop a guest or revoke cached worker permissions. Host evidence IDs are trusted
 worker assertions, not independent proof. Do not expose this preparation API to
 customers or start production migrations with it.

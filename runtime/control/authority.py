@@ -208,7 +208,9 @@ class Authority:
 
     @staticmethod
     def node_project(db, node, project):
-        row = db.execute('SELECT * FROM projects WHERE id=? AND node=?', (project, node)).fetchone()
+        row = db.execute('''SELECT p.id,p.customer,? AS node,p.owner FROM projects p WHERE p.id=? AND (p.node=?
+            OR EXISTS(SELECT 1 FROM vm_host_projects h WHERE h.project=p.id AND h.node=?))''',
+            (node, project, node, node)).fetchone()
         if not row:
             raise Failure('project_node_mismatch', 403)
         return row
@@ -565,7 +567,7 @@ class Authority:
             rows = db.execute("""SELECT c.vm,c.project,c.node,c.state,c.revision,
                     p.owner,m.id AS migration_id,m.phase AS migration_phase,m.target AS migration_target
                 FROM capacity c JOIN projects p ON p.id=c.project
-                LEFT JOIN vm_migrations m ON m.vm=c.vm AND m.phase <> 'cancelled'
+                LEFT JOIN vm_migrations m ON m.vm=c.vm AND m.phase NOT IN ('cancelled','committed')
                 WHERE p.customer=? AND c.state<>'released' AND c.vm>?
                   AND (? IS NULL OR EXISTS(SELECT 1 FROM grants g WHERE g.project=c.project AND g.agent=?))
                 ORDER BY c.vm LIMIT 101""", (customer,after,agent,agent)).fetchall()

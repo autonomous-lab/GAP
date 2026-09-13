@@ -19,8 +19,12 @@ def schema(db):
         phase TEXT NOT NULL, disk_digest TEXT, source_receipt TEXT,
         target_receipt TEXT, created INTEGER NOT NULL,
         CHECK(source<>target))''')
+    db.execute('''CREATE TABLE IF NOT EXISTS vm_host_projects(
+        project TEXT NOT NULL REFERENCES projects(id),node TEXT NOT NULL,
+        PRIMARY KEY(project,node))''')
     db.execute('DROP INDEX IF EXISTS migration_vm')
-    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS active_migration_vm ON vm_migrations(vm) WHERE phase <> 'cancelled'")
+    db.execute('DROP INDEX IF EXISTS active_migration_vm')
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS active_migration_vm ON vm_migrations(vm) WHERE phase NOT IN ('cancelled','committed')")
 
 
 def view(row):
@@ -28,7 +32,7 @@ def view(row):
                 source_node=row['source'], target_node=row['target'],
                 revision=row['revision'], phase=row['phase'],
                 disk_sha256=row['disk_digest'], execution_authorized=False,
-                handoff_complete=False)
+                handoff_complete=row['phase']=='committed')
 
 
 def row_for(db, migration):
@@ -40,7 +44,7 @@ def row_for(db, migration):
 
 
 def guard_capacity(db, vm):
-    if db.execute("SELECT 1 FROM vm_migrations WHERE vm=? AND phase <> 'cancelled'", (vm,)).fetchone():
+    if db.execute("SELECT 1 FROM vm_migrations WHERE vm=? AND phase NOT IN ('cancelled','committed')", (vm,)).fetchone():
         raise Failure('vm_migration_in_progress', 409)
 
 
@@ -132,7 +136,7 @@ def cancel_request(a, request, migration, revision):
         row = row_for(db, migration)
         if row['revision'] != revision:
             raise Failure('migration_revision_conflict', 409)
-        if row['phase'] not in ('prepared', 'source_fenced', 'target_staged'):
+        if row['phase'] not in ('prepared', 'source_fenced', 'target_staged', 'source_settled', 'routing_ready'):
             raise Failure('migration_phase_conflict', 409)
         db.execute("UPDATE vm_migrations SET phase='cancelling',revision=revision+1 WHERE id=?", (migration,))
         return view(row_for(db, migration))
@@ -161,3 +165,71 @@ def cancel_attest(a, node, request, migration, revision, stage, evidence):
                    ('target_discarded' if target else 'cancelled', migration))
         return view(row_for(db, migration))
     return a.mutation('node:'+node, request, body, apply)
+
+
+def settle(a, node, request, migration, revision, checkpoint_request):
+    """Source confirms its final VM sample is in a durable central checkpoint.
+
+    The worker must stop metering the exported VM BEFORE submitting this fact.
+    Its reservation may remain open for other VMs in the same project.
+    """
+    a.capacity_number(revision, 2**53-1, 1)
+    identifier(checkpoint_request)
+    body=dict(action='migration-settle',migration=migration,revision=revision,checkpoint=checkpoint_request)
+    def apply(db):
+        import json
+        row=row_for(db,migration)
+        if node!=row['source']:raise Failure('migration_node_mismatch',403)
+        if row['revision']!=revision:raise Failure('migration_revision_conflict',409)
+        if row['phase']!='target_staged':raise Failure('migration_phase_conflict',409)
+        operation=db.execute('SELECT result FROM operations WHERE actor=? AND id=?',('node:'+node,checkpoint_request)).fetchone()
+        if not operation:raise Failure('migration_checkpoint_missing',409)
+        checkpoint=json.loads(operation['result'])
+        if (checkpoint.get('node_id'),checkpoint.get('project_id'),checkpoint.get('owner_did'))!=(node,row['project'],row['owner']):
+            raise Failure('migration_checkpoint_mismatch',409)
+        reservation=db.execute('SELECT * FROM reservations WHERE id=?',(checkpoint.get('reservation_id'),)).fetchone()
+        if not reservation or (reservation['node'],reservation['project'],reservation['customer'])!=(node,row['project'],row['customer']):
+            raise Failure('migration_checkpoint_mismatch',409)
+        if checkpoint.get('unpaid_microcredits')!=0 or reservation['unpaid']:
+            raise Failure('unpaid_usage_requires_reconciliation',409)
+        db.execute("UPDATE vm_migrations SET phase='source_settled',revision=revision+1 WHERE id=?",(migration,))
+        return view(row_for(db,migration))
+    return a.mutation('node:'+node,request,body,apply)
+
+
+def routes_ready(a, request, migration, revision, evidence):
+    """Operator attests dormant routes are staged, never that the VM is live."""
+    a.capacity_number(revision, 2**53-1, 1)
+    identifier(evidence)
+    body=dict(action='migration-routes-ready',migration=migration,revision=revision,evidence=evidence)
+    def apply(db):
+        row=row_for(db,migration)
+        if row['revision']!=revision:raise Failure('migration_revision_conflict',409)
+        if row['phase']!='source_settled':raise Failure('migration_phase_conflict',409)
+        db.execute("UPDATE vm_migrations SET phase='routing_ready',revision=revision+1 WHERE id=?",(migration,))
+        return view(row_for(db,migration))
+    return a.mutation('operator',request,body,apply)
+
+
+def commit(a, request, migration, revision):
+    """Atomic placement handoff, preserving the project home and wallet history.
+
+    This is NOT a guest start lease: target still requires fresh billing and
+    policy admission. A committed move is never rolled back on a timeout.
+    """
+    a.capacity_number(revision, 2**53-1, 1)
+    body=dict(action='migration-commit',migration=migration,revision=revision)
+    def apply(db):
+        row=row_for(db,migration)
+        if row['revision']!=revision:raise Failure('migration_revision_conflict',409)
+        if row['phase']!='routing_ready':raise Failure('migration_phase_conflict',409)
+        allocation=a.capacity_row(db,row['source'],row['project'],row['vm'])
+        if not allocation or allocation['state']!='active' or allocation['revision']!=row['capacity_revision']:
+            raise Failure('migration_allocation_changed',409)
+        if db.execute("SELECT 1 FROM retention_claims WHERE project=? AND node IN (?,?) AND state='claimed'",(row['project'],row['source'],row['target'])).fetchone():
+            raise Failure('migration_retention_claimed',409)
+        db.execute('INSERT OR IGNORE INTO vm_host_projects VALUES(?,?)',(row['project'],row['target']))
+        db.execute('UPDATE capacity SET node=?,revision=revision+1 WHERE vm=?',(row['target'],row['vm']))
+        db.execute("UPDATE vm_migrations SET phase='committed',revision=revision+1 WHERE id=?",(migration,))
+        return view(row_for(db,migration))
+    return a.mutation('operator',request,body,apply)

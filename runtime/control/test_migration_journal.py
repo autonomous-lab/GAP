@@ -97,6 +97,52 @@ class MigrationJournalTests(unittest.TestCase):
         self.assertEqual(len(self.a.vm_placements(self.customer)['placements']),1)
         self.fails('migration_revision_conflict',lambda:self.attest(first,request='old-transfer'))
 
+    def test_handoff_preserves_project_wallet_and_count_and_fences_old_node(self):
+        self.a.topup('operator','fund',self.customer,100,'promotional')
+        self.a.checkpoint('node-one','reserve',PROJECT,OWNER,'source-reservation',0,0,60,30)
+        first=self.prepare();source=self.attest(first)
+        target=self.attest(source,'two','target-staged','target')
+        self.fails('migration_phase_conflict',lambda:journal.commit(self.a,'premature',first['migration_id'],target['revision']))
+        self.fails('migration_checkpoint_missing',lambda:journal.settle(self.a,'node-one','settle-missing',first['migration_id'],target['revision'],'missing'))
+        self.a.checkpoint('node-one','final-sample',PROJECT,OWNER,'source-reservation',10,0,50,30)
+        settled=journal.settle(self.a,'node-one','settle',first['migration_id'],target['revision'],'final-sample')
+        routed=journal.routes_ready(self.a,'routes',first['migration_id'],settled['revision'],'dormant-routes-installed')
+        wallet=self.a.wallet(self.customer);quota=self.a.quotas(self.customer)
+        committed=journal.commit(self.a,'commit',first['migration_id'],routed['revision'])
+        self.assertTrue(committed['handoff_complete'])
+        self.assertFalse(committed['execution_authorized'])
+        self.assertEqual(self.a.wallet(self.customer),wallet)
+        self.assertEqual(self.a.quotas(self.customer),quota)
+        self.assertEqual(self.a.capacity_get('node-two',PROJECT,VM)['node_id'],'node-two')
+        with self.a.db() as db:
+            self.assertEqual(self.a.node_project(db,'node-two',PROJECT)['node'],'node-two')
+        self.fails('capacity_binding_mismatch',lambda:self.a.capacity_get('node-one',PROJECT,VM))
+        self.assertEqual(next(p for p in self.a.projects(self.customer)['projects'] if p['id']==PROJECT)['node'],'node-one')
+        self.a=Authority(self.path,'operator-one')
+        self.assertEqual(journal.commit(self.a,'commit',first['migration_id'],routed['revision']),committed)
+        self.fails('migration_phase_conflict',lambda:journal.cancel_request(self.a,'undo',first['migration_id'],committed['revision']))
+        self.a.checkpoint('node-two','target-reserve',PROJECT,OWNER,'target-reservation',0,0,20,30)
+        self.assertEqual(self.a.wallet(self.customer)['total_remaining_microcredits'],90)
+        current=self.a.capacity_get('node-two',PROJECT,VM)
+        reverse=journal.prepare(self.a,'reverse',self.customer,PROJECT,VM,'node-two','node-one',current['revision'])
+        self.assertNotEqual(reverse['migration_id'],first['migration_id'])
+        self.assertEqual(len(self.a.vm_placements(self.customer)['placements']),1)
+
+    def test_handoff_refuses_retention_claim_and_rolls_back_all_changes(self):
+        self.a.topup('operator','fund',self.customer,100,'promotional')
+        self.a.checkpoint('node-one','checkpoint',PROJECT,OWNER,'reservation',0,0,10,30)
+        first=self.prepare();source=self.attest(first)
+        target=self.attest(source,'two','target-staged','target')
+        self.fails('migration_node_mismatch',lambda:journal.settle(self.a,'node-two','wrong-settle',first['migration_id'],target['revision'],'checkpoint'))
+        settled=journal.settle(self.a,'node-one','settle',first['migration_id'],target['revision'],'checkpoint')
+        ready=journal.routes_ready(self.a,'routes',first['migration_id'],settled['revision'],'routes')
+        with self.a.db() as db:
+            db.execute("INSERT INTO retention_claims VALUES(?,?,?,'claimed')",('node-one',PROJECT,'claim'))
+        self.fails('migration_retention_claimed',lambda:journal.commit(self.a,'commit',first['migration_id'],ready['revision']))
+        self.assertEqual(self.a.capacity_get('node-one',PROJECT,VM)['node_id'],'node-one')
+        self.assertEqual(journal.get(self.a,first['migration_id'])['phase'],'routing_ready')
+        self.fails('project_node_mismatch',lambda:self.a.capacity_get('node-two',PROJECT,VM))
+
     def test_default_disabled_and_operator_only(self):
         self.app.allow_migration_journal=False
         self.fails('migration_journal_disabled',self.prepare)

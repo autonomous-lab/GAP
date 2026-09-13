@@ -117,12 +117,16 @@ class Application:
             if action=='finance':
                 if not self.finance:raise Failure('fleet_finance_not_configured',409)
                 return self.finance.report(body['start'],body['end'],body.get('project_id'),body.get('customer_id'),body.get('node_id'))
-            if action in ('migration-prepare', 'migration-status', 'migration-cancel'):
+            if action in ('migration-prepare', 'migration-status', 'migration-cancel', 'migration-routes-ready', 'migration-commit'):
                 if not self.allow_migration_journal:
                     raise Failure('migration_journal_disabled', 409)
                 import migration_journal
                 if action == 'migration-status':
                     return migration_journal.get(a, body['migration_id'])
+                if action == 'migration-routes-ready':
+                    return migration_journal.routes_ready(a, request, body['migration_id'], body['revision'], body['evidence_id'])
+                if action == 'migration-commit':
+                    return migration_journal.commit(a, request, body['migration_id'], body['revision'])
                 if action == 'migration-cancel':
                     return migration_journal.cancel_request(a, request, body['migration_id'], body['revision'])
                 if not self.allow_capacity or not self.allow_reservations:
@@ -166,12 +170,15 @@ class Application:
         if method == 'POST' and parsed.path == '/node':
             if kind != 'node':
                 raise Failure('node_credentials_required', 403)
-            if body.get('action') in ('migration-status', 'migration-attest', 'migration-cancel-attest'):
+            if body.get('action') in ('migration-status', 'migration-attest', 'migration-cancel-attest', 'migration-settle'):
                 if not self.allow_migration_journal:
                     raise Failure('migration_journal_disabled', 409)
                 import migration_journal
                 if body['action'] == 'migration-status':
                     return migration_journal.get(a, body['migration_id'], actor)
+                if body['action'] == 'migration-settle':
+                    return migration_journal.settle(a, actor, body['request_id'], body['migration_id'],
+                        body['revision'], body['checkpoint_request_id'])
                 if body['action'] == 'migration-cancel-attest':
                     return migration_journal.cancel_attest(a, actor, body['request_id'], body['migration_id'],
                         body['revision'], body['stage'], body['evidence_id'])
