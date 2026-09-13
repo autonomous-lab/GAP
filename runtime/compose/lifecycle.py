@@ -102,7 +102,7 @@ class Runtime:
                 import subprocess
                 try:
                     disk=json.loads(subprocess.check_output(['qemu-img','info','--output=json',str(self.manager.folder(meta)/'disk.qcow2')]))
-                    exists=any(s['name']==meta.get('snapshot_tag') for s in disk.get('snapshots',[]))
+                    exists=(self.manager.folder(meta)/'memory.enc').is_file() if meta.get('snapshot_format')=='gapmem1' else any(s['name']==meta.get('snapshot_tag') for s in disk.get('snapshots',[]))
                 except Exception: exists=False
                 meta['state']='hibernated' if exists else 'stopped'
             elif meta['state']=='running': meta['state']='stopped'

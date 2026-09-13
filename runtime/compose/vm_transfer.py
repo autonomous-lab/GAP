@@ -217,7 +217,7 @@ class Transfers:
             bundle=folder/'export'
             if bundle.exists():shutil.rmtree(bundle)
             bundle.mkdir(mode=0o700)
-            subprocess.run(['qemu-img','convert','-c','-O','qcow2',str(m.folder(meta)/'disk.qcow2'),str(bundle/'disk.qcow2')],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=900)
+            m.disk_crypto.execute(meta,'convert',m.folder(meta)/'disk.qcow2',output=bundle/'disk.qcow2')
             info=json.loads(subprocess.check_output(['qemu-img','info','--output=json',str(bundle/'disk.qcow2')],text=True))
             if 'backing-filename' in info:raise VMError('migration_disk_not_standalone')
             if shutil.disk_usage(folder).free < (bundle/'disk.qcow2').stat().st_size+64*1024**2:
@@ -255,7 +255,7 @@ class Transfers:
         info=json.loads(subprocess.check_output(['qemu-img','info','--output=json',str(staging/'disk.qcow2')],text=True))
         if info.get('format')!='qcow2' or 'backing-filename' in info or info.get('virtual-size')!=meta['disk_gib']*1024**3:
             raise VMError('migration_disk_format_mismatch')
-        subprocess.run(['qemu-img','check',str(staging/'disk.qcow2')],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)
+        m.disk_crypto.execute(meta,'check',staging/'disk.qcow2')
         # Keep validated data outside the live catalog. Activation will install
         # fresh host ports, capacity intents and billing bindings after handoff.
         atomic_json(staging/'.migration-fence',dict(transfer_id=identity,vm_id=meta['vm_id']))

@@ -109,6 +109,10 @@ class MicroVMs:
     def __init__(self, config, execute_guest):
         self.root = Path(config['state_dir']).resolve()
         self.images = Path(config['image_dir']).resolve()
+        from disk_crypto import DiskCrypto
+        self.disk_crypto = DiskCrypto(config.get('disk_keyring'))
+        if self.disk_crypto.path and self.disk_crypto.path.resolve().is_relative_to(self.root):
+            raise VMError('disk_keyring_must_be_outside_vm_storage')
         # QEMU option strings and UNIX socket paths must stay unambiguous.
         if not re.fullmatch(r'/[A-Za-z0-9_./-]+', str(self.root)) or len(str(self.root)) > 45:
             raise VMError('hypervisor_state_dir_must_be_short_absolute_safe_path')
@@ -212,7 +216,7 @@ class MicroVMs:
         atomic_json(self.catalog(key), meta)
 
     def qmp(self, meta, command, arguments=None):
-        if command not in ('query-status', 'quit', 'human-monitor-command', 'stop', 'cont'):
+        if command not in ('query-status', 'quit', 'human-monitor-command', 'stop', 'cont', 'migrate', 'query-migrate', 'migrate_cancel'):
             raise VMError('invalid_qmp_command')
         # QEMU's monitor accepts one connection at a time. Keep this mutex
         # separate from the lifecycle lock held by long guest deployments.
@@ -279,6 +283,7 @@ class MicroVMs:
                 result['state'] = self.qmp(meta, 'query-status')['status']
             except (OSError, VMError):
                 result['state'] = 'unknown' if self.alive(meta) else 'stopped'
+        result['disk_encryption'] = {'enabled':bool(meta.get('disk_encryption')), 'cipher':'AES-256-XTS' if meta.get('disk_encryption') else None}
         result['public_ports'] = meta.get('public_ports', [])
         if self.network:
             result['public_hostname'] = self.network.host
@@ -331,8 +336,11 @@ class MicroVMs:
         folder = self.folder(meta)
         folder.mkdir(mode=0o700)
         meta['image_version'] = self.image_version()
-        run(['qemu-img', 'create', '-f', 'qcow2', '-F', 'raw', '-b', str(self.images / 'rootfs.ext4'),
-             str(folder / 'disk.qcow2'), str(meta['disk_gib']) + 'G'])
+        self.disk_crypto.initialize(meta)
+        if self.disk_crypto.path:
+            self.disk_crypto.execute(meta, 'create', folder / 'disk.qcow2', size=str(meta['disk_gib'])+'G', base=self.images / 'rootfs.ext4')
+        else:
+            run(['qemu-img', 'create', '-f', 'qcow2', '-F', 'raw', '-b', str(self.images / 'rootfs.ext4'),str(folder/'disk.qcow2'),str(meta['disk_gib'])+'G'])
         seed = folder / 'seed'
         seed.mkdir(mode=0o700)
         run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(folder / 'client_key')])
@@ -408,7 +416,7 @@ class MicroVMs:
                 '-nodefaults', '-no-user-config', '-display', 'none',
                 '-serial', f'file:{folder}/serial.log' if self.diagnostic_serial else 'null', '-no-reboot',
                 '-sandbox', 'on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny',
-                '-drive', f'id=root,file={folder}/disk.qcow2,format=qcow2,if=none',
+                '-drive', f'id=root,file={folder}/disk.qcow2,format=qcow2,if=none'+(',encrypt.key-secret=gapdisk' if meta.get('disk_encryption') else ''),
                 '-device', 'virtio-blk-device,drive=root',
                 '-drive', f'id=seed,file={folder}/seed.ext4,format=raw,if=none,readonly=on',
                 '-device', 'virtio-blk-device,drive=seed',
@@ -463,8 +471,14 @@ class MicroVMs:
         self.save(meta)
         try:
             self.qmp(meta,'stop')
-            response=self.qmp(meta,'human-monitor-command',{'command-line':'savevm '+tag})
-            if response.strip(): raise VMError('snapshot_save_failed')
+            if meta.get('disk_encryption'):
+                from memory_crypto import save
+                save(self,meta)
+                meta['snapshot_format']='gapmem1'
+                self.save(meta)
+            else:
+                response=self.qmp(meta,'human-monitor-command',{'command-line':'savevm '+tag})
+                if response.strip(): raise VMError('snapshot_save_failed')
             self.qmp(meta,'quit')
             child=self.children.pop(meta['vm_id'],None)
             if child: child.wait(timeout=15)
@@ -485,6 +499,7 @@ class MicroVMs:
             raise
 
     def resume(self, meta):
+        self.disk_crypto.key(meta)
         if meta['state'] != 'hibernated':
             return self.start(meta)
         tag=meta.get('snapshot_tag','')
@@ -494,9 +509,11 @@ class MicroVMs:
             raise VMError('snapshot_requires_original_qemu_version')
         meta['state']='resuming'; self.save(meta)
         self.capture_start(meta)
+        if meta.get('disk_encryption'):
+            return self.resume_encrypted(meta)
         log=self.folder(meta)/'restore.log'
-        with log.open('wb') as error:
-            process=subprocess.Popen(self.command(meta)+['-loadvm',tag,'-S'],stdin=subprocess.DEVNULL,
+        with log.open('wb') as error, self.disk_crypto.secret(meta) as (secret, fds):
+            process=subprocess.Popen(self.command(meta)+[x.replace('--object','-object') for x in secret]+['-loadvm',tag,'-S'],pass_fds=fds,stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,stderr=error,env={'PATH':'/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'})
         self.children[meta['vm_id']]=process
         deadline=time.monotonic()+90
@@ -527,7 +544,46 @@ class MicroVMs:
             self.save(meta)
             raise
 
+    def resume_encrypted(self,meta):
+        from memory_crypto import restore
+        folder=self.folder(meta)
+        if meta.get('snapshot_format')!='gapmem1':
+            meta['state']='hibernated';self.save(meta)
+            raise VMError('snapshot_format_invalid')
+        (folder/'memory.sock').unlink(missing_ok=True)
+        process=None
+        try:
+            with (folder/'restore.log').open('wb') as log, self.disk_crypto.secret(meta) as (secret,fds):
+                process=subprocess.Popen(self.command(meta)+[x.replace('--object','-object') for x in secret]+['-incoming','unix:'+str(folder/'memory.sock'),'-S'],
+                    pass_fds=fds,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=log,
+                    env={'PATH':'/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'})
+            self.children[meta['vm_id']]=process
+            self.enforce_cpu(meta,process)
+            restore(self,meta,process)
+            deadline=time.monotonic()+90
+            while time.monotonic()<deadline:
+                if process.poll() is not None:raise VMError('snapshot_restore_failed')
+                try:
+                    if self.qmp(meta,'query-status')['status']=='paused':break
+                except OSError:pass
+                time.sleep(.02)
+            else:raise VMError('snapshot_restore_timeout')
+            if not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
+            meta['state']='running';self.save(meta)
+            self.qmp(meta,'cont')
+            if self.runtime:self.runtime.execution_started(meta)
+            (folder/'memory.enc').unlink()
+            meta.pop('snapshot_tag',None);meta.pop('snapshot_format',None);self.save(meta)
+        except Exception:
+            if process and process.poll() is None:process.terminate();process.wait(timeout=10)
+            self.capture_stop(meta)
+            if meta['state']=='resuming':meta['state']='hibernated'
+            else:meta['state']='stopped'
+            self.save(meta)
+            raise
+
     def start(self, meta):
+        self.disk_crypto.key(meta)
         if not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
         if meta['state'] == 'creating':
             raise VMError('vm_creation_incomplete_destroy_and_retry')
@@ -541,8 +597,8 @@ class MicroVMs:
         self.refresh_seed(meta)
         self.capture_start(meta)
         error_log = folder / 'hypervisor.log'
-        with (error_log.open('wb') if self.diagnostic_serial else open(os.devnull, 'wb')) as log:
-            process = subprocess.Popen(self.command(meta)+['-S'], stdin=subprocess.DEVNULL,
+        with (error_log.open('wb') if self.diagnostic_serial else open(os.devnull, 'wb')) as log, self.disk_crypto.secret(meta) as (secret, fds):
+            process = subprocess.Popen(self.command(meta)+[x.replace('--object','-object') for x in secret]+['-S'], pass_fds=fds, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=log, start_new_session=True,
                 env={'PATH': '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'})
         self.children[meta['vm_id']] = process
@@ -744,7 +800,7 @@ class MicroVMs:
                     if body.get('disk_gib', meta['disk_gib']) < meta['disk_gib']:
                         raise VMError('disk_shrink_not_supported')
                     if body.get('disk_gib', meta['disk_gib']) > meta['disk_gib']:
-                        run(['qemu-img', 'resize', str(self.folder(meta) / 'disk.qcow2'), str(body['disk_gib']) + 'G'])
+                        self.disk_crypto.execute(meta,'resize',self.folder(meta)/'disk.qcow2',size=str(body['disk_gib'])+'G')
                     for key in ('vcpus', 'memory_mib', 'disk_gib'):
                         meta[key] = body.get(key, meta[key])
                     with self.allocation_lock():
