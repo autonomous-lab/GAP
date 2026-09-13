@@ -963,3 +963,11 @@ Every new VM creation also runs this gate before inserting a job. Existing job
 retries, lease enforcement, stop/delete and resource release remain available.
 Process health alone is not admission readiness. Deploy the authority first when
 upgrading the readiness protocol; older authorities reject the probe.
+
+## Encrypted disks and hibernation
+
+New microVMs on the Elestio fleet use AES-256-XTS disk encryption and
+authenticated AES-256-GCM hibernation memory. Independent workers opt in with
+`hypervisor.disk_keyring`. See [configuration, recovery and coverage](./ENCRYPTION.md).
+Disk exports remain encrypted; trusted migration destinations require the matching
+key version. This does not claim host-wide encryption or live migration.

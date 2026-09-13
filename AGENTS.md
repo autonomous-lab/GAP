@@ -73,8 +73,9 @@ Humans can open `/account` on the operator gateway to view their common wallet,
 quotas and projects and manage agent memberships. It redirects to the isolated
 management origin. Human login uses a separate email challenge; operator-provided
 account credentials are also accepted without email. Account-wide credentials
-must not be given to agents. The page keeps credentials only in memory and logout
-revokes them. A reload requires reconnecting.
+must not be given to agents. The isolated account page uses a Secure, HttpOnly, SameSite=Strict browser-session
+cookie, so reloading restores a valid session. Logout revokes the credential and
+clears the cookie. Server-side session expiry still applies; this is not a permanent login.
 
 For an operator-bound project on another node, POST
 `/v1/cloud/projects/{project}/provision` with that project's signed management
@@ -1692,6 +1693,34 @@ CPU uses increments of 0.25, RAM increments of 256 MiB, disk increments of
 disk size required by the guest image. API creation and resize enforce these
 limits; existing allocations are not automatically changed.
 
+
+## MicroVM storage encryption
+
+**New microVMs on the Elestio fleet encrypt their disks and saved hibernation
+memory at rest.** This is built into the worker: applications do not need to
+manage disk passwords, and the host OS does not require a storage migration.
+Independent operators must explicitly enable encryption on their workers.
+
+- VM disk payloads use **AES-256-XTS through qcow2 LUKS**.
+- Saved hibernation memory uses **authenticated AES-256-GCM**; corrupted or
+  incomplete checkpoints are rejected before guest execution resumes.
+- Each VM has a distinct derived disk key. Keys are held outside the VM storage
+  directory and are not included in disk exports or guest images.
+- The cold-move export stays encrypted. Trusted destination nodes need the
+  matching operator key version. Moving still stops and restarts the VM; it
+  does not transfer live memory or provide host-failure protection.
+
+Check `disk_encryption.enabled` in the VM API response. The dashboard shows the
+AES-256 storage badge only when that VM reports encryption enabled. Do not infer
+coverage from a provider name or assume every independent node enables it.
+
+This covers disk payloads and retained hibernation memory, not qcow2 metadata,
+guest seed/SSH files, host swap/logs, other GAP databases, or a compromised host
+with access to its keyring. Encryption does not replace backups. Keep an
+independent recovery copy of the keyring; losing a required key prevents recovery.
+Rotation of the active key version affects new VMs, not existing disk contents.
+
+Operator configuration and recovery: [MicroVM encryption](./runtime/compose/ENCRYPTION.md).
 
 ## Moving a MicroVM between hosts
 
