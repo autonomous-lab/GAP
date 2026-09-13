@@ -75,6 +75,25 @@ class Transfers:
         identity=body['migration_id'];folder=self.folder(identity);action=body['operation']
         with self.guard:
             row=self.authority(identity)
+            if action=='binding':
+                meta=self.manager.read(row['project_id'],row['owner_did'],row['vm_id'])
+                target=folder/'target.json'
+                if not meta and target.exists():meta=json.loads(target.read_text())['meta']
+                return dict(row,vm=self.manager.public(meta) if meta else None,
+                    route_key=(meta or {}).get('catalog_key',row['project_id']),
+                    ingress=self.runner.ingress.public(meta) if self.runner.ingress and meta else {},
+                    kernel_sha256=sha(self.manager.images/'vmlinuz'),
+                    free_bytes=shutil.disk_usage(folder).free,
+                    memory_available_mib=next(int(line.split()[1]) for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))//1024,
+                    cpu_flags=next((line.split(':',1)[1].split() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('flags')),[]))
+            if action=='route':return self.route(identity,body)
+            if action=='prune':
+                self.authority(identity,'target')
+                if row['phase']!='committed' or not (folder/'activated.json').exists():raise VMError('migration_target_not_activated')
+                for name in ('import.tar','upload.json'):
+                    path=folder/name
+                    if path.exists():path.unlink()
+                return dict(phase='pruned')
             if action=='policy':
                 if row.get('home_node')!=self.runner.runtime.ledger.config['node_id']:
                     raise VMError('migration_origin_node_required')
@@ -89,10 +108,10 @@ class Transfers:
                 manifest=folder/'upload.json';archive=folder/'import.tar'
                 if not manifest.exists():return dict(received=0)
                 return dict(json.loads(manifest.read_text()),received=archive.stat().st_size if archive.exists() else 0)
-            if action in ('settle','activate','restore','discard'):
+            if action in ('settle','activate','restore','discard','cleanup'):
                 side='target' if action in ('activate','discard') else 'source'
                 row=self.authority(identity,side)
-                allowed={'settle':('target_staged','source_settled','routing_ready','committed'),'activate':('committed',),'restore':('target_discarded','cancelled'),'discard':('cancelling','target_discarded','cancelled')}[action]
+                allowed={'settle':('target_staged','source_settled','routing_ready','committed'),'activate':('committed',),'restore':('target_discarded','cancelled'),'discard':('cancelling','target_discarded','cancelled'),'cleanup':('committed',)}[action]
                 if row['phase'] not in allowed:raise VMError('migration_phase_conflict')
                 if identity in self.tasks:return {'phase':'working','operation':action}
                 # Activation must recheck current capacity even after an earlier
@@ -163,7 +182,7 @@ class Transfers:
     def run(self,identity,action):
         folder=self.folder(identity)
         try:
-            result={'export':self.export,'import':self.receive,'settle':self.settle,'activate':self.activate,'restore':self.restore,'discard':self.discard}[action](identity)
+            result={'export':self.export,'import':self.receive,'settle':self.settle,'activate':self.activate,'restore':self.restore,'discard':self.discard,'cleanup':self.cleanup}[action](identity)
             result=dict(result)
             result.setdefault('phase',action+'ed')
             result['operation']=action
@@ -207,7 +226,7 @@ class Transfers:
                 if name in ('disk.qcow2','meta.json'):continue
                 dest=bundle/name;dest.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
                 shutil.copy2(m.folder(meta)/name,dest)
-            atomic_json(bundle/'meta.json',dict(meta=meta,kernel_sha256=sha(m.images/'vmlinuz'),origin_url=meta.get('ingress_origin',m.ingress_origin),restore_running=json.loads((folder/'intent.json').read_text())['restore_running']))
+            atomic_json(bundle/'meta.json',dict(meta=meta,kernel_sha256=sha(m.images/'vmlinuz'),origin_url=meta.get('ingress_origin',m.ingress_origin),http_origin_node=meta.get('http_origin_node',self.runner.runtime.ledger.config['node_id']),restore_running=json.loads((folder/'intent.json').read_text())['restore_running']))
             disk_digest=sha(bundle/'disk.qcow2')
             temporary=folder/'export.next'
             with tarfile.open(temporary,'w') as tar:
@@ -244,6 +263,60 @@ class Transfers:
         self.runner.runtime.ledger.transport(dict(action='migration-attest',request_id=identity+':target',migration_id=identity,revision=row['revision'],stage='target-staged',evidence_id=identity+':import',disk_sha256=row['disk_sha256']))
         return dict(vm_id=meta['vm_id'],disk_sha256=row['disk_sha256'],execution_authorized=False)
 
+    def route(self,identity,body):
+        row=self.authority(identity,'source');m=self.manager
+        if row['phase'] not in ('source_settled','routing_ready'):raise VMError('migration_phase_conflict')
+        config=json.loads(Path(self.runner.path).read_text())
+        peer=config.get('migration_peers',{}).get(row['target_node'])
+        if not peer:raise VMError('migration_peer_not_configured')
+        username=body.get('username');password=body.get('password')
+        if not isinstance(username,str) or not re.fullmatch('[A-Za-z0-9_-]{1,64}',username):raise VMError('invalid_migration_route_credentials')
+        if not isinstance(password,str) or not 12<=len(password.encode())<=128 or any(ord(c)<32 for c in password):raise VMError('invalid_migration_route_credentials')
+        meta=m.read(row['project_id'],row['owner_did'],row['vm_id'])
+        fence=m.folder(meta)/'.migration-fence'
+        if not fence.exists() or json.loads(fence.read_text()).get('transfer_id')!=identity or m.alive(meta):raise VMError('migration_source_not_fenced')
+        path=m.root/'migration-routes.json';routes=json.loads(path.read_text()) if path.exists() else {}
+        entry=dict(migration_id=identity,project_id=row['project_id'],owner_did=row['owner_did'],
+            route_key=meta.get('catalog_key',row['project_id']),origin=peer['origin'],username=username,password=password,forwarded=meta.get('migration_http_hop',False))
+        routes[row['vm_id']]=entry;atomic_json(path,routes)
+        if not self.runner.ingress:raise VMError('migration_ingress_required')
+        self.runner.ingress.sync()
+        return dict(phase='routes_ready',evidence_id=identity+':proxy')
+
+    def remove_route(self,identity):
+        path=self.manager.root/'migration-routes.json'
+        with self.guard:
+            values=json.loads(path.read_text()) if path.exists() else {}
+            values={vm:entry for vm,entry in values.items() if entry['migration_id']!=identity}
+            if path.exists():atomic_json(path,values)
+        if self.runner.ingress:self.runner.ingress.sync()
+
+    def cleanup(self,identity):
+        row=self.authority(identity,'source');m=self.manager;folder=self.folder(identity)
+        if row['phase']!='committed':raise VMError('migration_handoff_required')
+        # Coordinator requests cleanup only after target HTTP and runtime checks;
+        # independently require target's persisted activation receipt as well.
+        from migration_peer import request
+        reply=request(json.loads(Path(self.runner.path).read_text()),row['target_node'],
+            dict(operation='status',migration_id=identity))
+        if reply.get('phase')!='activated':raise VMError('migration_target_not_activated')
+        with self.runner.runtime.lock(row['project_id']):
+            meta=m.read(row['project_id'],row['owner_did'],row['vm_id'])
+            fence=m.folder(meta)/'.migration-fence'
+            if not fence.exists() or json.loads(fence.read_text()).get('transfer_id')!=identity or m.alive(meta):raise VMError('migration_source_not_fenced')
+            meta.update(state='migrated',outgoing_migration=identity,migrated_to=row['target_node'],ports=[],public_ports=[],public_mappings=[],public_targets={})
+            m.save(meta)
+            for path in m.folder(meta).iterdir():
+                if path.name in ('.migration-fence','.migration-meter-off'):continue
+                if path.is_dir():shutil.rmtree(path)
+                else:path.unlink()
+            for name in ('export','export.tar','export.next'):
+                path=folder/name
+                if path.is_dir():shutil.rmtree(path)
+                elif path.exists():path.unlink()
+            if self.runner.ingress:self.runner.ingress.sync()
+            return dict(phase='cleaned')
+
     def discard(self,identity):
         """Acknowledge cancellation only after every staged target copy is gone."""
         row=self.authority(identity,'target');folder=self.folder(identity)
@@ -276,6 +349,7 @@ class Transfers:
             meta=m.read(project,owner,row['vm_id'])
             if not meta or meta['state']=='destroyed':raise VMError('migration_vm_missing')
             self.runner.authorize(project,owner)
+            self.remove_route(identity)
             with m.owner_lock(owner):
                 fence=m.folder(meta)/'.migration-fence'
                 marker=m.folder(meta)/'.migration-meter-off'
@@ -355,11 +429,20 @@ class Transfers:
             with m.owner_lock(owner):
                 remote=m.capacity.adopt_migrated_vm(project,owner,vm)
                 meta=next((r for r in m.list(project,owner) if r['vm_id']==vm),None)
+                if meta and meta['state']=='migrated':
+                    marker=m.folder(meta)/'.migration-fence'
+                    previous=meta.get('outgoing_migration')
+                    if not previous or not marker.exists() or json.loads(marker.read_text()).get('transfer_id')!=previous or m.alive(meta):
+                        raise VMError('migration_target_collision')
+                    self.remove_route(previous)
+                    shutil.rmtree(m.folder(meta))
+                    m.catalog(meta.get('catalog_key',project)).unlink()
+                    meta=None
                 if meta is None:
                     meta=dict(receipt['meta'])
                     if m.capacity.resources(meta)!=remote['committed']:raise VMError('migration_resource_mismatch')
                     meta.update(state='stopped',ports=[],image_version=m.image_version(),retained=False,
-                                ingress_origin=receipt['origin_url'],migration_id=identity)
+                                ingress_origin=receipt['origin_url'],http_origin_node=receipt.get('http_origin_node',row.get('home_node')),migration_id=identity,migration_http_hop=receipt['origin_url'].rstrip('/')!=getattr(m,'ingress_origin','').rstrip('/'))
                     for key in ('pid','snapshot_tag','snapshot_qemu_version','public_ports','public_targets','public_mappings'):
                         meta.pop(key,None)
                     with m.allocation_lock():

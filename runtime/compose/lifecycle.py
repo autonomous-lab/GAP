@@ -334,6 +334,7 @@ class Runtime:
 
     def tick_project(self,path):
         meta=json.loads(path.read_text())
+        if meta['state']=='migrated':return
         project=meta['project_id']
         if meta['state']=='destroyed' and not self.storage_bytes(meta):
             if self.ledger.view(project,meta['owner_did'],include_entries=False)['deletion_committed']: self.expire(meta)

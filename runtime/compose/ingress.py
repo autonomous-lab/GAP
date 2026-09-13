@@ -1,5 +1,6 @@
 """Dedicated Caddy ingress for managed guests; never configures the shared edge."""
 import json
+import base64
 from pathlib import Path
 import re
 import threading
@@ -109,13 +110,15 @@ class Ingress:
                 'guest_port': configured.get('guest_port'), 'base_path': prefix + '/',
                 'url': meta.get('ingress_origin',self.public_url) + prefix + '/',
                 'routed': meta['vm_id'] in self.applied,
+                'visitor_settings_local':meta.get('ingress_origin',self.public_url).rstrip('/')==self.public_url.rstrip('/'),
+                'visitor_settings_node':meta.get('http_origin_node'),
                 'note': 'Routing configuration only; not application health'}
 
     def configuration(self, exclude=None):
         routes, applied = [], set()
         for path in sorted((self.manager.root / 'catalog').glob('*.json')):
             meta = json.loads(path.read_text())
-            if exclude in (meta['project_id'],meta['vm_id']) or meta['state'] in ('creating', 'destroyed'):
+            if exclude in (meta['project_id'],meta['vm_id']) or meta['state'] in ('creating', 'destroyed', 'migrated'):
                 continue
             settings = meta.get('ingress', {})
             state=self.manager.public(meta)['state']
@@ -131,13 +134,34 @@ class Ingress:
             }], 'terminal': True})
             routes.append({'match': [{'path': [prefix + '/*'], 'header': {'X-GAP-VM-Identity': [meta['vm_id']]}}], 'handle': [
                 {'handler': 'rewrite', 'strip_path_prefix': prefix},
+                *([{'handler':'subroute','routes':[{'match':[{'header':{'X-GAP-Origin-Host':['*']}}],'handle':[{'handler':'headers','request':{'set':{'Authorization':['{http.request.header.X-GAP-Origin-Authorization}'],'Host':['{http.request.header.X-GAP-Origin-Host}']}}}]}]}] if meta.get('migration_http_hop') else []),
                 {'handler': 'reverse_proxy', 'upstreams': [{'dial': '127.0.0.1:' + str(self.manager.runtime.gateway.port if self.manager.runtime and self.manager.runtime.gateway else port)}],
                  'headers': {'request': {'set': {
                      **({'X-GAP-Project': [meta['project_id']], 'X-GAP-VM': [meta['vm_id']]} if self.manager.runtime else {}),
                      'X-Forwarded-Proto': [urlsplit(self.public_url).scheme]
-                 }, 'delete': ['X-GAP-VM-Admission', 'X-GAP-VM-Identity']}, 'response': {'delete': ['Service-Worker-Allowed']}}}
+                 }, 'delete': ['X-GAP-VM-Admission', 'X-GAP-VM-Identity', 'X-GAP-Origin-Authorization', 'X-GAP-Origin-Host']}, 'response': {'delete': ['Service-Worker-Allowed']}}}
             ], 'terminal': True})
             applied.add(meta['vm_id'])
+        remote_file=self.manager.root/'migration-routes.json'
+        remote=json.loads(remote_file.read_text()) if remote_file.exists() else {}
+        for vm,entry in remote.items():
+            if exclude in (vm,entry['project_id']):continue
+            meta=self.manager.read(entry['project_id'],entry['owner_did'],vm)
+            if not meta:continue
+            fence=self.manager.folder(meta)/'.migration-fence'
+            if not fence.exists() or json.loads(fence.read_text()).get('transfer_id')!=entry['migration_id']:continue
+            target=urlsplit(entry['origin'])
+            if target.scheme!='https' or not target.hostname or target.username or target.password or target.path not in ('','/') or target.query or target.fragment:
+                raise VMError('invalid_migration_route_origin')
+            prefix=self.prefix(entry['route_key'])
+            auth=base64.b64encode((entry['username']+':'+entry['password']).encode()).decode()
+            routes.append({'match':[{'path':[prefix,prefix+'/*'],'header':{'X-GAP-VM-Identity':[vm]}}],
+                'handle':([{'handler':'headers','request':{'set':{'X-GAP-Origin-Authorization':['{http.request.header.Authorization}'],'X-GAP-Origin-Host':['{http.request.host}']}}}] if not entry.get('forwarded') else [])+[{'handler':'reverse_proxy','upstreams':[{'dial':target.netloc if target.port else target.hostname+':443'}],
+                    'transport':{'protocol':'http','tls':{'server_name':target.hostname}},
+                    'headers':{'request':{'set':{'Authorization':['Basic '+auth],'Host':[target.netloc]},
+                        'delete':['X-GAP-VM-Admission','X-GAP-VM-Identity']},
+                        'response':{'delete':['Service-Worker-Allowed']}}}], 'terminal':True})
+            applied.add(vm)
         if self.admission_token:
             for route in routes:
                 for match in route.get('match',[]):

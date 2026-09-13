@@ -44,6 +44,7 @@ class Application:
         if type(allow_migration_journal) is not bool:
             raise ValueError("invalid migration journal configuration")
         self.allow_migration_journal = allow_migration_journal
+        self.migrations = None
         credentials = [admin, *nodes.values(), *self.identity_nodes.values(), *([report_token] if report_token else [])]
         if type(allow_debits) is not bool or len(set(credentials)) != len(credentials):
             raise ValueError('control credentials must be distinct')
@@ -231,6 +232,18 @@ class Application:
         if method=='GET' and parsed.path=='/v1/nodes':
             prices=self.finance.prices.get() if self.finance else {}
             return {'nodes':[{'node_id':n,'console_path':self.console_paths.get(n),'pricing':prices.get(n,{'available':False})} for n in sorted(self.nodes)]}
+        if parsed.path=='/v1/migrations':
+            if not self.migrations:raise Failure('migrations_disabled',409)
+            if method=='POST':return self.migrations.submit(actor,body)
+            if method=='GET':
+                identity=parse_qs(parsed.query).get('migration_id',[''])[0]
+                if identity:return self.migrations.status(actor,identity)
+                with a.db() as db:
+                    rows=db.execute('''SELECT m.id FROM vm_migrations m JOIN migration_jobs j ON j.id=m.id
+                        WHERE m.customer=? AND (? IS NULL OR EXISTS(SELECT 1 FROM grants g WHERE g.project=m.project
+                        AND g.agent=? AND g.role IN ('owner','operator'))) ORDER BY m.created DESC LIMIT 100''',
+                        (actor['customer'],actor['agent'],actor['agent'])).fetchall()
+                return {'migrations':[self.migrations.status(actor,r[0]) for r in rows]}
         if parsed.path == '/v1/members' and self.access:
             if method=='GET':return self.access.members(actor)
             if method=='POST':return self.access.membership(actor,body)
@@ -355,7 +368,14 @@ def main():
                           config.get('allow_capacity', False), access,
                           {node: secret(path) for node, path in config.get('identity_token_files', {}).items()},
                           config.get('console_paths',{}),finance,
-                          secret(config['report_token_file']) if config.get('report_token_file') else None)
+                          secret(config['report_token_file']) if config.get('report_token_file') else None,
+                          config.get('allow_migration_journal',False))
+        if config.get('migration_peers'):
+            if not app.allow_migration_journal or not app.allow_capacity or not app.allow_reservations or not access or not finance:
+                raise ValueError('migration dependencies are required')
+            if not set(config['migration_peers'])<=set(app.nodes):raise ValueError('unknown migration peer')
+            from migration_service import Migrations
+            app.migrations=Migrations(authority,access,config['migration_peers'],finance.prices)
     except (OSError, ValueError, KeyError, sqlite3.Error):
         raise SystemExit('Cannot initialize operator authority; inspect configuration privately.') from None
     Server((args.bind, args.port), app).serve_forever()

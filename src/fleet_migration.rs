@@ -14,7 +14,7 @@ fn admitted(method: &str, expected: &str, auth: Option<&str>, body: &Value) -> b
                 && s.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)))
         })
         && body["operation"].as_str().is_some_and(|op| matches!(op,
-            "status" | "upload-status" | "policy" | "export" | "import" | "read" | "write" | "settle" | "activate" | "discard" | "restore"))
+            "prune" | "node-admission" | "binding" | "route" | "cleanup" | "status" | "upload-status" | "policy" | "export" | "import" | "read" | "write" | "settle" | "activate" | "discard" | "restore"))
 }
 
 pub fn worker(state: &Arc<Mutex<NodeState>>, method: &str, path: &str,
@@ -27,6 +27,15 @@ pub fn worker(state: &Arc<Mutex<NodeState>>, method: &str, path: &str,
     // Release the node lock before contacting the worker.
     let runner = state.lock().ok().and_then(|s|
         s.private_node.as_ref().and_then(|p| p.runner.clone()));
+    if body["operation"]=="node-admission" {
+        let Some(runner)=runner else {return Some((503,json!({"error":{"code":"migration_worker_unavailable"}})))};
+        let mut request=body.clone();request["operation"]=json!("binding");
+        let (status,result)=crate::private_node::forward(&runner,"","","POST","admin/migration",request);
+        if status!=200 {return Some((status,result))}
+        let allowed=state.lock().ok().is_some_and(|s|s.private_node.as_ref().is_some_and(|p|
+            result["owner_did"].as_str().is_some_and(|owner|p.authorize(owner).is_ok() && p.authorize_compose(owner).is_ok())));
+        return Some(if allowed {(200,result)} else {(403,json!({"error":{"code":"migration_target_approval_required"}}))});
+    }
     Some(match runner {
         Some(r) => crate::private_node::forward(&r, "", "", "POST", "admin/migration", body.clone()),
         None => (503, json!({"error":{"code":"migration_worker_unavailable"}})),

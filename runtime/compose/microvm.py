@@ -274,7 +274,7 @@ class MicroVMs:
         if not meta:
             return {'state': 'absent'}
         result = {key: meta[key] for key in ('vm_id', 'project_id', 'state', 'vcpus', 'memory_mib', 'disk_gib', 'ports')}
-        if meta['state'] not in ('destroyed', 'creating', 'hibernated', 'hibernating', 'resuming'):
+        if meta['state'] not in ('destroyed', 'creating', 'hibernated', 'hibernating', 'resuming', 'migrated'):
             try:
                 result['state'] = self.qmp(meta, 'query-status')['status']
             except (OSError, VMError):

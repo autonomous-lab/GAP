@@ -349,6 +349,10 @@ class Runner:
         selected = body.get('vm_id') if isinstance(body,dict) else None
         if selected is not None and not re.fullmatch(r'vm_[0-9a-f]{32}',str(selected)):
             raise Failure(400,'invalid_vm_identity')
+        if self.hypervisor and action not in ('vms','credits','budget','') and not (isinstance(action,str) and action.startswith('jobs/')):
+            moved=self.hypervisor.read(project,owner,selected)
+            if moved and moved['state']=='migrated' and not (method=='GET' and action in ('vm','ingress','runtime')):
+                return 409,{'error':{'code':'vm_migrated','node_id':moved['migrated_to'],'vm_id':moved['vm_id']}}
         if isinstance(action,str) and action.startswith('terminal/') and action!='terminal/prepare':
             if not self.terminals: raise Failure(409,'terminal_not_configured')
             if method != 'POST': raise Failure(405,'terminal_post_required')
@@ -377,6 +381,8 @@ class Runner:
                 if not isinstance(body,dict) or set(body)!={'request_id','budget_microcredits'}:
                     raise Failure(400,'invalid_budget')
                 with self.runtime.lock(project):
+                    if body['budget_microcredits'] is not None and any(m.get('migration_id') or m.get('outgoing_migration') or (self.hypervisor.folder(m)/'.migration-fence').exists() for m in self.hypervisor.list(project,owner)):
+                        raise Failure(409,'migration_project_budget_requires_central_support')
                     for meta in self.hypervisor.list(project,owner): self.runtime.sample(meta)
                     return 200,self.runtime.ledger.set_budget(project,owner,body['budget_microcredits'],body['request_id'])
             if action!='runtime' or method!='PUT': raise Failure(400,'invalid_runtime_method')

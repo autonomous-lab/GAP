@@ -49,6 +49,26 @@ class IngressTests(unittest.TestCase):
         self.assertTrue(config['admin']['listen'].startswith('unix/'))
         self.assertNotIn('tls', config['apps'])  # normal automatic public TLS
 
+    def test_migrated_route_requires_fence_and_uses_authenticated_tls(self):
+        identity='move_'+'d'*32
+        self.meta.update(state='migrated',ingress={'enabled':True,'guest_port':8000})
+        self.manager.save(self.meta)
+        folder=self.manager.folder(self.meta);folder.mkdir(parents=True,exist_ok=True)
+        marker=folder/'.migration-fence';marker.write_text(json.dumps({'transfer_id':identity}))
+        entry=dict(migration_id=identity,project_id=PROJECT,owner_did=OWNER,route_key=PROJECT,
+            origin='https://target.example',username='migration',password='private-hop-password')
+        (self.manager.root/'migration-routes.json').write_text(json.dumps({VM:entry}))
+        config,applied=self.ingress.configuration();self.assertEqual(applied,{VM})
+        route=config['apps']['http']['servers']['compose']['routes'][0]
+        self.assertEqual(route['match'][0]['header']['X-GAP-VM-Identity'],[VM])
+        self.assertEqual(route['match'][0]['header']['X-GAP-VM-Admission'],['ab'*32])
+        self.assertEqual(route['handle'][-1]['transport']['tls'],{'server_name':'target.example'})
+        self.assertEqual(route['handle'][-1]['upstreams'],[{'dial':'target.example:443'}])
+        self.assertTrue(route['handle'][-1]['headers']['request']['set']['Authorization'][0].startswith('Basic '))
+        self.assertEqual(route['handle'][0]['request']['set']['X-GAP-Origin-Authorization'],['{http.request.header.Authorization}'])
+        marker.unlink()
+        self.assertEqual(self.ingress.configuration()[1],set())
+
     def test_undeclared_guest_port_is_forwarded_without_a_public_slot(self):
         # An application port must not need a public slot or a VM restart to be routed.
         self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 9000})

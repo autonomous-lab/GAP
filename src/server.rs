@@ -7817,6 +7817,13 @@ pub fn route_with_ip(
                 Some(_) => return (400,json!({"error":{"code":"invalid_cursor"}})),
                 None=>String::new(),
             }
+        } else if path=="/v1/fleet/migrations" {
+            let params=parse_url_params(raw_path);
+            match params.get("migration_id") {
+                Some(v) if v.len()==37 && v.starts_with("move_") && v[5..].bytes().all(|b|b.is_ascii_hexdigit())=>format!("?migration_id={v}"),
+                Some(_)=>return (400,json!({"error":{"code":"invalid_migration_id"}})),
+                None=>String::new(),
+            }
         } else {String::new()};
         drop(guard);
         return crate::fleet_relay::forward_client(&format!("http://172.17.0.1:8096{target}{query}"),method,auth,body_bytes);
