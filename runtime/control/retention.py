@@ -1,5 +1,6 @@
 """Central 72-hour retention; a partition or held allowance is never exhaustion."""
 from authority import Failure, identifier
+import suspension
 
 SECONDS = 72 * 3600
 
@@ -25,7 +26,9 @@ def status(a,node,project,owner):
         if p['owner']!=owner:raise Failure('retention_owner_mismatch',403)
         since=refresh(a,db,p['customer'])
         claim=db.execute('SELECT claim,state FROM retention_claims WHERE node=? AND project=?',(node,project)).fetchone()
-        return dict(exhausted_at=since,delete_after=since+SECONDS if since is not None else None,
+        until=suspension.hold(db,p['customer'])
+        return dict(exhausted_at=since,delete_after=max(since+SECONDS,until or 0) if since is not None else None,
+                    suspension_hold_until=until,
                     claim_id=claim['claim'] if claim and claim['state']=='claimed' else None)
 
 
@@ -38,7 +41,7 @@ def claim(a,node,project,owner,claim_id):
         if old and old['claim']==claim_id:return dict(claim_id=claim_id,state=old['state'])
         if old and old['state']=='claimed':raise Failure('retention_claim_conflict',409)
         since=refresh(a,db,p['customer'])
-        if since is None or a.clock()<since+SECONDS:raise Failure('retention_not_due',409)
+        if since is None or a.clock()<max(since+SECONDS,suspension.hold(db,p['customer']) or 0):raise Failure('retention_not_due',409)
         db.execute("INSERT INTO retention_claims VALUES(?,?,?,'claimed') ON CONFLICT(node,project) DO UPDATE SET claim=excluded.claim,state='claimed'",(node,project,claim_id))
         # The claim fences this project's future reservations even if the owner
         # tops up immediately afterwards. Other projects can use the new funds.

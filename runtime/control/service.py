@@ -136,6 +136,10 @@ class Application:
                     raise Failure('unknown_trusted_node')
                 return migration_journal.prepare(a, request, body['customer_id'], body['project_id'],
                     body['vm_id'], body['source_node'], body['target_node'], body['capacity_revision'])
+            if action in ('suspension-set','suspension-status'):
+                import suspension
+                if action=='suspension-status':return suspension.status(a,body.get('customer_id','*'))
+                return suspension.set_policy(a,request,body)
             if action == 'create-customer':
                 return a.create_customer('operator', request, body['label'])
             if action == 'attach-principal':
@@ -185,6 +189,9 @@ class Application:
                         body['revision'], body['stage'], body['evidence_id'])
                 return migration_journal.attest(a, actor, body['request_id'], body['migration_id'],
                     body['revision'], body['stage'], body['evidence_id'], body['disk_sha256'])
+            if body.get('action') == 'suspension-snapshot':
+                import suspension
+                return suspension.snapshot(a,actor)
             if body.get('action') == 'readiness':
                 return dict(operator_id=a.operator,node_id=actor,protocol='fleet-admission-v1',
                             reservations=self.allow_reservations,capacity=self.allow_capacity)

@@ -138,6 +138,7 @@ fn main() -> Result<()> {
     }
 
     let state = Arc::new(Mutex::new(state));
+    gap::fleet_policy::start(&state).map_err(gap::Error::Other)?;
 
     let server = Arc::new(
         Server::http(&addr)

@@ -9,6 +9,7 @@ import re
 import secrets
 
 from authority import Failure, encode, identifier
+import suspension
 
 
 class Access:
@@ -54,6 +55,7 @@ class Access:
             if member and (not human or member[0] != human[0]):
                 raise Failure('legacy_identity_reconciliation_required', 409)
             customer = human[0] if human else 'cus_' + secrets.token_hex(16)
+            suspension.check(db, customer)
             if not human:
                 db.execute('INSERT INTO customers(id,label,created) VALUES(?,?,?)', (customer, 'Verified customer', int(self.a.clock())))
                 db.execute('INSERT INTO verified_emails VALUES(?,?)', (email, customer))
@@ -144,6 +146,7 @@ class Access:
         if type(ttl) is not int or not 30 <= ttl <= 300:
             raise Failure('invalid_token_lifetime')
         with self.a.db() as db:
+            suspension.check(db, actor['customer'])
             row = db.execute('SELECT * FROM projects WHERE id=? AND customer=?', (project, actor['customer'])).fetchone()
             if not row:
                 raise Failure('project_membership_required', 403)

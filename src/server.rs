@@ -497,6 +497,7 @@ pub struct NodeState {
     pub private_node: Option<crate::private_node::PrivateNode>,
     pub registration: Option<Arc<crate::registration::Registration>>,
     pub fleet_access: Option<crate::fleet_access::Access>,
+    pub fleet_policy: Option<Arc<crate::fleet_policy::Policy>>,
     pub cloud_admin: Option<Arc<crate::cloud_admin::Admin>>,
     /// Verified custom hostname -> project mapping. Kept globally so a TLS
     /// handshake and a Host-routed request are O(1), not a scan of tenant DBs.
@@ -960,6 +961,7 @@ impl NodeState {
             private_node: None,
             registration: None,
             fleet_access: None,
+            fleet_policy: None,
             cloud_admin: None,
             custom_domains,
             vm_http,
@@ -2572,12 +2574,20 @@ the content inline"
     }
 
     fn agent_suspended(&self,did:&str)->bool {
-        self.cloud_suspensions.get(did).is_some_and(|r|r.current.active)
+        self.cloud_suspensions.get(did).is_some_and(|r|r.current.active) || self.fleet_policy.as_ref().is_some_and(|policy| {
+            let email = match self.storage.get_state("cloud_verified_agent_emails",did) {
+                Ok(record)=>record.and_then(|r|serde_json::from_str::<Value>(&r.value).ok())
+                    .and_then(|v|v["email"].as_str().map(|s|crate::sha256_hex(s.to_lowercase().as_bytes()))),
+                Err(_)=>return true,
+            };
+            policy.blocked(Some(did),email.as_deref(),None)
+        })
     }
 
     fn active_cloud_project(&self,id:&str)->bool {
         self.cloud_projects.get(id).is_some_and(|p|p.status=="active" && !self.agent_suspended(&p.owner_did))
             && !self.cloud_project_suspensions.get(id).is_some_and(|r|r.current.active)
+            && !self.fleet_policy.as_ref().is_some_and(|p|p.blocked(None,None,Some(id)))
     }
 
     fn workload_policy(&self,project_id:&str,compose:bool)->Value {
@@ -2586,7 +2596,7 @@ the content inline"
         let project_suspension=self.cloud_project_suspensions.get(project_id);
         // Both counters are durable and only increase. Restoring one scope
         // cannot roll back a newer decision at the other scope.
-        let generation=suspension.map_or(0,|r|r.current.generation).saturating_add(project_suspension.map_or(0,|r|r.current.generation));
+        let generation=suspension.map_or(0,|r|r.current.generation).saturating_add(project_suspension.map_or(0,|r|r.current.generation)).saturating_add(self.fleet_policy.as_ref().map_or(0,|p|p.sequence()));
         let admission=self.private_node.as_ref().is_none_or(|p|p.authorize(&project.owner_did).is_ok() && (!compose || p.microvm_quota(&project.owner_did).is_ok()));
         json!({"allowed":self.active_cloud_project(project_id) && admission,"owner_did":project.owner_did,"generation":generation,"suspended":self.agent_suspended(&project.owner_did) || project_suspension.is_some_and(|r|r.current.active),"lease_seconds":5})
     }

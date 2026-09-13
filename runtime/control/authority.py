@@ -95,6 +95,8 @@ class Authority:
             schema(db)
             import retention
             retention.schema(db)
+            import suspension
+            suspension.schema(db)
             import migration_journal
             migration_journal.schema(db)
             if db.execute("SELECT value FROM metadata WHERE key='operator'").fetchone()[0] != operator:
@@ -299,6 +301,8 @@ class Authority:
                     cpu=cpu, memory=memory, expected_revision=expected_revision)
         def apply(db):
             placement = self.node_project(db, node, project)
+            import suspension
+            suspension.check(db, placement['customer'])
             import migration_journal
             migration_journal.guard_capacity(db, vm)
             if placement['owner'] != owner:
@@ -593,6 +597,8 @@ class Authority:
         expires = int(self.clock()) + ttl
         with self.db() as db:
             self.customer(db, customer)
+            import suspension
+            suspension.check(db, customer)
             if agent is not None:
                 row = db.execute("SELECT customer FROM principals WHERE kind='agent' AND subject=?", (agent,)).fetchone()
                 if not row or row[0] != customer:
@@ -610,6 +616,8 @@ class Authority:
                              (hashlib.sha256(token.encode()).hexdigest(), int(self.clock()))).fetchone()
             if not row:
                 raise Failure('invalid_control_credentials', 401)
+            import suspension
+            suspension.check(db, row['customer'])
             return dict(customer=row['customer'], agent=row['agent'])
 
     def revoke(self, token):

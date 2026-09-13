@@ -673,3 +673,55 @@ read-only probe returns the authenticated node and operator identities,
 `protocol: fleet-admission-v1`, and the reservation/capacity feature flags. Workers
 check it before admitting new VM creations. It does not extend an existing lease
 or allocate capacity/credits; normal checkpoint and capacity checks still apply.
+
+## Customer and fleet suspension
+
+Operator-only `POST /operator` accepts `suspension-set` and `suspension-status`.
+Use `scripts/fleet-control.py call --request-file <private-request.json>` on the
+control host. Node, identity and customer credentials cannot change decisions.
+
+```json
+{"action":"suspension-set","request_id":"abuse-case-123","scope":"customer","customer_id":"cus_...","active":true,"expected_revision":0,"reason":"Abuse case reviewed by operator","retention_hours":72}
+```
+
+A reason (10–1000 characters) and current revision are mandatory. Reuse the
+identical request ID/body after a lost response. Request status and the last 100
+audit events with `{"action":"suspension-status","customer_id":"cus_..."}`.
+For an operator-wide stop use `scope:operator`; inspect its status by omitting
+`customer_id`. Restore explicitly with `active:false`, a new request ID and the
+current revision. Restoring a customer does not undo an operator-wide stop or
+any local agent/project suspension.
+
+Suspension revokes control sessions and blocks new account/project credentials
+and VM allocations. Nodes also deny existing signed project capabilities, local
+owner tokens and application access after convergence. Linked identities and
+projects, including migrated VMs, are covered. Locally verified email hashes
+prevent a new DID with the same verified address from bypassing a decision.
+A previously unknown email cannot automatically be identified as the same human;
+this does not promise universal protection against new identities.
+
+Enable `GAP_FLEET_POLICY_ENABLED=1` on each node only after updating the worker
+and control service. The node polls the authenticated internal worker RPC
+`admin/customer-policy`; the worker fetches `suspension-snapshot` using its
+existing fleet node credential. No new secret is required. Snapshots identify
+operator/node and have a durable increasing sequence. They expire five seconds
+from request start; polling runs every two seconds. Failed, invalid or older
+responses never extend a lease. Startup and expired policy deny execution.
+Existing watchdogs cut connections and pause/hibernate workloads independently
+of deployment locks. Allow the node lease plus the existing five-second workload
+lease for propagation; this is not an instantaneous global transaction.
+Control availability is required; high availability is a separate concern.
+
+`retention_hours` preserves data during an active suspension (default 72,
+maximum 720; zero disables the hold). It delays central insufficient-credit
+purges until that time, without deleting data automatically at expiry or waiving
+storage charges. Normal retention applies afterwards; explicit restoration
+removes the hold. A new hold is rejected if deletion has already been claimed.
+Suspension itself never destroys disks or releases allocated VM capacity.
+The hold applies to operator-bound projects using central retention.
+
+Tests: `test_suspension.py` checks revisions/restart, identities, account and
+allocation denial, operator precedence and retention. With `GAP_TEST_BINARY`,
+`suspension_integration.py` starts two real isolated nodes and verifies local and
+signed token denial, preserved data on restoration and expired-policy behavior.
+Its policy RPC adapters do not emulate guest execution.
