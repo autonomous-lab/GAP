@@ -6,10 +6,12 @@
 |---|---|---|---|
 | gap-node-01 | root@159.195.122.180 | /opt/app/gap-node-01 | https://gap.geta.team |
 | gap-node-02 | root@159.195.123.24 | /opt/app/gap-node-02 | https://gap-node-02-u3.vm.elestio.app |
+| gap-node-03 | root@152.53.201.183 | /opt/app/gap-node-03 | https://gap-node-03-u3.vm.elestio.app |
 
-Node 02 hostname: `cicd-gap-2-u3`. Observed capacity: 8 vCPUs, approximately
-16 GiB RAM, 196 GiB root filesystem; `/dev/kvm` is present. The existing operator
-SSH key is authorized on both hosts. From the operator workspace:
+Node 02 hostname: `cicd-gap-2-u3`. Node 03 hostname: `cicd-gap-3-u3`. Observed
+capacity on both secondary nodes: 8 vCPUs, approximately 16 GiB RAM, and
+`/dev/kvm` present. The existing operator SSH key is authorized on the hosts.
+From the operator workspace:
 
 ```sh
 ssh -i /opt/app/data/.ssh/id_ed25519 root@159.195.123.24
@@ -17,12 +19,14 @@ ssh -i /opt/app/data/.ssh/id_ed25519 root@159.195.123.24
 
 The private key stays in the operator workspace. Never copy it into a node or
 repository. Each node keeps its own live secrets in its checkout's `.env`.
-Node 02 uses Elestio nginx with its assigned HTTPS hostname, forwarding to
-`172.17.0.1:8080`. Its `GAP_PUBLIC_URL` must name node 02, not node 01's origin.
+Nodes 02 and 03 use the GAP Caddy edge (`/opt/elestio/caddy`) with their assigned
+HTTPS hostnames, forwarding to `172.17.0.1:8080`; their legacy Elestio nginx
+containers remain stopped with restart policy `no` for rollback. Each node's
+`GAP_PUBLIC_URL` must name its own origin, not node 01's origin.
 
-Both nodes are configured in CI/CD against the same GAP repository. Every push
-can rebuild and redeploy both stacks. Validate changes on the target host before
-pushing, and check the health of both nodes after the automatic deployments.
+All three nodes are configured in CI/CD against the same GAP repository. Every
+push can rebuild and redeploy the stacks. Validate changes on the target host
+before pushing, and check the health of all nodes after automatic deployments.
 
 ## Verification email transport
 
