@@ -347,7 +347,11 @@ fn main() -> Result<()> {
                     let mut response=Response::from_string(if head_only {String::new()} else {body}).with_status_code(200);
                     response.add_header(Header::from_bytes("Content-Type","text/html; charset=utf-8").unwrap());
                     for (name,value) in [("Cache-Control","no-store"),("X-Content-Type-Options","nosniff"),("X-Frame-Options","SAMEORIGIN"),("Referrer-Policy","no-referrer")] {response.add_header(Header::from_bytes(name,value).unwrap());}
-                    response.add_header(Header::from_bytes("Content-Security-Policy",format!("default-src 'none'; frame-src {}; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'self'",admin_origin.trim_end_matches('/'))).unwrap());
+                    // The isolated console starts on the management origin, but
+                    // its navigation deliberately sends public pages back to
+                    // GAP_PUBLIC_URL. Allow the same-origin public frame so
+                    // mobile menu links do not hit a CSP-blocked error page.
+                    response.add_header(Header::from_bytes("Content-Security-Policy",format!("default-src 'none'; frame-src 'self' {}; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'self'",admin_origin.trim_end_matches('/'))).unwrap());
                     let _=request.respond(response);continue;
                 }
                 let _=request.respond(Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{}{prefix}{clean_path}",admin_origin.trim_end_matches('/'))).unwrap()));continue;
