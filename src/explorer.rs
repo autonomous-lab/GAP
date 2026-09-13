@@ -6,6 +6,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() }
 fn field(key: &str) -> String { std::env::var(key).unwrap_or_default().chars().take(200).collect() }
 
+fn assurance(origin: &str, listed: &str) -> Value {
+    let provider = listed.len() <= 4096 && listed.split(',').take(8)
+        .any(|v| !v.is_empty() && v.trim_end_matches('/') == origin.trim_end_matches('/'));
+    json!({"identity_status":"not_independently_verified", "controls_status":"not_reviewed",
+        "provider":if provider {json!({"name":"Elestio","relationship":"directory_operator_declared",
+            "claims":["SOC 2 Type II","ISO 27001"],"evidence_status":"provider_statement",
+            "source_url":"https://elest.io/security-and-compliance",
+            "scope":"Elestio management services; applicability requires review of the reports.",
+            "reports_reviewed":false})} else {Value::Null}})
+}
+
 pub fn local(runner: Option<(String,String)>) -> Value {
     static CACHE: OnceLock<Mutex<Option<(Instant,Value)>>> = OnceLock::new();
     let mut cache=CACHE.get_or_init(||Mutex::new(None)).lock().unwrap();
@@ -43,9 +54,24 @@ pub fn directory() -> Value {
             Some(v)
         })();
         nodes.push(json!({"url":origin,"reachable":value.is_some(),"node":value,
+            "assurance":assurance(origin,&std::env::var("GAP_PUBLIC_ELESTIO_NODES").unwrap_or_default()),
             "latency_ms":started.elapsed().as_millis() as u64,"measurement_origin":field("GAP_FLEET_NODE_ID"),
             "measured_at":now()}));
     }
     let value=json!({"nodes":nodes,"checked_at":now(),"max_age_seconds":30});
     *cache=Some((Instant::now(),value.clone()));value
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn provider_claims_require_explicit_origin_listing() {
+        let known="https://node.example";
+        assert!(super::assurance(known, "")["provider"].is_null());
+        assert!(super::assurance("https://node.example.attacker.test", known)["provider"].is_null());
+        let value=super::assurance(known, "https://node.example/");
+        assert_eq!(value["provider"]["name"], "Elestio");
+        assert_eq!(value["provider"]["reports_reviewed"], false);
+        assert_eq!(value["identity_status"], "not_independently_verified");
+    }
 }

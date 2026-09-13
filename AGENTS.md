@@ -1786,3 +1786,23 @@ Operators configure `GAP_PUBLIC_OPERATOR`, `GAP_PUBLIC_COUNTRY`,
 origins; at most eight). Leave metadata empty if it is unknown. These fields
 contain public information only. Each operator controls its own listing; no
 credential exchange or automatic federation follows from discovery.
+
+### Operator trust and evidence
+
+Each explorer card has **Trust & evidence**. Operator metadata is declared;
+independent identity verification and reviewed technical controls are separate
+states. None is inferred from a name, hostname, software version or listing.
+
+For origins explicitly listed by the directory operator in
+`GAP_PUBLIC_ELESTIO_NODES` (comma-separated HTTPS origins), the directory exposes
+Elestio's SOC 2 Type II and ISO 27001 statements and links to
+https://elest.io/security-and-compliance. The provider relationship is declared
+by the directory operator. Underlying audit reports have not been reviewed by
+GAP; applicability to a deployment requires reviewing their scope. These
+references do not certify GAP, the host provider, applications or independent
+operators, and do not establish encryption coverage.
+
+The `/v1/explorer` response adds an `assurance` object to each directory entry.
+It is assigned by the directory, not copied from the remote node's metadata.
+Unknown origins have no provider evidence. An unavailable node may retain its
+listed provider reference; this does not establish present availability.
