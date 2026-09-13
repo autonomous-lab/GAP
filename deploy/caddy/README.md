@@ -61,3 +61,29 @@ listener. Its private `ask` call goes
 directly to the bridge-bound GAP edge and includes the shared token. Unknown,
 pending, suspended, inactive-project and missing-site hostnames all fail closed
 before ACME issuance.
+
+### Fleet console host on secondary nodes
+
+When a secondary node uses the central `GAP_ADMIN_ORIGIN`, its explicit Caddy
+site block must include that central hostname as well as its own hostname.
+The fleet edge connects with the secondary hostname for TLS SNI but preserves
+the central console Host header for session and administrator isolation.
+Without the central hostname in the explicit site block, the catch-all marks
+management requests as tenant traffic and returns `site not found`.
+For node-02 the explicit block is:
+
+```caddyfile
+gap-node-02-u3.vm.elestio.app, gap-node-01-u3.vm.elestio.app {
+    tls /certs/fullchain.cer /certs/vm.elestio.app.key
+    @internal path /internal/*
+    respond @internal 404
+    reverse_proxy 172.17.0.1:8080 {
+        header_up Host {host}
+        header_up -X-GAP-Custom-Domain
+    }
+}
+```
+
+Keep the central hostname isolated by the existing GAP admin-origin boundary;
+do not remove tenant marking from the catch-all or forward arbitrary headers
+as trusted host identities. No public DNS change is needed.
