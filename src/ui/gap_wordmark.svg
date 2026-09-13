@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 88" fill="none" aria-hidden="true" focusable="false">
+  <path fill="#f2f5eb" d="M70 0H32C13 0 0 12 0 29s13 29 32 29h38V25H37v13h18v7H32c-11 0-17-6-17-16s6-16 17-16h31L70 0Z"/>
+  <path fill="#f2f5eb" d="m80 58 29-58h18l23 45h-18l-14-28-21 41H80Z"/>
+  <path fill="#c6ff6b" d="m134 48 5 10h18l-5-10h-18Z"/>
+  <path fill="#f2f5eb" d="M167 0h48c15 0 25 9 25 22s-10 22-25 22h-31v14h-17V30h47c6 0 10-3 10-8s-4-8-10-8h-47V0Z"/>
+  <text x="123" y="83" fill="#f2f5eb" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-size="11" letter-spacing="10">CLOUD</text>
+</svg>

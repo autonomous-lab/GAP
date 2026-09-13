@@ -50,8 +50,9 @@ fn product_page(source: &str, active: &str) -> String {
         "<a href=\"{href}\"{}>{label}</a>",
         if *href == active { " aria-current=\"page\"" } else { "" }
     )).collect::<String>();
+    let wordmark = include_str!("ui/gap_wordmark.svg");
     let navigation = format!(r#"<header class="gap-header"><div class="gap-header-inner">
-<a class="gap-brand" href="/" aria-label="GAP Cloud home"><span class="gap-symbol" aria-hidden="true">G</span><span>GAP <small>CLOUD</small></span></a>
+<a class="gap-brand" href="/" aria-label="GAP Cloud home">{wordmark}</a>
 <nav class="gap-desktop" aria-label="Main navigation">{links}</nav>
 <div class="gap-mobile"><details><summary>Menu</summary><nav aria-label="Mobile navigation">{links}</nav></details></div>
 </div></header>"#);

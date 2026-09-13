@@ -28,3 +28,9 @@ body{font-family:var(--sans);-webkit-font-smoothing:antialiased}
 @media(max-width:900px){.gap-desktop{display:none}.gap-mobile{display:flex;align-items:center;gap:2px}.gap-mobile details{position:static}.gap-mobile summary{cursor:pointer;list-style:none}.gap-mobile summary::-webkit-details-marker{display:none}.gap-mobile summary:after{content:'+';margin-left:8px}.gap-mobile details[open] summary:after{content:'−'}.gap-mobile nav{position:absolute;top:calc(100% + 8px);left:16px;right:16px;padding:10px;background:#101a12;border:1px solid #34422e;border-radius:12px;box-shadow:0 16px 40px #0004;display:grid;grid-template-columns:1fr 1fr;gap:4px}.gap-header-inner{padding:0 20px;min-height:68px;gap:10px}.gap-mobile>a,.gap-mobile summary{padding:9px 10px}}
 @media(max-width:600px){.gap-header-inner{padding:0 16px}.gap-brand{font-size:20px;gap:7px}.gap-brand small{display:none}.gap-symbol{width:28px;height:28px;font-size:18px}.gap-mobile>a,.gap-mobile summary{font-size:13px;padding:9px 8px}.gap-compute main{padding:26px 16px}.gap-compute .topbar{padding:0 16px}.gap-product .shell{padding-left:16px;padding-right:16px}}
 .gap-mobile details{margin:0;padding:0;border:0}
+
+/* The typographic wordmark has no button surface, including on hover. */
+.gap-header .gap-brand{min-height:44px;line-height:1;padding:0;background:transparent;border:0;box-shadow:none;transform:none}
+.gap-header .gap-brand:hover,.gap-header .gap-brand:active{background:transparent;box-shadow:none;transform:none}
+.gap-header .gap-brand svg{display:block;width:114px;height:auto;max-height:none;fill:none;stroke:none}
+@media(max-width:600px){.gap-header .gap-brand svg{width:102px}}
