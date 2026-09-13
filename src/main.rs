@@ -338,6 +338,15 @@ fn main() -> Result<()> {
                 let prefix=if clean_path=="/microvms" {env::var("GAP_VM_CONSOLE_PREFIX").ok().filter(|p|p=="/nodes/node-02").unwrap_or_default()} else {String::new()};
                 let _=request.respond(Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{}{prefix}{clean_path}",admin_origin.trim_end_matches('/'))).unwrap()));continue;
             }
+            // Public pages stay on the public origin, outside the isolated console.
+            if on_admin_host && !custom_domain_request && method=="GET" && matches!(clean_path,"/pricing"|"/explorer"|"/docs") {
+                if let Ok(public)=env::var("GAP_PUBLIC_URL") {
+                    let public=public.trim_end_matches('/');
+                    if public.starts_with("https://") && public!=admin_origin.trim_end_matches('/') {
+                        let _=request.respond(Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{public}{clean_path}")).unwrap()));continue;
+                    }
+                }
+            }
             if (on_admin_host && !vm_console) || clean_path=="/admin" || admin_api {
                 let header=|name:&'static str|request.headers().iter().find(|h|h.field.equiv(name)).map(|h|h.value.as_str().to_string()).unwrap_or_default();
                 let mut response=if custom_domain_request {
@@ -347,7 +356,7 @@ fn main() -> Result<()> {
                         Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{}/admin",admin_origin.trim_end_matches('/'))).unwrap())
                     } else {Response::from_string("Administrator origin required").with_status_code(403)}
                 } else if clean_path=="/admin" && method=="GET" {
-                    Response::from_string(if head_only {""} else {include_str!("ui/cloud_admin.html")}).with_header(Header::from_bytes("Content-Type","text/html; charset=utf-8").unwrap())
+                    Response::from_string(if head_only {String::new()} else {include_str!("ui/cloud_admin.html").replace("<!-- GAP-WORDMARK -->",include_str!("ui/gap_wordmark.svg"))}).with_header(Header::from_bytes("Content-Type","text/html; charset=utf-8").unwrap())
                 } else if admin_api {
                     let out=gap::cloud_admin::handle(&state,&method,&path,&body,&header("Cookie"),&header("X-CSRF-Token"),&header("Origin"),client_ip.as_deref().unwrap_or("unknown"));
                     let mut r=Response::from_string(if head_only {String::new()} else {out.body.to_string()}).with_status_code(out.status).with_header(Header::from_bytes("Content-Type","application/json").unwrap());

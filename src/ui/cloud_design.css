@@ -34,3 +34,5 @@ body{font-family:var(--sans);-webkit-font-smoothing:antialiased}
 .gap-header .gap-brand:hover,.gap-header .gap-brand:active{background:transparent;box-shadow:none;transform:none}
 .gap-header .gap-brand svg{display:block;width:114px;height:auto;max-height:none;fill:none;stroke:none}
 @media(max-width:600px){.gap-header .gap-brand svg{width:102px}}
+
+.gap-wordmark{display:inline-flex;align-items:center;min-height:44px;background:transparent}.gap-wordmark svg{display:block;width:114px;height:42px;fill:none;stroke:none}.gap-wordmark:hover{background:transparent}

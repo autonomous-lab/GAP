@@ -57,7 +57,7 @@ fn product_page(source: &str, active: &str) -> String {
 <div class="gap-mobile"><details><summary>Menu</summary><nav aria-label="Mobile navigation">{links}</nav></details></div>
 </div></header>"#);
     let variant = if active == "/" { "gap-home" } else if active == "/microvms" { "gap-compute" } else { "gap-product" };
-    source.replace("<!-- GAP-NAV -->", &navigation)
+    source.replace("<!-- GAP-WORDMARK -->", wordmark).replace("<!-- GAP-NAV -->", &navigation)
         .replace("<!-- GAP-DESIGN -->", &format!("<style>{}</style>", include_str!("ui/cloud_design.css")))
         .replace("<html lang=\"en\">", &format!("<html lang=\"en\" class=\"{variant}\">"))
 }
