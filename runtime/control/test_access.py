@@ -83,6 +83,27 @@ class AccessTests(unittest.TestCase):
         with self.assertRaisesRegex(Failure,'invalid_control_credentials'):
             self.app.handle('POST','/v1/project-token',token,{'project_id':PROJECT})
 
+    def test_migrated_node_capability_requires_binding_and_existing_grant(self):
+        result=self.connect();token=result['credential']['token']
+        body={'project_id':PROJECT,'node_id':'node-two'}
+        with self.assertRaisesRegex(Failure,'project_node_mismatch'):
+            self.app.handle('POST','/v1/project-token',token,body)
+        with self.a.db() as db:
+            db.execute('INSERT INTO vm_host_projects VALUES(?,?)',(PROJECT,'node-two'))
+        grant=self.app.handle('POST','/v1/project-token',token,body)
+        claims=json.loads(base64.urlsafe_b64decode(grant['token'].split('.')[1]+'=='))
+        self.assertEqual(claims['node_id'],'node-two')
+        self.assertEqual(claims['owner_did'],OWNER)
+        self.assertEqual(self.app.handle('POST','/v1/project-token',token,{'project_id':PROJECT})['node_id'],'node-one')
+        self.connect('node-two',AGENT,SECOND,request='other')
+        viewer=self.a.authenticate(self.a.issue(result['customer_id'],AGENT)['token'])
+        with self.assertRaisesRegex(Failure,'project_management_required'):
+            self.access.issue(viewer,PROJECT,node_id='node-two')
+        self.a.grant('operator','viewer',PROJECT,AGENT,'viewer')
+        self.assertEqual(self.access.issue(viewer,PROJECT,read_only=True,node_id='node-two')['scope'],'project.vm.read')
+        with self.assertRaisesRegex(Failure,'project_management_required'):
+            self.access.issue(viewer,PROJECT,node_id='node-two')
+
     def test_viewer_gets_only_explicit_read_capability(self):
         first=self.connect();self.connect('node-two',AGENT,SECOND,request='second')
         self.a.grant('operator','read',PROJECT,AGENT,'viewer')

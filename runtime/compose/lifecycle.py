@@ -132,6 +132,10 @@ class Runtime:
         return total
 
     def sample(self,meta,force=True):
+        if (self.manager.folder(meta)/'.migration-meter-off').exists():
+            if self.manager.alive(meta):
+                self.manager.stop(meta,True)
+            return
         state=self.state(meta)
         if not force and time.monotonic()-state["last_sample"]<5: return
         meter=self.manager.meters.get(meta['vm_id'])

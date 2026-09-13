@@ -7748,6 +7748,7 @@ pub fn route_with_ip(
     };
 
     if let Some(result)=crate::fleet_finance::node_report(state,method,raw_path,auth) {return result}
+    if let Some(result)=crate::fleet_migration::worker(state,method,raw_path,auth,&body) {return result}
     if let Some(result)=vm_http::manage(state,method,raw_path,&body,auth) {return result}
 
     let mut guard = match state.lock() {
@@ -7809,10 +7810,10 @@ pub fn route_with_ip(
         if let Err(e)=guard.check_rate_limit(token,client_ip) {return error_response(&e)}
         // Forward only the documented pagination argument. No caller URL or
         // arbitrary path ever influences the destination.
-        let query=if path=="/v1/fleet/projects" {
+        let query=if matches!(path,"/v1/fleet/projects" | "/v1/fleet/vm-placements") {
             let params=parse_url_params(raw_path);
             match params.get("after") {
-                Some(v) if v.len()==28 && v.starts_with("prj_") && v[4..].bytes().all(|b|b.is_ascii_hexdigit()) => format!("?after={v}"),
+                Some(v) if (path=="/v1/fleet/projects" && v.len()==28 && v.starts_with("prj_") && v[4..].bytes().all(|b|b.is_ascii_hexdigit())) || (path=="/v1/fleet/vm-placements" && v.len()==35 && v.starts_with("vm_") && v[3..].bytes().all(|b|b.is_ascii_hexdigit())) => format!("?after={v}"),
                 Some(_) => return (400,json!({"error":{"code":"invalid_cursor"}})),
                 None=>String::new(),
             }

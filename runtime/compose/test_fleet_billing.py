@@ -56,6 +56,24 @@ class FleetTests(unittest.TestCase):
         self.assertEqual((central['spent_microcredits'],central['reserved_microcredits']),(80,100))
         self.assertEqual(central['balance_microcredits'],9820)
 
+    def test_migrated_project_binding_persists_without_copying_source_wallet(self):
+        with self.authority.db() as db:
+            db.execute('INSERT INTO vm_host_projects VALUES(?,?)',(P,'target'))
+        path=self.path.parent/'target.sqlite'
+        Ledger(path).set_pricing('enforced',PRICE)
+        config=dict(self.config,projects=[],node_id='target')
+        def transport(body):
+            with self.authority.db() as db:
+                row=dict(self.authority.node_project(db,'target',body['project_id']))
+            return dict(row,operator_id='operator')
+        target=FleetLedger(path,config,lambda:self.now,lambda:self.mono,transport)
+        target.adopt_migrated_project(P,O)
+        target=FleetLedger(path,config,lambda:self.now,lambda:self.mono,transport)
+        self.assertIn(P,target.projects)
+        self.assertEqual(target.view(P,O)['balance_microcredits'],0)
+        self.assertFalse(target.lease_allowed(P))
+        self.assertEqual(self.authority.wallet(self.customer)['balance_microcredits'],10000)
+
     def test_outage_expires_monotonically_and_never_triggers_retention(self):
         self.ledger.sync(P,O,True)
         self.down=True

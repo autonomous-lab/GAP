@@ -91,6 +91,21 @@ class CapacityWorkerTests(unittest.TestCase):
         self.assertEqual(other.capacity.records()[0]['phase'],'closed')
         self.assertEqual(self.a.quotas(self.customer)['allocated']['max_vms'],1)
 
+    def test_migrated_binding_survives_restart_without_reallocating_quota(self):
+        vm=self.create()['vm_id'];other=self.make_manager('two',SECOND)
+        before=self.a.quotas(self.customer)['allocated']
+        with self.a.db() as db:
+            db.execute('INSERT INTO vm_host_projects VALUES(?,?)',(P,'two'))
+            db.execute('UPDATE capacity SET node=?,revision=revision+1 WHERE vm=?',('two',vm))
+        other.capacity.adopt_migrated_vm(P,O,vm)
+        self.assertIn(P,other.capacity.projects)
+        restored=self.restart(other)
+        self.assertIn(P,restored.projects)
+        self.assertEqual(restored.records(P)[0]['remote']['node_id'],'two')
+        self.assertEqual(self.a.quotas(self.customer)['allocated'],before)
+        with self.assertRaises((VMError,BillingError)):
+            self.manager.capacity.adopt_migrated_vm(P,O,vm)
+
     def test_concurrent_workers_cannot_both_create_the_last_vm(self):
         other=self.make_manager('two',SECOND)
         def create(pair):

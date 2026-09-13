@@ -26,6 +26,7 @@ class Capacity:
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS bindings(project TEXT PRIMARY KEY,owner TEXT NOT NULL,operator TEXT NOT NULL,node TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS intents(vm TEXT PRIMARY KEY,project TEXT NOT NULL,owner TEXT NOT NULL,data TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS migration_projects(project TEXT PRIMARY KEY,operator TEXT NOT NULL,node TEXT NOT NULL)')
             self.bound={r['project'] for r in db.execute('SELECT project FROM bindings')}
 
     @contextmanager
@@ -44,9 +45,27 @@ class Capacity:
         self.config=config;self.projects=set(config['projects']) if config else set();self.ready.clear()
         self.transport=(transport or Client(config)) if config else None
         with self.db() as db:
+            if config:
+                self.projects.update(r[0] for r in db.execute('SELECT project FROM migration_projects WHERE operator=? AND node=?',(config['operator_id'],config['node_id'])))
             for row in db.execute('SELECT * FROM bindings'):
                 if row['project'] in self.projects and (row['operator'],row['node'])!=(config['operator_id'],config['node_id']):
                     raise VMError('fleet_capacity_binding_mismatch')
+
+    def adopt_migrated_vm(self,project,owner,vm):
+        reply=self.transport(dict(action='capacity-get',project_id=project,vm_id=vm))
+        if (reply.get('operator_id'),reply.get('node_id'),reply.get('project_id'),reply.get('vm_id'),reply.get('state'))!=(self.config['operator_id'],self.config['node_id'],project,vm,'active'):
+            raise VMError('fleet_capacity_binding_mismatch')
+        existing=project in self.projects
+        self.projects.add(project)
+        try:self.bind(project,owner)
+        except Exception:
+            if not existing:self.projects.discard(project)
+            raise
+        with self.db() as db:
+            db.execute('INSERT OR IGNORE INTO migration_projects VALUES(?,?,?)',(project,self.config['operator_id'],self.config['node_id']))
+        record=dict(vm=vm,project=project,owner=owner,kind='create',phase='active',remote=reply)
+        self.put(record);self.ready.add(vm)
+        return reply
 
     def managed(self, project):
         return project in self.projects or project in self.bound

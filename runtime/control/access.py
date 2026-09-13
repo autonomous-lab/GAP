@@ -139,7 +139,7 @@ class Access:
             return dict(updated=True,action=action,agent_did=agent)
         return self.a.mutation('human:'+customer,request,body,apply)
 
-    def issue(self, actor, project, ttl=120, read_only=False):
+    def issue(self, actor, project, ttl=120, read_only=False, node_id=None):
         if type(read_only) is not bool:raise Failure('invalid_read_only')
         if type(ttl) is not int or not 30 <= ttl <= 300:
             raise Failure('invalid_token_lifetime')
@@ -151,8 +151,12 @@ class Access:
                 grant = db.execute('SELECT role FROM grants WHERE project=? AND agent=?', (project, actor['agent'])).fetchone()
                 if not grant or grant[0] not in (('owner','operator','viewer') if read_only else ('owner','operator')):
                     raise Failure('project_management_required', 403)
+            selected_node = row['node'] if node_id is None else identifier(node_id)
+            if selected_node != row['node'] and not db.execute(
+                    'SELECT 1 FROM vm_host_projects WHERE project=? AND node=?', (project,selected_node)).fetchone():
+                raise Failure('project_node_mismatch',403)
             now = int(self.a.clock())
-            claims = dict(version=1, operator_id=self.a.operator, node_id=row['node'],
+            claims = dict(version=1, operator_id=self.a.operator, node_id=selected_node,
                           customer_id=row['customer'], project_id=project, owner_did=row['owner'],
                           agent_did=actor['agent'], scope='project.vm.read' if read_only else 'project.manage', issued_at=now,
                           expires_at=now+ttl, nonce=secrets.token_hex(16))
@@ -160,4 +164,4 @@ class Access:
         message = b'gapf1.' + payload
         signature = base64.urlsafe_b64encode(self.key.sign(message)).rstrip(b'=')
         return dict(token=(message+b'.'+signature).decode(), expires_at=now+ttl,
-                    operator_id=self.a.operator, node_id=row['node'], project_id=project, scope=claims['scope'])
+                    operator_id=self.a.operator, node_id=selected_node, project_id=project, scope=claims['scope'])

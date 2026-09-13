@@ -184,6 +184,12 @@ class Runner:
         if self.ingress_config:
             from ingress import Ingress
             self.ingress = Ingress(self.ingress_config, self.hypervisor)
+        self.transfers = None
+        if config.get('migration_transfers', False):
+            if not self.runtime or not config.get('fleet_billing'):
+                raise ValueError('migration_requires_fleet_accounting')
+            from vm_transfer import Transfers
+            self.transfers = Transfers(self)
         with self.db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs(
                 id TEXT PRIMARY KEY, project TEXT NOT NULL, owner TEXT NOT NULL,
@@ -210,7 +216,29 @@ class Runner:
         finally:
             db.close()
 
+    def migration_origin(self,project):
+        if not self.hypervisor:return None
+        path=self.hypervisor.root/'migration-origins.json'
+        return json.loads(path.read_text()).get(project) if path.exists() else None
+
+    def origin_policy(self,origin):
+        from migration_peer import request
+        return request(load_config(self.path),origin['node_id'],
+            dict(operation='policy',migration_id=origin['migration_id']))
+
     def workload_policies(self,projects):
+        projects=list(projects);local=[];remote={}
+        for project in projects:
+            try:
+                origin=self.migration_origin(project)
+                if origin:
+                    policy=self.origin_policy(origin).get('policy',{})
+                    if policy.get('owner_did')==origin['owner_did']:remote[project]=policy
+                else:local.append(project)
+            except Exception:pass  # Missing origin policy must deny, never fall back.
+        return dict(self.workload_policies_local(local) if local else {},**remote)
+
+    def workload_policies_local(self,projects):
         try:
             config=load_config(self.path)
             request=urllib.request.Request(config['node_url'].rstrip('/')+'/internal/workload-policy',
@@ -229,6 +257,23 @@ class Runner:
         return policy
 
     def authorize(self, project, owner):
+        origin=self.migration_origin(project)
+        if not origin:return self.authorize_local(project,owner)
+        if origin.get('owner_did')!=owner:raise Failure(403,'migration_origin_binding_mismatch')
+        config=load_config(self.path)
+        if config.get('ingress')!=self.ingress_config or config.get('hypervisor')!=self.hypervisor_config:
+            raise Failure(503,'migration_configuration_changed_restart_worker')
+        try:approval=self.origin_policy(origin)['approval']
+        except Exception:raise Failure(403,'compose_origin_approval_unavailable_or_revoked') from None
+        if (approval.get('project_id'),approval.get('owner_did'),approval.get('managed'))!=(project,owner,True):
+            raise Failure(403,'migration_origin_binding_mismatch')
+        quota=approval.get('quota')
+        if (not isinstance(quota,dict) or not {'vcpus','memory_mib'} <= set(quota) <= {'vcpus','memory_mib','max_vms','disk_gib'}
+                or any(type(v) is not int or not 0<v<2**31 for v in quota.values())):
+            raise Failure(403,'microvm_quota_unavailable')
+        return approval
+
+    def authorize_local(self, project, owner):
         config = load_config(self.path)  # reload approvals before each operation
         if config.get('ingress') != self.ingress_config:
             raise Failure(503, 'ingress_config_changed_restart_worker')
@@ -267,6 +312,9 @@ class Runner:
     def rpc(self, rpc):
         # Internal service credential required by /rpc. The public project
         # route allowlist never forwards this operator-only inventory action.
+        if rpc.get('action')=='admin/migration' and rpc.get('method')=='POST':
+            if not self.transfers:raise Failure(409,'migration_transfers_disabled')
+            return 200,self.transfers.operation(rpc['body'])
         if rpc.get('action')=='admin/inventory' and rpc.get('method')=='GET':
             if not self.hypervisor:return 200,{'vms':[],'available':False}
             body=rpc.get('body') or {};offset=body.get('offset',0)

@@ -77,9 +77,29 @@ class FleetLedger(Ledger):
             raise ValueError('invalid_fleet_limits')
         self.monotonic=monotonic
         self.transport=transport or Client(config)
-        self.deadlines={};self.last_sync={};self.errors={};self.funding={};self.retention={}
+        self.deadlines={};self.last_sync={};self.errors={};self.funding={};self.retention={};self.last_checkpoints={}
         self.locks={p:threading.RLock() for p in self.projects}
         super().__init__(path,clock)
+        with self.db() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS migration_projects(project TEXT PRIMARY KEY,owner TEXT NOT NULL,operator TEXT NOT NULL,node TEXT NOT NULL)')
+            dynamic=db.execute('SELECT project FROM migration_projects WHERE operator=? AND node=?',(config['operator_id'],config['node_id'])).fetchall()
+        for row in dynamic:
+            self.projects.add(row[0]);self.locks.setdefault(row[0],threading.RLock())
+
+    def adopt_migrated_project(self,project,owner):
+        placement=self.transport(dict(action='project',project_id=project))
+        if (placement.get('operator_id'),placement.get('id'),placement.get('node'),placement.get('owner'))!=(self.config['operator_id'],project,self.config['node_id'],owner):
+            raise BillingError('fleet_authority_binding_mismatch')
+        existing=project in self.projects
+        self.projects.add(project);self.locks.setdefault(project,threading.RLock())
+        try:
+            with self.db() as db:
+                self.ensure(db,project,owner)
+                db.execute('INSERT OR IGNORE INTO migration_projects VALUES(?,?,?,?)',(project,owner,self.config['operator_id'],self.config['node_id']))
+        except Exception:
+            if not existing:self.projects.discard(project)
+            raise
+
 
     def fleet_allows(self,project):
         return project in self.projects
@@ -159,6 +179,7 @@ class FleetLedger(Ledger):
                                (reply['allocated_microcredits'],project))
                 self.deadlines[project]=started+remaining if balance else 0
                 self.last_sync[project]=started
+                self.last_checkpoints[project]=pending['request_id']
                 self.funding[project]=reply['funding_status']
                 self.retention[project]=reply.get('retention',{})
                 self.errors.pop(project,None)

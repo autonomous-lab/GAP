@@ -252,7 +252,7 @@ class Application:
         if method == 'POST' and parsed.path == '/v1/project-token':
             if not self.access:
                 raise Failure('fleet_access_disabled', 409)
-            return self.access.issue(actor, body['project_id'], body.get('ttl_seconds', 120),body.get('read_only',False))
+            return self.access.issue(actor, body['project_id'], body.get('ttl_seconds', 120),body.get('read_only',False),body.get('node_id'))
         raise Failure('not_found', 404)
 
 

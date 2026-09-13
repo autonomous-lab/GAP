@@ -96,5 +96,51 @@ customers or start production migrations with it.
 The private control endpoint `GET /v1/vm-placements` lists the current capacity
 placement per VM and any preparation target. It filters by customer and project
 grant, paginates by VM ID, and never presents the preparation target as the
-current host. It is not yet exposed by the public fleet relay or consumed by
-the dashboard. This inventory is the next integration point for per-VM access.
+current host. The public fleet relay now maps `/v1/fleet/vm-placements` to this
+endpoint. Account uses the placement to query and open the actual host, while
+preserving project grants. Project tokens accept an explicit `node_id` only for
+the project home or a host admitted by a committed migration.
+
+## Integrated worker implementation (not activated in production)
+
+`vm_transfer.py` implements the private storage and lifecycle operations. Enable
+`migration_transfers` only after the complete coordinator, origin policy and
+HTTPS routing integration are available. The public-facing node transport is
+`POST /v1/fleet/migration-worker`, requiring a distinct, operator-provided
+`GAP_FLEET_MIGRATION_TOKEN`; tenant and project tokens cannot use it. It only
+forwards the fixed `admin/migration` worker action. Every request includes
+`migration_id` and `operation`, and checks the current authority binding.
+
+- `export` stops and fences the source, flattens the disk and records its digest.
+- `read` / `write` exchange bounded 512-KiB chunks. `upload-status` resumes from
+  the target's durable byte count. A replay must contain identical bytes.
+- `import` validates the complete archive, disk format, digest, kernel and owner
+  before attesting target staging. It creates no live catalog entry.
+- `settle` takes the final source sample, durably disables source metering and
+  references the acknowledged central checkpoint.
+- `activate` requires committed placement and fresh target accounting, capacity
+  and policy admission. It preserves guest keys and the configured original
+  application origin, allocates new host ports, and installs the disk by rename.
+- `discard` deletes staged target data before cancellation acknowledgement.
+  `restore` requires that acknowledgement before unfencing the source. Neither
+  operation rolls back a committed move.
+
+Export, import, settlement, activation, discard and restoration run asynchronously;
+poll `status`. A failed operation may be retried with the same migration ID;
+historical success is never a fresh execution lease. An interrupted installation
+after disk rename can resume before the catalog has been saved. Transfers check
+temporary disk space, reject archive links/traversal and retain private keys only
+in private worker storage. Do not attach bundles to public logs or tickets.
+
+An activated target persists the original project policy host. Its worker uses
+the configured `migration_peers` HTTPS origins and private token files to fetch
+current approvals and suspension policy. Missing or revoked origin policy denies
+execution instead of falling back to destination approval. The private `policy`
+operation resolves project and owner from the journal and only serves them on
+the original project home. This does not yet proxy node-level management routes.
+
+Project-local budgets currently reject export because their enforcement has not
+been centralized across hosts. The worker does not make an HTTPS proxy route
+merely by preserving `ingress_origin`. Automatic orchestration, node-level access,
+stable HTTPS forwarding, source cleanup and the dashboard migration action still
+need integration and end-to-end validation before production activation.

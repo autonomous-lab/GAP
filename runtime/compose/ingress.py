@@ -107,7 +107,7 @@ class Ingress:
         prefix = self.prefix(meta.get('catalog_key',meta['project_id']))
         return {'enabled': configured.get('enabled', False), 'vm_id': meta['vm_id'],
                 'guest_port': configured.get('guest_port'), 'base_path': prefix + '/',
-                'url': self.public_url + prefix + '/',
+                'url': meta.get('ingress_origin',self.public_url) + prefix + '/',
                 'routed': meta['vm_id'] in self.applied,
                 'note': 'Routing configuration only; not application health'}
 

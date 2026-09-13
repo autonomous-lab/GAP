@@ -61,6 +61,7 @@ pub mod registration;
 pub mod fleet_relay;
 pub mod fleet_access;
 pub mod fleet_finance;
+pub mod fleet_migration;
 pub mod runtime;
 pub mod sealed;
 pub mod server;

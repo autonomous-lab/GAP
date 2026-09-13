@@ -347,7 +347,7 @@ class MicroVMs:
 
     def environment(self, meta):
         from environment import variables
-        return variables(meta, self.network.host if self.network else '', self.ingress_origin)
+        return variables(meta, self.network.host if self.network else '', meta.get('ingress_origin',self.ingress_origin))
 
     def sync_environment(self, meta):
         values = self.environment(meta)

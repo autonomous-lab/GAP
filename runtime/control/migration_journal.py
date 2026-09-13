@@ -29,7 +29,7 @@ def schema(db):
 
 def view(row):
     return dict(migration_id=row['id'], vm_id=row['vm'], project_id=row['project'],
-                source_node=row['source'], target_node=row['target'],
+                source_node=row['source'], target_node=row['target'], owner_did=row['owner'],
                 revision=row['revision'], phase=row['phase'],
                 disk_sha256=row['disk_digest'], execution_authorized=False,
                 handoff_complete=row['phase']=='committed')
@@ -79,9 +79,10 @@ def prepare(a, request, customer, project, vm, source, target, capacity_revision
 def get(a, migration, node=None):
     with a.db() as db:
         row = row_for(db, migration)
-        if node is not None and node not in (row['source'], row['target']):
+        home=db.execute('SELECT node FROM projects WHERE id=?',(row['project'],)).fetchone()[0]
+        if node is not None and node not in (row['source'], row['target'], home):
             raise Failure('migration_node_mismatch', 403)
-        return view(row)
+        return dict(view(row),home_node=home)
 
 
 def attest(a, node, request, migration, revision, stage, evidence, disk_digest):
