@@ -338,6 +338,25 @@ A restored old database must never replace the live authority without fencing an
 reconciling every worker; otherwise it can forget newer reservations. This is the
 same single-writer recovery boundary as for shared wallet balances.
 
+## Read-only placement dry-run
+
+The first scheduler integration step is deliberately read-only. From the repository
+root, the operator can evaluate a requested VM against the three public node
+origins:
+
+```sh
+python3 scripts/fleet-placement-dry-run.py \
+  --vcpus 1 --memory-mib 1024 --disk-gib 10
+```
+
+The command fetches `/v1/public-node` over HTTPS and rejects a node unless its
+admission gate, aggregate headroom and enforced USD tariff are all available. An
+optional `--region Manassas` prefers that region and excludes the others. Output
+contains the selected node, every rejection reason, the observed headroom and
+`mutates: false`; no project, VM, wallet or reservation state is changed. The
+planner is an inspection aid until authenticated project binding and an atomic
+`capacity-prepare` call are wired into VM creation.
+
 ## Legacy migration staging
 
 On each existing worker host, export one consistent **read-only** SQLite snapshot:
