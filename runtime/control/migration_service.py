@@ -229,7 +229,7 @@ class Migrations:
                     self.wait(target,identity,'activate',('activated',))
                     if not private['existing_http']:self.vm_api(row,target,'/vm/http-access','PUT',dict(vm_id=row['vm_id'],**private['hop']))
                     target_state=self.worker(target,identity,'binding')
-                    if private['was_running'] and target_state['vm']['state']!='running':raise Failure('migration_target_not_running',409)
+                    if private['was_running'] and target_state['vm']['state'] not in ('running','hibernated'):raise Failure('migration_target_not_running',409)
                     self.verify_route(row,private)
                     self.wait(source,identity,'cleanup',('cleaned',))
                     self.worker(target,identity,'prune')

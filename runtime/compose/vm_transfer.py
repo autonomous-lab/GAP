@@ -489,6 +489,7 @@ class Transfers:
                 finally:os.close(fd)
             runtime.sample(meta)
             if receipt.get('restore_running',True):
+                runtime.touch(meta)
                 runtime.check_credit(meta)
                 with runtime.admission(project,meta['vcpus'],meta['memory_mib'],vm):
                     m.perform(project,owner,'vm/start',dict(vm_id=vm,request_id=identity+':activate'))

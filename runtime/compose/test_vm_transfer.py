@@ -184,5 +184,12 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(self.transfer.activate(MOVE)['phase'],'activated')
         self.assertFalse((guest/'.migration-fence').exists())
         self.assertEqual(catalog[0]['ingress_origin'],'https://source.test')
+        receipt=json.loads((folder/'target.json').read_text());receipt['restore_running']=True
+        (folder/'target.json').write_text(json.dumps(receipt))
+        events=[];runtime.touch=lambda _:events.append('touch');runtime.check_credit=lambda _:None
+        runtime.admission=lambda *args:threading.RLock()
+        m.perform=lambda *args:events.append('start')
+        self.transfer.activate(MOVE)
+        self.assertEqual(events,['touch','start'])
 
 if __name__=='__main__':unittest.main()
