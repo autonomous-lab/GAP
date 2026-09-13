@@ -1488,8 +1488,9 @@ with an optional comment. Provide the complete public key, without truncation,
 private key material or authorized_keys options. RSA key format does not enable
 legacy SHA-1 signatures.
 
-The `/microvms` console redirects to the isolated `GAP_ADMIN_ORIGIN` management
-origin, where tenant applications are never served. It uses an opaque Secure, HttpOnly, SameSite=Strict session
+The public `/microvms` URL stays on `GAP_PUBLIC_URL` and embeds the console from
+the isolated `GAP_ADMIN_ORIGIN` management origin, where tenant applications are
+never served. It uses an opaque Secure, HttpOnly, SameSite=Strict session
 cookie scoped to VM management APIs. The bearer stays on the server. Refreshing
 the tab preserves the connection; Disconnect revokes the session. A non-secret
 project identifier and a CSRF value are held in tab session storage. Sessions

@@ -336,6 +336,20 @@ fn main() -> Result<()> {
             }
             if matches!(clean_path,"/microvms" | "/account") && !custom_domain_request && !on_admin_host && !admin_host.is_empty() {
                 let prefix=if clean_path=="/microvms" {env::var("GAP_VM_CONSOLE_PREFIX").ok().filter(|p|p=="/nodes/node-02").unwrap_or_default()} else {String::new()};
+                if clean_path=="/microvms" {
+                    // Keep the public URL stable while the console itself stays
+                    // on the isolated management origin. Its Secure, HttpOnly
+                    // session cookie must never be moved onto the public origin,
+                    // where tenant applications share the browser origin.
+                    let target=format!("{}{prefix}/microvms",admin_origin.trim_end_matches('/'));
+                    let escaped=target.replace('&',"&amp;").replace('"',"&quot;").replace('<',"&lt;");
+                    let body=format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>MicroVMs · GAP Cloud</title><style>html,body,iframe{{width:100%;height:100%;margin:0;border:0}}body{{background:#f6f7fa}}</style></head><body><iframe src=\"{escaped}\" title=\"GAP MicroVM console\" allow=\"clipboard-read; clipboard-write\"></iframe></body></html>");
+                    let mut response=Response::from_string(if head_only {String::new()} else {body}).with_status_code(200);
+                    response.add_header(Header::from_bytes("Content-Type","text/html; charset=utf-8").unwrap());
+                    for (name,value) in [("Cache-Control","no-store"),("X-Content-Type-Options","nosniff"),("X-Frame-Options","SAMEORIGIN"),("Referrer-Policy","no-referrer")] {response.add_header(Header::from_bytes(name,value).unwrap());}
+                    response.add_header(Header::from_bytes("Content-Security-Policy",format!("default-src 'none'; frame-src {}; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'self'",admin_origin.trim_end_matches('/'))).unwrap());
+                    let _=request.respond(response);continue;
+                }
                 let _=request.respond(Response::from_string("").with_status_code(303).with_header(Header::from_bytes("Location",format!("{}{prefix}{clean_path}",admin_origin.trim_end_matches('/'))).unwrap()));continue;
             }
             // Public pages stay on the public origin, outside the isolated console.
@@ -485,9 +499,14 @@ fn main() -> Result<()> {
                 } else { body };
                 let mut response = Response::from_string(body).with_status_code(200);
                 if vm_console {
-                    let frame=if clean_path=="/microvms" {"SAMEORIGIN"} else {"DENY"};
-                    let csp=if clean_path=="/microvms" {"frame-ancestors 'self'; base-uri 'none'"} else {"frame-ancestors 'none'; base-uri 'none'"};
-                    for (name,value) in [("Cache-Control","no-store"),("X-Frame-Options",frame),("Referrer-Policy","no-referrer"),("Content-Security-Policy",csp)] {response.add_header(Header::from_bytes(name,value).unwrap());}
+                    if clean_path=="/microvms" {
+                        let public=env::var("GAP_PUBLIC_URL").unwrap_or_default().trim_end_matches('/').replace('"',"&quot;").replace('<',"&lt;");
+                        let csp=format!("frame-ancestors 'self' {public}; base-uri 'none'");
+                        for (name,value) in [("Cache-Control","no-store"),("Referrer-Policy","no-referrer")] {response.add_header(Header::from_bytes(name,value).unwrap());}
+                        response.add_header(Header::from_bytes("Content-Security-Policy",csp).unwrap());
+                    } else {
+                        for (name,value) in [("Cache-Control","no-store"),("X-Frame-Options","DENY"),("Referrer-Policy","no-referrer"),("Content-Security-Policy","frame-ancestors 'none'; base-uri 'none'")] {response.add_header(Header::from_bytes(name,value).unwrap());}
+                    }
                 }
                 response.add_header(
                     Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap(),
