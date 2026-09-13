@@ -5,6 +5,8 @@ import hashlib
 import io
 import json
 import os
+import re
+import shutil
 from pathlib import Path
 import sqlite3
 import struct
@@ -88,7 +90,7 @@ def decrypt(data, private):
     secret=key.decrypt(data[start:end],padding.OAEP(mgf=padding.MGF1(hashes.SHA256()),algorithm=hashes.SHA256(),label=MAGIC))
     return AESGCM(secret).decrypt(data[end:end+12],data[end+12:],data[:end+12])
 
-def verify(raw, scratch="/dev/shm"):
+def unpack(raw):
     with zipfile.ZipFile(io.BytesIO(raw)) as z:
         entries=z.infolist()
         if len(entries)>100 or sum(e.file_size for e in entries)>LIMIT or len({e.filename for e in entries})!=len(entries):
@@ -97,6 +99,14 @@ def verify(raw, scratch="/dev/shm"):
     manifest=json.loads(files.pop('manifest.json'))
     if manifest['version']!=1 or manifest['sha256']!={k:hashlib.sha256(v).hexdigest() for k,v in files.items()}:
         raise ValueError('manifest mismatch')
+    for name in files:
+        if name != 'authority.sqlite' and not re.fullmatch(r'config/[A-Za-z0-9_.-]+',name):
+            raise ValueError('invalid archive path')
+        if Path(name).name in ('.','..'):raise ValueError('invalid archive path')
+    return manifest,files
+
+def verify(raw, scratch="/dev/shm"):
+    manifest,files=unpack(raw)
     config=json.loads(files['config/control.json'])
     # SQLite serialization preserves WAL header flags. Open the standalone
     # backup on tmpfs so SQLite can handle journal mode without touching live data.
@@ -111,13 +121,39 @@ def verify(raw, scratch="/dev/shm"):
     if not config.get('operator_id'): raise ValueError('missing operator identity')
     return dict(verified=True, tables=len(manifest['tables']), config_files=len(files)-1)
 
+def stage(raw, output, scratch="/dev/shm"):
+    """Create a private, inactive recovery directory; never overwrite anything."""
+    result=verify(raw,scratch)
+    manifest,files=unpack(raw)
+    output=Path(output)
+    output.mkdir(mode=0o700,exist_ok=False)
+    try:
+        (output/'state').mkdir(mode=0o700)
+        (output/'config').mkdir(mode=0o700)
+        for name,data in files.items():
+            target=output/('state/authority.sqlite' if name=='authority.sqlite' else name)
+            exclusive(target,data)
+        # Verify referenced configuration was fully captured; no arbitrary paths.
+        if config_files(output/'config')!={k:v for k,v in files.items() if k.startswith('config/')}:
+            raise ValueError('configuration file set mismatch')
+        report=dict(result,staged=True,activated=False,backup_created_at=manifest['created_at'],
+                    reconciliation_required=True)
+        exclusive(output/'recovery.json',json.dumps(report).encode())
+        return report
+    except BaseException:
+        shutil.rmtree(output)
+        raise
+
 def main():
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='action',required=True)
     b=sub.add_parser('backup');b.add_argument('--database',required=True);b.add_argument('--config',required=True);b.add_argument('--public-key',required=True);b.add_argument('--output',required=True)
     v=sub.add_parser('verify');v.add_argument('--archive',required=True);v.add_argument('--private-key',required=True);v.add_argument('--scratch-dir',default='/dev/shm')
+    r=sub.add_parser('stage');r.add_argument('--archive',required=True);r.add_argument('--private-key',required=True);r.add_argument('--scratch-dir',default='/dev/shm');r.add_argument('--output',required=True)
     args=p.parse_args();os.umask(0o077)
     if args.action=='backup':
         data=encrypt(pack(args.database,args.config),Path(args.public_key).read_bytes());exclusive(args.output,data)
         print(json.dumps(dict(created=True,bytes=len(data),sha256=hashlib.sha256(data).hexdigest())))
+    elif args.action=='stage':
+        print(json.dumps(stage(decrypt(Path(args.archive).read_bytes(),Path(args.private_key).read_bytes()),args.output,args.scratch_dir)))
     else: print(json.dumps(verify(decrypt(Path(args.archive).read_bytes(),Path(args.private_key).read_bytes()),args.scratch_dir)))
 if __name__=='__main__': main()

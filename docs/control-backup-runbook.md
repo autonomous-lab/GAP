@@ -90,3 +90,93 @@ provider-wide loss. Add owner-controlled escrow of the recovery key before
 claiming complete disaster recovery. Replication, election, fencing and actual
 failover tests remain on the existing resilience card. The operational scripts
 are deployed separately from GAP, requiring no Rust rebuild.
+
+## Agreed recovery scope: SQLite on the second host
+
+The PostgreSQL/Patroni/etcd integration is paused. The practical recovery path is
+an operator-controlled restore from an off-host backup, with interruption and a
+possible gap since the snapshot. This is not automatic HA or zero-loss recovery.
+The PostgreSQL prototype is retained only as experimental code.
+
+### Prepare an inactive restore
+
+Keep the private recovery key in the workspace; do not copy it to the destination.
+Download the encrypted archive from node02 and compare its SHA-256 with the
+source transfer receipt when available. Use a new private parent directory:
+
+```sh
+python3 GAP/scripts/control-backup.py stage \
+  --archive temp/control-backup-check/archive.gapenc \
+  --private-key .ssh/gap-control-recovery.pem \
+  --scratch-dir temp/control-backup-check \
+  --output temp/control-backup-check/restored
+```
+
+This verifies the archive before creating `state/authority.sqlite`, `config/`
+and `recovery.json`. Directories are private and files mode 0600. Existing output
+paths, missing referenced config files and unsafe archive paths are rejected.
+The restored configuration keeps its original permissions and feature flags:
+**staging is not a write-disabled service mode**. Do not attach it to the live
+network before completing the recovery gates below.
+
+Transfer this private directory over operator SSH to a new private directory
+on node02. Test the restored service with no network access, no published ports,
+`/config` mounted read-only and only the copied state mounted writable. The
+recovery key remains in the workspace. This checks configuration, keys, schema
+and startup without allowing workers to reach the restored authority.
+
+### Gates before a real production takeover
+
+1. Fence the old controller. If reachable, stop its service and disable automatic
+   restart/redeployment. If unreachable, use provider power-off or equivalent
+   enforced isolation; an SSH timeout is not evidence it has stopped. Record the
+   action and keep it fenced when the host returns.
+2. Block every consumer from both controller endpoints during reconciliation.
+   Inventory node gateways, billing/capacity workers, operator/account access,
+   identity gateways and migration clients. Existing execution leases must
+   expire. Do not merely change DNS while old connections remain usable.
+3. Preserve worker databases and any surviving controller WAL/database before
+   modifying them. Record snapshot time and enumerate changes after it:
+   cumulative reservation consumption/unpaid amounts and reservation IDs;
+   funding/refunds and request IDs; VM placement and in-flight migration state;
+   capacity changes; grants, revoked credentials and suspension decisions.
+4. Reconcile against durable evidence. Replay only supported idempotent
+   operations using their original identifiers and matching bodies. Never add
+   a credit balance manually or replay the same payment with a new identifier.
+   A worker checkpoint may refer to a reservation missing from the backup;
+   that needs explicit reconciliation, not a new reservation to hide the gap.
+   This release does not automate reconciliation or invent a recovery epoch.
+   If evidence is missing, keep affected operations/accounts closed. If the
+   affected scope cannot be established, keep the whole controller closed.
+5. Review credentials restored from an older snapshot: later revocations may
+   have been lost. Revoke uncertain sessions and rotate controller consumer
+   credentials with the corresponding configurations before restoring access.
+   Reconcile outstanding migrations before permitting their execution.
+6. With the old authority still fenced, install the reconciled copy under the
+   destination's control config/state paths, owned by service UID 10001. Back up
+   any pre-existing destination state; never overwrite it in place. Update all
+   trusted controller endpoints and gateway routing, retaining the intended TLS
+   identity and private access rules. An HTTPS origin on the failed node is a
+   separate routing dependency; restoring the database does not repair it.
+7. Verify identity, integrity, wallet/reservation consistency and a controlled
+   consumer before reopening operations. Retarget the backup source/service to
+   node02 and copy encrypted archives to a healthy independent host. Once new
+   writes are accepted, never roll back to the older snapshot: it would erase
+   those writes. Preserve the previous data for investigation only.
+
+No automated command bypasses these gates. Takeover needs an incident-specific
+record of the fencing action, reconciliation evidence, changed endpoints and
+reopening decision. There is no guaranteed recovery time or data-loss bound.
+
+### Restore drill evidence
+
+A real off-host archive was staged and the actual SQLite control service started
+on node02 in a disposable container with `--network none` and no published ports.
+The health request succeeded with access signing, reservations and capacity
+configured. All 24 tables and 12 configuration files verified. The transfer
+checksum matched; overwriting an existing stage and archive traversal were
+rejected. The exercise did not call mutation endpoints or connect production
+consumers. Its private restored copies were removed afterward.
+
+This proves backup-to-service startup on the second host. It does not prove
+reconciliation of a real incident, gateway takeover, or recovery of guest disks.
