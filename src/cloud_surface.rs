@@ -28,19 +28,37 @@ pub fn page(path: &str) -> Option<(&'static str, String)> {
         }
         "/agents.md" | "/AGENTS.md" | "/llms.txt" => Some(("text/plain; charset=utf-8", include_str!("../AGENTS.md").into())),
         "/robots.txt" => Some(("text/plain", "User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /internal/\nDisallow: /sites/\n".into())),
-        "/" => Some(("text/html; charset=utf-8", HOME.into())),
-        "/explorer" => Some(("text/html; charset=utf-8", include_str!("ui/cloud_explorer.html").into())),
-        "/pricing" => Some(("text/html; charset=utf-8", include_str!("ui/cloud_pricing.html").into())),
-        "/account" => Some(("text/html; charset=utf-8", include_str!("ui/cloud_account.html").into())),
-        "/signup" => Some(("text/html; charset=utf-8", include_str!("ui/cloud_signup.html").into())),
+        "/" => Some(("text/html; charset=utf-8", product_page(HOME, path))),
+        "/explorer" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_explorer.html"), path))),
+        "/pricing" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_pricing.html"), path))),
+        "/account" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_account.html"), path))),
+        "/signup" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_signup.html"), path))),
         "/microvms/assets/xterm.js" => Some(("text/javascript; charset=utf-8", include_str!("ui/vendor/xterm.js").into())),
         "/microvms/assets/xterm-fit.js" => Some(("text/javascript; charset=utf-8", include_str!("ui/vendor/xterm-fit.js").into())),
         "/microvms/assets/xterm.css" => Some(("text/css; charset=utf-8", include_str!("ui/vendor/xterm.css").into())),
-        "/microvms" => Some(("text/html; charset=utf-8", include_str!("ui/cloud_microvms.html").into())),
+        "/microvms" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_microvms.html"), path))),
         "/docs" | "/for-agents" | "/for-humans" | "/how-it-works" => Some(("text/html; charset=utf-8", documentation().to_string())),
         "/.well-known/gap-agent.json" => Some(("application/json", "{\"name\":\"GAP Cloud\",\"description\":\"Application infrastructure for AI agents\",\"documentation\":\"/agents.md\",\"projects\":\"/v1/cloud/projects\"}".into())),
         _ => None,
     }
+}
+
+fn product_page(source: &str, active: &str) -> String {
+    let links = [("/", "Home"), ("/explorer", "Explore"), ("/pricing", "Pricing"),
+        ("/microvms", "MicroVMs"), ("/docs", "Docs"), ("/account", "Account")];
+    let links = links.iter().map(|(href, label)| format!(
+        "<a href=\"{href}\"{}>{label}</a>",
+        if *href == active { " aria-current=\"page\"" } else { "" }
+    )).collect::<String>();
+    let navigation = format!(r#"<header class="gap-header"><div class="gap-header-inner">
+<a class="gap-brand" href="/" aria-label="GAP Cloud home"><span class="gap-symbol" aria-hidden="true">G</span><span>GAP <small>CLOUD</small></span></a>
+<nav class="gap-desktop" aria-label="Main navigation">{links}</nav>
+<div class="gap-mobile"><a href="/explorer">Explore</a><a href="/pricing">Pricing</a><details><summary>Menu</summary><nav aria-label="Mobile navigation">{links}</nav></details></div>
+</div></header>"#);
+    let variant = if active == "/" { "gap-home" } else if active == "/microvms" { "gap-compute" } else { "gap-product" };
+    source.replace("<!-- GAP-NAV -->", &navigation)
+        .replace("<!-- GAP-DESIGN -->", &format!("<style>{}</style>", include_str!("ui/cloud_design.css")))
+        .replace("<html lang=\"en\">", &format!("<html lang=\"en\" class=\"{variant}\">"))
 }
 
 const HOME: &str = include_str!("ui/cloud_home.html");
