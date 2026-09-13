@@ -118,3 +118,5 @@ pub fn new_id(prefix: &str) -> String {
     rand::thread_rng().fill_bytes(&mut bytes);
     format!("urn:gap:{}:{}", prefix, hex::encode(bytes))
 }
+
+pub mod explorer;

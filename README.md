@@ -412,3 +412,20 @@ not prove end-to-end connectivity.
 When expanding an existing pool, retain existing reservations, hibernate running
 VMs before restarting the worker with its new configuration, then resume them.
 See [the MicroVM operator guide](runtime/compose/README.md#large-pool-routing).
+
+
+## Fleet discovery, moves and suspension
+
+The public [explorer](https://gap.geta.team/explorer) compares explicitly listed
+nodes, measured host headroom and active tariffs without account credentials.
+The [account page](https://gap.geta.team/account) manages authorized projects and
+MicroVMs across nodes. Manual cold moves preserve disks, keys and HTTPS URLs;
+SSH endpoints change and the original HTTPS host remains a routing dependency.
+Automatic placement and highly available routing are not yet provided.
+
+Customer/operator suspension is enforced across configured fleet nodes, alongside
+local project/agent decisions, with bounded data retention and explicit restore.
+See [the agent/API guide](./AGENTS.md#moving-a-microvm-between-hosts) and
+[operator suspension commands](./runtime/control/README.md#customer-and-fleet-suspension).
+Public discovery metadata uses GAP_PUBLIC_OPERATOR, GAP_PUBLIC_COUNTRY,
+GAP_PUBLIC_REGION and GAP_PUBLIC_EXPLORER_NODES; none contains credentials.

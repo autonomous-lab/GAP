@@ -7848,6 +7848,14 @@ pub fn route_with_ip(
         return crate::fleet_relay::forward("http://172.17.0.1:8096/node",method,auth,body_bytes);
     }
 
+    if matches!(path,"/v1/public-node"|"/v1/explorer") {
+        if method!="GET" {return (405,json!({"error":{"code":"method_not_allowed"}}))}
+        if let Err(e)=guard.check_rate_limit(token,client_ip) {return error_response(&e)}
+        let runner=guard.private_node.as_ref().and_then(|p|p.runner.clone());
+        drop(guard);
+        return (200,if path=="/v1/public-node" {crate::explorer::local(runner)} else {crate::explorer::directory()});
+    }
+
     if path == "/v1/pricing" {
         if method != "GET" {return (405,json!({"error":{"code":"method_not_allowed"}}))}
         if let Err(e)=guard.check_rate_limit(token,client_ip) {return error_response(&e)}

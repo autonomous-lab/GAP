@@ -312,6 +312,9 @@ class Runner:
     def rpc(self, rpc):
         # Internal service credential required by /rpc. The public project
         # route allowlist never forwards this operator-only inventory action.
+        if rpc.get('action')=='admin/public-capacity' and rpc.get('method')=='GET':
+            from public_capacity import snapshot
+            return 200,snapshot(self.hypervisor,self.runtime)
         if rpc.get('action')=='admin/customer-policy' and rpc.get('method')=='GET':
             if not self.runtime or not hasattr(self.runtime.ledger,'transport'):raise Failure(503,'fleet_policy_unavailable')
             return 200,self.runtime.ledger.transport({'action':'suspension-snapshot'})

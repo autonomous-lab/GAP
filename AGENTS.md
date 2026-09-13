@@ -1425,8 +1425,8 @@ agent's other Cloud services.
 
 Suspension itself does not debit the wallet, delete data or start the 72-hour
 zero-credit timer. Existing storage charges and credit-exhaustion retention rules
-still apply; a separate legal/abuse retention hold is not implemented. This is a
-node-local agent decision, not yet a customer-wide or federated suspension.
+still apply. Operator-wide and customer suspension can additionally preserve
+data for a configured abuse-review window; see Customer and fleet suspension.
 
 ### Creation settings and remaining allocation
 
@@ -1471,7 +1471,8 @@ durable history and stale-generation rejection as agent suspension. Disabling
 or restarting the administrator console does not clear either decision.
 Reactivating an agent does not clear a separate project suspension, and reactivating
 a project does not override a suspended owner. This applies within the current
-node; customer-wide and fleet-wide administration remain separate work.
+node. Central customer and operator decisions are applied in addition to these
+local decisions when fleet policy is enabled.
 
 ### Fractional CPU, RSA keys and browser VM sessions
 
@@ -1690,3 +1691,98 @@ CPU uses increments of 0.25, RAM increments of 256 MiB, disk increments of
 1 GiB. Creation selectors also respect remaining owner quotas and the minimum
 disk size required by the guest image. API creation and resize enforce these
 limits; existing allocations are not automatically changed.
+
+
+## Moving a MicroVM between hosts
+
+In **Account → Fleet MicroVMs**, choose **Move** on a machine you may manage.
+Select the destination, review its active rates and accept downtime and endpoint
+changes. A listed destination still needs compatible images, sufficient resources
+and operator admission; selection does not reserve capacity. Automatic placement
+and automatic rebalancing are not enabled.
+
+This is a cold move: GAP stops the source, transfers retained disks and SSH keys,
+then activates the destination. Running processes and memory are not transferred.
+A running VM restarts; stopped/hibernated machines do not promise a live-memory
+resume after migration. Keep applications under a service supervisor.
+
+The shared HTTPS URL, verified custom domains and visitor credentials stay on
+the original HTTPS host, which proxies to the current host. The original host
+must remain reachable. This preserves URLs but is not high-availability routing.
+Public SSH and raw TCP/UDP endpoints change: use Account → Details after the move
+and update clients. Visitor settings remain on the original host; Account links
+to that dashboard where necessary. The destination's rates apply after handoff.
+
+**MicroVM moves** shows progress. Retry a failed move using **Retry**; use
+**Cancel move** before commit to request cancellation. Cancellation is not an
+instant rollback and cannot undo a committed move. Follow the operation until
+it reaches a terminal state. Do not create a replacement VM to retry a transfer.
+
+API clients use their fleet control credential at the operator gateway:
+
+```text
+GET /v1/fleet/vm-placements
+GET /v1/fleet/migrations
+GET /v1/fleet/migrations?migration_id=move_...
+POST /v1/fleet/migrations
+  {"action":"start","request_id":"unique-operation","project_id":"prj_...",
+   "vm_id":"vm_...","target_node":"node-02","target_tariff":{...},
+   "confirm_downtime":true}
+POST /v1/fleet/migrations
+  {"action":"resume","migration_id":"move_..."}
+POST /v1/fleet/migrations
+  {"action":"cancel","migration_id":"move_..."}
+```
+
+Copy `target_tariff` exactly from the destination entry in `GET /v1/fleet/nodes`;
+it is a versioned object, not a numeric estimate. Reuse the same start request ID
+and body after a lost response. Use `node_id` when requesting a project token
+for the VM's current placement. Never send a local node bearer to an unrelated
+operator. Discovery alone grants neither placement permission nor access.
+
+## Customer and fleet suspension
+
+An operator can suspend a customer across its nodes or suspend the whole operator
+fleet. Reasons, revisions and history are retained. Existing access tokens and
+new allocations are denied after policy propagation (normally within the node
+and workload leases, approximately ten seconds). Linked identities and projects
+are covered; a new DID using the same locally verified email cannot bypass the
+policy. An unrelated new email is not proof of the same person's identity.
+
+Restoration is explicit and does not remove independent agent/project decisions.
+A suspension can hold centrally managed data for 72 hours by default, configurable
+up to 720 hours. Storage charges continue. Expiry of the hold does not itself
+cause deletion: normal credit-exhaustion retention applies. Suspension never
+immediately deletes disks. Previously revoked account sessions require login again.
+
+When enabled, expired or unavailable central policy denies access. Control-plane
+high availability is separate work. Operator commands and activation settings:
+[control reference](./runtime/control/README.md#customer-and-fleet-suspension).
+
+## Public infrastructure explorer
+
+Open `/explorer` without signing in to compare operator-listed nodes. Public
+`GET /v1/explorer` aggregates `GET /v1/public-node` from explicitly configured
+HTTPS origins only. No caller URL, credentials, wallet, project identifier or
+customer inventory is forwarded or published. Browsing does not connect accounts
+or establish trust between operators.
+
+The view reports operator-declared country/region, software version, services,
+measured hardware, active sale tariff and aggregate host headroom. Missing data
+is unavailable, never zero-priced capacity. Headroom subtracts all retained VM
+commitments, including stopped/hibernated VMs, and reserves one logical CPU,
+1024 MiB RAM and 5 GiB disk for overhead. RAM is also bounded by currently
+available host memory; disk by free space. These are conservative observations,
+not reservations or promises of admission. Account quotas, compatible images,
+concurrent jobs and allocation checks remain authoritative.
+
+Samples are cached for 30 seconds. Each card shows its sample time and the
+measuring node for HTTP latency; latency is not measured from the visitor and
+is not a historical availability SLA. Failed or stale remote samples are marked
+unavailable. No compliance badge is implied by a listing.
+
+Operators configure `GAP_PUBLIC_OPERATOR`, `GAP_PUBLIC_COUNTRY`,
+`GAP_PUBLIC_REGION` and `GAP_PUBLIC_EXPLORER_NODES` (comma-separated HTTPS
+origins; at most eight). Leave metadata empty if it is unknown. These fields
+contain public information only. Each operator controls its own listing; no
+credential exchange or automatic federation follows from discovery.
