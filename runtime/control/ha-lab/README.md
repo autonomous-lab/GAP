@@ -1,8 +1,9 @@
 # Isolated fleet-control HA prototype
 
 This lab runs **three real PostgreSQL instances managed by Patroni and three etcd
-members** on an internal Docker network. It uses a small synthetic wallet, not
-GAP's live authority or customer data. No ports are published. All six containers
+members** on an internal Docker network. It now runs GAP's real `Authority`
+business methods through the opt-in `PostgresAuthority` adapter with synthetic
+credits, never live customer data. No ports are published. All six containers
 run on one test host: this validates a process/network scenario, not independent
 physical failure domains or a production HA deployment.
 
@@ -40,7 +41,8 @@ inspect the `gap.ha-lab=true` label before removing interrupted lab resources.
    receipt total and exactly one primary in the cluster.
 
 Observed time from network isolation through successful retry on the successor:
-**20.91 seconds** in one successful run. This includes failure detection, election,
+**20.91 seconds** in the original simplified-wallet run; see the latest JSON
+report for the real-authority run. This includes failure detection, election,
 synchronous readiness and test requests; it is not an election-only measurement,
 a p95 or an SLA. The approximately five-second GAP policy lease would expire
 before this recovery completed. No production lease was extended.
@@ -56,8 +58,9 @@ no weakening to asynchronous replication was needed.
 
 ## Guarantees not established
 
-- The real `Authority` implementation still uses SQLite. This SQL wallet is a
-  contract experiment, not a PostgreSQL adapter for its full API/schema.
+- Production service wiring still uses SQLite. The opt-in adapter shares the
+  real Authority methods/schema, but not every access, migration, reservation
+  and finance flow has yet been exercised on PostgreSQL.
 - No host/power failure, frozen Patroni process, watchdog/STONITH, loss of multiple
   data replicas, TLS identity, backup recovery or cross-datacenter outage was tested.
 - Lab clients have administrative SQL access. Production clients must not be able
@@ -66,11 +69,38 @@ no weakening to asynchronous replication was needed.
 - A timed-out transaction is ambiguous: retry the same operation ID. Never infer
   rollback just from a timeout or reissue a new debit identifier.
 
-Next implementation: preserve the authority's transactional/idempotency contracts
-in a PostgreSQL adapter, add leader-aware endpoints and independent fencing,
-then run the existing authority tests plus targeted partitions. A real deployment
+Next implementation: validate the remaining business flows, wire service
+configuration and migration tooling, add leader-aware endpoints and independent
+fencing. The lab currently selects a known primary for each request. A real deployment
 requires independent failure domains, secured replication and an explicit policy
 for the measured recovery gap. The existing HA card remains open.
 
 References: [Patroni synchronous modes](https://patroni.readthedocs.io/en/latest/replication_modes.html)
 and [configuration](https://patroni.readthedocs.io/en/latest/yaml_configuration.html).
+
+## PostgreSQL adapter boundary
+
+`../postgres_authority.py` inherits the actual business methods and shared schema
+initialization. SQLite remains the default and needs no new dependency. The
+adapter requires `psycopg[binary]==3.2.10` and accepts a libpq DSN, potentially
+with multiple hosts; `target_session_attrs=read-write` refuses standbys. It does
+not by itself prove that a writable server still owns the consensus lease.
+
+Each transaction takes one database-wide advisory lock and uses READ COMMITTED,
+preserving the existing single-writer semantics across controller processes.
+This deliberately limits throughput and serializes reads too. It is not a lock
+shared between divergent primaries and is not independent fencing. Commits use
+`synchronous_commit=on`; actual standby durability still depends on the server's
+strict synchronous replication configuration. No automatic mutation retry is
+performed after a failed connection or ambiguous commit.
+
+The internal SQL adapter handles placeholders, 64-bit integer schema/aggregates,
+identity sequences and the few SQLite conflict clauses used by Authority. It is
+not a general-purpose SQL translator. Database errors are returned as a generic
+503 without credentials, query parameters or PostgreSQL diagnostics.
+
+`test_postgres_authority.py` requires `GAP_TEST_POSTGRES_DISPOSABLE=1` and
+`GAP_TEST_POSTGRES_DSN` pointing to a fresh disposable database. It verifies
+large integer balances, cross-instance concurrent debit, idempotency conflicts,
+rollback, suspension revisions, credential revocation and operator binding.
+Never run it against a production database.

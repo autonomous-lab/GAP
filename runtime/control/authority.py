@@ -51,6 +51,10 @@ class Authority:
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         os.close(fd)
         Path(self.path).chmod(0o600)
+        self.initialize_schema()
+
+    def initialize_schema(self):
+        operator = self.operator
         with self.db() as db:
             for sql in (
                 'CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)',

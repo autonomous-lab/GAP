@@ -9,7 +9,7 @@ import time
 PREFIX='gap-ha-lab-'; NETWORK=PREFIX+'net'
 ROOT=Path('/tmp/gap-ha-lab-config'); ROOT.mkdir(exist_ok=True); ROOT.chmod(0o755)
 NODES=[PREFIX+'pg'+str(i) for i in range(1,4)]
-CREATED=[]; CONFIGS=[]; report={'scope':'isolated synthetic wallet, not production GAP authority','checks':[]}
+CREATED=[]; CONFIGS=[]; report={'scope':'real GAP Authority on PostgreSQL, synthetic credits and isolated replicas','checks':[]}
 
 def cmd(args,check=True,timeout=30,input=None):
     r=subprocess.run(args,input=input,text=True,capture_output=True,timeout=timeout)
@@ -19,6 +19,8 @@ def cmd(args,check=True,timeout=30,input=None):
 def docker(*args,**kw):return cmd(['docker',*args],**kw)
 def sql(node,query,check=True):
     return docker('exec','-e','PGOPTIONS=-c statement_timeout=5000',node,'psql','-h','127.0.0.1','-U','postgres','-At','-v','ON_ERROR_STOP=1','-c',query,check=check,timeout=12)
+def authority(node,*args,check=True):
+    return docker('exec',node,'python3','/control/ha-lab/authority_client.py',*args,check=check,timeout=25)
 def role(node):
     r=docker('exec',node,'python3','-c',"import urllib.request,json;print(json.load(urllib.request.urlopen('http://127.0.0.1:8008/patroni',timeout=1))['role'])",check=False,timeout=5)
     return r.stdout.strip() if r.returncode==0 else 'unavailable'
@@ -63,57 +65,38 @@ try:
           watchdog=dict(mode='off'))
         p=ROOT/(name+'.json');p.write_text(json.dumps(config));p.chmod(0o644); CONFIGS.append(p)
         docker('run','-d','--name',name,'--label','gap.ha-lab=true','--network',NETWORK,'--network-alias',name,
-               '--memory','512m','--cpus','1','-v',str(p)+':/lab.json:ro','gap-ha-lab-patroni','/lab.json')
+               '--memory','512m','--cpus','1','-v',str(p)+':/lab.json:ro','-v',str(Path(__file__).resolve().parent.parent)+':/control:ro','gap-ha-lab-patroni','/lab.json')
         CREATED.append(name)
     leader=wait(primary,'initial leader')
     wait(lambda:sql(leader,"select count(*) from pg_stat_replication where state='streaming'").stdout.strip()=='2','two replicas')
     wait(lambda:'sync' in sql(leader,'select sync_state from pg_stat_replication').stdout.split(),'synchronous standby')
     wait(lambda: 'sync_standby' in docker('exec',PREFIX+'e1','/usr/local/bin/etcdctl','get','/gap-lab/gap-isolated/sync','--print-value-only').stdout and json.loads(docker('exec',PREFIX+'e1','/usr/local/bin/etcdctl','get','/gap-lab/gap-isolated/sync','--print-value-only').stdout).get('sync_standby'), 'published synchronous standby')
     record('cluster_ready',leader=leader,data_nodes=3,consensus_members=3)
-    schema="""
-CREATE TABLE wallet(id int primary key,balance bigint not null check(balance>=0));
-CREATE TABLE receipts(request text primary key,amount bigint not null);
-INSERT INTO wallet VALUES(1,100);
-CREATE FUNCTION debit(r text,a bigint) RETURNS boolean LANGUAGE plpgsql AS $$
-DECLARE b bigint; previous bigint;
-BEGIN
- SELECT balance INTO b FROM wallet WHERE id=1 FOR UPDATE;
- SELECT amount INTO previous FROM receipts WHERE request=r;
- IF FOUND THEN
-  IF previous<>a THEN RAISE EXCEPTION 'request conflict'; END IF;
-  RETURN true;
- END IF;
- IF a<=0 OR b<a THEN RETURN false; END IF;
- UPDATE wallet SET balance=balance-a WHERE id=1;
- INSERT INTO receipts VALUES(r,a);
- RETURN true;
-END $$;
-"""
-    sql(leader,schema)
-    assert sql(leader,"select debit('confirmed-before-partition',25)").stdout.strip()=='t'
+    authority(leader,'setup')
+    authority(leader,'debit','confirmed-before-partition','25')
     began=time.monotonic();docker('network','disconnect',NETWORK,leader)
     # Docker exec still reaches the old SQL process locally despite its network isolation.
-    denied=sql(leader,"select debit('lost-response',10)",check=False)
+    denied=authority(leader,'debit','lost-response','10',check=False)
     assert denied.returncode!=0,'isolated primary confirmed a write'
     record('isolated_primary_did_not_acknowledge',exit_code=denied.returncode)
     successor=wait(lambda:primary((leader,)),'successor election')
     wait(lambda:'sync' in sql(successor,'select sync_state from pg_stat_replication').stdout.split(),'successor synchronous partner')
-    assert sql(successor,"select count(*) from receipts where request='confirmed-before-partition'").stdout.strip()=='1'
-    assert sql(successor,"select debit('lost-response',10)").stdout.strip()=='t'
-    assert sql(successor,"select debit('lost-response',10)").stdout.strip()=='t'
-    assert sql(successor,"select balance from wallet").stdout.strip()=='65'
+    assert sql(successor,"select count(*) from wallet_entries where operation='confirmed-before-partition'").stdout.strip()=='1'
+    authority(successor,'debit','lost-response','10')
+    authority(successor,'debit','lost-response','10')
+    assert json.loads(authority(successor,'wallet').stdout)['balance_microcredits']==65
     record('failover_preserved_acknowledged_debit_and_idempotent_retry',successor=successor,elapsed_seconds=round(time.monotonic()-began,2))
     with concurrent.futures.ThreadPoolExecutor(2) as pool:
-        results=list(pool.map(lambda r:sql(successor,f"select debit('{r}',65)").stdout.strip(),['race-a','race-b']))
-    assert sorted(results)==['f','t'],results
-    assert sql(successor,'select balance from wallet').stdout.strip()=='0'
-    assert sql(successor,'select sum(amount) from receipts').stdout.strip()=='100'
+        results=list(pool.map(lambda r:authority(successor,'debit',r,'65',check=False).returncode,['race-a','race-b']))
+    assert sorted(results)==[0,2],results
+    assert json.loads(authority(successor,'wallet').stdout)['balance_microcredits']==0
+    assert sql(successor,"select sum(-delta) from wallet_entries where kind='usage'").stdout.strip()=='100'
     record('concurrent_final_balance_spend',outcomes=results,final_balance=0,total_debits=100)
     # Restore network and let Patroni rewind the previous primary to the new timeline.
     docker('network','connect','--alias',leader,NETWORK,leader)
     wait(lambda:role(leader)=='replica','old primary rejoins as replica')
-    wait(lambda:sql(leader,'select sum(amount) from receipts').stdout.strip()=='100','replica converges')
-    assert sql(leader,"select debit('forbidden-replica',1)",check=False).returncode!=0
+    wait(lambda:sql(leader,"select sum(-delta) from wallet_entries where kind='usage'").stdout.strip()=='100','replica converges')
+    assert authority(leader,'debit','forbidden-replica','1',check=False).returncode!=0
     assert len([n for n in NODES if role(n)=='primary'])==1
     record('old_primary_rejoined_read_only',one_primary=True)
     report['passed']=True
