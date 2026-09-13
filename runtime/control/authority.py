@@ -565,7 +565,7 @@ class Authority:
             rows = db.execute("""SELECT c.vm,c.project,c.node,c.state,c.revision,
                     p.owner,m.id AS migration_id,m.phase AS migration_phase,m.target AS migration_target
                 FROM capacity c JOIN projects p ON p.id=c.project
-                LEFT JOIN vm_migrations m ON m.vm=c.vm
+                LEFT JOIN vm_migrations m ON m.vm=c.vm AND m.phase <> 'cancelled'
                 WHERE p.customer=? AND c.state<>'released' AND c.vm>?
                   AND (? IS NULL OR EXISTS(SELECT 1 FROM grants g WHERE g.project=c.project AND g.agent=?))
                 ORDER BY c.vm LIMIT 101""", (customer,after,agent,agent)).fetchall()

@@ -66,7 +66,13 @@ No preparation phase grants destination execution or changes placement/balances.
 Authority capacity changes are rejected while a preparation exists. The local
 source fence also refuses resize and destroy before worker side effects.
 
-The journal has no cancellation, timeout-based unlock or cutover operation yet.
+The journal has no timeout-based unlock or cutover operation yet.
+Cancellation now proceeds through cancelling -> target_discarded -> cancelled,
+with target attestation required before source restoration. Both attestations
+are revision-bound, retry-safe trusted-worker receipts. These transport actions
+remain disabled in production until the worker orchestration is connected.
+A cancelled record remains available for audit and permits a new migration ID;
+a delayed request for the cancelled migration cannot advance the new one.
 A full orchestration must reconcile worker lifecycle/retention actions, settle
 source metering, prepare destination accounting, and switch routes and placement
 before it can authorize target execution. Central preparation alone does not

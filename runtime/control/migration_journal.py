@@ -19,7 +19,8 @@ def schema(db):
         phase TEXT NOT NULL, disk_digest TEXT, source_receipt TEXT,
         target_receipt TEXT, created INTEGER NOT NULL,
         CHECK(source<>target))''')
-    db.execute('CREATE UNIQUE INDEX IF NOT EXISTS migration_vm ON vm_migrations(vm)')
+    db.execute('DROP INDEX IF EXISTS migration_vm')
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS active_migration_vm ON vm_migrations(vm) WHERE phase <> 'cancelled'")
 
 
 def view(row):
@@ -39,7 +40,7 @@ def row_for(db, migration):
 
 
 def guard_capacity(db, vm):
-    if db.execute('SELECT 1 FROM vm_migrations WHERE vm=?', (vm,)).fetchone():
+    if db.execute("SELECT 1 FROM vm_migrations WHERE vm=? AND phase <> 'cancelled'", (vm,)).fetchone():
         raise Failure('vm_migration_in_progress', 409)
 
 
@@ -114,5 +115,49 @@ def attest(a, node, request, migration, revision, stage, evidence, disk_digest):
                 raise Failure('migration_disk_digest_mismatch', 409)
             db.execute("UPDATE vm_migrations SET phase='target_staged',revision=revision+1,target_receipt=? WHERE id=?",
                        (evidence, migration))
+        return view(row_for(db, migration))
+    return a.mutation('node:'+node, request, body, apply)
+
+
+def cancel_request(a, request, migration, revision):
+    """Fence progression, then wait for BOTH hosts to acknowledge no execution.
+
+    Cancellation is not a timeout-based unlock. Target must durably discard its
+    copy before the source may be unfenced; delayed source/target work remains
+    blocked by its local migration marker.
+    """
+    a.capacity_number(revision, 2**53-1, 1)
+    body = dict(action='migration-cancel', migration=migration, revision=revision)
+    def apply(db):
+        row = row_for(db, migration)
+        if row['revision'] != revision:
+            raise Failure('migration_revision_conflict', 409)
+        if row['phase'] not in ('prepared', 'source_fenced', 'target_staged'):
+            raise Failure('migration_phase_conflict', 409)
+        db.execute("UPDATE vm_migrations SET phase='cancelling',revision=revision+1 WHERE id=?", (migration,))
+        return view(row_for(db, migration))
+    return a.mutation('operator', request, body, apply)
+
+
+def cancel_attest(a, node, request, migration, revision, stage, evidence):
+    a.capacity_number(revision, 2**53-1, 1)
+    identifier(evidence)
+    if stage not in ('target-discarded', 'source-restored'):
+        raise Failure('invalid_migration_stage')
+    body = dict(action='migration-cancel-attest', migration=migration,
+                revision=revision, stage=stage, evidence=evidence)
+    def apply(db):
+        row = row_for(db, migration)
+        target = stage == 'target-discarded'
+        if node != row['target' if target else 'source']:
+            raise Failure('migration_node_mismatch', 403)
+        if row['revision'] != revision:
+            raise Failure('migration_revision_conflict', 409)
+        if row['phase'] != ('cancelling' if target else 'target_discarded'):
+            raise Failure('migration_phase_conflict', 409)
+        # Store new receipts separately in the operation log, preserving export
+        # and import receipts in the migration record for postmortem inspection.
+        db.execute('UPDATE vm_migrations SET phase=?,revision=revision+1 WHERE id=?',
+                   ('target_discarded' if target else 'cancelled', migration))
         return view(row_for(db, migration))
     return a.mutation('node:'+node, request, body, apply)

@@ -80,6 +80,23 @@ class MigrationJournalTests(unittest.TestCase):
         other=self.a.create_customer('operator','other-account','Other')['customer_id']
         self.assertEqual(self.a.vm_placements(other)['placements'],[])
 
+    def test_cancel_requires_target_discard_before_source_restore(self):
+        first=self.prepare();source=self.attest(first)
+        cancelling=journal.cancel_request(self.a,'cancel',first['migration_id'],source['revision'])
+        self.fails('migration_phase_conflict',lambda:journal.cancel_attest(self.a,'node-one','early',first['migration_id'],cancelling['revision'],'source-restored','receipt'))
+        self.fails('migration_revision_conflict',lambda:self.attest(source,'two','target-staged','late'))
+        discarded=journal.cancel_attest(self.a,'node-two','discard',first['migration_id'],cancelling['revision'],'target-discarded','no-target-copy')
+        self.fails('vm_migration_in_progress',lambda:self.prepare('too-early'))
+        self.a=Authority(self.path,'operator-one');self.app.authority=self.a
+        done=journal.cancel_attest(self.a,'node-one','restore',first['migration_id'],discarded['revision'],'source-restored','source-restored')
+        self.assertEqual(done['phase'],'cancelled')
+        self.assertFalse(done['execution_authorized'])
+        self.assertEqual(journal.cancel_request(self.a,'cancel',first['migration_id'],source['revision']),cancelling)
+        new=self.prepare('new-move')
+        self.assertNotEqual(new['migration_id'],first['migration_id'])
+        self.assertEqual(len(self.a.vm_placements(self.customer)['placements']),1)
+        self.fails('migration_revision_conflict',lambda:self.attest(first,request='old-transfer'))
+
     def test_default_disabled_and_operator_only(self):
         self.app.allow_migration_journal=False
         self.fails('migration_journal_disabled',self.prepare)
