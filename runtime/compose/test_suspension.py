@@ -3,7 +3,8 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+from contextlib import nullcontext
 from lifecycle import Runtime
 from microvm import MicroVMs,VMError
 import threading
@@ -36,6 +37,43 @@ class SuspensionTests(unittest.TestCase):
         policy.clear()
         self.assertFalse(runtime.check_policy(meta,force=True))
         self.assertEqual(runtime.state(meta)['policy_generation'],3)
+    def test_policy_recovery_keeps_pause_until_lifecycle_restarts_guest(self):
+        runtime,meta=self.runtime()
+        meta.update(execution_mode='always_on',vcpus=1,memory_mib=256)
+        calls=[]
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);path=root/'vm.json';path.write_text(json.dumps(meta))
+            def save(m):path.write_text(json.dumps(m))
+            def hibernate(m):
+                calls.append('hibernate');m['state']='hibernated';save(m)
+            def start(project,owner,action,body):
+                calls.append(action)
+                m=json.loads(path.read_text());m['state']='running'
+                runtime.execution_started(m);save(m)
+            runtime.manager=SimpleNamespace(alive=lambda m:m['state']=='running',
+                hibernate=hibernate,save=save,perform=start,
+                read=lambda *args:json.loads(path.read_text()))
+            runtime.ledger=SimpleNamespace(view=lambda *a,**k:dict(execution_allowed=True,
+                deletion_committed=False,billing_mode='shadow'))
+            policy=dict(owner_did=meta['owner_did'],generation=2,allowed=True)
+            db=Mock();db.execute.return_value.fetchone.return_value=None
+            runtime.runner=SimpleNamespace(workload_policy=lambda *a:policy,
+                authorize=lambda *a:dict(always_on_allowed=True),
+                db=lambda:nullcontext(db),ingress=None)
+            runtime.admission=lambda *a:nullcontext()
+            runtime.sample=Mock()
+            runtime.execution_started(meta)
+            runtime.execution_stopping(meta)
+            runtime.state(meta)['policy_preempted']=True
+            self.assertTrue(runtime.accept_policy(meta,policy))
+            self.assertTrue(runtime.state(meta)['policy_preempted'])
+            runtime.tick_project(path)
+            self.assertEqual(calls,['hibernate'])
+            runtime.tick_project(path)
+            self.assertEqual(calls,['hibernate','vm/start'])
+            self.assertFalse(runtime.state(meta)['policy_preempted'])
+            self.assertIsNotNone(runtime.state(meta)['running_since'])
+
     def test_watchdog_closes_connections_and_stops_cpu_without_job_lock(self):
         runtime,meta=self.runtime();calls=[]
         with tempfile.TemporaryDirectory() as directory:

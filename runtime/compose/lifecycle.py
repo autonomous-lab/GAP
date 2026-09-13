@@ -170,7 +170,8 @@ class Runtime:
         if valid:
             state['policy_generation']=policy['generation'];meta['policy_generation']=policy['generation']
             state['operator_suspended']=bool(policy.get('suspended'));meta['operator_suspended']=state['operator_suspended']
-            if state['policy_allowed'] and not state.get('fleet_preempted'):state['policy_preempted']=False
+            # Permission recovery does not resume QEMU. Only execution_started
+            # may clear the pause marker after an actual guest restart/resume.
         meta['policy_blocked']=not state['policy_allowed']
         return state['policy_allowed']
 
@@ -353,6 +354,9 @@ class Runtime:
             state['policy_checked']=time.time()
             if not approved: meta['execution_mode']='serverless'; self.manager.save(meta)
         blocked=not account['execution_allowed'] or not self.check_policy(meta) or state.get('fleet_preempted',False)
+        # A watchdog-paused process still has catalog state running. Finish
+        # hibernation before the normal authorized wake/restart path can run.
+        blocked=blocked or (meta['state']=='running' and state.get('policy_preempted',False))
         idle=(meta.get('execution_mode','serverless')=='serverless'
               and time.time()-state['last_incoming']>=meta.get('idle_timeout_seconds',900) and not state['active_http'])
         with self.runner.db() as db:
