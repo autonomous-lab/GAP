@@ -1,0 +1,12 @@
+[Unit]
+Description=Encrypted GAP control backup to secondary host
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/gap-backup/send.py
+TimeoutStartSec=300
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
