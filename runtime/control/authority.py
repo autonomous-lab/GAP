@@ -95,6 +95,8 @@ class Authority:
             schema(db)
             import retention
             retention.schema(db)
+            import migration_journal
+            migration_journal.schema(db)
             if db.execute("SELECT value FROM metadata WHERE key='operator'").fetchone()[0] != operator:
                 raise Failure('operator_database_mismatch', 409)
 
@@ -295,6 +297,8 @@ class Authority:
                     cpu=cpu, memory=memory, expected_revision=expected_revision)
         def apply(db):
             placement = self.node_project(db, node, project)
+            import migration_journal
+            migration_journal.guard_capacity(db, vm)
             if placement['owner'] != owner:
                 raise Failure('project_owner_mismatch', 403)
             row = self.capacity_row(db, node, project, vm)
@@ -345,6 +349,8 @@ class Authority:
                 raise Failure('capacity_revision_conflict', 409)
             if row['state'] == 'released':
                 raise Failure('capacity_released', 409)
+            import migration_journal
+            migration_journal.guard_capacity(db, vm)
             if outcome == 'release':
                 if row['state'] != 'active':
                     raise Failure('capacity_transition_pending', 409)
@@ -550,6 +556,24 @@ class Authority:
                         unpaid_microcredits=unpaid,lease_expires_at=expires,closed=close,
                         funding_status='available' if expires else 'fully_reserved' if remaining else 'exhausted')
         return self.mutation('node:'+node,request,body,apply)
+
+    def vm_placements(self, customer, agent=None, after=''):
+        if not isinstance(after, str) or (after and not re.fullmatch(r'vm_[0-9a-f]{32}', after)):
+            raise Failure('invalid_capacity_cursor')
+        with self.db() as db:
+            self.customer(db, customer)
+            rows = db.execute("""SELECT c.vm,c.project,c.node,c.state,c.revision,
+                    p.owner,m.id AS migration_id,m.phase AS migration_phase,m.target AS migration_target
+                FROM capacity c JOIN projects p ON p.id=c.project
+                LEFT JOIN vm_migrations m ON m.vm=c.vm
+                WHERE p.customer=? AND c.state<>'released' AND c.vm>?
+                  AND (? IS NULL OR EXISTS(SELECT 1 FROM grants g WHERE g.project=c.project AND g.agent=?))
+                ORDER BY c.vm LIMIT 101""", (customer,after,agent,agent)).fetchall()
+            return dict(placements=[dict(vm_id=r['vm'],project_id=r['project'],node_id=r['node'],
+                owner_did=r['owner'],state=r['state'],revision=r['revision'],
+                migration=(dict(migration_id=r['migration_id'],phase=r['migration_phase'],
+                    target_node=r['migration_target'],handoff_complete=False) if r['migration_id'] else None))
+                for r in rows[:100]], next_cursor=rows[99]['vm'] if len(rows)>100 else None)
 
     def projects(self, customer, agent=None, after=''):
         with self.db() as db:

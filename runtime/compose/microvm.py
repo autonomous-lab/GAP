@@ -96,6 +96,10 @@ def validate(action, body):
 
 
 class MicroVMs:
+    def require_mutable(self, meta, action):
+        if meta and action in ('vm/update', 'vm/destroy') and (self.folder(meta)/'.migration-fence').exists():
+            raise VMError('migration_source_fenced')
+
     def execution_allowed(self,meta):
         if (self.folder(meta)/'.migration-fence').exists():return False
         if not self.capacity.allows(meta):return False
@@ -679,6 +683,7 @@ class MicroVMs:
             if (action == 'vm/create' and (not meta or meta['state'] == 'destroyed')
                     and self.vm_count(owner) >= limits.get('max_vms', 1)):
                 raise VMError('agent_quota_exceeded_max_vms')
+            self.require_mutable(meta, action)
             if self.capacity.managed(project):
                 return self.capacity.execute(project,owner,action,body)
             return self._perform(project, owner, action, body)
@@ -687,6 +692,7 @@ class MicroVMs:
         validate(action, body)
         with self.lock(project):
             meta = None if action=='vm/create' and body.get('new_vm') else self.read(project, owner, body.get('vm_id'))
+            self.require_mutable(meta, action)
             if action == 'vm/create':
                 if meta and meta['state'] != 'destroyed':
                     raise VMError('vm_already_exists')

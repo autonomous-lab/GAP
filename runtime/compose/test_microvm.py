@@ -45,6 +45,14 @@ class MicroVMTests(unittest.TestCase):
                 restarted.fence_for_migration(PROJECT, OWNER, VM, 'move_' + 'e' * 32)
             self.assertEqual(stop.call_count, 1)
 
+    def test_fenced_source_cannot_be_resized_or_deleted(self):
+        (self.manager.folder(self.meta) / '.migration-fence').write_text('{}')
+        for action in ('vm/update', 'vm/destroy'):
+            for entry in (self.manager.perform, self.manager._perform):
+                with self.assertRaisesRegex(VMError, 'migration_source_fenced'):
+                    entry(PROJECT, OWNER, action, {'vm_id': VM})
+        self.assertTrue(self.manager.folder(self.meta).exists())
+
     def test_resource_steps_apply_to_create_and_resize(self):
         for action in ('vm/create','vm/update'):
             base={'request_id':'d'*32,'vm_id':VM} if action=='vm/update' else {'request_id':'d'*32}

@@ -27,7 +27,7 @@ def secret(path):
 
 
 class Application:
-    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False, allow_capacity=False, access=None, identity_nodes=None, console_paths=None, finance=None, report_token=None):
+    def __init__(self, authority, admin, nodes, allow_debits=False, allow_reservations=False, allow_capacity=False, access=None, identity_nodes=None, console_paths=None, finance=None, report_token=None, allow_migration_journal=False):
         self.authority, self.admin, self.nodes = authority, admin, dict(nodes)
         self.finance,self.report_token=finance,report_token
         self.console_paths=dict(console_paths or {})
@@ -41,6 +41,9 @@ class Application:
         if type(allow_capacity) is not bool:
             raise ValueError('invalid capacity configuration')
         self.allow_capacity = allow_capacity
+        if type(allow_migration_journal) is not bool:
+            raise ValueError("invalid migration journal configuration")
+        self.allow_migration_journal = allow_migration_journal
         credentials = [admin, *nodes.values(), *self.identity_nodes.values(), *([report_token] if report_token else [])]
         if type(allow_debits) is not bool or len(set(credentials)) != len(credentials):
             raise ValueError('control credentials must be distinct')
@@ -114,6 +117,18 @@ class Application:
             if action=='finance':
                 if not self.finance:raise Failure('fleet_finance_not_configured',409)
                 return self.finance.report(body['start'],body['end'],body.get('project_id'),body.get('customer_id'),body.get('node_id'))
+            if action in ('migration-prepare', 'migration-status'):
+                if not self.allow_migration_journal:
+                    raise Failure('migration_journal_disabled', 409)
+                import migration_journal
+                if action == 'migration-status':
+                    return migration_journal.get(a, body['migration_id'])
+                if not self.allow_capacity or not self.allow_reservations:
+                    raise Failure('migration_requires_fleet_accounting', 409)
+                if any(body[k] not in self.nodes for k in ('source_node', 'target_node')):
+                    raise Failure('unknown_trusted_node')
+                return migration_journal.prepare(a, request, body['customer_id'], body['project_id'],
+                    body['vm_id'], body['source_node'], body['target_node'], body['capacity_revision'])
             if action == 'create-customer':
                 return a.create_customer('operator', request, body['label'])
             if action == 'attach-principal':
@@ -149,6 +164,14 @@ class Application:
         if method == 'POST' and parsed.path == '/node':
             if kind != 'node':
                 raise Failure('node_credentials_required', 403)
+            if body.get('action') in ('migration-status', 'migration-attest'):
+                if not self.allow_migration_journal:
+                    raise Failure('migration_journal_disabled', 409)
+                import migration_journal
+                if body['action'] == 'migration-status':
+                    return migration_journal.get(a, body['migration_id'], actor)
+                return migration_journal.attest(a, actor, body['request_id'], body['migration_id'],
+                    body['revision'], body['stage'], body['evidence_id'], body['disk_sha256'])
             if body.get('action') == 'readiness':
                 return dict(operator_id=a.operator,node_id=actor,protocol='fleet-admission-v1',
                             reservations=self.allow_reservations,capacity=self.allow_capacity)
@@ -206,6 +229,9 @@ class Application:
         if method == 'GET' and parsed.path == '/v1/quotas':
             # Aggregate only: no other agent's project/VM identifiers disclosed.
             return a.quotas(actor['customer'])
+        if method == 'GET' and parsed.path == '/v1/vm-placements':
+            after = parse_qs(parsed.query).get('after', [''])[0]
+            return a.vm_placements(actor['customer'], actor['agent'], after)
         if method == 'GET' and parsed.path == '/v1/projects':
             after = parse_qs(parsed.query).get('after', [''])[0]
             return a.projects(actor['customer'], actor['agent'], after)

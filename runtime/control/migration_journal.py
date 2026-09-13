@@ -1,0 +1,118 @@
+"""Durable cold-migration preparation, before routing/billing handoff.
+
+Trusted workers attest durable local facts; receipts are audit evidence, not
+cryptographic host proofs. No state here grants destination execution. In
+particular, a retry response is historical evidence, never a start lease.
+"""
+import re
+import secrets
+
+from authority import Failure, identifier
+
+
+def schema(db):
+    db.execute('''CREATE TABLE IF NOT EXISTS vm_migrations(
+        id TEXT PRIMARY KEY, vm TEXT NOT NULL REFERENCES capacity(vm),
+        project TEXT NOT NULL REFERENCES projects(id), customer TEXT NOT NULL,
+        owner TEXT NOT NULL, source TEXT NOT NULL, target TEXT NOT NULL,
+        capacity_revision INTEGER NOT NULL, revision INTEGER NOT NULL,
+        phase TEXT NOT NULL, disk_digest TEXT, source_receipt TEXT,
+        target_receipt TEXT, created INTEGER NOT NULL,
+        CHECK(source<>target))''')
+    db.execute('CREATE UNIQUE INDEX IF NOT EXISTS migration_vm ON vm_migrations(vm)')
+
+
+def view(row):
+    return dict(migration_id=row['id'], vm_id=row['vm'], project_id=row['project'],
+                source_node=row['source'], target_node=row['target'],
+                revision=row['revision'], phase=row['phase'],
+                disk_sha256=row['disk_digest'], execution_authorized=False,
+                handoff_complete=False)
+
+
+def row_for(db, migration):
+    identifier(migration)
+    row = db.execute('SELECT * FROM vm_migrations WHERE id=?', (migration,)).fetchone()
+    if not row:
+        raise Failure('migration_not_found', 404)
+    return row
+
+
+def guard_capacity(db, vm):
+    if db.execute('SELECT 1 FROM vm_migrations WHERE vm=?', (vm,)).fetchone():
+        raise Failure('vm_migration_in_progress', 409)
+
+
+def prepare(a, request, customer, project, vm, source, target, capacity_revision):
+    """Operator-only entry point; transport validates the configured node set."""
+    identifier(source)
+    identifier(target)
+    if source == target:
+        raise Failure('migration_same_node')
+    a.capacity_number(capacity_revision, 2**53-1, 1)
+    body = dict(action='migration-prepare', customer=customer, project=project,
+                vm=vm, source=source, target=target, capacity_revision=capacity_revision)
+    def apply(db):
+        placement = a.node_project(db, source, project)
+        if placement['customer'] != customer:
+            raise Failure('migration_customer_mismatch', 403)
+        allocation = a.capacity_row(db, source, project, vm)
+        if not allocation or allocation['state'] != 'active':
+            raise Failure('migration_requires_active_allocation', 409)
+        if allocation['revision'] != capacity_revision:
+            raise Failure('capacity_revision_conflict', 409)
+        guard_capacity(db, vm)
+        migration = 'move_' + secrets.token_hex(16)
+        db.execute('''INSERT INTO vm_migrations VALUES(
+            ?,?,?,?,?,?,?,?,1,'prepared',NULL,NULL,NULL,?)''',
+            (migration, vm, project, customer, placement['owner'], source, target,
+             capacity_revision, int(a.clock())))
+        return view(row_for(db, migration))
+    return a.mutation('operator', request, body, apply)
+
+
+def get(a, migration, node=None):
+    with a.db() as db:
+        row = row_for(db, migration)
+        if node is not None and node not in (row['source'], row['target']):
+            raise Failure('migration_node_mismatch', 403)
+        return view(row)
+
+
+def attest(a, node, request, migration, revision, stage, evidence, disk_digest):
+    """Source: disk exported AFTER stop+fence. Target: imported, still stopped.
+
+    Disk integrity and shutdown must be checked by the worker before reporting.
+    No timeout transition releases the source fence or destination execution.
+    """
+    a.capacity_number(revision, 2**53-1, 1)
+    identifier(evidence)
+    if not isinstance(disk_digest, str) or not re.fullmatch('[0-9a-f]{64}', disk_digest):
+        raise Failure('invalid_migration_disk_digest')
+    if stage not in ('source-fenced', 'target-staged'):
+        raise Failure('invalid_migration_stage')
+    body = dict(action='migration-attest', migration=migration, revision=revision,
+                stage=stage, evidence=evidence, disk_digest=disk_digest)
+    def apply(db):
+        row = row_for(db, migration)
+        expected_node = row['source'] if stage == 'source-fenced' else row['target']
+        if node != expected_node:
+            raise Failure('migration_node_mismatch', 403)
+        if row['revision'] != revision:
+            raise Failure('migration_revision_conflict', 409)
+        expected_phase = 'prepared' if stage == 'source-fenced' else 'source_fenced'
+        if row['phase'] != expected_phase:
+            raise Failure('migration_phase_conflict', 409)
+        allocation = a.capacity_row(db, row['source'], row['project'], row['vm'])
+        if not allocation or allocation['state'] != 'active' or allocation['revision'] != row['capacity_revision']:
+            raise Failure('migration_allocation_changed', 409)
+        if stage == 'source-fenced':
+            db.execute("UPDATE vm_migrations SET phase='source_fenced',revision=revision+1,disk_digest=?,source_receipt=? WHERE id=?",
+                       (disk_digest, evidence, migration))
+        else:
+            if disk_digest != row['disk_digest']:
+                raise Failure('migration_disk_digest_mismatch', 409)
+            db.execute("UPDATE vm_migrations SET phase='target_staged',revision=revision+1,target_receipt=? WHERE id=?",
+                       (evidence, migration))
+        return view(row_for(db, migration))
+    return a.mutation('node:'+node, request, body, apply)

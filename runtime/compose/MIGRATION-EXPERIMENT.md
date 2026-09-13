@@ -49,3 +49,33 @@ it does not establish compatibility for arbitrary kernels or guest images.
 
 The internal fence primitive is intentionally not exposed as a public endpoint.
 A shutdown failure leaves the fence in place and does not authorize target start.
+
+## Authority preparation journal
+
+`runtime/control/migration_journal.py` persists preparation through
+`prepared -> source_fenced -> target_staged`. The private Application transport
+has opt-in operator preparation/status and node-scoped attestation actions.
+This switch is deliberately not wired to the production configuration loader:
+preparation is not a complete migration service and must not be enabled there.
+
+Each migration pins the customer, project, VM, source, destination and capacity
+revision. Concurrent preparations for one VM are rejected. Attestations require
+the correct worker, current revision and matching disk digest. Lost-response
+retries return their historical result; status must be read for current state.
+No preparation phase grants destination execution or changes placement/balances.
+Authority capacity changes are rejected while a preparation exists. The local
+source fence also refuses resize and destroy before worker side effects.
+
+The journal has no cancellation, timeout-based unlock or cutover operation yet.
+A full orchestration must reconcile worker lifecycle/retention actions, settle
+source metering, prepare destination accounting, and switch routes and placement
+before it can authorize target execution. Central preparation alone does not
+stop a guest or revoke cached worker permissions. Host evidence IDs are trusted
+worker assertions, not independent proof. Do not expose this preparation API to
+customers or start production migrations with it.
+
+The private control endpoint `GET /v1/vm-placements` lists the current capacity
+placement per VM and any preparation target. It filters by customer and project
+grant, paginates by VM ID, and never presents the preparation target as the
+current host. It is not yet exposed by the public fleet relay or consumed by
+the dashboard. This inventory is the next integration point for per-VM access.
