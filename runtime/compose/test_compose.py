@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import guest
 from runner import Runner, Failure, load_config, ssh_command
@@ -129,6 +130,16 @@ class RunnerTests(unittest.TestCase):
             with self.assertRaises(Failure) as failure:
                 runner.authorize(PROJECT, OWNER)
             self.assertEqual(failure.exception.code, "compose_approval_unavailable_or_revoked")
+
+    def test_dynamic_job_result_remains_readable_after_placement_release(self):
+        runner = Runner(self.path)
+        runner.runtime = SimpleNamespace(ledger=SimpleNamespace(dynamically_managed=lambda project: project == PROJECT))
+        with patch.object(runner, 'authorize') as authorize:
+            with self.assertRaises(Failure) as missing:
+                runner.rpc({'project_id':PROJECT,'owner_did':OWNER,'method':'GET',
+                            'action':'jobs/job_'+'d'*32,'body':None})
+            self.assertEqual(missing.exception.code, 'unknown_stack_resource')
+            authorize.assert_not_called()
 
     def test_managed_quota_callback_requires_valid_policy(self):
         runner = Runner(self.path)

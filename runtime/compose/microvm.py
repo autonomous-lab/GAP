@@ -714,8 +714,17 @@ class MicroVMs:
         # Read live approval/quota after acquiring it, before reserving resources.
         with self.owner_lock(owner):
             limits = self.quota_provider(project, owner)
-            if (not isinstance(limits, dict) or not {'vcpus', 'memory_mib'} <= set(limits) <= {'vcpus', 'memory_mib', 'max_vms', 'disk_gib'}
-                    or any(type(v) is not int or not 0 < v < 2**31 for v in limits.values())):
+            valid_limits = isinstance(limits, dict) and {'vcpus', 'memory_mib'} <= set(limits) <= {'vcpus', 'memory_mib', 'max_vms', 'disk_gib'}
+            if valid_limits:
+                from cpu_quota import quarters
+                try:
+                    quarters(limits['vcpus'])
+                except ValueError:
+                    valid_limits = False
+                valid_limits = valid_limits and all(
+                    type(value) is int and 0 < value < 2**31
+                    for key, value in limits.items() if key != 'vcpus')
+            if not valid_limits:
                 raise VMError('invalid_agent_quota')
             meta = None if action=='vm/create' and body.get('new_vm') else self.read(project, owner, body.get('vm_id'))
             if action in ('vm/create', 'vm/update', 'vm/start', 'vm/resume'):

@@ -648,9 +648,12 @@ Previously signed project capabilities expire within five minutes.
 operator-signed capability for that exact node/project. The operator must first
 bind the project and owner at the authority. Provisioning is idempotent and
 persists the project before responding; it does not copy any owner private key.
-Local policy and MicroVM approvals still apply. This enables an existing owner's
-project on a second node without registering another identity or sending email.
-Worker billing opt-in remains an explicit operator configuration operation.
+Local identity and suspension policy still apply. A valid fleet capability may
+reach the worker without duplicating the owner's static MicroVM approval on the
+target; the worker then requires either its existing local approval or a live,
+centrally bound placement before it admits the request. This enables an existing
+owner's project on a second node without registering another identity or sending
+email. Worker billing opt-in remains an explicit operator configuration operation.
 For secondary gateways, set `GAP_FLEET_ACCOUNT_ORIGIN` to the primary operator's
 isolated management origin so `/account` opens the shared account console.
 

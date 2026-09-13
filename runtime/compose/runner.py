@@ -360,7 +360,12 @@ class Runner:
         if not isinstance(project, str) or not PROJECT.fullmatch(project) or not isinstance(owner, str):
             raise Failure(400, "invalid_project")
         placement_id=body.get('placement_id') if method=='POST' and action=='vms' and isinstance(body,dict) else None
-        self.authorize(project, owner, placement_id)
+        # The gateway has already authenticated the exact project capability.
+        # Keep completed job results readable after a failed create or a
+        # successful delete releases the placement at the authority.
+        dynamic_job_read=(method=='GET' and isinstance(action,str) and action.startswith('jobs/')
+                          and self.runtime and self.runtime.ledger.dynamically_managed(project))
+        if not dynamic_job_read:self.authorize(project, owner, placement_id)
         selected = body.get('vm_id') if isinstance(body,dict) else None
         if selected is not None and not re.fullmatch(r'vm_[0-9a-f]{32}',str(selected)):
             raise Failure(400,'invalid_vm_identity')

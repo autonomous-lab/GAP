@@ -492,6 +492,9 @@ pub struct NodeState {
     /// GAP Runtime's global project projection. The durable copy uses
     /// the existing ClickHouse-backed generic state table.
     cloud_projects: HashMap<String, crate::cloud::ProjectRecord>,
+    /// Projects admitted through a signed fleet capability use central
+    /// placement and quota policy instead of a duplicated local approval.
+    cloud_fleet_projects: std::collections::HashSet<String>,
     cloud_suspensions: HashMap<String, crate::cloud_suspension::Record>,
     cloud_project_suspensions: HashMap<String, crate::cloud_suspension::Record>,
     pub private_node: Option<crate::private_node::PrivateNode>,
@@ -786,6 +789,9 @@ impl NodeState {
         .collect();
         let cloud_projects: HashMap<String, crate::cloud::ProjectRecord> =
             load(&*storage, "cloud_projects", cloud_only);
+        let cloud_fleet_projects = storage.list_state("cloud_fleet_projects")
+            .expect("cannot load fleet project markers")
+            .into_iter().map(|record| record.key).collect();
         // Security decisions must never disappear through best-effort hydration.
         let cloud_suspensions=storage.list_state("cloud_suspensions")
             .expect("cannot load suspension policy; refusing to serve")
@@ -956,6 +962,7 @@ impl NodeState {
             credited_deposits,
             deposit_chain: None,
             cloud_projects,
+            cloud_fleet_projects,
             cloud_suspensions,
             cloud_project_suspensions,
             private_node: None,
@@ -2549,6 +2556,9 @@ the content inline"
             return Err(crate::fleet_access::denied());
         }
         if let Some(policy) = &self.private_node { policy.authorize(&claims.owner_did)?; }
+        self.storage.upsert_state(&crate::storage::StateRecord { scope: "cloud_fleet_projects".into(), key: project_id.into(),
+            value: "true".into(), updated_at: now_unix() })?;
+        self.cloud_fleet_projects.insert(project_id.into());
         if self.cloud_projects.contains_key(project_id) { return self.cloud_owned_project(token, project_id); }
         crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?;
         let now = now_unix();
@@ -2597,7 +2607,7 @@ the content inline"
         // Both counters are durable and only increase. Restoring one scope
         // cannot roll back a newer decision at the other scope.
         let generation=suspension.map_or(0,|r|r.current.generation).saturating_add(project_suspension.map_or(0,|r|r.current.generation)).saturating_add(self.fleet_policy.as_ref().map_or(0,|p|p.sequence()));
-        let admission=self.private_node.as_ref().is_none_or(|p|p.authorize(&project.owner_did).is_ok() && (!compose || p.microvm_quota(&project.owner_did).is_ok()));
+        let admission=self.cloud_fleet_projects.contains(project_id) || self.private_node.as_ref().is_none_or(|p|p.authorize(&project.owner_did).is_ok() && (!compose || p.microvm_quota(&project.owner_did).is_ok()));
         json!({"allowed":self.active_cloud_project(project_id) && admission,"owner_did":project.owner_did,"generation":generation,"suspended":self.agent_suspended(&project.owner_did) || project_suspension.is_some_and(|r|r.current.active),"lease_seconds":5})
     }
 
@@ -7991,20 +8001,24 @@ pub fn route_with_ip(
                 )
             }
         };
-        let selected=guard.cloud_owned_project(token.unwrap_or(""),project_id).or_else(|error|{
+        let supplied=token.unwrap_or("");
+        let fleet_capability=guard.fleet_access.as_ref().is_some_and(|access|
+            access.verify(supplied,project_id,now_unix()).is_some()
+                || access.verify_vm_read(supplied,project_id,now_unix()).is_some());
+        let selected=guard.cloud_owned_project(supplied,project_id).or_else(|error|{
             if method=="GET" && matches!(action,"vms"|"vm"|"ssh"|"ports"|"metrics"|"runtime"|"credits"|"ingress") {
-                guard.cloud_vm_read_project(token.unwrap_or(""),project_id)
+                guard.cloud_vm_read_project(supplied,project_id)
             } else {Err(error)}
         });
         let project=match selected {Ok(p)=>p,Err(error)=>return error_response(&error)};
-        if let Err(error) = guard
+        if !fleet_capability {if let Err(error) = guard
             .private_node
             .as_ref()
             .unwrap()
             .authorize_compose(&project.owner_did)
         {
             return error_response(&error);
-        }
+        }}
         let mut body = body;
         let params = parse_url_params(raw_path);
         if let Some(vm_id) = params.get("vm_id") {
@@ -10612,6 +10626,10 @@ mod tests {
         assert_eq!(invoke(None), 403);
         assert_eq!(invoke(Some("Bearer wrong-secret")), 403);
         assert_eq!(invoke(Some("Bearer runner-secret")), 200);
+        std::fs::write(&path, json!({"agents":[]}).to_string()).unwrap();
+        assert_eq!(arc.lock().unwrap().workload_policy(project,true)["allowed"],false);
+        arc.lock().unwrap().cloud_fleet_projects.insert(project.into());
+        assert_eq!(arc.lock().unwrap().workload_policy(project,true)["allowed"],true);
         arc.lock()
             .unwrap()
             .cloud_projects

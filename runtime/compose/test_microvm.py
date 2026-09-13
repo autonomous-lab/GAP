@@ -153,6 +153,20 @@ class MicroVMTests(unittest.TestCase):
         with self.assertRaisesRegex(VMError, 'invalid_agent_quota'):
             self.manager.perform(PROJECT, OWNER, 'vm/start', {'vm_id': VM})
 
+    def test_fractional_vcpu_quota_admits_only_its_quarter_cpu(self):
+        owner = 'did:gap:' + 'e' * 64
+        self.manager.cpu_quota_socket = '/run/gap-test-quota.sock'
+        self.manager.quota_provider = lambda *_: {'vcpus': .25, 'memory_mib': 256, 'max_vms': 1, 'disk_gib': 4}
+        with patch.object(self.manager, '_perform') as execute:
+            self.manager.perform(PROJECT, owner, 'vm/create', {'new_vm': True, 'vcpus': .25, 'memory_mib': 256, 'disk_gib': 4})
+            execute.assert_called_once()
+            with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_vcpus'):
+                self.manager.perform(PROJECT, owner, 'vm/create', {'new_vm': True, 'vcpus': .5, 'memory_mib': 256, 'disk_gib': 4})
+        for invalid in (.3, True, float('nan')):
+            self.manager.quota_provider = lambda *_, invalid=invalid: {'vcpus': invalid, 'memory_mib': 256}
+            with self.assertRaisesRegex(VMError, 'invalid_agent_quota'):
+                self.manager.perform(PROJECT, owner, 'vm/create', {'new_vm': True, 'vcpus': .25, 'memory_mib': 256})
+
     def test_disk_quota_includes_other_projects_and_retained_volumes(self):
         self.manager.quota_provider=lambda *_:{'vcpus':2,'memory_mib':4096,'max_vms':2,'disk_gib':10}
         with patch.object(self.manager,'_perform') as execute:

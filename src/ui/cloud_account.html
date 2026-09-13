@@ -56,7 +56,7 @@ async function openMachine(p,vm_id,create){await closeMachine();const data=await
 $('fleetRefresh').onclick=run(loadFleet);$('fleetNode').onchange=drawFleet;$('fleetProject').onchange=drawFleet;$('closeMachine').onclick=run(closeMachine);
 window.addEventListener('message',e=>{if(e.origin===location.origin&&e.source===$('machineFrame').contentWindow&&e.data?.type==='gap-project-disconnected'&&e.data.project===machine?.p.id)closeMachine()});
 
-async function waitNodeJob(p,cap,job){for(let attempt=0;attempt<180;attempt++){await new Promise(resolve=>setTimeout(resolve,1000));const value=await nodeRequest(p,cap,'/jobs/'+job);if(value.status==='succeeded')return value.result;if(!['queued','running'].includes(value.status))throw Error(value.result?.error||value.status)}throw Error('Creation is still running. Refresh the inventory to inspect it.')}
+async function waitNodeJob(p,cap,job){for(let attempt=0;attempt<180;attempt++){await new Promise(resolve=>setTimeout(resolve,1000));const value=await nodeRequest(p,cap,'/vm/jobs/'+job);if(value.status==='succeeded')return value.result;if(!['queued','running'].includes(value.status))throw Error(value.result?.error||value.status)}throw Error('Creation is still running. Refresh the inventory to inspect it.')}
 function placementDialog(){
  const projects=allProjects.filter(p=>p.role!=='viewer');if(!projects.length)throw Error('No project with management access is available.');
  const dialog=document.createElement('dialog');dialog.style.cssText='width:min(560px,calc(100% - 28px));border:1px solid #dce1e7;border-radius:8px;padding:26px;color:#182333';
@@ -77,7 +77,7 @@ function placementDialog(){
   const target={...original,node:placed.node_id};status.textContent='Reserved on '+placed.node_id+'. Preparing the project…';
   const capability=await api('project-token',{project_id:target.id,node_id:target.node,ttl_seconds:300});
   await nodeRequest(target,capability.token,'/provision',{});
-  const body={request_id:crypto.randomUUID(),vcpus,memory_mib,disk_gib,start:true,new_vm:true,execution_mode:'serverless',placement_id:placed.placement_id};
+  const body={request_id:crypto.randomUUID().replaceAll('-',''),vcpus,memory_mib,disk_gib,start:true,new_vm:true,execution_mode:'serverless',placement_id:placed.placement_id};
   const key=ssh.value.trim();if(key){if(!key.startsWith('ssh-')&&!key.startsWith('ecdsa-'))throw Error('Enter a supported SSH public key. Never paste a private key.');body.ssh_keys=[key]}
   status.textContent='Creating on '+target.node+'…';const queued=await nodeRequest(target,capability.token,'/vms',body);const result=queued.job_id?await waitNodeJob(target,capability.token,queued.job_id):queued;
   const vm=result?.vm?.vm_id||queued.vm?.vm_id;if(!vm)throw Error('The host did not return the new MicroVM identity.');
