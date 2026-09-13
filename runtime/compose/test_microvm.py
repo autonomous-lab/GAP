@@ -32,6 +32,19 @@ class MicroVMTests(unittest.TestCase):
         self.manager.save(self.meta)
         self.manager.folder(self.meta).mkdir()
 
+    def test_migration_fence_survives_failed_shutdown_and_controller_restart(self):
+        transfer = 'move_' + 'd' * 32
+        with patch.object(self.manager, 'stop', side_effect=VMError('shutdown_failed')):
+            with self.assertRaisesRegex(VMError, 'shutdown_failed'):
+                self.manager.fence_for_migration(PROJECT, OWNER, VM, transfer)
+        restarted = MicroVMs({'state_dir': str(self.root / 'state'), 'image_dir': str(self.images)}, None)
+        self.assertFalse(restarted.execution_allowed(self.meta))
+        with patch.object(restarted, 'stop') as stop, patch.object(restarted, 'alive', return_value=False):
+            self.assertTrue(restarted.fence_for_migration(PROJECT, OWNER, VM, transfer)['source_stopped'])
+            with self.assertRaisesRegex(VMError, 'migration_already_fenced'):
+                restarted.fence_for_migration(PROJECT, OWNER, VM, 'move_' + 'e' * 32)
+            self.assertEqual(stop.call_count, 1)
+
     def test_resource_steps_apply_to_create_and_resize(self):
         for action in ('vm/create','vm/update'):
             base={'request_id':'d'*32,'vm_id':VM} if action=='vm/update' else {'request_id':'d'*32}

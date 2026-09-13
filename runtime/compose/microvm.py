@@ -97,6 +97,7 @@ def validate(action, body):
 
 class MicroVMs:
     def execution_allowed(self,meta):
+        if (self.folder(meta)/'.migration-fence').exists():return False
         if not self.capacity.allows(meta):return False
         if not self.runtime:return True
         ledger=getattr(self.runtime,'ledger',None)
@@ -289,6 +290,20 @@ class MicroVMs:
         folder = self.folder(meta)
         return {'vm_id': meta['vm_id'], 'address': '127.0.0.1', 'port': meta['ssh_port'],
                 'ssh_key': str(folder / 'client_key'), 'known_hosts': str(folder / 'known_hosts')}
+
+    def fence_for_migration(self, project, owner, vm_id, transfer_id):
+        if not re.fullmatch(r'move_[0-9a-f]{32}',transfer_id):raise VMError('invalid_transfer_id')
+        with self.owner_lock(owner):
+            meta=self.read(project,owner,vm_id)
+            if not meta or meta['state']=='destroyed':raise VMError('migration_vm_missing')
+            fence=self.folder(meta)/'.migration-fence'
+            if fence.exists():
+                if json.loads(fence.read_text()).get('transfer_id')!=transfer_id:raise VMError('migration_already_fenced')
+            else:atomic_json(fence,dict(transfer_id=transfer_id,vm_id=vm_id))
+            # Fence first. A failed shutdown never permits a target start.
+            self.stop(meta,False)
+            if self.alive(meta):raise VMError('migration_source_still_alive')
+            return dict(transfer_id=transfer_id,vm_id=vm_id,source_stopped=True)
 
     def image_version(self):
         manifest = (self.images / 'SHA256SUMS').read_text()
