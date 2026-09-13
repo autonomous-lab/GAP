@@ -488,6 +488,37 @@ fn main() -> Result<()> {
             }
 
             let header = |name: &'static str| request.headers().iter().find(|h|h.field.equiv(name)).map(|h|h.value.as_str()).unwrap_or("");
+            // Account cookies are accepted only on the isolated management origin.
+            if !custom_domain_request && on_admin_host && clean_path.starts_with("/v1/fleet/") {
+                let cookie_token=header("Cookie").split(';').filter_map(|v|v.trim().strip_prefix("__Host-gap-account=")).find(|v| !v.is_empty() && v.len()<=4096 && v.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)));
+                let session_endpoint=clean_path=="/v1/fleet/browser-session";
+                let cookie_auth=cookie_token.map(|v|format!("Bearer {v}"));
+                let using_cookie=auth.is_none() && cookie_auth.is_some();
+                if session_endpoint || using_cookie {
+                    let clear="__Host-gap-account=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0";
+                    let mut set_cookie=None;
+                    let (status,result)=if method!="GET" && header("Origin")!=admin_origin.trim_end_matches('/') {
+                        (403,serde_json::json!({"error":{"code":"origin_required"}}))
+                    } else if session_endpoint && method=="POST" {
+                        let bearer=auth.as_deref().and_then(|v|v.strip_prefix("Bearer ")).filter(|v|!v.is_empty() && v.len()<=4096 && v.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)));
+                        if let Some(bearer)=bearer {
+                            let (status,result)=route_with_ip(&state,"GET","/v1/fleet/account",&[],auth.as_deref(),client_ip.as_deref());
+                            if status==200 {set_cookie=Some(format!("__Host-gap-account={bearer}; Path=/; Secure; HttpOnly; SameSite=Strict"));(200,serde_json::json!({"connected":true}))} else {(status,result)}
+                        } else {(401,serde_json::json!({"error":{"code":"unauthorized"}}))}
+                    } else if session_endpoint {
+                        (405,serde_json::json!({"error":{"code":"method_not_allowed"}}))
+                    } else {
+                        let result=route_with_ip(&state,&method,&path,&body,auth.as_deref().or(cookie_auth.as_deref()),client_ip.as_deref());
+                        if result.0==401 || (clean_path=="/v1/fleet/logout" && result.0<300) {set_cookie=Some(clear.to_string());}
+                        result
+                    };
+                    let mut response=Response::from_string(result.to_string()).with_status_code(status)
+                        .with_header(Header::from_bytes("Content-Type","application/json").unwrap())
+                        .with_header(Header::from_bytes("Cache-Control","no-store").unwrap());
+                    if let Some(cookie)=set_cookie {response.add_header(Header::from_bytes("Set-Cookie",cookie).unwrap());}
+                    let _=request.respond(response);continue;
+                }
+            }
             let session_cookie=header("Cookie");
             let session_csrf=header("X-GAP-VM-Session");
             if clean_path.ends_with("/vm/http-access/reveal") && on_admin_host && auth.is_none() && !session_cookie.is_empty() && header("Origin")!=admin_origin.trim_end_matches('/') {
