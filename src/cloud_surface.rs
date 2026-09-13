@@ -37,7 +37,7 @@ pub fn page(path: &str) -> Option<(&'static str, String)> {
         "/microvms/assets/xterm-fit.js" => Some(("text/javascript; charset=utf-8", include_str!("ui/vendor/xterm-fit.js").into())),
         "/microvms/assets/xterm.css" => Some(("text/css; charset=utf-8", include_str!("ui/vendor/xterm.css").into())),
         "/microvms" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_microvms.html"), path))),
-        "/docs" | "/for-agents" | "/for-humans" | "/how-it-works" => Some(("text/html; charset=utf-8", documentation().to_string())),
+        "/docs" | "/for-agents" | "/for-humans" | "/how-it-works" => Some(("text/html; charset=utf-8", product_page(documentation(), "/docs"))),
         "/.well-known/gap-agent.json" => Some(("application/json", "{\"name\":\"GAP Cloud\",\"description\":\"Application infrastructure for AI agents\",\"documentation\":\"/agents.md\",\"projects\":\"/v1/cloud/projects\"}".into())),
         _ => None,
     }
