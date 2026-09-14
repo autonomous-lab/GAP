@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import re
 import selectors
-import sqlite3
+from sqlite_crypto import connect, prepare, sqlite3
 import subprocess
 import tempfile
 import threading
@@ -155,6 +155,7 @@ class Runner:
             raise ValueError("runner token must contain at least 32 characters")
         root = Path(config["state_dir"])
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        prepare(root.parent)
         self.db_path = root / "jobs.sqlite"
         self.lock = threading.Lock()
         self.hypervisor = None
@@ -208,7 +209,7 @@ class Runner:
 
     @contextmanager
     def db(self):
-        db = sqlite3.connect(self.db_path, timeout=5)
+        db = connect(self.db_path, 'jobs', timeout=5)
         db.row_factory = sqlite3.Row
         try:
             with db:

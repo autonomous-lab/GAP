@@ -23,6 +23,31 @@ const HARD_PERSISTED_BYTES = 100 * 1024 * 1024;
 const MIB = 1024 * 1024;
 
 if (!secret) throw new Error("REALTIME_SECRET is required");
+const storageKey = crypto.createHmac("sha256", secret)
+  .update("gap-realtime-storage-v1\0")
+  .digest();
+function storageContext(projectId, channel, sizeBytes, createdAt, expiresAt) {
+  return Buffer.from(JSON.stringify([projectId, channel, sizeBytes, createdAt, expiresAt]));
+}
+function sealBody(body, projectId, channel, sizeBytes, createdAt, expiresAt) {
+  const nonce = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", storageKey, nonce);
+  cipher.setAAD(storageContext(projectId, channel, sizeBytes, createdAt, expiresAt));
+  const encrypted = Buffer.concat([cipher.update(body, "utf8"), cipher.final()]);
+  return `enc:v1:${nonce.toString("base64url")}:${cipher.getAuthTag().toString("base64url")}:${encrypted.toString("base64url")}`;
+}
+function openBody(body, projectId, channel, sizeBytes, createdAt, expiresAt) {
+  const [prefix, version, nonceText, tagText, encryptedText, extra] = String(body).split(":");
+  if (prefix !== "enc" || version !== "v1" || extra !== undefined) throw new Error("invalid encrypted realtime message");
+  const nonce = Buffer.from(nonceText, "base64url");
+  const tag = Buffer.from(tagText, "base64url");
+  const encrypted = Buffer.from(encryptedText, "base64url");
+  if (nonce.length !== 12 || tag.length !== 16) throw new Error("invalid encrypted realtime message");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", storageKey, nonce);
+  decipher.setAAD(storageContext(projectId, channel, sizeBytes, createdAt, expiresAt));
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
+}
 const db = new DatabaseSync(dbPath);
 db.exec(`PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS messages(
@@ -35,6 +60,21 @@ CREATE TABLE IF NOT EXISTS messages(
   expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_channel_seq ON messages(project_id,channel,seq);`);
+db.exec("BEGIN IMMEDIATE");
+try {
+  const update = db.prepare("UPDATE messages SET body=? WHERE seq=?");
+  for (const row of db.prepare("SELECT seq,project_id,channel,body,size_bytes,created_at,expires_at FROM messages").all()) {
+    if (row.body.startsWith("enc:v1:")) {
+      openBody(row.body, row.project_id, row.channel, row.size_bytes, row.created_at, row.expires_at);
+    } else {
+      update.run(sealBody(row.body, row.project_id, row.channel, row.size_bytes, row.created_at, row.expires_at), row.seq);
+    }
+  }
+  db.exec("COMMIT");
+} catch (error) {
+  db.exec("ROLLBACK");
+  throw error;
+}
 
 const clients = new Map();
 const projectRates = new Map();
@@ -270,12 +310,13 @@ websocket.on("connection", socket => {
         await spendCredits(state.projectId, charges);
         state.channels.add(message.channel);
         const after = Number.isSafeInteger(message.after) ? message.after : 0;
-        const history = db.prepare(`SELECT seq,body,created_at FROM messages
+        const history = db.prepare(`SELECT seq,body,size_bytes,created_at,expires_at FROM messages
           WHERE project_id=? AND channel=? AND seq>? AND expires_at>? ORDER BY seq LIMIT 100`)
           .all(state.projectId, message.channel, after, now());
         send(socket, { type: "subscribed", channel: message.channel });
         for (const item of history) send(socket, { type: "message", channel: message.channel,
-          seq: item.seq, payload: JSON.parse(item.body), created_at: item.created_at, replay: true });
+          seq: item.seq, payload: JSON.parse(openBody(item.body, state.projectId, message.channel,
+            item.size_bytes, item.created_at, item.expires_at)), created_at: item.created_at, replay: true });
       } else if (message.action === "unsubscribe") {
         if (!state.permissions.includes("subscribe")) throw new Error("subscribe not allowed");
         await spendCredits(state.projectId, charges);
@@ -301,9 +342,11 @@ websocket.on("connection", socket => {
           const after = Math.ceil(Math.max(used + bytes - FREE_PERSISTED_BYTES, 0) / MIB);
           if (after > before) charges.persisted_megabyte = after - before;
           await spendCredits(state.projectId, charges);
+          const expiresAt = createdAt + RETENTION_SECONDS;
+          const encryptedBody = sealBody(body, state.projectId, message.channel, bytes, createdAt, expiresAt);
           seq = Number(db.prepare(`INSERT INTO messages(project_id,channel,body,size_bytes,created_at,expires_at)
-            VALUES(?,?,?,?,?,?)`).run(state.projectId, message.channel, body, bytes,
-              createdAt, createdAt + RETENTION_SECONDS).lastInsertRowid);
+            VALUES(?,?,?,?,?,?)`).run(state.projectId, message.channel, encryptedBody, bytes,
+              createdAt, expiresAt).lastInsertRowid);
         } else await spendCredits(state.projectId, charges);
         for (const [peer, client] of clients) {
           if (client.projectId === state.projectId && client.channels.has(message.channel)) {

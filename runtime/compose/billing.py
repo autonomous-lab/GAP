@@ -9,7 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
-import sqlite3
+from sqlite_crypto import connect, sqlite3
 import time
 import uuid
 import finance
@@ -118,7 +118,7 @@ class Ledger:
 
     @contextmanager
     def db(self):
-        db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        db = connect(self.path, 'microvm-credits', timeout=30, isolation_level=None)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA journal_mode=WAL')
         db.execute('PRAGMA synchronous=FULL')

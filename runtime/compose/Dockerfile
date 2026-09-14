@@ -1,6 +1,7 @@
 FROM alpine:3.23
-RUN apk add --no-cache python3 py3-cryptography openssh-client qemu-system-x86_64 qemu-img \
+RUN apk add --no-cache python3 py3-cryptography sqlcipher-libs openssh-client qemu-system-x86_64 qemu-img \
     qemu-modules e2fsprogs ttyd=1.7.7-r0 && adduser -D -u 10001 runner
+ENV LD_PRELOAD=/usr/lib/libsqlcipher.so.0
 WORKDIR /opt/runner
 COPY runtime/compose/*.py ./
 USER 10001:10001

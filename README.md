@@ -327,12 +327,26 @@ coverage from a provider name or assume every independent node enables it.
 
 This covers disk payloads, retained hibernation memory, seed images, guest SSH
 host private keys, project databases, registration challenges, administrator
-state and browser VM sessions. It does not cover qcow2 metadata, public seed
-metadata, host swap/logs, realtime/node/worker databases, or a compromised host
-with access to its keyring. Encryption does not replace backups. Keep an
-independent recovery copy of the keyring; losing a required key prevents
+state, browser VM sessions and the worker's job, credit and capacity databases.
+It does not cover qcow2 metadata, public seed metadata, Realtime routing/quota
+fields, the development-only node SQLite event backend, host swap/logs, or a
+compromised host with access to its keyring. Encryption does not replace backups.
+Keep an independent recovery copy of the keyring; losing a required key prevents
 recovery. Rotation of the active key version affects new VMs, not existing disk
 contents.
+
+Persisted Realtime message bodies are sealed separately with authenticated
+AES-256-GCM. The service derives its storage key from the stable
+`GAP_REALTIME_SECRET`, migrates old clear message bodies at startup and refuses
+to start if an encrypted record cannot be authenticated. Routing fields and
+quota counters remain visible in the SQLite file.
+
+The worker encrypts `jobs.sqlite`, `microvm-credits.sqlite`,
+`fleet-capacity.sqlite` and existing SQLite recovery copies with SQLCipher. It
+derives a distinct purpose-bound key for each database from the worker keyring,
+migrates plaintext files atomically before serving requests and records only the
+required key version in a mode-0600 `.key-id` sidecar. Retain that sidecar with
+each database backup and keep old keyring versions needed by stored backups.
 
 Operator configuration and recovery: [MicroVM encryption](./runtime/compose/ENCRYPTION.md).
 

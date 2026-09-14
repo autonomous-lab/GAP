@@ -57,6 +57,8 @@ readOnly.send(JSON.stringify({ action: "publish", channel: "contract:demo", payl
 await new Promise(resolve => setTimeout(resolve, 50));
 assert(readOnlyReceived.some(message => message.type === "authenticated" &&
   message.subject === "read-only-client"));
+assert(readOnlyReceived.some(message => message.type === "message" && message.replay === true &&
+  message.payload.answer === 42));
 assert(readOnlyReceived.some(message => message.type === "error" &&
   message.error === "publish not allowed"));
 readOnly.terminate();

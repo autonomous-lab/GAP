@@ -65,22 +65,38 @@ formal key-service audit integration are separate work; do not claim them delive
 Keyrings are read on each operation. Replace files atomically with preserved mode
 and ownership. A running QEMU retains its key until it exits.
 
+## Worker databases
+
+The deployment also uses the worker disk keyring to encrypt every persistent
+SQLite database under `/data` with SQLCipher. This includes the job catalog,
+credit ledger, fleet-capacity catalog and existing SQLite recovery copies. A
+separate HMAC-derived passphrase is bound to each database purpose. Existing
+plaintext databases migrate atomically before the worker initializes its
+hypervisor or accepts requests. A missing key, invalid keyring, wrong purpose or
+damaged database stops startup.
+
+Each encrypted database has a `<database>.key-id` sidecar containing only its
+keyring version. Keep this mode-0600 file beside the database in backups and
+restores. Changing `active` applies to databases created afterwards; existing
+databases continue using their recorded version. Do not remove an old keyring
+entry while any database or backup references it.
+
 ## Protection boundary
 
 This protects VM disk payloads, retained hibernation memory, seed images and guest
-SSH host private keys against acquisition of those files without the keyring.
-qcow2 metadata, public seed metadata, worker catalogs, serial logs (when enabled),
-host swap, host logs, other databases and a complete host image including the
-keyring are NOT covered.
+SSH host private keys and worker SQLite contents against acquisition of those
+files without the keyring. qcow2 metadata, public seed metadata, SQLite filenames
+and sizes, serial logs (when enabled), host swap, host logs and a complete host
+image including the keyring are NOT covered.
 Root on a running host can obtain keys or guest memory. No host-wide encryption
 badge is justified. Authenticated memory encryption does not add disk integrity to
 AES-XTS. Transfer transport authentication and existing archive digests still apply.
 
 ## Verification
 
-`python3 -m unittest test_disk_crypto test_memory_crypto test_seed_crypto test_microvm test_vm_transfer`
-checks key binding, missing keys, version retention, seed sealing and memory
-corruption/truncation.
+`python3 -m unittest test_sqlite_crypto test_disk_crypto test_memory_crypto test_seed_crypto test_microvm test_vm_transfer`
+checks database migration, purpose binding, key-version retention, missing keys,
+seed sealing and memory corruption/truncation.
 Run `GAP_TEST_ENCRYPTION=1 python3 encryption_kvm_test.py` only in an isolated
 container with /dev/kvm, the proper KVM group and read-only /images. It creates and
 cleans its own VM/catalog. It checks real guest disk writes, memory-preserving

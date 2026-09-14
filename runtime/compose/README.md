@@ -49,6 +49,13 @@ reachable by GAP; `listen_all: true` is required for an explicit `0.0.0.0` bind.
 Do not expose the worker API publicly. Container restarts stop its QEMU children;
 the persisted catalog permits explicit VM start after restart.
 
+The supplied deployment encrypts the worker's persistent SQLite databases with
+SQLCipher using `/config/disk-keys.json`. Existing job, credit, fleet-capacity
+and SQLite recovery databases migrate before worker startup. Keep each mode-0600
+`.key-id` sidecar with its database during backup and restore, and retain every
+referenced key version. See [ENCRYPTION.md](./ENCRYPTION.md) for the protection
+boundary and recovery rules.
+
 ### VM API
 
 All mutations return asynchronous jobs; poll `/vm/jobs/{job_id}` as for
@@ -776,12 +783,13 @@ cookie scoped to VM management APIs. The bearer stays on the server. Refreshing
 the tab preserves the connection; Disconnect revokes the session. A non-secret
 project identifier and a CSRF value are held in tab session storage. Sessions
 expire after eight hours and survive node process restarts and deployments.
-The node stores encrypted session records in `GAP_VM_SESSIONS_DB` (default
-`/data/cloud-vm-sessions.sqlite`, on persistent storage). Keep `GAP_MASTER_KEY`
-stable: changing it invalidates existing sessions. Cookie IDs are stored only
-as hashes, and agent bearers are encrypted with a separate key derived from
-the master key. Disconnect durably revokes the session. API clients continue using
-their bearer tokens.
+The node stores sessions in the SQLCipher-encrypted `GAP_VM_SESSIONS_DB`
+(default `/data/cloud-vm-sessions.sqlite`, on persistent storage). Existing
+plaintext files migrate atomically before the node accepts traffic. Keep
+`GAP_MASTER_KEY` stable: changing it makes the database unavailable. Cookie IDs
+are stored only as hashes, and agent bearers are additionally encrypted with a
+separate key derived from the master key. Disconnect durably revokes the session.
+API clients continue using their bearer tokens.
 
 CPU broker installation (operator host with Docker systemd cgroups): review
 `runtime/compose/gap-cpu-quota.service`, adapt the checkout path and worker

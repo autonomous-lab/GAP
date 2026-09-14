@@ -8,7 +8,7 @@ from contextlib import contextmanager
 import json
 import os
 import re
-import sqlite3
+from sqlite_crypto import connect, sqlite3
 import uuid
 
 from billing import BillingError
@@ -31,7 +31,7 @@ class Capacity:
 
     @contextmanager
     def db(self):
-        db=sqlite3.connect(self.path,timeout=2,isolation_level=None);db.row_factory=sqlite3.Row
+        db=connect(self.path,'fleet-capacity',timeout=2,isolation_level=None);db.row_factory=sqlite3.Row
         try:
             db.execute('PRAGMA journal_mode=WAL');db.execute('PRAGMA synchronous=FULL');db.execute('BEGIN IMMEDIATE')
             yield db
