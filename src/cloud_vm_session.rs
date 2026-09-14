@@ -20,7 +20,7 @@ fn store() -> Result<&'static Store,()> {
 }
 impl Store {
     fn open(path: &Path,key: &[u8;32]) -> Result<Self,()> {
-        let db=Connection::open(path).map_err(|_|())?;
+        let db=crate::encrypted_sqlite::open(path,key,"cloud-vm-sessions").map_err(|_|())?;
         #[cfg(unix)] if path!=Path::new(":memory:") {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path,std::fs::Permissions::from_mode(0o600)).map_err(|_|())?;
@@ -134,7 +134,7 @@ pub fn console_path(path: &str) -> bool {
         assert!(s.authorization(&url,c,csrf,100+8*3600).is_none());
         let payload:String=s.db.lock().unwrap().query_row("SELECT payload FROM vm_sessions",[],|r|r.get(0)).unwrap();
         assert!(!payload.contains("secret-test"));assert!(!payload.contains(csrf));
-        assert!(Store::open(&path,&[8u8;32]).unwrap().authorization(&url,c,csrf,101).is_none());
+        assert!(Store::open(&path,&[8u8;32]).is_err());
         s.revoke(c).unwrap();drop(s);
         assert!(Store::open(&path,&key).unwrap().authorization(&url,c,csrf,101).is_none());
         std::fs::remove_dir_all(dir).unwrap();

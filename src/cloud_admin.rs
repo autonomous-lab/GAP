@@ -37,10 +37,11 @@ impl Admin {
         }
         if allowed.is_empty() { return Err("administrator allowlist cannot be empty".into()) }
         let path=std::env::var("GAP_ADMIN_DB").unwrap_or_else(|_|"/data/cloud-admin.sqlite".into());
-        Self::open(Path::new(&path),origin,allowed,Some(Arc::new(mailer))).map(Some).map_err(|_|"cannot initialize administrator database".into())
+        let master: [u8;32]=hex::decode(std::env::var("GAP_MASTER_KEY").map_err(|_|"GAP_MASTER_KEY required")?.trim()).map_err(|_|"invalid master key")?.try_into().map_err(|_|"invalid master key")?;
+        Self::open(Path::new(&path),&master,origin,allowed,Some(Arc::new(mailer))).map(Some).map_err(|_|"cannot initialize administrator database".into())
     }
-    fn open(path: &Path, origin: String, allowed: HashSet<String>, mailer: Option<Arc<Registration>>) -> Result<Self> {
-        let db=Connection::open(path).map_err(unavailable)?;
+    fn open(path: &Path, master: &[u8;32], origin: String, allowed: HashSet<String>, mailer: Option<Arc<Registration>>) -> Result<Self> {
+        let db=crate::encrypted_sqlite::open(path,master,"cloud-admin").map_err(unavailable)?;
         #[cfg(unix)] if path!=Path::new(":memory:") {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path,std::fs::Permissions::from_mode(0o600)).map_err(unavailable)?;
@@ -304,7 +305,7 @@ pub fn handle(state:&Arc<Mutex<crate::server::NodeState>>,method:&str,path:&str,
 
 #[cfg(test)] mod tests {
     use super::*;
-    fn admin()->Admin {Admin::open(Path::new(":memory:"),"https://node.test".into(),HashSet::from(["owner@example.com".into()]),None).unwrap()}
+    fn admin()->Admin {Admin::open(Path::new(":memory:"),&[19;32],"https://node.test".into(),HashSet::from(["owner@example.com".into()]),None).unwrap()}
     fn enroll(a:&Admin)->(String,Session) {
         let (email,new,old)=a.begin("owner@example.com","a strong unique password","ip",100).unwrap();
         a.pending("challenge",&email,new.as_deref(),old.as_deref(),100).unwrap();

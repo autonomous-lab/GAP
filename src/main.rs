@@ -92,6 +92,8 @@ fn main() -> Result<()> {
     let private_node = gap::private_node::PrivateNode::from_env()?;
     let addr = env::var("GAP_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let storage = build_storage()?;
+    let prepared_node_databases = gap::prepare_node_databases().map_err(gap::Error::Other)?;
+    println!("[gap-cloud] encrypted node storage ready: {prepared_node_databases} database(s)");
 
     // Node identity persistence (audit fix H-01): load the seed from
     // GAP_NODE_SEED (hex) or GAP_NODE_SEED_FILE. Without it, the node

@@ -51,10 +51,11 @@ impl Registration {
             return Err("email registration requires GAP_CLICKHOUSE_ASYNC_INSERT=0".into());
         }
         let get = |name| std::env::var(name).map_err(|_| format!("missing {name}"));
-        let mut key: [u8; 32] = hex::decode(get("GAP_MASTER_KEY")?)
+        let database_master: [u8; 32] = hex::decode(get("GAP_MASTER_KEY")?)
             .map_err(|_| "invalid master key")?
             .try_into()
             .map_err(|_| "invalid master key")?;
+        let mut key = database_master;
         let host = get("GAP_SMTP_HOST")?;
         // This transport deliberately supports only an on-host, unencrypted relay.
         // Never silently downgrade a remote authenticated SMTP connection.
@@ -82,11 +83,13 @@ impl Registration {
         }
         if admin { origin=format!("{}/admin (administrator authentication)",origin.trim_end_matches('/')); }
         let path = std::env::var(db_var).unwrap_or_else(|_| default_path.into());
-        Self::open(Path::new(&path), key, &host, port, &from, &origin)
+        let database_purpose=if admin {"admin-challenges"} else {"registration"};
+        Self::open_with_database_purpose(Path::new(&path), key, &database_master, &host, port, &from, &origin, database_purpose)
             .map(Some)
             .map_err(|_| "cannot initialize email verification".into())
     }
 
+    #[cfg(test)]
     fn open(
         path: &Path,
         key: [u8; 32],
@@ -95,7 +98,19 @@ impl Registration {
         from: &str,
         origin: &str,
     ) -> Result<Self> {
-        let db = Connection::open(path).map_err(unavailable)?;
+        Self::open_with_database_purpose(path,key,&key,host,port,from,origin,"registration-test")
+    }
+    fn open_with_database_purpose(
+        path: &Path,
+        key: [u8; 32],
+        database_master: &[u8; 32],
+        host: &str,
+        port: u16,
+        from: &str,
+        origin: &str,
+        database_purpose: &str,
+    ) -> Result<Self> {
+        let db = crate::encrypted_sqlite::open(path,database_master,database_purpose).map_err(unavailable)?;
         #[cfg(unix)]
         if path != Path::new(":memory:") {
             use std::os::unix::fs::PermissionsExt;
@@ -438,6 +453,10 @@ mod tests {
         let (id, _, code) = s.prepare("agent@example.com", "ip", 10000).unwrap();
         ready(&s, &id);
         drop(s);
+        assert_ne!(
+            &std::fs::read(&path).unwrap()[..16],
+            b"SQLite format 3\0"
+        );
         let s = Registration::open(
             &path,
             [17; 32],

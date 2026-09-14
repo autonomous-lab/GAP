@@ -325,12 +325,14 @@ Check `disk_encryption.enabled` in the VM API response. The dashboard shows the
 AES-256 storage badge only when that VM reports encryption enabled. Do not infer
 coverage from a provider name or assume every independent node enables it.
 
-This covers disk payloads, retained hibernation memory, seed images and guest SSH
-host private keys, but not qcow2 metadata, public seed metadata, host swap/logs,
-registration/admin/realtime/node databases, or a compromised host with access to
-its keyring. Encryption does not replace backups. Keep an independent recovery
-copy of the keyring; losing a required key prevents recovery. Rotation of the
-active key version affects new VMs, not existing disk contents.
+This covers disk payloads, retained hibernation memory, seed images, guest SSH
+host private keys, project databases, registration challenges, administrator
+state and browser VM sessions. It does not cover qcow2 metadata, public seed
+metadata, host swap/logs, realtime/node/worker databases, or a compromised host
+with access to its keyring. Encryption does not replace backups. Keep an
+independent recovery copy of the keyring; losing a required key prevents
+recovery. Rotation of the active key version affects new VMs, not existing disk
+contents.
 
 Operator configuration and recovery: [MicroVM encryption](./runtime/compose/ENCRYPTION.md).
 
@@ -458,12 +460,14 @@ creation. Enable it with `GAP_EMAIL_VERIFICATION_REQUIRED=1`, a configured
 The transport supports a private or loopback IPv4 SMTP endpoint without TLS,
 intended only for the local relay. Use Postfix for authenticated upstream TLS.
 
-Challenges live in `/data/registration.sqlite`, survive restarts, expire after
-ten minutes, allow five guesses, and cannot be replayed. Codes are stored as
-keyed HMAC digests; they are never returned by the API or logged. New credentials
-are issued only after successful verification and storage writes. Existing
-identities remain usable without being falsely labelled verified. This is a
-node-local registration foundation, not shared fleet authentication or admin MFA.
+Challenges live in the SQLCipher-encrypted `/data/registration.sqlite`, survive
+restarts, expire after ten minutes, allow five guesses, and cannot be replayed.
+The node migrates an existing plaintext file atomically on startup. Codes are
+stored as keyed HMAC digests; they are never returned by the API or logged. New
+credentials are issued only after successful verification and storage writes.
+Existing identities remain usable without being falsely labelled verified. This
+is a node-local registration foundation, not shared fleet authentication or
+admin MFA.
 See [agent instructions](AGENTS.md) for endpoints, rate limits and error handling.
 
 MicroVM sales tariffs can be loaded explicitly from each node's `.env` with
@@ -482,6 +486,9 @@ the same origin. The console is at `/admin`; the first login enrolls a password
 Subsequent logins require both the password and a fresh email code. Sessions
 expire after 30 idle minutes or 8 hours total and can be ended with Sign out.
 The SMTP variables above also configure administrator email delivery.
+The administrator database and its separate email-challenge database are
+SQLCipher-encrypted with distinct keys derived from `GAP_MASTER_KEY`; existing
+plaintext files migrate atomically when the console starts.
 
 Project owners can request microVM access or higher aggregate quotas without
 already having microVM approval. Use the request form on `/microvms`, or:
@@ -565,12 +572,13 @@ cookie scoped to VM management APIs. The bearer stays on the server. Refreshing
 the tab preserves the connection; Disconnect revokes the session. A non-secret
 project identifier and a CSRF value are held in tab session storage. Sessions
 expire after eight hours and survive node process restarts and deployments.
-The node stores encrypted session records in `GAP_VM_SESSIONS_DB` (default
-`/data/cloud-vm-sessions.sqlite`, on persistent storage). Keep `GAP_MASTER_KEY`
-stable: changing it invalidates existing sessions. Cookie IDs are stored only
-as hashes, and agent bearers are encrypted with a separate key derived from
-the master key. Disconnect durably revokes the session. API clients continue using
-their bearer tokens.
+The node stores sessions in the SQLCipher-encrypted `GAP_VM_SESSIONS_DB`
+(default `/data/cloud-vm-sessions.sqlite`, on persistent storage) and migrates
+an existing plaintext file atomically on first use. Keep `GAP_MASTER_KEY`
+stable: changing it makes the database unavailable. Cookie IDs are stored only
+as hashes, and agent bearers are additionally encrypted with a separate key
+derived from the master key. Disconnect durably revokes the session. API clients
+continue using their bearer tokens.
 
 From Account, **Manage** opens a dedicated same-origin management route instead
 of nesting the dashboard in another iframe. Secondary nodes use their trusted

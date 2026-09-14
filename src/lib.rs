@@ -43,6 +43,7 @@ pub mod delegation;
 pub mod delivery;
 pub mod deposit;
 pub mod discovery;
+mod encrypted_sqlite;
 pub mod error;
 pub mod execution;
 pub mod gateway;
@@ -117,6 +118,11 @@ pub fn new_id(prefix: &str) -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
     format!("urn:gap:{}:{}", prefix, hex::encode(bytes))
+}
+
+/// Encrypt or unlock existing node-owned SQLite metadata before services start.
+pub fn prepare_node_databases() -> std::result::Result<usize, String> {
+    encrypted_sqlite::prepare_from_env()
 }
 
 pub mod explorer;
