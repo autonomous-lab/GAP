@@ -233,24 +233,6 @@ fn pseudonym(input: &str) -> String {
     crate::sha256_hex(input.as_bytes())[..16].to_string()
 }
 
-/// The node state — shared behind a mutex, one process, one order.
-/// A remembered answer to "does this chain hang together".
-///
-/// `/v1/audit/verify` walks the entire spine and recomputes every hash.
-/// That is the point - a tamper-evidence claim nobody can check is not
-/// evidence - but it is O(chain), it is public, and it is
-/// unauthenticated. Measured on the live node: ~3 microseconds an
-/// event, so 25 ms at eight thousand events and about three SECONDS at
-/// a million. Left uncached, any stranger could pin a core to it in a
-/// loop.
-struct SpineCheck {
-    /// Spine height the answer was computed at.
-    head: u64,
-    at: std::time::Instant,
-    took: std::time::Duration,
-    value: Value,
-}
-
 /// How many finished contracts stay in memory behind the live ones.
 ///
 /// Read traffic is overwhelmingly recent - the activity feed, a job page
@@ -360,8 +342,6 @@ impl Contracts {
 }
 
 pub struct NodeState {
-    /// The last spine verification, and what it cost.
-    spine_check: Option<SpineCheck>,
     /// The node's own identity.
     pub node: NodeIdentity,
     /// token -> registered agent (key custody).
@@ -915,7 +895,6 @@ impl NodeState {
         }
 
         let mut state = Self {
-            spine_check: None,
             node: NodeIdentity { identity },
             agents,
             agents_by_did,
@@ -6196,158 +6175,6 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         ))
     }
 
-    /// Walk the audit spine and check every link.
-    ///
-    /// A chain nobody can check is decoration, so this is public and
-    /// unauthenticated in its summary form: anyone can ask whether this
-    /// node's history hangs together, and recompute it themselves from
-    /// `/v1/audit` using the rule in `storage::event_hash`.
-    ///
-    /// It reports where the chain STARTS, and that number is the honest
-    /// part. Events written before the chain existed carry no hash and
-    /// cannot be given one now: hashing them today would produce a
-    /// chain proving only that nobody has touched them since, while
-    /// looking identical to one proving they were never touched at all.
-    /// Saying "verified from seq N" is a smaller claim than the truth
-    /// would allow, and it is the one that is actually true.
-    /// Verify the chain, reusing the last answer when it is still true.
-    ///
-    /// Two rules, and either one is enough to serve from memory:
-    ///
-    ///   * the spine has not grown since the last check - nothing can
-    ///     have changed, so the answer is not stale, it is current;
-    ///   * or the last check is recent, where "recent" is derived from
-    ///     what it COST rather than fixed. A flat one-second cache is
-    ///     fine at eight thousand events and a treadmill at a million:
-    ///     the node would spend every second recomputing a three-second
-    ///     answer. Backing off to eight times the measured cost keeps
-    ///     the work under an eighth of one core no matter how long the
-    ///     chain gets.
-    ///
-    /// A served answer always says how old it is and what height it was
-    /// taken at, so nobody has to guess whether they are looking at
-    /// this second or the last one.
-    pub fn verify_spine(&mut self) -> Value {
-        let head = self.storage.head_seq().unwrap_or(0);
-        if let Some(prev) = &self.spine_check {
-            let backoff = std::cmp::max(
-                std::time::Duration::from_secs(1),
-                prev.took.saturating_mul(8),
-            );
-            if prev.head == head || prev.at.elapsed() < backoff {
-                let mut v = prev.value.clone();
-                if let Some(o) = v.as_object_mut() {
-                    o.insert("checked_at_seq".into(), json!(prev.head));
-                    o.insert(
-                        "checked_ms_ago".into(),
-                        json!(prev.at.elapsed().as_millis() as u64),
-                    );
-                }
-                return v;
-            }
-        }
-        let started = std::time::Instant::now();
-        let value = self.verify_spine_uncached();
-        let took = started.elapsed();
-        self.spine_check = Some(SpineCheck {
-            head,
-            at: std::time::Instant::now(),
-            took,
-            value: value.clone(),
-        });
-        let mut v = value;
-        if let Some(o) = v.as_object_mut() {
-            o.insert("checked_at_seq".into(), json!(head));
-            o.insert("checked_ms_ago".into(), json!(0));
-        }
-        v
-    }
-
-    fn verify_spine_uncached(&self) -> Value {
-        // Paged, not slurped.
-        //
-        // `events_after(0, u64::MAX)` asked the store for the entire
-        // chain in one answer, which was free while the whole chain sat
-        // in memory and is a way to run the node out of it now that
-        // only a window does. Walking in pages holds one page at a
-        // time, whatever the chain has grown to.
-        const PAGE: u64 = 5_000;
-        let mut cursor = 0u64;
-        let mut segments: Vec<Value> = vec![];
-        let mut breaks: Vec<u64> = vec![];
-        let mut seg_from: Option<u64> = None;
-        let mut seg_links = 0u64;
-        let mut seg_last = 0u64;
-        let mut expected_prev = String::new();
-        let mut events_total = 0u64;
-        let mut unchained = 0u64;
-        let mut verified = 0u64;
-        let mut tip_hash = None;
-
-        loop {
-            let page = self.storage.events_after(cursor, PAGE).unwrap_or_default();
-            let last = page.last().map(|e| e.seq);
-            let n = page.len() as u64;
-            for e in page {
-                events_total += 1;
-                tip_hash = (!e.hash.is_empty()).then(|| e.hash.clone());
-                if e.hash.is_empty() {
-                    unchained += 1;
-                    continue; // written before the chain existed
-                }
-                let recomputed =
-                    crate::storage::event_hash(e.seq, &e.kind, e.at, &e.payload, &e.prev_hash);
-                let links_here = seg_from.is_some() && e.prev_hash == expected_prev;
-                if recomputed != e.hash || (seg_from.is_some() && !links_here) {
-                    // Close the running stretch and start a new one HERE.
-                    // Stopping dead at the first break lets one historical
-                    // incident hide every link after it, and the useful
-                    // question is not "is this perfect" but "which parts of
-                    // this history can I trust".
-                    if let Some(from) = seg_from {
-                        verified += seg_links;
-                        segments.push(
-                            json!({ "from_seq": from, "to_seq": seg_last, "links": seg_links }),
-                        );
-                    }
-                    breaks.push(e.seq);
-                    seg_from = None;
-                }
-                if seg_from.is_none() {
-                    seg_from = Some(e.seq);
-                    seg_links = 0;
-                }
-                seg_links += 1;
-                seg_last = e.seq;
-                expected_prev = e.hash;
-            }
-            match last {
-                Some(seq) if n == PAGE && seq > cursor => cursor = seq,
-                _ => break,
-            }
-        }
-        if let Some(from) = seg_from {
-            segments.push(json!({ "from_seq": from, "to_seq": seg_last, "links": seg_links }));
-            verified += seg_links;
-        }
-
-        json!({
-            "intact": breaks.is_empty(),
-            "breaks_at_seq": breaks,
-            "segments": segments,
-            "links_verified": verified,
-            "events_total": events_total,
-            "unchained_prefix": unchained,
-            "tip_hash": tip_hash,
-            "algorithm": "sha256 over {at,kind,payload,prev_hash,seq} as compact sorted-key JSON, \
-        payload normalised through one parse/serialise cycle before it is stored and hashed",
-            "note": "Events written before the chain existed carry no hash. They are counted in \
-        unchained_prefix and excluded rather than hashed retroactively, which would manufacture evidence \
-        this node does not have. A break does not stop verification: each unbroken stretch is reported \
-        separately.",
-        })
-    }
-
     /// How long this settlement waits before the money moves
     /// (RFC-0009), or `None` when it moves immediately.
     ///
@@ -6541,11 +6368,6 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
                 "governance",
                 true,
                 "autonomy levels, principal binding, veto, budgets",
-            ),
-            (
-                "receipt_chain",
-                true,
-                "hash-chained spine, GET /v1/audit/verify",
             ),
             (
                 "policy",
@@ -9256,10 +9078,6 @@ with your agent id. Either way the node credits it after enough confirmations.",
             }
         }
 
-        // ---- audit ----
-        // Public on purpose: a tamper-evidence claim nobody can check
-        // is a claim, not evidence.
-        ("GET", "/v1/audit/verify") => Ok(guard.verify_spine()),
         // Public: a node that will not say what it speaks is a node you
         // have to guess about.
         ("GET", "/v1/conformance") => Ok(guard.conformance()),
@@ -10764,94 +10582,6 @@ mod tests {
         assert_eq!(status, 200, "accept failed: {out}");
         (id, client_tok, provider_tok)
     }
-
-    #[test]
-    fn verifying_the_spine_twice_only_walks_it_once() {
-        // The endpoint is public, unauthenticated, and O(chain): it
-        // recomputes every hash on the spine. Measured live at roughly
-        // three microseconds an event, which is 25 ms at eight thousand
-        // and about three SECONDS at a million. Uncached, a stranger
-        // could pin a core to it in a loop.
-        let arc = state();
-        {
-            let mut g = arc.lock().unwrap();
-            for _ in 0..5 {
-                g.record("ctr.propose", json!({ "contract_id": "c" }));
-            }
-        }
-        let first = arc.lock().unwrap().verify_spine();
-        assert_eq!(first["intact"], true);
-        assert_eq!(first["checked_ms_ago"], 0, "computed, not served");
-
-        // Nothing has been appended, so the answer cannot have changed:
-        // this is not a stale reply, it is the current one.
-        let second = arc.lock().unwrap().verify_spine();
-        assert_eq!(second["intact"], true);
-        assert_eq!(second["checked_at_seq"], first["checked_at_seq"]);
-        assert_eq!(
-            second["links_verified"], first["links_verified"],
-            "same answer, not recomputed"
-        );
-
-        // Every served answer says which height it was taken at, so a
-        // caller never has to guess how current it is.
-        assert!(second["checked_at_seq"].is_u64());
-        assert!(second["checked_ms_ago"].is_u64());
-    }
-
-    #[test]
-    fn a_grown_spine_is_re_verified_once_the_backoff_has_passed() {
-        // The cache must not outlive the truth it describes. It is
-        // allowed to be briefly behind - that is the whole point, and
-        // the reply says so - but once the backoff has elapsed and the
-        // chain has moved, it walks it again.
-        let arc = state();
-        {
-            let mut g = arc.lock().unwrap();
-            g.record("ctr.propose", json!({ "contract_id": "c" }));
-        }
-        let before = arc.lock().unwrap().verify_spine();
-        {
-            let mut g = arc.lock().unwrap();
-            for _ in 0..4 {
-                g.record("ctr.accept", json!({ "contract_id": "c" }));
-            }
-            // Within the backoff the previous answer still stands, and
-            // it is honest about which height it was taken at.
-            let stale = g.verify_spine();
-            assert_eq!(stale["checked_at_seq"], before["checked_at_seq"]);
-            assert_eq!(stale["events_total"], before["events_total"]);
-
-            // Age the cache rather than sleeping through it.
-            if let Some(c) = g.spine_check.as_mut() {
-                c.at -= std::time::Duration::from_secs(30);
-            }
-        }
-        let after = arc.lock().unwrap().verify_spine();
-        assert!(
-            after["checked_at_seq"].as_u64().unwrap() > before["checked_at_seq"].as_u64().unwrap(),
-            "the chain grew and the backoff passed: {before} then {after}"
-        );
-        assert_eq!(after["events_total"], 5);
-        assert_eq!(after["intact"], true);
-    }
-
-    #[test]
-    fn spine_verification_crosses_storage_page_boundaries() {
-        let arc = state();
-        {
-            let mut guard = arc.lock().unwrap();
-            for seq in 0..5_001 {
-                guard.record("cloud.test", json!({ "seq": seq }));
-            }
-        }
-        let verified = arc.lock().unwrap().verify_spine();
-        assert_eq!(verified["intact"], true);
-        assert_eq!(verified["events_total"], 5_001);
-        assert_eq!(verified["links_verified"], 5_001);
-        assert_eq!(verified["checked_at_seq"], 5_001);
-    }
-
     #[test]
     fn expiry_defaults_to_a_dry_run_and_changes_nothing() {
         // A bulk state change over every contract on the node is the one
@@ -10918,7 +10648,6 @@ mod tests {
             .collect();
         assert!(kinds.contains(&"ctr.cancel".to_string()));
         assert!(kinds.contains(&"ctr.propose".to_string()), "history kept");
-        assert_eq!(guard.verify_spine()["intact"], true);
     }
 
     #[test]
@@ -12734,7 +12463,6 @@ mod tests {
         // Generated from live state, so it cannot go stale in the way a
         // checked-in file does.
         assert!(txt.contains(&guard.node_did().to_string()));
-        assert!(txt.contains("/v1/audit/verify"), "no way to check it");
 
         // The rules that are easy to get wrong and expensive to learn.
         assert!(txt.contains("before the work"), "escrow ordering rule gone");

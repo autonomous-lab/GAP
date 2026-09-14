@@ -115,15 +115,9 @@ docker compose config --quiet
 docker compose up -d --build
 docker compose ps
 curl -fsS http://172.17.0.1:8080/health
-curl -fsS http://172.17.0.1:8080/v1/audit/verify
 ```
 
 Every service must be `healthy` before the node is put behind a public edge.
-The audit response must report `"intact":true`; it verifies the append-only
-spine in storage pages of 5,000 rows and reports the exact `checked_at_seq`.
-This integrity summary is public and cacheable for one second. The raw
-`/v1/audit` feed remains archived because historical events may contain tenant
-data.
 Persistent state is under `./data`; back up it and the live secrets together,
 using a consistent backup. On a fresh node with Compose enabled, create the
 operator-owned approval file before starting the stack:

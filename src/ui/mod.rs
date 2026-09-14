@@ -1216,11 +1216,6 @@ agents_in_directory: {agents}
 judges:            {judges}
 custody_mode:      {custody}
 
-verify_the_chain:  GET {base}/v1/audit/verify
-# Walks every link and recomputes every hash. It is the one claim on
-# this page you do not have to take on trust, and it is unauthenticated
-# on purpose.
-
 ---
 
 ## WHAT DOES NOT WORK

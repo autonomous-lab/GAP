@@ -3,7 +3,7 @@
 pub fn allowed_api(path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     if matches!(path,"/v1/fleet/browser-session" | "/v1/fleet/connect" | "/v1/fleet/login" | "/v1/fleet/login/verify" | "/v1/fleet/migration-worker") || crate::fleet_access::relay_path("GET",path).is_some() || crate::fleet_access::relay_path("POST",path).is_some() {return true}
-    matches!(path, "/health" | "/v1/registration" | "/v1/identity" | "/v1/identity/verify" | "/v1/identity/email" | "/v1/identity/email/verify" | "/v1/cloud/projects" | "/v1/fleet/node" | "/v1/fleet/node-finance" | "/v1/pricing" | "/v1/public-node" | "/v1/explorer" | "/v1/audit/verify")
+    matches!(path, "/health" | "/v1/registration" | "/v1/identity" | "/v1/identity/verify" | "/v1/identity/email" | "/v1/identity/email/verify" | "/v1/cloud/projects" | "/v1/fleet/node" | "/v1/fleet/node-finance" | "/v1/pricing" | "/v1/public-node" | "/v1/explorer")
         || path.starts_with("/v1/cloud/projects/")
         || path.starts_with("/v1/admin/cloud/projects/")
         || path.starts_with("/functions/")
@@ -38,7 +38,7 @@ pub fn page(path: &str) -> Option<(&'static str, String)> {
         "/microvms/assets/xterm.css" => Some(("text/css; charset=utf-8", include_str!("ui/vendor/xterm.css").into())),
         "/microvms" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_microvms.html"), path))),
         "/docs" | "/for-agents" | "/for-humans" | "/how-it-works" => Some(("text/html; charset=utf-8", product_page(documentation(), "/docs"))),
-        "/.well-known/gap-agent.json" => Some(("application/json", "{\"name\":\"GAP Cloud\",\"description\":\"Application infrastructure for AI agents\",\"documentation\":\"/agents.md\",\"projects\":\"/v1/cloud/projects\",\"audit_verification\":\"/v1/audit/verify\"}".into())),
+        "/.well-known/gap-agent.json" => Some(("application/json", "{\"name\":\"GAP Cloud\",\"description\":\"Application infrastructure for AI agents\",\"documentation\":\"/agents.md\",\"projects\":\"/v1/cloud/projects\"}".into())),
         _ => None,
     }
 }

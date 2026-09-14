@@ -100,6 +100,7 @@ fn cloud_binary_preserves_project_api_and_closes_commerce_surface() {
         "/admin",
         "/activity",
         "/v1/audit",
+        "/v1/audit/verify",
     ] {
         assert_eq!(
             request(port, "GET", path, "Accept: text/event-stream\r\n", "").0,
@@ -112,12 +113,6 @@ fn cloud_binary_preserves_project_api_and_closes_commerce_surface() {
             "custom {path}"
         );
     }
-    let verification = request(port, "GET", "/v1/audit/verify", "", "");
-    assert_eq!(verification.0, 200);
-    let verification: serde_json::Value = serde_json::from_str(&verification.1).unwrap();
-    assert_eq!(verification["intact"], true);
-    assert!(verification["checked_at_seq"].is_u64());
-    assert!(verification["checked_ms_ago"].is_u64());
     assert_eq!(
         request(port, "GET", "/", "X-GAP-Custom-Domain: 1\r\n", "").0,
         404
