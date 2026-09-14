@@ -417,8 +417,10 @@ and serializes resource mutations across projects belonging to the same owner.
 Malformed or unavailable quota policy fails closed. Deploy the updated node
 before updating the worker; old nodes do not return the required quota callback.
 
-Email-verified identities that have no explicit operator grant receive the Free Trial:
-$1 of promotional credit once, one VM, 0.5 vCPU, 512 MiB RAM, and serverless execution only. The worker persists the
+Eligible email-verified identities that have no explicit operator grant receive the Free Trial:
+$1 of promotional credit once per customer and public network, one VM, 0.5 vCPU,
+512 MiB RAM, and serverless execution only. Trial eligibility is decided atomically
+by the central authority; workers never mint promotional credit. The worker persists the
 authorization tier in the VM catalog and starts QEMU's user network with `restrict=on`.
 This blocks guest-initiated connections while preserving the reverse proxy's loopback
 forward and replies on that inbound connection. Free Trial VMs cannot publish direct

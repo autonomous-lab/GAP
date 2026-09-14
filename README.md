@@ -411,7 +411,10 @@ Paths above are relative to `/v1/cloud/projects/{project_id}`. Configure the
 application's base path; root-relative links are not rewritten. Applications
 are long-running services, not time-bounded serverless function invocations.
 MicroVM access on the public deployment is available after email verification.
-The Free Trial grants each verified customer $1 of promotional credit once and
+Eligible verified customers receive one $1 promotional Free Trial. A customer
+can receive it only once, and a public IPv4 address or IPv6 /64 can sponsor only
+one trial; additional accounts still work and can use paid credits. GAP stores a
+keyed digest of the network identity rather than the address itself. The trial
 provides one serverless VM with 0.5 vCPU and 512 MiB RAM. Its QEMU
 network blocks guest-initiated outbound traffic and direct application port publication;
 applications remain reachable through the managed HTTPS reverse proxy. One public

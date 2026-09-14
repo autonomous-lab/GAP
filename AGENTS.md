@@ -801,6 +801,14 @@ an application. Only the operator can run these host commands.
 
 ### Serverless execution, credits and retention
 
+Eligible email-verified customers receive a single $1 promotional Free Trial.
+The grant is also limited to one customer per public IPv4 address or IPv6 /64;
+another account from a network that already claimed it is created normally but
+starts without promotional credit. The control authority stores only a keyed
+digest of that network identity. The trial is a promotion, not an entitlement;
+funding the common wallet removes the promotional-credit dependency. Network
+usage is metered in both directions and consumes the same balance.
+
 On workers with serverless enabled, a VM defaults to `serverless` with **15 minutes
 of inbound inactivity** before disk hibernation. QEMU exits and releases its RAM;
 the disk snapshot preserves execution state. The next HTTP/API/WebSocket request,

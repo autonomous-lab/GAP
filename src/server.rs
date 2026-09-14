@@ -7659,7 +7659,7 @@ pub fn route_with_ip(
         let email=match registration.verify_link(body["challenge_id"].as_str().unwrap_or(""),body["code"].as_str().unwrap_or(""),now_unix(),"fleet-human-login") {
             Ok(email)=>email,Err(e)=>return e.response(),
         };
-        return access.connect(&json!({"action":"human-login","email":email}));
+        return access.connect(&json!({"action":"human-login","email":email,"trial_ip":client_ip.unwrap_or("unknown")}));
     }
     if path == "/v1/fleet/connect" && method == "POST" {
         let Some(access) = guard.fleet_access.clone() else {return (409,json!({"error":{"code":"fleet_access_disabled"}}))};
@@ -7683,7 +7683,7 @@ pub fn route_with_ip(
         };
         let Some(email)=proof["email"].as_str().filter(|_|proof["verified_at"].as_u64().is_some())
             else {return (403,json!({"error":{"code":"verified_email_required"}}))};
-        let request=json!({"action":"connect","request_id":body["request_id"],"project_id":project.project_id,"agent_did":agent,"email":email});
+        let request=json!({"action":"connect","request_id":body["request_id"],"project_id":project.project_id,"agent_did":agent,"email":email,"trial_ip":client_ip.unwrap_or("unknown")});
         drop(guard);
         return access.connect(&request);
     }

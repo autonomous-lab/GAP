@@ -17,9 +17,9 @@ class SuspensionTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.now=100;self.a=Authority(Path(self.tmp.name)/'db','op',clock=lambda:self.now)
         self.access=Access(self.a,b'k'*32)
-        self.first=self.access.connect('one','connect','same@example.com',OWNER,PROJECT)
+        self.first=self.access.connect('one','connect','same@example.com',OWNER,PROJECT,trial_ip='203.0.113.10')
         self.customer=self.first['customer_id']
-        self.access.connect('two','second','SAME@example.com',OTHER,SECOND)
+        self.access.connect('two','second','SAME@example.com',OTHER,SECOND,trial_ip='203.0.113.10')
     def change(self,active=True,revision=0,request='suspend',**extra):
         return suspension.set_policy(self.a,request,dict(customer_id=self.customer,active=active,
             expected_revision=revision,reason='Operator abuse decision',**extra))
@@ -28,7 +28,7 @@ class SuspensionTests(unittest.TestCase):
         with self.assertRaises(Failure):self.a.authenticate(self.first['credential']['token'])
         with self.assertRaisesRegex(Failure,'customer_suspended'):self.access.issue(actor,PROJECT)
         with self.assertRaisesRegex(Failure,'customer_suspended'):
-            self.access.connect('two','new','same@example.com','did:gap:'+'c'*64,'prj_'+'c'*24)
+            self.access.connect('two','new','same@example.com','did:gap:'+'c'*64,'prj_'+'c'*24,trial_ip='203.0.113.10')
         s=suspension.snapshot(self.a,'two');self.assertEqual(s['agents'],[OWNER,OTHER])
         self.assertEqual(s['projects'],[PROJECT,SECOND]);self.assertIn(hashlib.sha256(b'same@example.com').hexdigest(),s['email_hashes'])
         with self.assertRaisesRegex(Failure,'customer_suspended'):

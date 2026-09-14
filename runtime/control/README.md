@@ -226,7 +226,7 @@ The authority neither scans nor adopts existing VM catalogs. Keep the existing l
 checks and physical-host admission checks; they solve different constraints.
 No client is migrated by enabling this flag.
 
-Each verified customer receives a one-time Free Trial: $1 (1,000,000 microcredits),
+An eligible verified customer receives a one-time Free Trial: $1 (1,000,000 microcredits),
 one VM, 2 CPU quarters (0.5 vCPU) and
 512 MiB RAM. A successful operator `set-quotas` marks that customer as approved;
 placement approvals then carry the standard network policy. Free Trial placement
@@ -240,6 +240,16 @@ hibernated VMs. They are not measures of current CPU consumption or free host RA
 Disk remains a per-project/per-host limit. Central retention is a separate
 protocol. Scheduler reservations described below coordinate physical disk
 headroom, while global customer quota continues to cover VM count, CPU and RAM.
+
+Promotional attribution is atomic across the fleet. `trial_grants` enforces one
+grant per customer and `trial_ip_grants` enforces one grant per public IPv4 or
+IPv6 /64. The trusted identity node supplies the observed client address; the
+authority normalizes it and stores an HMAC digest derived from its signing seed,
+never the address itself. A missing or invalid address fails closed for the
+promotion while account creation and paid funding remain available. Shared NAT
+users may therefore create accounts but only the first eligible customer receives
+the automatic credit. Payment-method verification and interactive anti-bot
+challenges are escalation options, not current signup requirements.
 
 Client GET `/v1/quotas` returns only the authenticated customer's aggregate
 limits, allocations, revision and `over_limit` dimensions, including for an agent
@@ -635,8 +645,10 @@ credential; save it privately (`fleet-control.py --output`), never in logs.
 Humans sign in using a fresh email challenge (`POST /v1/fleet/login`, then
 `/v1/fleet/login/verify`). Challenges are scoped to human login: an agent bearer
 or an identity-link/signup code cannot grant account-wide access. A newly verified
-address receives exactly one $1 promotional trial grant, including an existing
-verified customer on their next login. Operator-provided human control
+email identity receives a $1 promotional trial grant when both the customer and observed
+public network are still eligible, including an existing verified customer on
+their next login. A duplicate network signs in normally without promotional
+credit. Operator-provided human control
 credentials can also be entered without sending an email. Credentials stay in
 page memory, expire within one hour, and logout revokes them. Refreshing the
 page requires reconnecting; no credential is stored in browser storage.

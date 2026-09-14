@@ -5,6 +5,8 @@ no access to this endpoint. No local wallet is imported or activated here.
 """
 import base64
 import hashlib
+import hmac
+import ipaddress
 import re
 import secrets
 
@@ -19,6 +21,7 @@ class Access:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
         self.a = authority
+        self.trial_key = hashlib.sha256(b'gap-trial-ip-v1\0' + seed).digest()
         self.key = Ed25519PrivateKey.from_private_bytes(seed)
         self.public_key = self.key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
         with authority.db() as db:
@@ -29,18 +32,31 @@ class Access:
                 node TEXT NOT NULL,email TEXT NOT NULL REFERENCES verified_emails(email))''')
             db.execute('''CREATE TABLE IF NOT EXISTS trial_grants(customer TEXT PRIMARY KEY
                 REFERENCES customers(id), granted INTEGER NOT NULL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS trial_ip_grants(ip_key TEXT PRIMARY KEY,
+                customer TEXT NOT NULL REFERENCES customers(id), granted INTEGER NOT NULL)''')
 
-    def ensure_trial(self, db, customer):
-        inserted=db.execute('INSERT OR IGNORE INTO trial_grants VALUES(?,?)',
-                            (customer,int(self.a.clock())))
-        if inserted.rowcount != 1:return
+    def trial_ip_key(self, value):
+        try: address=ipaddress.ip_address(value)
+        except ValueError:return None
+        identity=str(address) if address.version==4 else str(ipaddress.ip_network(f'{address}/64',strict=False))
+        return hmac.new(self.trial_key,identity.encode(),hashlib.sha256).hexdigest()
+
+    def ensure_trial(self, db, customer, trial_ip):
+        if db.execute('SELECT 1 FROM trial_grants WHERE customer=?',(customer,)).fetchone():return False
+        ip_key=self.trial_ip_key(trial_ip)
+        if ip_key is None:return False
+        now=int(self.a.clock())
+        claimed=db.execute('INSERT OR IGNORE INTO trial_ip_grants VALUES(?,?,?)',(ip_key,customer,now))
+        if claimed.rowcount != 1:return False
+        db.execute('INSERT INTO trial_grants VALUES(?,?)',(customer,now))
         row=self.a.customer(db,customer);balance=amount(row['balance']+TRIAL_CREDITS)
         db.execute('UPDATE customers SET balance=? WHERE id=?',(balance,customer))
         db.execute('DELETE FROM retention_clocks WHERE customer=?',(customer,))
         self.a.entry(db,customer,None,None,'funding',TRIAL_CREDITS,'promotional',
                      'verified-email','microvm-trial-v1')
+        return True
 
-    def connect(self, node, request, email, agent, project, manual_reason=None):
+    def connect(self, node, request, email, agent, project, manual_reason=None, trial_ip=None):
         # Gateway validates its durable email proof and local owner bearer.
         if not isinstance(email, str) or len(email) > 254 or not re.fullmatch(r'[^\s@<>;,"\x00-\x1f]+@[^\s@<>;,"\x00-\x1f]+', email) or not email.isascii():
             raise Failure('invalid_verified_email')
@@ -82,9 +98,10 @@ class Access:
             db.execute('INSERT OR IGNORE INTO identity_sources VALUES(?,?,?)', (agent, node, email))
             db.execute('INSERT OR IGNORE INTO projects VALUES(?,?,?,?)', (project, customer, node, agent))
             db.execute("INSERT OR IGNORE INTO grants VALUES(?,?,'owner')", (project, agent))
-            self.ensure_trial(db,customer)
+            trial_credit_granted=self.ensure_trial(db,customer,trial_ip)
             return dict(customer_id=customer, agent_did=agent, project_id=project, node_id=node,
                         operator_id=self.a.operator, legacy_balance_transferred=False,
+                        trial_credit_granted=trial_credit_granted,
                         confirmation_method="operator_confirmation" if manual_reason else "identity_gateway",
                         confirmation_reason=manual_reason)
         result = self.a.mutation('operator' if manual_reason else 'identity:'+node, request, body, apply)
@@ -104,7 +121,7 @@ class Access:
         return dict(operator_id=self.a.operator,customer_id=customer,project_id=project,node_id=node,
                     agent_did=agent,legacy_balance_transferred=False,credential=self.a.issue(customer,agent))
 
-    def human_login(self, email):
+    def human_login(self, email, trial_ip=None):
         if not isinstance(email,str) or len(email)>254 or not re.fullmatch(r'[^\s@<>;,"\x00-\x1f]+@[^\s@<>;,"\x00-\x1f]+',email) or not email.isascii():raise Failure('invalid_verified_email')
         with self.a.db() as db:
             row=db.execute('SELECT customer FROM verified_emails WHERE email=?',(email.lower(),)).fetchone()
@@ -114,7 +131,7 @@ class Access:
                 db.execute('INSERT INTO customers(id,label,created) VALUES(?,?,?)',(customer,'Verified customer',int(self.a.clock())))
                 db.execute('INSERT INTO verified_emails VALUES(?,?)',(email.lower(),customer))
                 db.execute("INSERT INTO principals VALUES('human',?,?,1)",('email:'+hashlib.sha256(email.lower().encode()).hexdigest(),customer))
-            self.ensure_trial(db,customer)
+            self.ensure_trial(db,customer,trial_ip)
         return self.a.issue(customer,None)
 
     def members(self, actor):

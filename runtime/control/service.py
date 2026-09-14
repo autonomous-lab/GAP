@@ -92,10 +92,10 @@ class Application:
             if body.get('action') == 'reconnect':
                 return self.access.reconnect(actor,body['agent_did'],body['project_id'])
             if body.get('action') == 'human-login':
-                return self.access.human_login(body['email'])
+                return self.access.human_login(body['email'],body.get('trial_ip'))
             if body.get('action') != 'connect':
                 raise Failure('unknown_identity_action', 404)
-            return self.access.connect(actor, body['request_id'], body['email'], body['agent_did'], body['project_id'])
+            return self.access.connect(actor, body['request_id'], body['email'], body['agent_did'], body['project_id'],trial_ip=body.get('trial_ip'))
         if method=='GET' and parsed.path=='/v1/finance':
             if kind not in ('operator','report'):raise Failure('finance_operator_required',403)
             if not self.finance:raise Failure('fleet_finance_not_configured',409)
