@@ -612,6 +612,7 @@ fn main() -> Result<()> {
 
             let mut response = Response::from_string(json_str).with_status_code(status);
             if vm_console || clean_path.ends_with("/vm/http-access/reveal") {response.add_header(Header::from_bytes("Cache-Control","no-store").unwrap());}
+            else if clean_path=="/v1/audit/verify" {response.add_header(Header::from_bytes("Cache-Control","public, max-age=1, stale-while-revalidate=30").unwrap());}
             response.add_header(
                 Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
             );

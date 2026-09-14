@@ -694,6 +694,26 @@ Top-ups are persisted in ClickHouse and written to the GAP audit spine. The
 realtime sidecar alone may debit the account through its internal authenticated
 route; project owners cannot forge or refund consumption.
 
+### Public audit-spine verification
+
+Anyone can verify the node's append-only event chain without a bearer token:
+
+```bash
+curl -s "$NODE/v1/audit/verify"
+```
+
+The response reports `intact`, `events_total`, `links_verified`,
+`breaks_at_seq`, `segments`, `tip_hash`, `checked_at_seq` and
+`checked_ms_ago`. Verification reads storage in pages of 5,000 events and
+keeps only one page in memory. The node caches an unchanged result and applies
+cost-based backoff while the chain grows; the HTTP response is cacheable for
+one second. A non-zero `checked_ms_ago` is therefore expected and its matching
+`checked_at_seq` states the exact verified height.
+
+The raw `/v1/audit` event feed remains archived in GAP Cloud because legacy
+contract events may contain tenant data. This public endpoint exposes only the
+integrity summary.
+
 ### Realtime for a static site
 
 Your browser connects to `wss://gap.geta.team/v1/realtime`, but it must never

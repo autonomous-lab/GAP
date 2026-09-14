@@ -6272,67 +6272,73 @@ event (or poll GET /v1/contract/{id} until escrow_funded is true)"
         // only a window does. Walking in pages holds one page at a
         // time, whatever the chain has grown to.
         const PAGE: u64 = 5_000;
-        let mut events: Vec<crate::storage::EventRecord> = Vec::new();
         let mut cursor = 0u64;
-        loop {
-            let page = self.storage.events_after(cursor, PAGE).unwrap_or_default();
-            let last = page.last().map(|e| e.seq);
-            let n = page.len() as u64;
-            events.extend(page);
-            match last {
-                Some(seq) if n == PAGE && seq > cursor => cursor = seq,
-                _ => break,
-            }
-        }
         let mut segments: Vec<Value> = vec![];
         let mut breaks: Vec<u64> = vec![];
         let mut seg_from: Option<u64> = None;
         let mut seg_links = 0u64;
         let mut seg_last = 0u64;
         let mut expected_prev = String::new();
+        let mut events_total = 0u64;
+        let mut unchained = 0u64;
+        let mut verified = 0u64;
+        let mut tip_hash = None;
 
-        for e in &events {
-            if e.hash.is_empty() {
-                continue; // written before the chain existed
-            }
-            let recomputed =
-                crate::storage::event_hash(e.seq, &e.kind, e.at, &e.payload, &e.prev_hash);
-            let links_here = seg_from.is_some() && e.prev_hash == expected_prev;
-            if recomputed != e.hash || (seg_from.is_some() && !links_here) {
-                // Close the running stretch and start a new one HERE.
-                // Stopping dead at the first break lets one historical
-                // incident hide every link after it, and the useful
-                // question is not "is this perfect" but "which parts of
-                // this history can I trust".
-                if let Some(from) = seg_from {
-                    segments
-                        .push(json!({ "from_seq": from, "to_seq": seg_last, "links": seg_links }));
+        loop {
+            let page = self.storage.events_after(cursor, PAGE).unwrap_or_default();
+            let last = page.last().map(|e| e.seq);
+            let n = page.len() as u64;
+            for e in page {
+                events_total += 1;
+                tip_hash = (!e.hash.is_empty()).then(|| e.hash.clone());
+                if e.hash.is_empty() {
+                    unchained += 1;
+                    continue; // written before the chain existed
                 }
-                breaks.push(e.seq);
-                seg_from = None;
+                let recomputed =
+                    crate::storage::event_hash(e.seq, &e.kind, e.at, &e.payload, &e.prev_hash);
+                let links_here = seg_from.is_some() && e.prev_hash == expected_prev;
+                if recomputed != e.hash || (seg_from.is_some() && !links_here) {
+                    // Close the running stretch and start a new one HERE.
+                    // Stopping dead at the first break lets one historical
+                    // incident hide every link after it, and the useful
+                    // question is not "is this perfect" but "which parts of
+                    // this history can I trust".
+                    if let Some(from) = seg_from {
+                        verified += seg_links;
+                        segments.push(
+                            json!({ "from_seq": from, "to_seq": seg_last, "links": seg_links }),
+                        );
+                    }
+                    breaks.push(e.seq);
+                    seg_from = None;
+                }
+                if seg_from.is_none() {
+                    seg_from = Some(e.seq);
+                    seg_links = 0;
+                }
+                seg_links += 1;
+                seg_last = e.seq;
+                expected_prev = e.hash;
             }
-            if seg_from.is_none() {
-                seg_from = Some(e.seq);
-                seg_links = 0;
+            match last {
+                Some(seq) if n == PAGE && seq > cursor => cursor = seq,
+                _ => break,
             }
-            seg_links += 1;
-            seg_last = e.seq;
-            expected_prev = e.hash.clone();
         }
         if let Some(from) = seg_from {
             segments.push(json!({ "from_seq": from, "to_seq": seg_last, "links": seg_links }));
+            verified += seg_links;
         }
 
-        let unchained = events.iter().filter(|e| e.hash.is_empty()).count();
-        let verified: u64 = segments.iter().filter_map(|s| s["links"].as_u64()).sum();
         json!({
             "intact": breaks.is_empty(),
             "breaks_at_seq": breaks,
             "segments": segments,
             "links_verified": verified,
-            "events_total": events.len(),
+            "events_total": events_total,
             "unchained_prefix": unchained,
-            "tip_hash": events.last().map(|e| e.hash.clone()).filter(|h| !h.is_empty()),
+            "tip_hash": tip_hash,
             "algorithm": "sha256 over {at,kind,payload,prev_hash,seq} as compact sorted-key JSON, \
         payload normalised through one parse/serialise cycle before it is stored and hashed",
             "note": "Events written before the chain existed carry no hash. They are counted in \
@@ -10828,6 +10834,22 @@ mod tests {
         );
         assert_eq!(after["events_total"], 5);
         assert_eq!(after["intact"], true);
+    }
+
+    #[test]
+    fn spine_verification_crosses_storage_page_boundaries() {
+        let arc = state();
+        {
+            let mut guard = arc.lock().unwrap();
+            for seq in 0..5_001 {
+                guard.record("cloud.test", json!({ "seq": seq }));
+            }
+        }
+        let verified = arc.lock().unwrap().verify_spine();
+        assert_eq!(verified["intact"], true);
+        assert_eq!(verified["events_total"], 5_001);
+        assert_eq!(verified["links_verified"], 5_001);
+        assert_eq!(verified["checked_at_seq"], 5_001);
     }
 
     #[test]
