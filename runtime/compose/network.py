@@ -3,6 +3,7 @@ import base64
 import hashlib
 import re
 import socket
+import time
 
 from microvm import VMError
 
@@ -55,13 +56,17 @@ def keys(value):
 
 def validate(action, body):
     field = 'mappings' if action == 'ports' else 'authorized_keys'
-    if set(body) != {'request_id', 'vm_id', field} or not re.fullmatch(r'vm_[0-9a-f]{32}', str(body.get('vm_id', ''))):
+    allowed={'request_id','vm_id',field}
+    if action=='ports':allowed.add('expires_in')
+    if not {'request_id','vm_id',field} <= set(body) <= allowed or not re.fullmatch(r'vm_[0-9a-f]{32}', str(body.get('vm_id', ''))):
         raise VMError('invalid_' + action + '_fields')
     if action == 'ssh':
         keys(body[field])
         return
     if not isinstance(body[field], list) or len(body[field]) > 5:
         raise VMError('maximum_five_public_ports')
+    if 'expires_in' in body and (type(body['expires_in']) is not int or not 300 <= body['expires_in'] <= 3600):
+        raise VMError('invalid_public_port_expiry')
     seen, udp_targets = set(), set()
     for item in body[field]:
         if (not isinstance(item, dict) or set(item) != {'slot', 'guest_port', 'protocol'}
@@ -120,10 +125,11 @@ class Network:
     def public(self, meta):
         if not meta or meta['state'] == 'destroyed':
             return {'hostname': self.host, 'ports': [], 'state': 'absent'}
-        configured = {p['slot']: p for p in meta.get('public_mappings', [])}
+        expires=meta.get('public_access_expires_at')
+        configured = {} if expires is not None and time.time() >= expires else {p['slot']: p for p in meta.get('public_mappings', [])}
         running = self.manager.public(meta)['state'] == 'running'
         reachable = running or bool(self.manager.runtime and meta['state']=='hibernated')
-        return {'vm_id': meta['vm_id'], 'hostname': self.host,
+        return {'vm_id': meta['vm_id'], 'hostname': self.host, 'expires_at': expires,
                 'state': 'pending' if meta.get('network_pending') else ('running' if running else 'stopped'),
                 'ports': [dict(slot=i, public_port=p, guest_port=configured.get(i, {}).get('guest_port'),
                                protocol=configured.get(i, {}).get('protocol'),
@@ -139,8 +145,20 @@ class Network:
         return {'vm_id': meta['vm_id'], 'username': 'root', 'authorized_keys': meta.get('ssh_keys', []),
                 'host_public_key': public, 'host_key_fingerprint': fingerprint,
                 'connections': [{'hostname': self.host, 'port': p['public_port'],
+                                 'expires_at': self.public(meta).get('expires_at'),
                                  'command': f'ssh -p {p["public_port"]} root@{self.host}'}
                                 for p in self.public(meta)['ports'] if p['guest_port'] == 22 and p['protocol'] in ('tcp', 'both')]}
+
+    def expire(self, meta, now=None):
+        expires=meta.get('public_access_expires_at')
+        if expires is None or (time.time() if now is None else now) < expires:
+            return False
+        meta['public_mappings']=[];meta['network_pending']=True
+        self.manager.save(meta)
+        if self.manager.alive(meta):self.apply(meta)
+        meta['network_pending']=False;meta.pop('public_access_expires_at',None)
+        self.manager.save(meta);self.manager.sync_environment(meta)
+        return True
 
     def rules(self, meta):
         for mapping in meta.get('public_mappings', []):
@@ -180,13 +198,25 @@ class Network:
                 meta['ssh_keys'] = new_keys
                 self.manager.save(meta)
                 return {'ok': True, 'ssh': self.ssh_public(meta)}
-            if meta.get('network_restricted') and body['mappings']:
-                raise VMError('trial_public_ports_disabled')
+            if meta.get('network_restricted') and any(
+                    mapping['guest_port'] != 22 or mapping['protocol'] != 'tcp'
+                    for mapping in body['mappings']):
+                raise VMError('trial_only_public_ssh_allowed')
+            if meta.get('network_restricted') and len(body['mappings']) > 1:
+                raise VMError('trial_only_public_ssh_allowed')
+            if meta.get('network_restricted') and body['mappings'] and 'expires_in' not in body:
+                raise VMError('trial_ssh_expiry_required')
+            if meta.get('network_restricted') and body['mappings'] and self.manager.alive(meta):
+                # Apply the current restrict,pty policy before the public listener exists.
+                self.manager.write_keys(meta,meta.get('ssh_keys',[]))
             if not meta.get('public_ports'):
                 with self.manager.allocation_lock():
                     self.allocate(meta)
                     self.manager.save(meta)
             meta['public_mappings'] = body['mappings']
+            if body['mappings'] and 'expires_in' in body:
+                meta['public_access_expires_at']=int(time.time())+body['expires_in']
+            else:meta.pop('public_access_expires_at',None)
             meta['network_pending'] = True
             self.manager.save(meta)
             if self.manager.alive(meta):

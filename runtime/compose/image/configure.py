@@ -23,6 +23,10 @@ AllowAgentForwarding no
 AllowTcpForwarding yes
 X11Forwarding no
 PermitTunnel no
+MaxAuthTries 3
+MaxSessions 4
+MaxStartups 10:30:30
+LoginGraceTime 20
 PrintMotd no
 Subsystem sftp internal-sftp
 ''')

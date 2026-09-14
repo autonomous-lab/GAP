@@ -19,8 +19,9 @@ MAX_BODY=16*1024*1024
 
 
 class LimitedThreads:
+    max_threads=128
     def __init__(self,*args,**kwargs):
-        self.slots=threading.BoundedSemaphore(128)
+        self.slots=threading.BoundedSemaphore(self.max_threads)
         super().__init__(*args,**kwargs)
     def process_request(self,request,address):
         if not self.slots.acquire(blocking=False):
@@ -40,6 +41,10 @@ class HTTPServer(LimitedThreads,ThreadingHTTPServer):
 class TCPServer(LimitedThreads,socketserver.ThreadingTCPServer):
     allow_reuse_address=True
     daemon_threads=True
+
+
+class SSHServer(TCPServer):
+    max_threads=8
 
 
 class UDPServer(LimitedThreads,socketserver.ThreadingUDPServer):
@@ -181,7 +186,7 @@ class Gateway:
             for identity in wanted:
                 if identity in self.listeners: continue
                 project,slot,protocol,port,vm_id=identity
-                cls=TCPServer if protocol=='tcp' else UDPServer
+                cls=SSHServer if protocol=='tcp' and wanted[identity]['guest_port']==22 else TCPServer if protocol=='tcp' else UDPServer
                 handler=self.tcp_handler(project,slot,vm_id) if protocol=='tcp' else self.udp_handler(project,slot,vm_id)
                 server=cls(('0.0.0.0',port),handler)
                 self.listeners[identity]=server

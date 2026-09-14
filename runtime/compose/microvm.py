@@ -397,9 +397,10 @@ class MicroVMs:
     def authorized_keys(self, meta, keys):
         terminal_key = self.folder(meta) / 'terminal_key.pub'
         terminal = ('restrict,pty,command="/bin/sh -l" ' + terminal_key.read_text().strip() + '\n') if terminal_key.exists() else ''
+        owner_options = 'restrict,pty ' if meta.get('network_restricted') else 'no-agent-forwarding,no-X11-forwarding '
         return ('restrict,command="python3 /usr/local/lib/gap-compose-guest.py" ' +
                 (self.folder(meta) / 'client_key.pub').read_text().strip() + '\n' +
-                terminal + ''.join('no-agent-forwarding,no-X11-forwarding ' + key + '\n' for key in keys))
+                terminal + ''.join(owner_options + key + '\n' for key in keys))
 
     def write_keys(self, meta, keys):
         folder = self.folder(meta)

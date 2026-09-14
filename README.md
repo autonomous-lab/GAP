@@ -413,8 +413,10 @@ are long-running services, not time-bounded serverless function invocations.
 MicroVM access on the public deployment is available after email verification.
 The Free Trial grants each verified customer $1 of promotional credit once and
 provides one serverless VM with 0.5 vCPU and 512 MiB RAM. Its QEMU
-network blocks guest-initiated outbound traffic and direct TCP/UDP publication;
-applications remain reachable through the managed HTTPS reverse proxy. Once the
+network blocks guest-initiated outbound traffic and direct application port publication;
+applications remain reachable through the managed HTTPS reverse proxy. One public
+high-port SSH endpoint may be enabled for up to one hour with public-key authentication;
+forwarding is disabled for client keys and the worker closes the mapping automatically. Once the
 trial credit is spent, prepaid billing stops execution until the account is funded.
 See the [complete quickstart](./AGENTS.md#managed-app-quickstart),
 [lifecycle API](./AGENTS.md#manage-the-microvm-and-publication) and

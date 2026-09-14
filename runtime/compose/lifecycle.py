@@ -283,6 +283,8 @@ class Runtime:
                 self.manager.perform(project,meta['owner_did'],'vm/resume',{'vm_id':meta['vm_id']})
             meta=self.manager.read(project,meta['owner_did'],meta['vm_id'])
             meta['manual_stop']=False; meta.pop('runtime_error',None); self.manager.save(meta)
+            # Refresh key restrictions before a wake-gateway TCP connection is relayed.
+            self.manager.write_keys(meta,meta.get('ssh_keys',[]))
             self.sample(meta)
         self.touch(meta)
         return meta
@@ -336,6 +338,7 @@ class Runtime:
     def tick_project(self,path):
         meta=json.loads(path.read_text())
         if meta['state']=='migrated':return
+        if self.manager.network and meta['state']!='destroyed':self.manager.network.expire(meta)
         project=meta['project_id']
         if meta['state']=='destroyed' and not self.storage_bytes(meta):
             if self.ledger.view(project,meta['owner_did'],include_entries=False)['deletion_committed']: self.expire(meta)

@@ -1,6 +1,7 @@
 import threading
 import unittest
 from unittest.mock import patch
+from gateway import SSHServer, TCPServer
 from lifecycle import Runtime
 
 class SourcePortTests(unittest.TestCase):
@@ -28,3 +29,7 @@ class SourcePortTests(unittest.TestCase):
         runtime.execution_started(meta,cold=True)
         self.assertTrue(runtime.reserve_tcp_source(meta,40000))
         self.assertNotIn('tcp_recent_ports',meta)
+
+    def test_ssh_listener_has_a_smaller_connection_budget(self):
+        self.assertEqual(SSHServer.max_threads,8)
+        self.assertEqual(TCPServer.max_threads,128)

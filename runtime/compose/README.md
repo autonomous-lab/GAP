@@ -422,7 +422,12 @@ $1 of promotional credit once, one VM, 0.5 vCPU, 512 MiB RAM, and serverless exe
 authorization tier in the VM catalog and starts QEMU's user network with `restrict=on`.
 This blocks guest-initiated connections while preserving the reverse proxy's loopback
 forward and replies on that inbound connection. Free Trial VMs cannot publish direct
-TCP/UDP slots or public SSH; the web terminal remains available. Placement approvals
+application TCP/UDP slots. They may publish one TCP mapping to guest SSH port 22
+for 5-60 minutes (`expires_in`, required for this tier);
+public-key authentication is mandatory and client keys use OpenSSH `restrict,pty`,
+which disables TCP, agent and X11 forwarding. The worker removes the forwarding
+rule at expiry, including after a restart, and accepts at most eight concurrent
+SSH connections per endpoint. The web terminal remains available. Placement approvals
 carry the same network policy so moving a VM cannot remove the restriction.
 
 ## Tests and production readiness

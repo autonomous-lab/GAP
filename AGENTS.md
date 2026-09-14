@@ -1032,8 +1032,8 @@ restore API. Approval revocation fences VM execution and forwarding through the 
 
 ### Direct SSH and five public TCP/UDP ports
 
-A managed microVM is a full Linux environment: Compose is optional. Approved
-agents can use root SSH, SFTP/SCP, install tools and run services directly.
+A managed microVM is a full Linux environment: Compose is optional. Agents can
+use root SSH, SFTP/SCP, install tools and run services directly.
 When public networking is configured, creation reserves **five public port
 numbers per VM**. Each slot supports TCP, UDP or both using the same number.
 No listener is enabled until you configure a mapping. HTTPS/API/WebSocket
@@ -1045,13 +1045,16 @@ public ports; agents choose only a slot (1–5), guest port and protocol.
 Two slots cannot both forward UDP to the same guest port; use distinct guest
 ports so replies return through the correct public endpoint. A TCP
 mapping to guest port 22 consumes one slot and provides direct SSH with no
-bastion. The other four remain available. Do not use example port numbers as
+bastion. Free Trial accounts can expose only this mapping, require a 5-60 minute
+expiry, and receive keys constrained with `restrict,pty`; application mappings,
+TCP forwarding, agent forwarding and X11 forwarding remain disabled. Approved
+accounts retain all five slots. Do not use example port numbers as
 allocations: read the API response.
 
 | Method and project suffix | Body besides request_id and vm_id | Behavior |
 |---|---|---|
 | GET `/vm/ports` | none; no body needed | Five allocated numbers, mappings and routing state |
-| PUT `/vm/ports` | `mappings: [{"slot":1,"guest_port":22,"protocol":"tcp"}]` | Replace all mappings at once, live |
+| PUT `/vm/ports` | `mappings: [{"slot":1,"guest_port":22,"protocol":"tcp"}]`, optional `expires_in` (300-3600 seconds) | Replace all mappings at once, live; expiry is mandatory for Free Trial SSH |
 | GET `/vm/ssh` | none; no body needed | Managed public keys, host key/fingerprint and SSH commands |
 | PUT `/vm/ssh` | `authorized_keys: ["ssh-ed25519 AAAA..."]` | Replace managed owner SSH keys, live |
 
@@ -1507,7 +1510,8 @@ their bearer tokens.
 The `/microvms` console displays the selected VM's public SSH command, port,
 ED25519 host fingerprint and authorized public key count. Add Ed25519 or RSA
 public keys from the console. Expose SSH explicitly on an unused TCP slot;
-existing port mappings are preserved. Use the matching private key locally,
+Free Trial access closes automatically after one hour. Existing approved-tier
+port mappings are preserved. Use the matching private key locally,
 optionally with `ssh -i /path/to/private_key`; never upload a private key.
 
 The web terminal uses a controller-owned, host-key-pinned SSH connection to the

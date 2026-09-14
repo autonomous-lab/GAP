@@ -53,6 +53,7 @@ def main():
     sub.add_parser('ports' , help='Read the five allocated port numbers')
     set_ports = sub.add_parser('set-ports', help='Replace all mappings; omit --map to disable all')
     set_ports.add_argument('--map', action='append', default=[], metavar='SLOT:GUEST_PORT:tcp|udp|both')
+    set_ports.add_argument('--expires-minutes',type=int,choices=range(5,61),help='Expire all mappings after 5-60 minutes; required for Free Trial SSH')
     sub.add_parser('ssh', help='Read SSH command, approved keys and host fingerprint')
     set_keys = sub.add_parser('set-ssh-keys', help='Replace keys; omit --key to revoke all managed keys')
     set_keys.add_argument('--key', action='append', default=[], help='Ed25519 public key file')
@@ -84,6 +85,7 @@ def main():
                                     for s, p, t in (item.split(':') for item in args.map)]
             except ValueError:
                 parser.error('use --map SLOT:GUEST_PORT:tcp|udp|both')
+            if args.expires_minutes is not None:body['expires_in']=args.expires_minutes*60
         elif resource == 'ssh':
             body['authorized_keys'] = [Path(p).read_text().strip() for p in args.key]
         elif resource == 'ingress':

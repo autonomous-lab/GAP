@@ -90,7 +90,7 @@ class NetworkTests(unittest.TestCase):
         self.meta['network_restricted']=True
         self.reserve(self.meta)
         direct=dict(request_id='a'*32,vm_id=V,mappings=[dict(slot=1,guest_port=8000,protocol='tcp')])
-        with self.assertRaisesRegex(VMError,'trial_public_ports_disabled'):
+        with self.assertRaisesRegex(VMError,'trial_only_public_ssh_allowed'):
             self.net.perform(P,O,'ports',direct)
         self.net.perform(P,O,'ports',dict(direct,mappings=[]))
 
@@ -99,6 +99,29 @@ class NetworkTests(unittest.TestCase):
             validate('ports', body)
         body['mappings'][1]['protocol'] = 'tcp'
         validate('ports', body)
+
+    def test_trial_allows_only_one_key_authenticated_public_ssh_mapping(self):
+        self.meta['network_restricted']=True
+        self.reserve(self.meta)
+        ssh=dict(request_id='a'*32,vm_id=V,
+                 mappings=[dict(slot=1,guest_port=22,protocol='tcp')])
+        ssh['expires_in']=3600
+        with patch('network.time.time',return_value=100):self.net.perform(P,O,'ports',ssh)
+        current=self.manager.read(P,O)
+        with patch('network.time.time',return_value=101):
+            self.assertEqual(self.net.ssh_public(current)['connections'][0]['port'],24000)
+        self.assertEqual(current['public_access_expires_at'],3700)
+        for mappings in [
+                [dict(slot=1,guest_port=22,protocol='both')],
+                [dict(slot=1,guest_port=22,protocol='tcp'),dict(slot=2,guest_port=22,protocol='tcp')]]:
+            with self.assertRaisesRegex(VMError,'trial_only_public_ssh_allowed'):
+                self.net.perform(P,O,'ports',dict(ssh,mappings=mappings))
+        with self.assertRaisesRegex(VMError,'trial_ssh_expiry_required'):
+            self.net.perform(P,O,'ports',{k:v for k,v in ssh.items() if k!='expires_in'})
+        with patch.object(self.manager,'alive',return_value=True),patch.object(self.net,'apply') as apply:
+            self.assertTrue(self.net.expire(current,3700));apply.assert_called_once()
+        self.assertEqual(self.manager.read(P,O)['public_mappings'],[])
+        self.assertFalse(self.net.expire(self.manager.read(P,O),3701))
 
     def test_key_options_private_keys_and_newlines_rejected(self):
         self.assertEqual(keys([KEY+' comment', KEY]), [KEY])
