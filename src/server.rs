@@ -2551,7 +2551,6 @@ the content inline"
         if self.agent_suspended(&claims.owner_did) || claims.agent_did.as_ref().is_some_and(|a| self.agent_suspended(a)) {
             return Err(crate::fleet_access::denied());
         }
-        if let Some(policy) = &self.private_node { policy.authorize(&claims.owner_did)?; }
         self.storage.upsert_state(&crate::storage::StateRecord { scope: "cloud_fleet_projects".into(), key: project_id.into(),
             value: "true".into(), updated_at: now_unix() })?;
         self.cloud_fleet_projects.insert(project_id.into());
@@ -2596,6 +2595,27 @@ the content inline"
             && !self.fleet_policy.as_ref().is_some_and(|p|p.blocked(None,None,Some(id)))
     }
 
+    fn verified_email(&self,did:&str)->bool {
+        self.storage.get_state("cloud_verified_agent_emails",did).ok().flatten()
+            .and_then(|r|serde_json::from_str::<Value>(&r.value).ok())
+            .is_some_and(|v|v["email"].as_str().is_some_and(|email|email.contains('@'))
+                && v["verified_at"].as_u64().is_some())
+    }
+
+    pub(super) fn microvm_approval(&self,did:&str)->Option<(crate::private_node::MicroVMQuota,bool,bool,&'static str)> {
+        let policy=self.private_node.as_ref()?;
+        if let Ok(quota)=policy.microvm_quota(did) {
+            return Some((quota,policy.always_on_allowed(did),false,"approved"));
+        }
+        (policy.runner.is_some() && self.verified_email(did)).then_some((
+            crate::private_node::MicroVMQuota{vcpus:0.5,memory_mib:512,max_vms:1,disk_gib:None},
+            false,true,"free"))
+    }
+
+    pub(super) fn microvm_project_allowed(&self,project:&str,owner:&str)->bool {
+        self.cloud_fleet_projects.contains(project) || self.microvm_approval(owner).is_some()
+    }
+
     fn workload_policy(&self,project_id:&str,compose:bool)->Value {
         let Some(project)=self.cloud_projects.get(project_id) else{return json!({"allowed":false,"generation":0,"reason":"unknown_project"})};
         let suspension=self.cloud_suspensions.get(&project.owner_did);
@@ -2603,7 +2623,7 @@ the content inline"
         // Both counters are durable and only increase. Restoring one scope
         // cannot roll back a newer decision at the other scope.
         let generation=suspension.map_or(0,|r|r.current.generation).saturating_add(project_suspension.map_or(0,|r|r.current.generation)).saturating_add(self.fleet_policy.as_ref().map_or(0,|p|p.sequence()));
-        let admission=self.cloud_fleet_projects.contains(project_id) || self.private_node.as_ref().is_none_or(|p|p.authorize(&project.owner_did).is_ok() && (!compose || p.microvm_quota(&project.owner_did).is_ok()));
+        let admission=self.cloud_fleet_projects.contains(project_id) || self.private_node.as_ref().is_none_or(|p|p.authorize(&project.owner_did).is_ok() && !compose) || (compose && self.microvm_approval(&project.owner_did).is_some());
         json!({"allowed":self.active_cloud_project(project_id) && admission,"owner_did":project.owner_did,"generation":generation,"suspended":self.agent_suspended(&project.owner_did) || project_suspension.is_some_and(|r|r.current.active),"lease_seconds":5})
     }
 
@@ -2859,7 +2879,7 @@ the content inline"
             return false;
         }
         if let Some(vm)=&domain.vm_id {
-            return self.vm_http.get(vm).is_some_and(|r|r.project_id==domain.project_id && self.private_node.as_ref().is_some_and(|p|p.authorize_compose(&r.owner_did).is_ok()));
+            return self.vm_http.get(vm).is_some_and(|r|r.project_id==domain.project_id && self.microvm_project_allowed(&r.project_id,&r.owner_did));
         }
         crate::cloud::ProjectStore::open(&self.cloud_root, &domain.project_id)
             .and_then(|store| store.site_config())
@@ -2872,7 +2892,6 @@ the content inline"
         let claims=self.fleet_access.as_ref().and_then(|a|a.verify_vm_read(token,project_id,now_unix())).ok_or_else(crate::fleet_access::denied)?;
         if claims.agent_did.as_ref().is_some_and(|a|self.agent_suspended(a)) {return Err(crate::fleet_access::denied())}
         let project=self.cloud_projects.get(project_id).filter(|p|p.owner_did==claims.owner_did && self.active_cloud_project(project_id)).cloned().ok_or_else(crate::fleet_access::denied)?;
-        if let Some(policy)=&self.private_node {policy.authorize(&project.owner_did)?;}
         Ok(project)
     }
 
@@ -2887,7 +2906,6 @@ the content inline"
             if claims.agent_did.as_ref().is_some_and(|a| self.agent_suspended(a)) {
                 return Err(crate::fleet_access::denied());
             }
-            if let Some(policy) = &self.private_node { policy.authorize(&claims.owner_did)?; }
             claims.owner_did
         } else { self.agent_by_token(token)?.identity.did().to_string() };
         let project = self
@@ -7821,7 +7839,7 @@ pub fn route_with_ip(
         return (200,guard.workload_policy(project,compose));
     }
     if method == "POST" && path == "/internal/compose/authorize" {
-        let quota = guard.private_node.as_ref().and_then(|policy| {
+        let approval = guard.private_node.as_ref().and_then(|policy| {
             if !policy.runner.as_ref().is_some_and(|(_, secret)| token == Some(secret.as_str())) {
                 return None;
             }
@@ -7829,11 +7847,13 @@ pub fn route_with_ip(
             if !guard.active_cloud_project(&project.project_id) || body["owner_did"].as_str() != Some(project.owner_did.as_str()) {
                 return None;
             }
-            policy.microvm_quota(&project.owner_did).ok()
+            guard.microvm_approval(&project.owner_did)
         });
-        let always_on_allowed = quota.is_some() && guard.private_node.as_ref().is_some_and(|policy|
-            body["owner_did"].as_str().is_some_and(|did| policy.always_on_allowed(did)));
-        return (if quota.is_some() { 200 } else { 403 }, json!({"allowed": quota.is_some(), "quota": quota, "always_on_allowed": always_on_allowed}));
+        let (quota,always_on_allowed,network_restricted,tier)=match approval {
+            Some((quota,always,restricted,tier))=>(Some(quota),always,restricted,Some(tier)),
+            None=>(None,false,false,None),
+        };
+        return (if quota.is_some() { 200 } else { 403 }, json!({"allowed": quota.is_some(), "quota": quota, "always_on_allowed": always_on_allowed, "network_restricted": network_restricted, "tier": tier}));
     }
 
     if let Some((project_id, action)) = crate::private_node::runtime_route(path) {
@@ -7856,14 +7876,9 @@ pub fn route_with_ip(
             } else {Err(error)}
         });
         let project=match selected {Ok(p)=>p,Err(error)=>return error_response(&error)};
-        if !fleet_capability {if let Err(error) = guard
-            .private_node
-            .as_ref()
-            .unwrap()
-            .authorize_compose(&project.owner_did)
-        {
-            return error_response(&error);
-        }}
+        if !fleet_capability && guard.microvm_approval(&project.owner_did).is_none() {
+            return error_response(&Error::Unauthorized("microVM access requires a verified email or operator approval".into()));
+        }
         let mut body = body;
         let params = parse_url_params(raw_path);
         if let Some(vm_id) = params.get("vm_id") {
@@ -10468,6 +10483,14 @@ mod tests {
         assert_eq!(invoke(Some("Bearer wrong-secret")), 403);
         assert_eq!(invoke(Some("Bearer runner-secret")), 200);
         std::fs::write(&path, json!({"agents":[]}).to_string()).unwrap();
+        assert_eq!(arc.lock().unwrap().workload_policy(project,true)["allowed"],false);
+        arc.lock().unwrap().storage.upsert_state(&crate::storage::StateRecord{
+            scope:"cloud_verified_agent_emails".into(),key:did.clone(),
+            value:json!({"email":"verified@example.test","verified_at":1}).to_string(),updated_at:1}).unwrap();
+        let (status,free)=route_with_ip(&arc,"POST","/internal/compose/authorize",payload.as_bytes(),Some("Bearer runner-secret"),None);
+        assert_eq!(status,200);assert_eq!(free["tier"],"free");assert_eq!(free["network_restricted"],true);
+        assert_eq!(free["quota"]["max_vms"],1);assert_eq!(free["quota"]["vcpus"],0.5);assert_eq!(free["quota"]["memory_mib"],512);
+        arc.lock().unwrap().storage.delete_state("cloud_verified_agent_emails",&did).unwrap();
         assert_eq!(arc.lock().unwrap().workload_policy(project,true)["allowed"],false);
         arc.lock().unwrap().cloud_fleet_projects.insert(project.into());
         assert_eq!(arc.lock().unwrap().workload_policy(project,true)["allowed"],true);

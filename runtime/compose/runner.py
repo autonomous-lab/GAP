@@ -35,6 +35,17 @@ class Failure(Exception):
         super().__init__(code)
 
 
+def valid_quota(quota):
+    if not isinstance(quota,dict) or not {'vcpus','memory_mib'} <= set(quota) <= {'vcpus','memory_mib','max_vms','disk_gib'}:
+        return False
+    try:
+        from cpu_quota import quarters
+        quarters(quota['vcpus'])
+    except ValueError:
+        return False
+    return all(type(value) is int and 0<value<2**31 for key,value in quota.items() if key!='vcpus')
+
+
 def load_config(path):
     config = json.loads(Path(path).read_text())
     if config.get("approved_only") is not True:
@@ -164,6 +175,7 @@ class Runner:
             from microvm import MicroVMs
             self.hypervisor = MicroVMs(config['hypervisor'], execute)
             self.hypervisor.quota_provider = lambda project, owner: self.authorize(project, owner)['quota']
+            self.hypervisor.approval_provider = self.authorize
         self.runtime = None
         self.operator_token = None
         if config.get('serverless'):
@@ -277,8 +289,7 @@ class Runner:
         if (approval.get('project_id'),approval.get('owner_did'),approval.get('managed'))!=(project,owner,True):
             raise Failure(403,'migration_origin_binding_mismatch')
         quota=approval.get('quota')
-        if (not isinstance(quota,dict) or not {'vcpus','memory_mib'} <= set(quota) <= {'vcpus','memory_mib','max_vms','disk_gib'}
-                or any(type(v) is not int or not 0<v<2**31 for v in quota.values())):
+        if not valid_quota(quota):
             raise Failure(403,'microvm_quota_unavailable')
         return approval
 
@@ -305,9 +316,11 @@ class Runner:
             raise Failure(403, "compose_approval_unavailable_or_revoked")
         if self.hypervisor:
             quota = approval.get("quota")
-            if (not isinstance(quota, dict) or not {"vcpus", "memory_mib"} <= set(quota) <= {"vcpus", "memory_mib", "max_vms", "disk_gib"}
-                    or any(type(v) is not int or not 0 < v < 2**31 for v in quota.values())):
+            if not valid_quota(quota):
                 raise Failure(403, "microvm_quota_unavailable")
+            if (approval.get('tier') not in ('free','approved')
+                    or approval.get('network_restricted') is not (approval['tier']=='free')):
+                raise Failure(403,"microvm_network_policy_unavailable")
             guest["quota"] = quota
             guest["always_on_allowed"] = approval.get("always_on_allowed") is True
         return guest

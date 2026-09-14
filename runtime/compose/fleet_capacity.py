@@ -224,7 +224,7 @@ class Capacity:
         record=next((r for r in self.records(meta['project_id']) if r['vm']==meta['vm_id']),None)
         return bool(record and record['phase']=='active' and record['remote']['committed']==self.resources(meta))
 
-    def execute(self, project, owner, action, body):
+    def execute(self, project, owner, action, body, approval=None):
         """Called under MicroVMs.perform's owner lock and caller's lifecycle lock."""
         self.bind(project,owner);self.reconcile_project(project,owner)
         manager=self.manager
@@ -234,7 +234,9 @@ class Capacity:
             vm='vm_'+uuid.uuid4().hex
             record=dict(vm=vm,project=project,owner=owner,kind='create',phase='preparing',
                         placement_id=body.get('placement_id'))
-            target=dict(vcpus=body.get('vcpus',1),memory_mib=body.get('memory_mib',1024))
+            limits=(approval or {}).get('quota',{})
+            target=dict(vcpus=body.get('vcpus',min(1,limits.get('vcpus',1))),
+                        memory_mib=body.get('memory_mib',min(1024,limits.get('memory_mib',1024))))
             revision=0
         else:
             if not meta or meta['state']=='destroyed':raise VMError('vm_not_found')
@@ -266,7 +268,8 @@ class Capacity:
             record['phase']='applying';self.put(record)
             # Never execute guest instructions until the local allocation has
             # been acknowledged centrally and the credit/policy gates pass.
-            result=manager._perform(project,owner,action,body,created_vm_id=record['vm'] if action=='vm/create' else None,defer_start=True)
+            result=manager._perform(project,owner,action,body,created_vm_id=record['vm'] if action=='vm/create' else None,
+                                    defer_start=True,approval=approval)
             self.reconcile(record)
             if action=='vm/create' and body.get('start',True):
                 with manager.lock(project):

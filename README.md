@@ -410,7 +410,10 @@ assets, REST and administrator login.
 Paths above are relative to `/v1/cloud/projects/{project_id}`. Configure the
 application's base path; root-relative links are not rewritten. Applications
 are long-running services, not time-bounded serverless function invocations.
-MicroVM access on the public deployment requires explicit operator approval.
+MicroVM access on the public deployment is available after email verification.
+The Free Tier provides one serverless VM with 0.5 vCPU and 512 MiB RAM. Its QEMU
+network blocks guest-initiated outbound traffic and direct TCP/UDP publication;
+applications remain reachable through the managed HTTPS reverse proxy.
 See the [complete quickstart](./AGENTS.md#managed-app-quickstart),
 [lifecycle API](./AGENTS.md#manage-the-microvm-and-publication) and
 [operator setup](./runtime/compose/README.md).
@@ -418,18 +421,16 @@ See the [complete quickstart](./AGENTS.md#managed-app-quickstart),
 ## Development
 
 Experimental: [microVM hosting with optional Compose](./runtime/compose/README.md),
-restricted to operator-preapproved agents and **GAP-managed exclusive
-project microVMs**. The API and asynchronous SSH worker support deploy/update,
+using **GAP-managed exclusive project microVMs**. The API and asynchronous SSH worker support deploy/update,
 start/stop, status and logs with request-id deduplication. Docker runs only in
 the guest; no GAT host Docker socket is given to GAP or workloads.
 
 Enable on public or private nodes with `GAP_COMPOSE_ENABLED=1` and the mandatory
 operator-owned `GAP_COMPOSE_APPROVALS_FILE`. Public registration and ordinary
-Cloud services remain open; only listed owners can use microVMs, with or without Compose. Private nodes
-also require the separate general node approval. Each agent defaults to **1 VM and 2 vCPUs /
-4096 MiB RAM total across its microVMs**, including stopped VMs. Allocate the minimum
-needed; the operator can change limits live with `scripts/microvm-access.py set-quota
-<DID> --vcpus 2 --memory-mib 4096 --max-vms 1`. Optional per-agent disk quotas include retained volumes; no GAP egress ACL is applied;
+Cloud services remain open. Email-verified owners receive the Free Tier automatically;
+listed owners use their operator-assigned quota and standard network policy. Allocate the
+minimum needed; the operator can change limits live with `scripts/microvm-access.py
+set-quota <DID> --vcpus 2 --memory-mib 4096 --max-vms 1`. Optional per-agent disk quotas include retained volumes;
 existing Cloud service quotas are unchanged. CPU/RAM/disk resize requires stopping
 and starting the VM.
 GAP creates, starts, stops, resizes and destroys microVMs through `/vm`.
@@ -437,8 +438,8 @@ The `/microvms` WebUI also creates machines, with resource sizing, an optional
 SSH public key and a choice to start immediately (the default) or keep stopped.
 Choose serverless or approved always-on at creation; inputs follow the remaining
 agent allocation, including an optional disk quota. Multiple machines can share a project: select, create or delete them in the console.
-The default quota remains one VM per agent on this node, adjustable live by the
-operator. Shared customer quotas across nodes are planned.
+The default fleet quota is one VM, 0.5 vCPU and 512 MiB RAM per customer,
+adjustable by the operator through the control plane.
 Billing activity accumulates one row per VM state/allocation/pricing period;
 internal metering still runs every five seconds to enforce prepaid credit limits.
 The repository includes the guest-image builder and real KVM/API acceptance tests.

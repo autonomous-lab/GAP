@@ -75,7 +75,9 @@ Compose. Every mutation requires a saved 32-lowercase-hex `request_id`.
 | POST `/vm/start` | `vm_id` | Start the existing VM |
 | DELETE `/vm` | `vm_id`, optional `delete_data`, `confirm_data_loss` | Destroy a stopped VM, retaining its files by default |
 
-Defaults are 1 vCPU, 1024 MiB RAM and 8 GiB virtual disk. The default cumulative quota per approved agent is 2 vCPUs and 4096 MiB RAM. Disk growth is applied to the guest filesystem at next
+Resource defaults follow the live authorization: Free Tier creates 0.5 vCPU and 512 MiB RAM;
+operator-approved access retains the 1 vCPU and 1024 MiB creation defaults. The virtual disk
+defaults to 8 GiB. Disk growth is applied to the guest filesystem at next
 boot. `ports` contains guest TCP port numbers other than 22; GAP allocates
 loopback forwards in the **worker network namespace**, returned as `worker_port`.
 Optional ingress publishes this forward under the existing node /apps/ path;
@@ -414,6 +416,14 @@ The worker obtains the current limits through the authenticated node callback
 and serializes resource mutations across projects belonging to the same owner.
 Malformed or unavailable quota policy fails closed. Deploy the updated node
 before updating the worker; old nodes do not return the required quota callback.
+
+Email-verified identities that have no explicit operator grant receive the Free Tier:
+one VM, 0.5 vCPU, 512 MiB RAM, serverless execution only. The worker persists the
+authorization tier in the VM catalog and starts QEMU's user network with `restrict=on`.
+This blocks guest-initiated connections while preserving the reverse proxy's loopback
+forward and replies on that inbound connection. Free Tier VMs cannot publish direct
+TCP/UDP slots or public SSH; the web terminal remains available. Placement approvals
+carry the same network policy so moving a VM cannot remove the restriction.
 
 ## Tests and production readiness
 

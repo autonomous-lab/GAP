@@ -242,5 +242,8 @@ def host_approval(authority, node, project, owner):
             raise Failure('placement_not_active', 409)
         quota = dict(max_vms=len(rows), vcpus=sum(r['cpu'] for r in rows)/4,
                      memory_mib=sum(r['memory'] for r in rows), disk_gib=sum(r['disk'] for r in rows))
+        tier=db.execute('SELECT tier FROM customer_tiers WHERE customer=?',(bound['customer'],)).fetchone()
+        tier=tier['tier'] if tier else 'free'
         return dict(operator_id=authority.operator, id=project, node=node, owner=owner,
-                    managed=True, always_on_allowed=False, quota=quota)
+                    managed=True, tier=tier, network_restricted=tier=='free',
+                    always_on_allowed=False, quota=quota)

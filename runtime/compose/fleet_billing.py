@@ -117,6 +117,10 @@ class FleetLedger(Ledger):
                 or isinstance(quota['vcpus'],bool) or not isinstance(quota['vcpus'],(int,float)) or quota['vcpus']<=0
                 or any(type(quota[k]) is not int or quota[k]<=0 for k in ('memory_mib','disk_gib'))):
             raise BillingError('fleet_placement_invalid_response')
+        if (approval.get('tier') not in ('free','approved')
+                or approval.get('network_restricted') is not (approval['tier']=='free')
+                or approval.get('always_on_allowed') is not False):
+            raise BillingError('fleet_placement_invalid_response')
         if project not in self.projects:
             self.adopt_migrated_project(project,owner)
         return approval

@@ -14,7 +14,7 @@ import sqlite3
 import time
 
 MAX_CREDITS = 10**15
-DEFAULT_QUOTAS = dict(max_vms=1, cpu_quarters=4, memory_mib=1024)
+DEFAULT_QUOTAS = dict(max_vms=1, cpu_quarters=2, memory_mib=512)
 MAX_QUOTAS = dict(max_vms=1000000, cpu_quarters=4000000, memory_mib=2**40)
 
 
@@ -87,6 +87,8 @@ class Authority:
                 '''CREATE TABLE IF NOT EXISTS quotas(customer TEXT PRIMARY KEY REFERENCES customers(id),
                    max_vms INTEGER NOT NULL, cpu_quarters INTEGER NOT NULL, memory_mib INTEGER NOT NULL,
                    revision INTEGER NOT NULL)''',
+                '''CREATE TABLE IF NOT EXISTS customer_tiers(customer TEXT PRIMARY KEY REFERENCES customers(id),
+                   tier TEXT NOT NULL)''',
                 '''CREATE TABLE IF NOT EXISTS capacity(vm TEXT PRIMARY KEY, node TEXT NOT NULL,
                    project TEXT NOT NULL REFERENCES projects(id), customer TEXT NOT NULL REFERENCES customers(id),
                    state TEXT NOT NULL, revision INTEGER NOT NULL, cpu INTEGER NOT NULL, memory INTEGER NOT NULL,
@@ -94,6 +96,15 @@ class Authority:
                 'CREATE INDEX IF NOT EXISTS capacity_customer ON capacity(customer,state,vm)',
             ):
                 db.execute(sql)
+            # Quotas written before tiers existed are either the former free
+            # defaults or an explicit operator override. Preserve overrides as
+            # approved accounts and migrate only the old defaults to Free.
+            db.execute('''INSERT OR IGNORE INTO customer_tiers(customer,tier)
+                SELECT customer,'approved' FROM quotas
+                WHERE NOT (max_vms=1 AND cpu_quarters=4 AND memory_mib=1024)''')
+            db.execute('''UPDATE quotas SET cpu_quarters=2,memory_mib=512,revision=revision+1
+                WHERE max_vms=1 AND cpu_quarters=4 AND memory_mib=1024
+                AND NOT EXISTS(SELECT 1 FROM customer_tiers t WHERE t.customer=quotas.customer)''')
             db.execute("INSERT OR IGNORE INTO metadata VALUES('operator',?)", (operator,))
             from wallet_import import schema
             schema(db)
@@ -262,6 +273,7 @@ class Authority:
                 max_vms=excluded.max_vms,cpu_quarters=excluded.cpu_quarters,
                 memory_mib=excluded.memory_mib,revision=excluded.revision''',
                 (customer, limits['max_vms'], limits['cpu_quarters'], limits['memory_mib'], expected_revision+1))
+            db.execute("INSERT INTO customer_tiers VALUES(?,'approved') ON CONFLICT(customer) DO UPDATE SET tier='approved'",(customer,))
             return self.quota_state(db, customer)
         return self.mutation(actor, request, body, apply)
 

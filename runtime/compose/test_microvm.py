@@ -76,6 +76,10 @@ class MicroVMTests(unittest.TestCase):
             validate(action,dict(base,disk_gib=8))
 
     def test_manifest_requires_every_asset_once_and_valid_hash(self):
+        self.meta['network_restricted']=True
+        command=self.manager.command(self.meta)
+        self.assertIn('user,id=net0,restrict=on,hostfwd=',command[command.index('-netdev')+1])
+
         self.manager.image_version()
         manifest = self.images / 'SHA256SUMS'
         original = manifest.read_text()
@@ -210,7 +214,7 @@ class MicroVMTests(unittest.TestCase):
         import threading
         barrier = threading.Barrier(2)
         # One CPU is already allocated. Both contenders request the last CPU.
-        def reserve(project, owner, action, body):
+        def reserve(project, owner, action, body, **_):
             self.manager.save(dict(self.meta, project_id=project))
             return True
         def attempt(project):

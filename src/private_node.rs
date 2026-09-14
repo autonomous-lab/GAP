@@ -26,7 +26,7 @@ struct Approvals {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MicroVMQuota {
-    pub vcpus: u32,
+    pub vcpus: f64,
     pub memory_mib: u32,
     #[serde(default = "default_vm_limit")]
     pub max_vms: u32,
@@ -39,7 +39,7 @@ fn default_vm_limit() -> u32 { 1 }
 impl Default for MicroVMQuota {
     fn default() -> Self {
         Self {
-            vcpus: 2,
+            vcpus: 2.0,
             memory_mib: 4096,
             max_vms: 1,
             disk_gib: None,
@@ -50,7 +50,7 @@ impl Default for MicroVMQuota {
 impl PrivateNode {
     pub fn grant_microvm(&self,did:&str,quota:MicroVMQuota,always_on:bool) -> Result<()> {
         use std::io::Write;
-        if !valid_did(did) || [quota.vcpus,quota.memory_mib,quota.max_vms].iter().any(|n|*n==0 || *n>=2_u32.pow(31)) || quota.disk_gib.is_some_and(|n|n==0 || n>=2_u32.pow(31)) {return Err(Error::Other("invalid microVM approval".into()))}
+        if !valid_did(did) || !valid_vcpus(quota.vcpus) || [quota.memory_mib,quota.max_vms].iter().any(|n|*n==0 || *n>=2_u32.pow(31)) || quota.disk_gib.is_some_and(|n|n==0 || n>=2_u32.pow(31)) {return Err(Error::Other("invalid microVM approval".into()))}
         let path=self.compose_approvals.as_ref().ok_or_else(||Error::Other("microVM hosting is not configured".into()))?;
         let lock_path=PathBuf::from(format!("{}.lock",path.display()));
         let lock=std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(lock_path).map_err(|_|Error::Other("approval lock unavailable".into()))?;
@@ -156,11 +156,10 @@ impl PrivateNode {
         }
         if approvals.quotas.iter().any(|(did, quota)| {
             !approvals.agents.contains(did)
-                || quota.vcpus == 0
+                || !valid_vcpus(quota.vcpus)
                 || quota.memory_mib == 0
                 || quota.max_vms == 0
                 || quota.max_vms >= 2_u32.pow(31)
-                || quota.vcpus >= 2_u32.pow(31)
                 || quota.memory_mib >= 2_u32.pow(31)
                 || quota.disk_gib.is_some_and(|n|n==0 || n>=2_u32.pow(31))
         }) {
@@ -228,6 +227,10 @@ impl PrivateNode {
 fn valid_did(did: &str) -> bool {
     did.strip_prefix("did:gap:")
         .is_some_and(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+fn valid_vcpus(value:f64)->bool {
+    value.is_finite() && value>=0.25 && value<2_u32.pow(31) as f64 && (value*4.0).fract()==0.0
 }
 
 /// A VM collection per project; legacy /vm routes address its default guest.

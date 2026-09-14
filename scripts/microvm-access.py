@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -41,15 +42,21 @@ def change(path, action, agent=None, vcpus=None, memory_mib=None, always_on=None
         if always_on is not None and action not in ('grant','set-always-on'): raise ValueError('always-on flag requires grant or set-always-on')
         if action=='set-always-on' and (agent not in data['agents'] or always_on is None): raise ValueError('set-always-on requires approved agent and --always-on yes|no')
         quotas = data.get('quotas', {})
+        def valid_vcpus(value):
+            return (not isinstance(value,bool) and isinstance(value,(int,float)) and math.isfinite(value)
+                    and .25<=value<2**31 and float(value*4).is_integer())
         def valid_quota(q):
             return (isinstance(q, dict) and {'vcpus', 'memory_mib'} <= set(q) <= {'vcpus', 'memory_mib', 'max_vms', 'disk_gib'}
-                    and all(type(v) is int and 0 < v < 2**31 for v in q.values()))
+                    and valid_vcpus(q['vcpus'])
+                    and all(type(v) is int and 0 < v < 2**31 for k,v in q.items() if k!='vcpus'))
         if not isinstance(quotas, dict) or any(did not in data['agents'] or not valid_quota(q) for did, q in quotas.items()):
             raise ValueError('invalid quota store')
         if action not in ('grant', 'revoke', 'list', 'set-quota', 'set-always-on'):
             raise ValueError('invalid action')
-        if any(v is not None and (type(v) is not int or not 0 < v < 2**31) for v in (vcpus, memory_mib, max_vms, disk_gib)):
-            raise ValueError('quotas must be positive integers below 2**31')
+        if vcpus is not None and not valid_vcpus(vcpus):
+            raise ValueError('vCPU quota must be a positive multiple of 0.25 below 2**31')
+        if any(v is not None and (type(v) is not int or not 0 < v < 2**31) for v in (memory_mib, max_vms, disk_gib)):
+            raise ValueError('RAM, VM and disk quotas must be positive integers below 2**31')
         if action in ('list', 'revoke') and (vcpus is not None or memory_mib is not None or max_vms is not None or disk_gib is not None):
             raise ValueError('quota flags require grant or set-quota')
         if action == 'set-quota' and (agent not in data['agents'] or (vcpus is None and memory_mib is None and max_vms is None and disk_gib is None)):
@@ -113,7 +120,7 @@ def main():
     parser.add_argument('--file', default='data/gap-node/compose-agents.json', help='shared microVM approval store (legacy GAP_COMPOSE_APPROVALS_FILE)')
     parser.add_argument('action', choices=('grant', 'revoke', 'list', 'set-quota', 'set-always-on'))
     parser.add_argument('agent', nargs='?')
-    parser.add_argument('--vcpus', type=int, help='Total allocated vCPUs across this agent’s VMs')
+    parser.add_argument('--vcpus', type=float, help='Total allocated vCPUs across this agent’s VMs, in 0.25 increments')
     parser.add_argument('--memory-mib', type=int, help='Total allocated RAM in MiB across this agent’s VMs')
     parser.add_argument('--max-vms', type=int, help='Maximum number of non-destroyed VMs, default 1')
     parser.add_argument('--disk-gib', type=int, help='Optional total provisioned disk quota, including retained volumes')

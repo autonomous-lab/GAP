@@ -55,7 +55,8 @@ class CapacityWorkerTests(unittest.TestCase):
         for name in ('vmlinuz','initramfs','rootfs.ext4'):
             (images/name).write_bytes(name.encode());manifest.append(hashlib.sha256(name.encode()).hexdigest()+'  '+name)
         (images/'SHA256SUMS').write_text('\n'.join(manifest)+'\n')
-        manager=MicroVMs(dict(state_dir=str(root/'vms'),image_dir=str(images)),None)
+        manager=MicroVMs(dict(state_dir=str(root/'vms'),image_dir=str(images),
+                              cpu_quota_socket=str(root/'quota.sock')),None)
         manager.quota_provider=lambda *_:dict(vcpus=100,memory_mib=100000,max_vms=10)
         manager.capacity.configure(dict(projects=[project],node_id=node,operator_id='operator'),lambda b:self.transport(node,b))
         def prepare(meta):
@@ -91,7 +92,7 @@ class CapacityWorkerTests(unittest.TestCase):
 
     def create(self,manager=None,project=P,**body):
         manager=manager or self.manager
-        return manager.perform(project,O,'vm/create',dict(start=False,**body))['vm']
+        return manager.perform(project,O,'vm/create',dict(start=False,vcpus=.5,memory_mib=512,**body))['vm']
 
     def limits(self,count=2,cpu=8,ram=2048):
         self.a.set_quotas('operator','limits',self.customer,dict(max_vms=count,cpu_quarters=cpu,memory_mib=ram),0)
@@ -107,7 +108,7 @@ class CapacityWorkerTests(unittest.TestCase):
     def test_placement_is_forwarded_and_committed_by_the_real_worker_manager(self):
         token=self.a.issue(self.customer,O)['token']
         placed=self.app.handle('POST','/v1/placements',token,dict(request_id='place-worker',
-            project_id=P,cpu_quarters=4,memory_mib=1024,disk_gib=8,region='one'))
+            project_id=P,cpu_quarters=2,memory_mib=512,disk_gib=8,region='one'))
         self.assertEqual(placed['node_id'],'one')
         vm=self.create(placement_id=placed['placement_id'])
         state=self.app.handle('POST','/node','one-token',
@@ -225,7 +226,7 @@ class CapacityWorkerTests(unittest.TestCase):
                 try:self.transport('one',delayed)
                 except BillingError as e:self.assertEqual(str(e),'capacity_revision_conflict')
                 current=self.a.capacity_get('one',P,vm['vm_id'])
-                self.assertEqual(current['state'],'active');self.assertEqual(current['committed']['cpu_quarters'],4)
+                self.assertEqual(current['state'],'active');self.assertEqual(current['committed']['cpu_quarters'],2)
                 self.assertTrue(self.manager.execution_allowed(self.manager.read(P,O)))
 
     def test_resize_catalog_ack_loss_commits_new_resources_exactly_once(self):
@@ -245,7 +246,7 @@ class CapacityWorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(VMError,'customer_quota_exceeded_cpu_quarters'):
             self.manager.perform(P,O,'vm/update',dict(vm_id=vm['vm_id'],vcpus=2))
         self.assertTrue(self.manager.execution_allowed(self.manager.read(P,O)))
-        self.assertEqual(self.a.quotas(self.customer)['allocated']['cpu_quarters'],4)
+        self.assertEqual(self.a.quotas(self.customer)['allocated']['cpu_quarters'],2)
 
     def test_destruction_crashes_complete_only_the_recorded_generation_and_retention_choice(self):
         for delete in (False,True):

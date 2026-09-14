@@ -89,13 +89,14 @@ class FleetTests(unittest.TestCase):
                         allow_capacity=True,placement=directory)
         token=self.authority.issue(self.customer,O)['token']
         placed=app.handle('POST','/v1/placements',token,dict(request_id='place-ledger',
-            project_id=P,cpu_quarters=4,memory_mib=1024,disk_gib=8,region='test'))
+            project_id=P,cpu_quarters=2,memory_mib=512,disk_gib=8,region='test'))
         path=self.path.parent/'placed.sqlite';Ledger(path).set_pricing('enforced',PRICE)
         config=dict(self.config,projects=[],node_id='target')
         target=FleetLedger(path,config,lambda:self.now,lambda:self.mono,
             lambda body:app.handle('POST','/node','target-token',body))
         approval=target.placement_approval(P,O,placed['placement_id'])
-        self.assertEqual(approval['quota'],dict(max_vms=1,vcpus=1.0,memory_mib=1024,disk_gib=8))
+        self.assertEqual(approval['quota'],dict(max_vms=1,vcpus=.5,memory_mib=512,disk_gib=8))
+        self.assertEqual((approval['tier'],approval['network_restricted']),('free',True))
         self.assertTrue(target.dynamically_managed(P))
         self.assertEqual(target.view(P,O)['balance_microcredits'],0)
 

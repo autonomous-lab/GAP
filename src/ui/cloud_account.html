@@ -62,8 +62,8 @@ function placementDialog(){
  const description=document.createElement('p');description.className='section-intro';description.textContent='GAP selects a healthy host with enough available capacity and reserves it while the machine is created.';form.append(description);
  const field=(labelText,values)=>{const label=document.createElement('label');label.textContent=labelText;const select=document.createElement('select');for(const [name,value]of values)select.append(new Option(name,value));label.append(select);form.append(label);return select};
  const project=field('Project',projects.map(p=>[p.id,p.id]));
- const cpu=field('CPU',[['0.25 vCPU','.25'],['0.5 vCPU','.5'],['1 vCPU','1'],['2 vCPU','2'],['4 vCPU','4']]);cpu.value='1';
- const ram=field('Memory',[['256 MiB','256'],['512 MiB','512'],['1 GiB','1024'],['2 GiB','2048'],['4 GiB','4096'],['8 GiB','8192']]);ram.value='1024';
+ const cpu=field('CPU',[['0.25 vCPU','.25'],['0.5 vCPU — Free tier','.5'],['1 vCPU','1'],['2 vCPU','2'],['4 vCPU','4']]);cpu.value='.5';
+ const ram=field('Memory',[['256 MiB','256'],['512 MiB — Free tier','512'],['1 GiB','1024'],['2 GiB','2048'],['4 GiB','4096'],['8 GiB','8192']]);ram.value='512';
  const disk=field('Disk',[['8 GiB','8'],['16 GiB','16'],['32 GiB','32'],['64 GiB','64'],['100 GiB','100']]);
  const sshLabel=document.createElement('label');sshLabel.textContent='SSH public key (optional)';const ssh=document.createElement('input');ssh.placeholder='ssh-ed25519 …';sshLabel.append(ssh);form.append(sshLabel);
  const status=document.createElement('p');status.className='status-line';status.setAttribute('role','status');form.append(status);

@@ -11,7 +11,7 @@ pub fn admit_terminal(state:&Arc<Mutex<NodeState>>,secret:&str,host:&str,path:&s
     let Some(token)=token.strip_prefix("Bearer ") else{return 403};
     let guard=match state.lock(){Ok(g)=>g,Err(_)=>return 503};
     let project=match guard.cloud_owned_project(token,project){Ok(p)=>p,Err(_)=>return 403};
-    if !guard.private_node.as_ref().is_some_and(|p|p.runner.is_some() && p.authorize_compose(&project.owner_did).is_ok()) {return 403}
+    if guard.private_node.as_ref().is_none_or(|p|p.runner.is_none()) || !guard.microvm_project_allowed(&project.project_id,&project.owner_did) {return 403}
     // Worker checks this ticket's project, live VM, policy and credits itself.
     // No synchronous callback cycle between the node and its worker.
     204

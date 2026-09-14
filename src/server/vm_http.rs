@@ -49,9 +49,8 @@ pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Val
         let token=auth.and_then(|a|a.strip_prefix("Bearer ")).ok_or_else(||Error::Unauthorized("missing bearer token".into()))?;
         let mut g=state.lock().map_err(|_|denied("state unavailable"))?;
         let owner=g.cloud_owned_project(token,project)?.owner_did;
-        let policy=g.private_node.as_ref().ok_or_else(||denied("microVM hosting not configured"))?;
-        policy.authorize_compose(&owner)?;
-        let runner=policy.runner.clone().ok_or_else(||denied("microVM hosting not configured"))?;
+        if !g.microvm_project_allowed(project,&owner) {return Err(denied("microVM access is not approved"))}
+        let runner=g.private_node.as_ref().and_then(|p|p.runner.clone()).ok_or_else(||denied("microVM hosting not configured"))?;
         if method=="POST" && tail=="http-access/reveal" {
             let r=g.vm_http.get(vm).filter(|r|r.project_id==project && r.owner_did==owner).ok_or_else(||denied("visitor credentials not configured"))?;
             let sealed=r.password_sealed.as_deref().filter(|s|crate::vault::Vault::is_sealed(s)).ok_or_else(||denied("password unavailable: save visitor credentials once to enable reveal"))?;
@@ -80,7 +79,7 @@ pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Val
             let route=ingress["base_path"].as_str().and_then(|p|p.strip_prefix("/apps/")).and_then(|p|p.strip_suffix('/')).ok_or_else(||denied("invalid VM route"))?;
             if route!=vm && route!=project {return Err(denied("VM route identity mismatch"))}
             g=state.lock().map_err(|_|denied("state unavailable"))?;
-            g.cloud_owned_project(token,project)?;g.private_node.as_ref().ok_or_else(||denied("hosting disabled"))?.authorize_compose(&owner)?;
+            g.cloud_owned_project(token,project)?;if !g.microvm_project_allowed(project,&owner){return Err(denied("microVM access is not approved"))}
             let mut record=g.vm_http.get(vm).cloned().unwrap_or(Record{vm_id:vm.into(),project_id:project.into(),owner_did:owner.clone(),route_key:route.into(),username:None,password_hash:None,password_sealed:None});
             if record.project_id!=project || record.owner_did!=owner {return Err(denied("VM owner mismatch"))}
             record.route_key=route.into();
@@ -110,7 +109,7 @@ pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Val
         drop(g);verify_domain_txt(&pending)?;
         g=state.lock().map_err(|_|denied("state unavailable"))?;
         g.cloud_owned_project(token,project)?;
-        g.private_node.as_ref().ok_or_else(||denied("hosting disabled"))?.authorize_compose(&owner)?;
+        if !g.microvm_project_allowed(project,&owner){return Err(denied("microVM access is not approved"))}
         let current=g.custom_domains.get(&hostname).filter(|d|d.vm_id.as_deref()==Some(vm) && d.project_id==project && d.verification_value==pending.verification_value).ok_or_else(||denied("domain changed during verification"))?;
         let mut active=current.clone();active.status="active".into();active.updated_at=now_unix();active.verified_at=Some(active.updated_at);
         g.storage.upsert_state(&crate::storage::StateRecord{scope:"cloud_domains".into(),key:hostname.clone(),value:serde_json::to_string(&active).map_err(|e|denied(&e.to_string()))?,updated_at:active.updated_at})?;
@@ -150,9 +149,8 @@ pub fn admit_vm_http(state:&Arc<Mutex<NodeState>>,secret:&str,host:&str,path:&st
     // which is what a visitor of a deleted or never-configured VM saw.
     let Some(record)=record else{return answer(if private {200}else{403})};
     if !g.active_cloud_project(&record.project_id) {return answer(403)}
-    let Some(policy)=g.private_node.as_ref() else{return answer(403)};
-    if policy.authorize_compose(&record.owner_did).is_err(){return answer(403)}
-    if policy.runner.is_none(){return answer(503)}
+    if !g.microvm_project_allowed(&record.project_id,&record.owner_did){return answer(403)}
+    if g.private_node.as_ref().is_none_or(|p|p.runner.is_none()){return answer(503)}
     if g.check_rate_limit(None,ip).is_err(){return answer(403)}
     drop(g);
     if domain.is_none() {

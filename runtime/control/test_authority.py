@@ -45,6 +45,23 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(self.a.wallet(self.customer)['balance_microcredits'], 0)
         self.assertEqual(self.a.wallet(self.customer)['spent_microcredits'], 1)
 
+    def test_legacy_default_quota_becomes_free_and_operator_override_stays_approved(self):
+        custom = self.a.create_customer('operator', 'custom', 'Custom')['customer_id']
+        with self.a.db() as db:
+            db.execute('INSERT INTO quotas VALUES(?,?,?,?,?)', (self.customer, 1, 4, 1024, 3))
+            db.execute('INSERT INTO quotas VALUES(?,?,?,?,?)', (custom, 2, 8, 2048, 4))
+        restarted = Authority(self.path, 'operator-one')
+        self.assertEqual(restarted.quotas(self.customer)['limits'],
+                         {'max_vms': 1, 'cpu_quarters': 2, 'memory_mib': 512})
+        self.assertEqual(restarted.quotas(self.customer)['revision'], 4)
+        self.assertEqual(restarted.quotas(custom)['limits'],
+                         {'max_vms': 2, 'cpu_quarters': 8, 'memory_mib': 2048})
+        with restarted.db() as db:
+            self.assertIsNone(db.execute('SELECT tier FROM customer_tiers WHERE customer=?',
+                                         (self.customer,)).fetchone())
+            self.assertEqual(db.execute('SELECT tier FROM customer_tiers WHERE customer=?',
+                                        (custom,)).fetchone()[0], 'approved')
+
     def test_lost_response_retry_survives_restart_and_rejects_changed_request(self):
         initial = self.a.topup('operator', 'fund', self.customer, 100, 'promotional')
         first = self.a.debit('node-one', 'usage-1', PROJECT, 25)

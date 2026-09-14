@@ -143,7 +143,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_managed_quota_callback_requires_valid_policy(self):
         runner = Runner(self.path)
-        runner.hypervisor = object()
+        runner.hypervisor = SimpleNamespace(root=self.path.parent / 'hypervisor')
         with patch('urllib.request.build_opener') as opener:
             response = opener.return_value.open.return_value.__enter__.return_value
             response.status = 200
@@ -152,8 +152,8 @@ class RunnerTests(unittest.TestCase):
                 with self.assertRaises(Failure) as failure:
                     runner.authorize(PROJECT, OWNER)
                 self.assertEqual(failure.exception.code, 'microvm_quota_unavailable')
-            response.read.return_value = b'{"allowed":true,"quota":{"vcpus":2,"memory_mib":4096}}'
-            self.assertEqual(runner.authorize(PROJECT, OWNER)['quota']['memory_mib'], 4096)
+            response.read.return_value = b'{"allowed":true,"quota":{"vcpus":0.5,"memory_mib":512},"tier":"free","network_restricted":true}'
+            self.assertEqual(runner.authorize(PROJECT, OWNER)['quota']['memory_mib'], 512)
 
     def test_idempotency_busy_jobs_scoping_and_payload_erasure(self):
         gate, started = threading.Event(), threading.Event()
@@ -165,7 +165,7 @@ class RunnerTests(unittest.TestCase):
             return {"ok": True}
         runner = Runner(self.path, execute=execute)
         self.addCleanup(gate.set)
-        def authorize(project, owner):
+        def authorize(project, owner, placement_id=None):
             if project != PROJECT or owner != OWNER:
                 raise Failure(403, "compose_not_preapproved")
             return self.config["guests"][project]
@@ -202,7 +202,7 @@ class RunnerTests(unittest.TestCase):
         runner = Runner(self.path, execute=lambda vm, payload: {'ok': True})
         runner.authorize = lambda *_: {}
         runner.hypervisor = Mock()
-        runner.hypervisor.read.return_value = {'vm_id': selected}
+        runner.hypervisor.read.return_value = {'vm_id': selected, 'state': 'stopped'}
         runner.hypervisor.guest.return_value = {'vm_id': selected}
         rpc = {'project_id': PROJECT, 'owner_did': OWNER, 'method': 'POST',
                'action': 'releases', 'body': dict(release(), vm_id=selected)}
@@ -215,7 +215,7 @@ class RunnerTests(unittest.TestCase):
         runner.execute = lambda vm, payload: calls.append((vm,payload)) or {'ok': True}
         runner.run_job(job['job_id'])
         runner.hypervisor.guest.assert_called_once_with(PROJECT, OWNER, selected)
-        runner.hypervisor.read.assert_called_once_with(PROJECT, OWNER, selected)
+        runner.hypervisor.read.assert_any_call(PROJECT, OWNER, selected)
         self.assertNotIn('vm_id', calls[0][1]['body'])
         self.assertEqual(calls[0][0]['vm_id'], selected)
         with runner.db() as db:

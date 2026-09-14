@@ -87,6 +87,13 @@ class NetworkTests(unittest.TestCase):
             validate('ports', dict(good, mappings=good['mappings']*2))
 
     def test_udp_reply_demultiplexing_requires_unique_guest_targets(self):
+        self.meta['network_restricted']=True
+        self.reserve(self.meta)
+        direct=dict(request_id='a'*32,vm_id=V,mappings=[dict(slot=1,guest_port=8000,protocol='tcp')])
+        with self.assertRaisesRegex(VMError,'free_tier_public_ports_disabled'):
+            self.net.perform(P,O,'ports',direct)
+        self.net.perform(P,O,'ports',dict(direct,mappings=[]))
+
         body = dict(request_id='a'*32, vm_id=V, mappings=[dict(slot=1, guest_port=7000, protocol='both'), dict(slot=2, guest_port=7000, protocol='udp')])
         with self.assertRaisesRegex(VMError, 'duplicate_udp'):
             validate('ports', body)

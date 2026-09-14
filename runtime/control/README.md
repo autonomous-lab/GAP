@@ -226,7 +226,10 @@ The authority neither scans nor adopts existing VM catalogs. Keep the existing l
 checks and physical-host admission checks; they solve different constraints.
 No client is migrated by enabling this flag.
 
-Each customer defaults to one VM, 4 CPU quarters (1 vCPU) and 1024 MiB RAM.
+Each customer defaults to the Free Tier: one VM, 2 CPU quarters (0.5 vCPU) and
+512 MiB RAM. A successful operator `set-quotas` marks that customer as approved;
+placement approvals then carry the standard network policy. Free Tier placement
+approvals carry `network_restricted: true` for enforcement by every worker.
 `set-quotas` replaces all three limits in one audited transaction and requires
 the current quota revision (`0` for defaults). Zero is allowed; increasing a
 limit requires operator credentials. Integer CPU quarters preserve fractional

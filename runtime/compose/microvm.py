@@ -129,6 +129,8 @@ class MicroVMs:
         self.qmp_locks_guard = threading.Lock()
         self.ingress_origin = ''
         self.quota_provider = lambda project, owner: {"vcpus": 2, "memory_mib": 4096, "max_vms": 1}
+        self.approval_provider = lambda project, owner: {'quota':self.quota_provider(project,owner),
+                                                          'network_restricted':False,'tier':'approved'}
         self.runtime = None
         self.cpu_quota_socket = config.get('cpu_quota_socket')
         self.meters = {}
@@ -294,6 +296,8 @@ class MicroVMs:
         if not meta:
             return {'state': 'absent'}
         result = {key: meta[key] for key in ('vm_id', 'project_id', 'state', 'vcpus', 'memory_mib', 'disk_gib', 'ports')}
+        result['tier']=meta.get('tier','approved')
+        result['network_policy']='reverse_proxy_only' if meta.get('network_restricted') else 'standard'
         if meta['state'] not in ('destroyed', 'creating', 'hibernated', 'hibernating', 'resuming', 'migrated'):
             try:
                 result['state'] = self.qmp(meta, 'query-status')['status']
@@ -427,7 +431,7 @@ class MicroVMs:
                 '-drive', f'id=seed,file={seed_path or folder / "seed.ext4"},format=raw,if=none,readonly=on',
                 '-device', 'virtio-blk-device,drive=seed',
                 '-device', 'virtio-rng-device',
-                '-netdev', 'user,id=net0,' + ','.join(forwards), '-device', 'virtio-net-device,netdev=net0,mac=' + self.guest_mac(meta),
+                '-netdev', 'user,id=net0,' + ('restrict=on,' if meta.get('network_restricted') else '') + ','.join(forwards), '-device', 'virtio-net-device,netdev=net0,mac=' + self.guest_mac(meta),
                 '-qmp', f'unix:{folder}/qmp.sock,server=on,wait=off',
                 '-pidfile', str(folder / 'qemu.pid')]
         if self.runtime:
@@ -517,7 +521,7 @@ class MicroVMs:
         self.capture_start(meta)
         if meta.get('disk_encryption'):
             return self.resume_encrypted(meta)
-        log=self.folder(meta)/'restore.log'
+        folder=self.folder(meta);log=folder/'restore.log'
         with log.open('wb') as error, self.disk_crypto.secret(meta) as (secret, fds), self.seed_crypto.image(meta, folder) as (seed_path, seed_fds):
             process=subprocess.Popen(self.command(meta,seed_path)+[x.replace('--object','-object') for x in secret]+['-loadvm',tag,'-S'],pass_fds=fds+seed_fds,stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,stderr=error,env={'PATH':'/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'})
@@ -705,9 +709,10 @@ class MicroVMs:
 
     def quota_view(self, project, owner):
         with self.owner_lock(owner):
-            limits=self.quota_provider(project, owner)
+            approval=self.approval_provider(project,owner);limits=approval.get('quota')
             return {'limits': limits, 'allocated': dict(self.quota_usage(owner,include_disk=True), max_vms=self.vm_count(owner)),
                     'always_on_allowed': bool(self.runtime and self.runtime.runner.authorize(project,owner).get('always_on_allowed')),
+                    'tier':approval.get('tier','approved'),'network_policy':'reverse_proxy_only' if approval.get('network_restricted') else 'standard',
                     'minimum_disk_gib': max(1,((self.images/'rootfs.ext4').stat().st_size+1024**3-1)//1024**3)}
 
     def perform(self, project, owner, action, body):
@@ -717,7 +722,8 @@ class MicroVMs:
         # All lifecycle changes share an owner lock across projects and processes.
         # Read live approval/quota after acquiring it, before reserving resources.
         with self.owner_lock(owner):
-            limits = self.quota_provider(project, owner)
+            approval = self.approval_provider(project, owner)
+            limits = approval.get('quota') if isinstance(approval,dict) else None
             valid_limits = isinstance(limits, dict) and {'vcpus', 'memory_mib'} <= set(limits) <= {'vcpus', 'memory_mib', 'max_vms', 'disk_gib'}
             if valid_limits:
                 from cpu_quota import quarters
@@ -731,9 +737,16 @@ class MicroVMs:
             if not valid_limits:
                 raise VMError('invalid_agent_quota')
             meta = None if action=='vm/create' and body.get('new_vm') else self.read(project, owner, body.get('vm_id'))
+            network_restricted=approval.get('network_restricted') is True
+            default_vcpus=min(1,limits['vcpus']);default_memory_mib=min(1024,limits['memory_mib'])
+            if meta and meta.get('network_restricted',False)!=network_restricted:
+                if self.alive(meta): raise VMError('network_policy_restart_required')
+                meta['network_restricted']=network_restricted
+                meta['tier']=approval.get('tier','approved')
+                self.save(meta)
             if action in ('vm/create', 'vm/update', 'vm/start', 'vm/resume'):
                 usage = self.quota_usage(owner,include_disk=True)
-                for key, default in (('vcpus', 1), ('memory_mib', 1024), ('disk_gib',8)):
+                for key, default in (('vcpus', default_vcpus), ('memory_mib', default_memory_mib), ('disk_gib',8)):
                     if key not in limits:continue
                     if action == 'vm/create':
                         requested, previous = body.get(key, default), 0
@@ -756,10 +769,10 @@ class MicroVMs:
                 raise VMError('agent_quota_exceeded_max_vms')
             self.require_mutable(meta, action)
             if self.capacity.managed(project):
-                return self.capacity.execute(project,owner,action,body)
-            return self._perform(project, owner, action, body)
+                return self.capacity.execute(project,owner,action,body,approval)
+            return self._perform(project, owner, action, body, approval=approval)
 
-    def _perform(self, project, owner, action, body, created_vm_id=None, defer_start=False):
+    def _perform(self, project, owner, action, body, created_vm_id=None, defer_start=False, approval=None):
         validate(action, body)
         with self.lock(project):
             meta = None if action=='vm/create' and body.get('new_vm') else self.read(project, owner, body.get('vm_id'))
@@ -767,6 +780,9 @@ class MicroVMs:
             if action == 'vm/create':
                 if meta and meta['state'] != 'destroyed':
                     raise VMError('vm_already_exists')
+                approval=approval or self.approval_provider(project,owner)
+                limits=approval['quota'];default_vcpus=min(1,limits['vcpus']);default_memory_mib=min(1024,limits['memory_mib'])
+                network_restricted=approval.get('network_restricted') is True
                 with self.allocation_lock():
                     previous=self.read(project,owner)
                     additional=previous is not None and previous['state']!='destroyed'
@@ -776,9 +792,10 @@ class MicroVMs:
                         self.catalog(project).replace(self.catalog(previous['vm_id']))
                         self.save(previous)
                     meta = {'vm_id': created_vm_id or 'vm_' + uuid.uuid4().hex, 'project_id': project, 'owner_did': owner,
-                            'state': 'creating', 'vcpus': body.get('vcpus', 1),
+                            'state': 'creating', 'vcpus': body.get('vcpus', default_vcpus),
                             'execution_mode': body.get('execution_mode','serverless'),
-                            'memory_mib': body.get('memory_mib', 1024), 'disk_gib': body.get('disk_gib', 8),
+                            'network_restricted': network_restricted, 'tier': approval.get('tier','approved'),
+                            'memory_mib': body.get('memory_mib', default_memory_mib), 'disk_gib': body.get('disk_gib', 8),
                             'ssh_port': self.reserved_port(), 'ports': [], 'retained': False,
                             'ssh_keys': __import__('network').keys(body.get('ssh_keys', []))}
                     meta['catalog_key']=meta['vm_id'] if additional else project
