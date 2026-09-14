@@ -56,6 +56,11 @@ and SQLite recovery databases migrate before worker startup. Keep each mode-0600
 referenced key version. See [ENCRYPTION.md](./ENCRYPTION.md) for the protection
 boundary and recovery rules.
 
+Use `worker_backup.py` through the running worker container for consistent live
+SQLite backups; copying a WAL database file directly while the worker is active
+is not a valid backup. The exact command and restore requirements are documented
+in the encryption guide.
+
 ### VM API
 
 All mutations return asynchronous jobs; poll `/vm/jobs/{job_id}` as for

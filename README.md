@@ -347,6 +347,8 @@ derives a distinct purpose-bound key for each database from the worker keyring,
 migrates plaintext files atomically before serving requests and records only the
 required key version in a mode-0600 `.key-id` sidecar. Retain that sidecar with
 each database backup and keep old keyring versions needed by stored backups.
+Use the worker's documented `worker_backup.py` command for online snapshots;
+copying a live SQLite file directly can omit committed WAL data.
 
 Operator configuration and recovery: [MicroVM encryption](./runtime/compose/ENCRYPTION.md).
 

@@ -121,6 +121,7 @@ services:
       - no-new-privileges:true
     pids_limit: 256
     mem_limit: 512m
+    memswap_limit: 512m
     cpus: 1.00
     networks:
       - sandbox_net
@@ -142,6 +143,7 @@ services:
       - SETGID
       - SETUID
     mem_limit: 128m
+    memswap_limit: 128m
     cpus: 0.50
     pids_limit: 64
     security_opt:
@@ -170,6 +172,7 @@ services:
     security_opt:
       - no-new-privileges:true
     mem_limit: 64m
+    memswap_limit: 64m
     cpus: 0.25
     pids_limit: 32
     restart: always

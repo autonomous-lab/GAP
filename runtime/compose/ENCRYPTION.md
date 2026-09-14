@@ -81,6 +81,20 @@ restores. Changing `active` applies to databases created afterwards; existing
 databases continue using their recorded version. Do not remove an old keyring
 entry while any database or backup references it.
 
+Create a live, transactionally consistent worker snapshot inside the state
+volume with:
+
+```bash
+docker compose -f runtime/compose/deploy.yml --project-directory . exec \
+  compose-runner python3 worker_backup.py --output /data/backups/NAME
+```
+
+The command writes SQLCipher databases, their `.key-id` files and a checksummed
+manifest into a new mode-0700 directory. It refuses to overwrite a snapshot.
+Copy the completed directory off-host together with an independently protected
+copy of every referenced keyring version. A database without its sidecar or key
+cannot be restored.
+
 ## Protection boundary
 
 This protects VM disk payloads, retained hibernation memory, seed images and guest

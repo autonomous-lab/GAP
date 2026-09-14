@@ -116,6 +116,41 @@ def connect(path,purpose,**options):
     return db
 
 
+def backup(source, destination, purpose):
+    """Create a transactionally consistent encrypted backup and its key marker."""
+    source, destination = Path(source), Path(destination)
+    marker = Path(str(destination) + '.key-id')
+    if destination.exists() or marker.exists():
+        raise RuntimeError('worker_database_backup_exists')
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    origin = target = None
+    try:
+        origin = connect(source, purpose, timeout=30)
+        target = connect(destination, purpose, timeout=30)
+        origin.backup(target, pages=256, sleep=0.01)
+        if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            raise RuntimeError('worker_database_backup_invalid')
+        target.close()
+        target = None
+        os.chmod(destination, 0o600)
+        with destination.open('rb') as file:
+            os.fsync(file.fileno())
+        directory = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except Exception:
+        if target is not None:
+            target.close()
+        destination.unlink(missing_ok=True)
+        marker.unlink(missing_ok=True)
+        raise
+    finally:
+        if origin is not None:
+            origin.close()
+
+
 def prepare(root):
     if not os.environ.get(KEYRING_ENV):
         return 0

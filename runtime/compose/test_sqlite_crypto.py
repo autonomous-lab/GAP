@@ -32,5 +32,13 @@ class SQLiteCryptoTest(unittest.TestCase):
         self.assertEqual(self.crypto.connect(path,'jobs').execute('SELECT count(*) FROM values_').fetchone()[0],1)
         with self.assertRaises(Exception):self.crypto.connect(path,'other-purpose')
 
+        snapshot=self.root/'backups'/'snapshot'/'jobs.sqlite'
+        self.crypto.backup(path,snapshot,'jobs')
+        self.assertNotEqual(snapshot.read_bytes()[:16],b'SQLite format 3\0')
+        restored=self.crypto.connect(snapshot,'jobs')
+        self.assertEqual(restored.execute('SELECT value FROM values_').fetchone()[0],'preserved')
+        restored.close()
+        self.assertEqual(snapshot.stat().st_mode & 0o777,0o600)
+
 
 if __name__=='__main__':unittest.main()
