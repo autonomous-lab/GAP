@@ -9,7 +9,7 @@ FROM rust:1.97-alpine AS builder
 # whole build dies. Retry, and fall back to a second mirror pinned to
 # this image's own Alpine version before giving up.
 RUN for attempt in 1 2 3 4 5; do \
-        apk add --no-cache musl-dev pkgconfig && exit 0; \
+        apk add --no-cache make musl-dev perl pkgconfig && exit 0; \
         echo "apk failed (attempt $attempt of 5)"; \
         if [ "$attempt" = "2" ]; then \
             v=$(cut -d. -f1,2 /etc/alpine-release); \

@@ -10,7 +10,10 @@ use crate::error::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -292,19 +295,237 @@ pub struct FunctionSchedule {
     pub last_status: Option<String>,
 }
 
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+fn project_master_key_from_env() -> Result<Option<[u8; 32]>> {
+    let configured = std::env::var("GAP_MASTER_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let required = std::env::var("GAP_PROJECT_ENCRYPTION_REQUIRED")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        });
+    let Some(configured) = configured else {
+        if required {
+            return Err(Error::Other(
+                "GAP_MASTER_KEY is required for encrypted project storage".into(),
+            ));
+        }
+        return Ok(None);
+    };
+    let bytes = hex::decode(configured.trim())
+        .map_err(|_| Error::Other("GAP_MASTER_KEY must be hex".into()))?;
+    bytes
+        .try_into()
+        .map(Some)
+        .map_err(|_| Error::Other("GAP_MASTER_KEY must be 32 bytes (64 hex chars)".into()))
+}
+
+fn derive_project_database_key(master_key: &[u8; 32], project_id: &str, database: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"gap-project-sqlcipher-v1\0");
+    hash.update(master_key);
+    hash.update(b"\0");
+    hash.update(project_id.as_bytes());
+    hash.update(b"\0");
+    hash.update(database.as_bytes());
+    hex::encode(hash.finalize())
+}
+
+fn open_project_database(path: &Path, key: Option<&str>) -> Result<Connection> {
+    if key.is_some() && plaintext_sqlite_file(path)? {
+        encrypt_plaintext_database(path, key.expect("checked above"))?;
+    }
+    let connection = Connection::open(path).map_err(db_error)?;
+    if let Some(key) = key {
+        connection
+            .pragma_update(None, "key", key)
+            .map_err(db_error)?;
+        // Force SQLCipher to read page one now. A wrong key or corrupt file
+        // must fail during open, before callers can attempt migrations/writes.
+        connection
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(db_error)?;
+    }
+    Ok(connection)
+}
+
+fn plaintext_sqlite_file(path: &Path) -> Result<bool> {
+    let Ok(mut file) = fs::File::open(path) else {
+        return Ok(false);
+    };
+    let mut header = [0u8; 16];
+    match file.read_exact(&mut header) {
+        Ok(()) => Ok(&header == SQLITE_HEADER),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(Error::Other(format!(
+            "read project database header {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn encrypt_plaintext_database(path: &Path, key: &str) -> Result<()> {
+    let source = Connection::open(path).map_err(db_error)?;
+    source
+        .busy_timeout(Duration::from_secs(10))
+        .map_err(db_error)?;
+    source
+        .pragma_update(None, "wal_checkpoint", "TRUNCATE")
+        .map_err(db_error)?;
+
+    let temporary = path.with_extension("sqlite.encrypting");
+    if temporary.exists() {
+        fs::remove_file(&temporary).map_err(|error| {
+            Error::Other(format!(
+                "remove stale project database migration {}: {error}",
+                temporary.display()
+            ))
+        })?;
+    }
+    source
+        .execute(
+            "ATTACH DATABASE ?1 AS encrypted KEY ?2",
+            params![temporary.to_string_lossy().as_ref(), key],
+        )
+        .map_err(db_error)?;
+    let export_result = source
+        .query_row("SELECT sqlcipher_export('encrypted')", [], |_| Ok(()))
+        .map_err(db_error);
+    let detach_result = source
+        .execute_batch("DETACH DATABASE encrypted")
+        .map_err(db_error);
+    export_result?;
+    detach_result?;
+    drop(source);
+
+    let encrypted = open_project_database(&temporary, Some(key))?;
+    encrypted
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .map_err(db_error)?;
+    drop(encrypted);
+
+    if let Ok(metadata) = fs::metadata(path) {
+        fs::set_permissions(&temporary, metadata.permissions()).map_err(|error| {
+            Error::Other(format!(
+                "preserve project database permissions {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
+    OpenOptions::new()
+        .write(true)
+        .open(&temporary)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| {
+            Error::Other(format!(
+                "sync encrypted project database {}: {error}",
+                temporary.display()
+            ))
+        })?;
+    fs::rename(&temporary, path).map_err(|error| {
+        Error::Other(format!(
+            "replace plaintext project database {}: {error}",
+            path.display()
+        ))
+    })?;
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
+        if sidecar.exists() {
+            fs::remove_file(&sidecar).map_err(|error| {
+                Error::Other(format!(
+                    "remove plaintext project database sidecar {}: {error}",
+                    sidecar.display()
+                ))
+            })?;
+        }
+    }
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                Error::Other(format!(
+                    "sync project database directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+    }
+    Ok(())
+}
+
 pub struct ProjectStore {
     project_id: String,
     root: PathBuf,
     control: Connection,
+    database_key: Option<String>,
 }
 
 impl ProjectStore {
+    pub fn prepare_all(base: &Path) -> Result<usize> {
+        let master_key = project_master_key_from_env()?;
+        Self::prepare_all_with_master_key(base, master_key.as_ref())
+    }
+
+    fn prepare_all_with_master_key(base: &Path, master_key: Option<&[u8; 32]>) -> Result<usize> {
+        if !base.exists() {
+            return Ok(0);
+        }
+        let entries = fs::read_dir(base)
+            .map_err(|error| Error::Other(format!("scan project storage: {error}")))?;
+        let mut project_ids = Vec::new();
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| Error::Other(format!("read project storage entry: {error}")))?;
+            if !entry
+                .file_type()
+                .map_err(|error| Error::Other(format!("read project storage type: {error}")))?
+                .is_dir()
+            {
+                continue;
+            }
+            let Some(project_id) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if validate_identifier("project_id", &project_id).is_err() {
+                continue;
+            }
+            let project = entry.path();
+            if project.join("control.sqlite").exists() || project.join("database.sqlite").exists() {
+                project_ids.push(project_id);
+            }
+        }
+        project_ids.sort_unstable();
+        for project_id in &project_ids {
+            Self::open_with_master_key(base, project_id, master_key)?;
+        }
+        Ok(project_ids.len())
+    }
+
     pub fn open(base: &Path, project_id: &str) -> Result<Self> {
+        let master_key = project_master_key_from_env()?;
+        Self::open_with_master_key(base, project_id, master_key.as_ref())
+    }
+
+    fn open_with_master_key(
+        base: &Path,
+        project_id: &str,
+        master_key: Option<&[u8; 32]>,
+    ) -> Result<Self> {
         validate_identifier("project_id", project_id)?;
         let root = base.join(project_id);
-        std::fs::create_dir_all(&root)
+        fs::create_dir_all(&root)
             .map_err(|e| Error::Other(format!("create project directory: {e}")))?;
-        let control = Connection::open(root.join("control.sqlite"))
+        let control_key =
+            master_key.map(|key| derive_project_database_key(key, project_id, "control"));
+        let database_key =
+            master_key.map(|key| derive_project_database_key(key, project_id, "database"));
+        let control = open_project_database(&root.join("control.sqlite"), control_key.as_deref())
             .map_err(|e| Error::Other(format!("open project control database: {e}")))?;
         control
             .execute_batch(SCHEMA)
@@ -312,12 +533,13 @@ impl ProjectStore {
         // Create the user database independently. It is intentionally not
         // attached to the control connection: tenant SQL must never reach
         // GAP metadata through an ATTACHed schema.
-        Connection::open(root.join("database.sqlite"))
+        open_project_database(&root.join("database.sqlite"), database_key.as_deref())
             .map_err(|e| Error::Other(format!("create project database: {e}")))?;
         Ok(Self {
             project_id: project_id.into(),
             root,
             control,
+            database_key,
         })
     }
 
@@ -330,7 +552,9 @@ impl ProjectStore {
         let mut stmt=self.control.prepare("SELECT f.name,f.active_version,f.created_at,count(v.version) FROM functions f LEFT JOIN function_versions v ON v.name=f.name GROUP BY f.name ORDER BY f.name LIMIT 100").map_err(db_error)?;
         let functions=stmt.query_map([],|r|Ok(json!({"name":r.get::<_,String>(0)?,"active_version":r.get::<_,Option<i64>>(1)?,"created_at":r.get::<_,i64>(2)?,"versions":r.get::<_,i64>(3)?}))).map_err(db_error)?.collect::<std::result::Result<Vec<_>,_>>().map_err(db_error)?;
         let schema=self.database_query("SELECT name,type,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 100",&[])?;
-        Ok(json!({"functions":functions,"site":self.site_config()?,"site_versions":self.site_versions()?,"database_schema":schema,"limit":100}))
+        Ok(
+            json!({"functions":functions,"site":self.site_config()?,"site_versions":self.site_versions()?,"database_schema":schema,"limit":100}),
+        )
     }
     pub fn user_database_path(&self) -> PathBuf {
         self.root.join("database.sqlite")
@@ -381,15 +605,33 @@ impl ProjectStore {
             }
             params.push(parameter);
         }
-        let connection = Connection::open(self.user_database_path()).map_err(db_error)?;
+        let connection =
+            open_project_database(&self.user_database_path(), self.database_key.as_deref())?;
         connection
             .busy_timeout(Duration::from_millis(100))
             .map_err(db_error)?;
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(db_error)?;
-        let page_size: i64 = connection
-            .pragma_query_value(None, "page_size", |row| row.get(0))
+        let page_size = connection
+            .pragma_query_value(None, "page_size", |row| match row.get_ref(0)? {
+                rusqlite::types::ValueRef::Integer(value) => Ok(value),
+                rusqlite::types::ValueRef::Text(value) => std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .ok_or_else(|| {
+                        rusqlite::Error::InvalidColumnType(
+                            0,
+                            "page_size".into(),
+                            rusqlite::types::Type::Text,
+                        )
+                    }),
+                value => Err(rusqlite::Error::InvalidColumnType(
+                    0,
+                    "page_size".into(),
+                    value.data_type(),
+                )),
+            })
             .map_err(db_error)?;
         let max_pages = sql_int(MAX_PROJECT_DATABASE_BYTES / (page_size.max(1) as u64))?;
         connection
@@ -1676,6 +1918,135 @@ mod tests {
             "prj_test",
         )
         .unwrap()
+    }
+
+    fn temp_project_root(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("gap-cloud-{label}-{nonce}"))
+    }
+
+    fn has_plaintext_sqlite_header(path: &Path) -> bool {
+        let mut header = [0u8; 16];
+        fs::File::open(path)
+            .and_then(|mut file| file.read_exact(&mut header))
+            .unwrap();
+        &header == SQLITE_HEADER
+    }
+
+    #[test]
+    fn encrypted_project_databases_require_the_derived_key() {
+        let root = temp_project_root("encrypted");
+        let key = [7u8; 32];
+        {
+            let mut store =
+                ProjectStore::open_with_master_key(&root, "prj_test", Some(&key)).unwrap();
+            store.put_kv("secret", b"value", None, 1).unwrap();
+            store
+                .database_execute("CREATE TABLE private_data(value TEXT)", &[])
+                .unwrap();
+            store
+                .database_execute(
+                    "INSERT INTO private_data(value) VALUES(?1)",
+                    &[json!("classified")],
+                )
+                .unwrap();
+        }
+        let project = root.join("prj_test");
+        assert!(!has_plaintext_sqlite_header(
+            &project.join("control.sqlite")
+        ));
+        assert!(!has_plaintext_sqlite_header(
+            &project.join("database.sqlite")
+        ));
+
+        let reopened = ProjectStore::open_with_master_key(&root, "prj_test", Some(&key)).unwrap();
+        assert_eq!(
+            reopened.get_kv("secret", 2).unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(
+            reopened
+                .database_query("SELECT value FROM private_data", &[])
+                .unwrap()
+                .rows,
+            vec![vec![json!("classified")]]
+        );
+        drop(reopened);
+        assert!(ProjectStore::open_with_master_key(&root, "prj_test", Some(&[8u8; 32])).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plaintext_project_databases_are_migrated_without_data_loss() {
+        let root = temp_project_root("migration");
+        {
+            let mut store = ProjectStore::open_with_master_key(&root, "prj_test", None).unwrap();
+            store.put_kv("before", b"migration", None, 1).unwrap();
+            store
+                .database_execute("CREATE TABLE existing(value INTEGER)", &[])
+                .unwrap();
+            store
+                .database_execute("INSERT INTO existing(value) VALUES(42)", &[])
+                .unwrap();
+        }
+        let project = root.join("prj_test");
+        assert!(has_plaintext_sqlite_header(&project.join("control.sqlite")));
+        assert!(has_plaintext_sqlite_header(
+            &project.join("database.sqlite")
+        ));
+
+        let encrypted =
+            ProjectStore::open_with_master_key(&root, "prj_test", Some(&[9u8; 32])).unwrap();
+        assert_eq!(
+            encrypted.get_kv("before", 2).unwrap(),
+            Some(b"migration".to_vec())
+        );
+        assert_eq!(
+            encrypted
+                .database_query("SELECT value FROM existing", &[])
+                .unwrap()
+                .rows,
+            vec![vec![json!(42)]]
+        );
+        drop(encrypted);
+        assert!(!has_plaintext_sqlite_header(
+            &project.join("control.sqlite")
+        ));
+        assert!(!has_plaintext_sqlite_header(
+            &project.join("database.sqlite")
+        ));
+        assert!(!project.join("control.sqlite.encrypting").exists());
+        assert!(!project.join("database.sqlite.encrypting").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepare_all_migrates_project_directories_without_an_index() {
+        let root = temp_project_root("prepare-all");
+        for project_id in ["prj_first", "prj_second"] {
+            let store = ProjectStore::open_with_master_key(&root, project_id, None).unwrap();
+            store
+                .database_execute("CREATE TABLE existing(value INTEGER)", &[])
+                .unwrap();
+        }
+        fs::create_dir_all(root.join("unrelated")).unwrap();
+
+        assert_eq!(
+            ProjectStore::prepare_all_with_master_key(&root, Some(&[10u8; 32])).unwrap(),
+            2
+        );
+        for project_id in ["prj_first", "prj_second"] {
+            assert!(!has_plaintext_sqlite_header(
+                &root.join(project_id).join("control.sqlite")
+            ));
+            assert!(!has_plaintext_sqlite_header(
+                &root.join(project_id).join("database.sqlite")
+            ));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

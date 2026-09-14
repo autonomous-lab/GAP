@@ -1025,6 +1025,23 @@ impl NodeState {
         self.cloud_root = root.into();
     }
 
+    /// Open every known project before the HTTP listener starts. This applies
+    /// storage migrations once, serially, and makes a missing/wrong encryption
+    /// key a boot error instead of a tenant's first-request failure.
+    pub fn prepare_cloud_storage(&self) -> Result<usize> {
+        let mut prepared = crate::cloud::ProjectStore::prepare_all(&self.cloud_root)?;
+        let mut project_ids = self.cloud_projects.keys().collect::<Vec<_>>();
+        project_ids.sort_unstable();
+        project_ids.dedup();
+        for project_id in &project_ids {
+            if !self.cloud_root.join(project_id).is_dir() {
+                crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?;
+                prepared += 1;
+            }
+        }
+        Ok(prepared)
+    }
+
     pub fn set_function_sandbox(&mut self, url: &str, token: &str) {
         self.function_sandbox_url = Some(url.trim_end_matches('/').to_string());
         self.function_sandbox_token = Some(token.to_string());

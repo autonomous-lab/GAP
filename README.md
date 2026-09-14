@@ -288,6 +288,21 @@ interpolation and an explicit container env file. See the
 and the [agent guide](./AGENTS.md#direct-ssh-and-five-public-tcpudp-ports),
 [CLI](./scripts/microvm.py) and [operator setup](./runtime/compose/README.md).
 
+## Project data encryption
+
+With `GAP_MASTER_KEY` configured, GAP encrypts each project's
+`control.sqlite` and `database.sqlite` files with SQLCipher. Distinct keys are
+derived for every project and file; the derived keys are never stored beside
+the databases. This covers KV values, objects, static sites, function sources,
+schedules, project metadata and user SQL data, including SQLite journals.
+
+The production Compose stack sets `GAP_PROJECT_ENCRYPTION_REQUIRED=1`. At
+startup, the node migrates existing plaintext project databases atomically and
+refuses to listen if the master key is absent, invalid or unable to decrypt an
+existing file. Keep `GAP_MASTER_KEY` stable across redeploys and include it in
+the operator's independent secret recovery process. Losing or changing it
+makes the project databases unrecoverable.
+
 ## MicroVM storage encryption
 
 **New microVMs on the Elestio fleet encrypt their disks and saved hibernation
@@ -309,10 +324,11 @@ AES-256 storage badge only when that VM reports encryption enabled. Do not infer
 coverage from a provider name or assume every independent node enables it.
 
 This covers disk payloads and retained hibernation memory, not qcow2 metadata,
-guest seed/SSH files, host swap/logs, other GAP databases, or a compromised host
-with access to its keyring. Encryption does not replace backups. Keep an
-independent recovery copy of the keyring; losing a required key prevents recovery.
-Rotation of the active key version affects new VMs, not existing disk contents.
+guest seed/SSH files, host swap/logs, registration/admin/realtime/node databases,
+or a compromised host with access to its keyring. Encryption does not replace
+backups. Keep an independent recovery copy of the keyring; losing a required
+key prevents recovery. Rotation of the active key version affects new VMs, not
+existing disk contents.
 
 Operator configuration and recovery: [MicroVM encryption](./runtime/compose/ENCRYPTION.md).
 

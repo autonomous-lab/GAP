@@ -29,6 +29,9 @@ services:
       GAP_STORAGE: "${GAP_STORAGE:-clickhouse}"
       GAP_CLICKHOUSE_URL: "${GAP_CLICKHOUSE_URL:-http://clickhouse:8123}"
       GAP_DB_INIT: "${GAP_DB_INIT:-1}"
+      # Project databases are encrypted with per-project keys derived from
+      # GAP_MASTER_KEY. Refuse Cloud reads/writes if that key is unavailable.
+      GAP_PROJECT_ENCRYPTION_REQUIRED: "${GAP_PROJECT_ENCRYPTION_REQUIRED:-1}"
       # Absolute URLs in sitemap.xml - set this to your public origin.
       GAP_PUBLIC_URL: "${GAP_PUBLIC_URL:-http://172.17.0.1:8080}"
       # Workers are I/O bound: each one blocks on a ClickHouse write for

@@ -124,6 +124,8 @@ fn main() -> Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(600);
     let mut state = NodeState::cloud_with_rate_limits(storage, seed, token_cap, ip_cap);
+    let prepared_projects = state.prepare_cloud_storage()?;
+    println!("[gap-cloud] project storage ready: {prepared_projects} project(s)");
     state.private_node = private_node;
     state.registration = gap::registration::Registration::from_env()
         .map_err(gap::Error::Other)?.map(Arc::new);
