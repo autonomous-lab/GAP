@@ -300,7 +300,7 @@ class Integration(unittest.TestCase):
                 ready()
                 print('CANONICAL VM API + LEGACY DEDUP + NATIVE HTTP WITHOUT DOCKER OK', flush=True)
             sources = {
-                "compose.yaml": 'services:\n  web:\n    build: .\n    ports: ["8000:8000"]\n    env_file:\n      - path: /etc/gap/runtime.env\n        format: raw\n    environment:\n      TEST_INTERPOLATED_HTTP_PORT: ${GAP_HTTP_PORT}\n    volumes: ["data:/persist"]\nvolumes:\n  data: {}\n',
+                "compose.yaml": 'services:\n  web:\n    build: .\n    ports: ["8000:8000"]\n    env_file:\n      - path: /etc/gap/runtime.env\n        format: raw\n    environment:\n      TEST_INTERPOLATED_HTTP_PORT: ${GAP_HTTP_PORT}\n    volumes: ["./data:/persist"]\n',
                 "Dockerfile": 'FROM alpine:3.23\nRUN apk add --no-cache python3\nCOPY http_fixture.py /app.py\nCMD ["python3", "/app.py"]\n',
                 "http_fixture.py": (Path(__file__).parent / 'http_fixture.py').read_text()}
             operation("POST", "/releases", {"compose_file": "compose.yaml", "files": {
@@ -389,7 +389,7 @@ class Integration(unittest.TestCase):
                     if attempt == 59:
                         raise
                     time.sleep(.25)
-            self.assertEqual(restored, persisted, "named volume must survive VM stop/resize/restart")
+            self.assertEqual(restored, persisted, "stable bind-mounted data must survive VM stop/resize/restart")
             if runner.ingress:
                 self.assertEqual(app_request(), persisted)
             operation("POST", "/status")

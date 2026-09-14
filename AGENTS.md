@@ -744,6 +744,19 @@ egress filtering is applied. Existing Cloud API quotas remain unchanged.
 Unrestricted guest networking can reach internal services, and workloads can
 affect host availability without resource safeguards.
 
+Compose runs from `/var/lib/gap-data/${GAP_PROJECT_ID}` inside the selected VM.
+Use project-relative bind mounts such as `./mariadb:/var/lib/mysql` and
+`./wordpress:/var/www/html` for persistent data that is easy to inspect, back up
+and restore. The worker stores immutable release inputs separately. Do not bind
+persistent data below `/var/lib/gap-compose/releases`: those directories belong
+to the release journal. Stop or quiesce databases, or use their dump tools,
+before copying live data directories.
+
+On the first release after a worker upgrade, GAP may atomically refresh its
+fixed guest helper before validating the bundle. The temporary update key is
+removed before application deployment begins; configured owner keys are
+restored unchanged.
+
 Each approved agent has a cumulative allocation quota of **1 VM, 2 vCPUs and 4096 MiB
 RAM by default**, shared across all its projects. Running, hibernated, stopped and partially
 created VMs count; destroying a VM releases its CPU/RAM allocation. An optional operator disk allocation quota may also apply. Allocate the minimum your workload needs
@@ -775,9 +788,10 @@ body and idempotent `request_id` as `/vm`. Select a VM for read operations with
 Mutations continue to require `vm_id` in their JSON body. Legacy `/vm` and `/stack` without a selector target the default VM.
 For **every Compose POST** (`releases`, `start`, `stop`, `status`, `logs`), include
 `vm_id` beside `request_id` in the JSON body. A `?vm_id=...` query selector is
-also accepted; conflicting body/query IDs are rejected. The guest bundle itself
-still contains only `request_id`, `compose_file` and `files`: the worker consumes
-the VM selector before forwarding it. Deleting the default VM does not promote
+also accepted; conflicting body/query IDs are rejected. The submitted guest
+bundle still contains only `request_id`, `compose_file` and `files`: the worker
+consumes the VM selector and supplies the authenticated project identity before
+forwarding it. Deleting the default VM does not promote
 another VM. List `/vms` and select an existing VM explicitly; never recreate or
 delete a working VM just to obtain the default slot. Additional VMs have separate
 `/apps/{vm_id}/` ingress paths, SSH identities, disks and five-port allocations.
@@ -821,7 +835,9 @@ in progress prevents idle hibernation. TCP/SSH/WebSocket connections with no
 incoming data do not: they can be disconnected and clients must reconnect.
 Protocol keepalives carrying incoming data count as activity. A publicly exposed
 port can be kept awake by visitors; use application authentication and a budget.
-A stopped VM requires explicit start; automatic wake applies to hibernated VMs.
+A manually stopped VM requires explicit start. If an interrupted resume leaves
+the VM stopped without a manual-stop marker, the next routed request performs a
+controlled cold start instead of leaving the application permanently unavailable.
 
 Configure `always_on` only for workloads that need uninterrupted background work.
 It requires an additional operator grant per agent, checked again at wake and
@@ -1222,8 +1238,11 @@ curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/stack/releases" \
 
 For updates, submit a complete new bundle with a new `request_id` to the same
 endpoint. Files are stored as an immutable guest release. Compose validates it,
-then runs `up --detach --build --remove-orphans --wait --wait-timeout 120` using
-a stable project name. Updates may cause downtime or partially change services;
+then GAP promotes the managed files into
+`/var/lib/gap-data/${GAP_PROJECT_ID}`, validates from that stable directory and
+runs `up --detach --build --remove-orphans --wait --wait-timeout 120` using a
+stable project name. Relative bind mounts keep the same guest paths across
+updates. Updates may cause downtime or partially change services;
 they are not atomic and do not automatically roll back database migrations.
 
 ### Poll a job and inspect the latest operation

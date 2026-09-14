@@ -366,9 +366,31 @@ Updates may cause downtime or partial changes. A timeout/disconnection can leave
 remote work running; it is not rollback. Guest-side locking serializes operations.
 The most recently attempted update remains inspectable/stoppable.
 
-Named volumes survive stop/start/update. Release-relative bind mounts switch to
-the next release's directory; use named volumes for persistent app data unless
-that behavior is intended. Explicit whole-VM data deletion is available; individual volume/release cleanup is not automated.
+Before a managed VM accepts a new release, the worker compares the installed
+guest helper with its bundled version. If needed, it installs the helper
+atomically using a dedicated ephemeral SSH key and immediately restores the
+VM's configured authorized keys. This upgrades existing VM disks without
+replacing their immutable base image or exposing a permanent shell credential.
+
+The active bundle is materialized in the stable project directory
+`/var/lib/gap-data/${GAP_PROJECT_ID}` and Compose always runs from there. Relative
+bind mounts therefore provide simple, persistent application folders:
+
+```yaml
+volumes:
+  - ./mariadb:/var/lib/mysql
+  - ./wordpress:/var/www/html
+```
+
+These folders survive releases, stop/start and resize operations and can be
+backed up together with the stack definition. GAP keeps the immutable release
+journal separately under `/var/lib/gap-compose/releases`. Files managed by the
+previous bundle but omitted from a successful replacement bundle are removed;
+unmanaged data directories are retained. A failed validation in the stable
+directory restores the previous managed files. Explicit whole-VM data deletion
+is available; individual directory/release cleanup is not automated. Quiesce a
+database or use its dump tool before copying its live files; bind mounts make the
+storage layout inspectable but do not make an online database backup consistent.
 
 HTTP bodies are bounded to 5 MiB including base64/JSON (GAP/proxies can impose
 less). Returned output is bounded. Operational timeouts are 540s per guest

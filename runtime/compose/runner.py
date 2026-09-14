@@ -84,7 +84,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def ssh_command(guest):
+def ssh_transport(guest):
     return ["ssh", "-F", "/dev/null", "-T", "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=yes", "-o", "IdentitiesOnly=yes",
             "-o", "IdentityAgent=none", "-o", "ForwardAgent=no",
@@ -95,7 +95,11 @@ def ssh_command(guest):
             "-o", "UserKnownHostsFile=" + guest["known_hosts"],
             "-o", "HostKeyAlias=" + guest["vm_id"],
             "-i", guest["ssh_key"], "-p", str(guest["port"]),
-            "root@" + guest["address"], "python3 /usr/local/lib/gap-compose-guest.py"]
+            "root@" + guest["address"]]
+
+
+def ssh_command(guest):
+    return ssh_transport(guest) + ["python3 /usr/local/lib/gap-compose-guest.py"]
 
 
 def ssh_failure(output, returncode):
@@ -617,11 +621,46 @@ class Runner:
                 guest = self.hypervisor.guest(row['project'], row['owner'], payload['body'].get('vm_id'))
                 meta = self.hypervisor.read(row['project'], row['owner'], payload['body'].get('vm_id'))
                 self.hypervisor.sync_environment(meta)
+                if payload['action']=='releases':self.sync_guest_agent(guest,meta)
             # VM identity is controller metadata, not part of the immutable guest bundle.
-            guest_payload = dict(payload, body={k: v for k, v in payload['body'].items() if k != 'vm_id'})
+            guest_payload = dict(payload, project_id=row['project'],
+                                 body={k: v for k, v in payload['body'].items() if k != 'vm_id'})
             result = self.execute(guest, guest_payload)
             if self.hypervisor: result = dict(result, vm_id=meta['vm_id'])
         return result
+
+    def sync_guest_agent(self, guest, meta):
+        source=Path(__file__).with_name('guest.py').read_bytes()
+        digest=hashlib.sha256(source).hexdigest()
+        current=self.execute(guest,{'action':'agent_version','body':{}},timeout=15)
+        if current.get('ok') is True and current.get('sha256')==digest:return
+        original=self.hypervisor.authorized_keys(meta,meta.get('ssh_keys',[]))
+        with tempfile.TemporaryDirectory() as directory:
+            key=Path(directory)/'updater'
+            created=subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(key)],
+                                   stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+                                   env={'PATH':'/usr/bin:/bin'},timeout=15)
+            if created.returncode!=0:raise Failure(502,'guest_agent_update_key_failed')
+            temporary=original+'restrict '+(key.with_suffix('.pub')).read_text().strip()+'\n'
+            granted=self.execute(guest,{'action':'ssh_keys','body':{'content':temporary}},timeout=15)
+            if granted.get('ok') is not True:raise Failure(502,'guest_agent_update_grant_failed')
+            failure=None
+            try:
+                command=ssh_transport(dict(guest,ssh_key=str(key)))+[
+                    "umask 077; cat > /tmp/gap-compose-guest.py.new && "
+                    "python3 -m py_compile /tmp/gap-compose-guest.py.new && "
+                    "chmod 0755 /tmp/gap-compose-guest.py.new && "
+                    "mv /tmp/gap-compose-guest.py.new /usr/local/lib/gap-compose-guest.py"]
+                installed=subprocess.run(command,input=source,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+                                         env={'PATH':'/usr/bin:/bin'},timeout=30)
+                if installed.returncode!=0:
+                    failure=Failure(502,ssh_failure(installed.stdout,installed.returncode))
+            except (OSError,subprocess.TimeoutExpired):
+                failure=Failure(502,'guest_agent_update_failed_state_unknown')
+            finally:
+                restored=self.execute(guest,{'action':'ssh_keys','body':{'content':original}},timeout=15)
+                if restored.get('ok') is not True:raise Failure(502,'guest_agent_update_key_cleanup_failed')
+            if failure:raise failure
 
     def operator(self,body):
         if not self.runtime: raise Failure(409,'serverless_not_configured')

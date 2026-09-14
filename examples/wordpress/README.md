@@ -61,10 +61,13 @@ The installation container uses UID 33 to match the Debian Apache image's volume
 ownership. The Dockerfiles explicitly make application directories traversable
 and scripts/configuration readable: GAP release files are private by default,
 so do not assume a non-root container can read a release bind mount. Secrets
-are supplied at runtime, never copied into the images. Two named volumes retain the database and WordPress files across
-releases. A healthy bootstrap service ensures Compose `--wait` includes completed
+are supplied at runtime, never copied into the images. The stack runs from
+`/var/lib/gap-data/${GAP_PROJECT_ID}` and uses `./mariadb` and `./wordpress`
+bind mounts, so the database and site files are visible as ordinary persistent
+subdirectories across releases. Stop or quiesce MariaDB, or create a logical
+dump, before copying its live directory for backup. A healthy bootstrap service ensures Compose `--wait` includes completed
 installation; it then only sleeps. Deleting the VM with data deletion deletes
-these volumes. This example does not provide backups or disaster recovery.
+these directories with the VM disk. This example does not provide backups or disaster recovery.
 
 The image tags match the reported working stack: `wordpress:php8.3-apache`,
 `mariadb:11.4`, `wordpress:cli-php8.3`. Tags can change; pin tested image digests

@@ -6,7 +6,7 @@ services:
       - path: ./runtime.env
         format: raw
     volumes:
-      - database:/var/lib/mysql
+      - ./mariadb:/var/lib/mysql
     healthcheck:
       test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
       interval: 5s
@@ -27,7 +27,7 @@ services:
       WORDPRESS_CONFIG_EXTRA: "require '/opt/gap-wordpress/config.php';"
     ports: ["8001:80"]
     volumes:
-      - wordpress:/var/www/html
+      - ./wordpress:/var/www/html
     healthcheck:
       test: [CMD, php, -r, "exit(is_file('/var/www/html/wp-config.php') && @fsockopen('127.0.0.1', 80) ? 0 : 1);"]
       interval: 5s
@@ -49,12 +49,9 @@ services:
       WORDPRESS_CONFIG_EXTRA: "require '/opt/gap-wordpress/config.php';"
     entrypoint: [sh, /opt/gap-wordpress/install.sh]
     volumes:
-      - wordpress:/var/www/html
+      - ./wordpress:/var/www/html
     healthcheck:
       test: [CMD, test, -f, /tmp/wordpress-installed]
       interval: 5s
       timeout: 3s
       retries: 24
-volumes:
-  database: {}
-  wordpress: {}

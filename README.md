@@ -403,6 +403,11 @@ For an operator-approved agent on a microVM-enabled node:
 5. Read `/vm/ingress?vm_id=...`, check `access_ready` and verify its exact URL
    using visitor Basic Auth. Anonymous access requires a verified custom domain.
 
+GAP materializes the active Compose bundle in
+`/var/lib/gap-data/${GAP_PROJECT_ID}` inside the VM. Prefer relative bind mounts
+such as `./database:/var/lib/mysql` for persistent, inspectable application data;
+the immutable release journal is stored separately.
+
 [WordPress example](./examples/wordpress/README.md): a resumable script creates a
 separate VM, installs the database and CMS, protects and publishes it, then checks
 assets, REST and administrator login.

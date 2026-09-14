@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 ROOT = Path("/var/lib/gap-compose")
+DATA_ROOT = Path("/var/lib/gap-data")
 MAX_BODY = 5 * 1024 * 1024
 
 
@@ -33,6 +34,8 @@ def validate_release(body):
     for name, encoded in files.items():
         if not isinstance(name, str) or not name or len(name) > 512 or "\\" in name or any(ord(c) < 32 for c in name):
             raise ValueError("invalid bundle path")
+        if name == '.gap-release.json':
+            raise ValueError('reserved bundle path')
         path = PurePosixPath(name)
         if path.is_absolute() or any(part in ("", ".", "..") for part in name.split("/")):
             raise ValueError("bundle paths must be relative files")
@@ -83,8 +86,96 @@ def compose(release, filename, *arguments):
                 "output_truncated": size > 262144}
 
 
-def run(payload, root=ROOT, execute=compose):
+def stack_directory(payload, data_root=DATA_ROOT):
+    supplied = payload.get('project_id')
+    environment_path = Path('/etc/gap/runtime.json')
+    values = json.loads(environment_path.read_text()) if environment_path.exists() else {}
+    installed = values.get('GAP_PROJECT_ID')
+    if supplied is not None and installed is not None and supplied != installed:
+        raise ValueError('project identity mismatch')
+    project = supplied or installed
+    if not isinstance(project, str) or not re.fullmatch(r'prj_[0-9a-f]{24}', project):
+        raise ValueError('project identity unavailable')
+    data_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if data_root.is_symlink():
+        raise ValueError('unsafe data root')
+    stack = data_root / project
+    if stack.exists() and (stack.is_symlink() or not stack.is_dir()):
+        raise ValueError('unsafe stack directory')
+    stack.mkdir(mode=0o700, exist_ok=True)
+    return stack
+
+
+def promote(decoded, stack, release_id, compose_file):
+    manifest_path = stack / '.gap-release.json'
+    previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    previous_files = previous.get('files', [])
+    if not isinstance(previous_files, list) or any(not isinstance(name, str) for name in previous_files):
+        raise ValueError('invalid release manifest')
+    backup = {}
+    for name in set(previous_files) | set(decoded) | {'.gap-release.json'}:
+        target = stack / name
+        if target.exists() and target.is_file() and not target.is_symlink():
+            if target.stat().st_size > MAX_BODY:
+                raise ValueError('stack target too large to replace')
+            backup[name] = (target.read_bytes(), target.stat().st_mode & 0o777)
+        else:
+            backup[name] = None
+    try:
+        for name, content in decoded.items():
+            target = stack / name
+            current = stack
+            for part in PurePosixPath(name).parts[:-1]:
+                current = current / part
+                if current.exists() and (current.is_symlink() or not current.is_dir()):
+                    raise ValueError('unsafe stack path')
+                current.mkdir(mode=0o700, exist_ok=True)
+            if target.exists() and (target.is_symlink() or target.is_dir()):
+                raise ValueError('unsafe stack target')
+            with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as output:
+                output.write(content)
+                output.flush()
+                os.fchmod(output.fileno(), 0o600)
+                os.fsync(output.fileno())
+            os.replace(output.name, target)
+        for name in set(previous_files) - set(decoded):
+            target = stack / name
+            if target.exists() and target.is_file() and not target.is_symlink():
+                target.unlink()
+        manifest = {'release': release_id, 'compose_file': compose_file, 'files': sorted(decoded)}
+        with tempfile.NamedTemporaryFile(mode='w', dir=stack, delete=False) as output:
+            json.dump(manifest, output, sort_keys=True)
+            output.flush()
+            os.fchmod(output.fileno(), 0o600)
+            os.fsync(output.fileno())
+        os.replace(output.name, manifest_path)
+    except Exception:
+        rollback_promotion(stack, backup)
+        raise
+    return backup
+
+
+def rollback_promotion(stack, backup):
+    for name, saved in backup.items():
+        target = stack / name
+        if saved is None:
+            if target.exists() and target.is_file() and not target.is_symlink():
+                target.unlink()
+            continue
+        content, mode = saved
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as output:
+            output.write(content)
+            output.flush()
+            os.fchmod(output.fileno(), mode)
+            os.fsync(output.fileno())
+        os.replace(output.name, target)
+
+
+def run(payload, root=ROOT, execute=compose, data_root=DATA_ROOT):
     action, body = payload["action"], payload["body"]
+    if action == 'agent_version' and body == {}:
+        return {'ok':True,'sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     if action == 'runtime_environment' and set(body) == {'variables'}:
         from environment import install
         install(body['variables'], ssh_dir=Path('/root/.ssh'))
@@ -120,6 +211,7 @@ def run(payload, root=ROOT, execute=compose):
         if action == "releases":
             decoded = validate_release(body)
             release = root / "releases" / body["request_id"]
+            stack = stack_directory(payload, data_root)
             digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
             metadata = root / (body["request_id"] + ".json")
             if metadata.exists():
@@ -136,12 +228,22 @@ def run(payload, root=ROOT, execute=compose):
             metadata.write_text(json.dumps({"digest": digest, "compose_file": body["compose_file"]}))
             result = execute(release, body["compose_file"], "config", "--quiet")
             if result["ok"]:
+                backup = promote(decoded, stack, body['request_id'], body['compose_file'])
+                try:
+                    result = execute(stack, body["compose_file"], "config", "--quiet")
+                except Exception:
+                    rollback_promotion(stack, backup)
+                    raise
+                if not result['ok']:
+                    rollback_promotion(stack, backup)
+            if result["ok"]:
                 # Record attempted release before mutation: a partial `up` is
                 # still the stack that stop/status must inspect.
                 temp = root / "current.tmp"
-                temp.write_text(json.dumps({"release": body["request_id"], "compose_file": body["compose_file"]}))
+                temp.write_text(json.dumps({"release": body["request_id"], "compose_file": body["compose_file"],
+                                            "project_directory": str(stack)}))
                 temp.replace(root / "current.json")
-                result = execute(release, body["compose_file"], "up", "--detach", "--build",
+                result = execute(stack, body["compose_file"], "up", "--detach", "--build",
                                  "--remove-orphans", "--wait", "--wait-timeout", "120")
             result["release"] = body["request_id"]
             return result
@@ -153,7 +255,8 @@ def run(payload, root=ROOT, execute=compose):
         if not (root / "current.json").exists():
             return {"ok": False, "error": "no_release"}
         current = json.loads((root / "current.json").read_text())
-        return execute(root / "releases" / current["release"], current["compose_file"], *options[action])
+        directory = Path(current.get('project_directory', root / "releases" / current["release"]))
+        return execute(directory, current["compose_file"], *options[action])
 
 
 if __name__ == "__main__":

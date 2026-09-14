@@ -42,6 +42,10 @@ class BundleTests(unittest.TestCase):
         body["files"]["compose.yaml/subfile"] = "eA=="
         with self.assertRaises(ValueError):
             guest.validate_release(body)
+        body = release()
+        body["files"][".gap-release.json"] = "eA=="
+        with self.assertRaises(ValueError):
+            guest.validate_release(body)
 
     def test_guest_lifecycle_no_host_interpolation_or_blind_replay(self):
         calls = []
@@ -49,29 +53,80 @@ class BundleTests(unittest.TestCase):
             calls.append((path, filename, args))
             return {"ok": True}
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            result = guest.run({"action": "releases", "body": release()}, root, execute)
+            root = Path(temp) / 'control';data_root = Path(temp) / 'data'
+            payload={"project_id":PROJECT,"action": "releases", "body": release()}
+            result = guest.run(payload, root, execute, data_root)
             self.assertTrue(result["ok"])
             self.assertEqual(calls[0][2], ("config", "--quiet"))
-            self.assertEqual(calls[1][2][0], "up")
+            self.assertEqual(calls[1][2], ("config", "--quiet"))
+            self.assertEqual(calls[2][2][0], "up")
             self.assertEqual((calls[0][0] / ".env").read_text(), "PROJECT_ENV=guest-only")
-            retry = guest.run({"action": "releases", "body": release()}, root, execute)
+            stack=data_root/PROJECT
+            self.assertEqual((stack/'.env').read_text(), 'PROJECT_ENV=guest-only')
+            self.assertEqual(json.loads((stack/'.gap-release.json').read_text())['release'],'a'*32)
+            (stack/'mariadb').mkdir();(stack/'mariadb'/'database').write_text('persistent')
+            retry = guest.run(payload, root, execute, data_root)
             self.assertFalse(retry["ok"])
-            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(calls), 3)
             for action in ("status", "logs", "stop", "start"):
-                self.assertTrue(guest.run({"action": action, "body": {"request_id": "b" * 32}}, root, execute)["ok"])
+                self.assertTrue(guest.run({"action": action, "body": {"request_id": "b" * 32}}, root, execute, data_root)["ok"])
             self.assertEqual(calls[-2][2], ("stop",))
+            self.assertEqual(calls[-1][0],stack)
+            self.assertEqual((stack/'mariadb'/'database').read_text(),'persistent')
             self.assertTrue((root / "releases" / ("a" * 32)).exists())
 
     def test_partial_up_remains_inspectable(self):
         def execute(path, filename, *args):
             return {"ok": args[0] != "up"}
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            result = guest.run({"action": "releases", "body": release()}, root, execute)
+            root = Path(temp)/'control';data_root=Path(temp)/'data'
+            result = guest.run({"project_id":PROJECT,"action": "releases", "body": release()}, root, execute, data_root)
             self.assertFalse(result["ok"])
             self.assertTrue((root / "current.json").exists())
-            self.assertTrue(guest.run({"action": "stop", "body": {"request_id": "b" * 32}}, root, execute)["ok"])
+            self.assertTrue(guest.run({"action": "stop", "body": {"request_id": "b" * 32}}, root, execute, data_root)["ok"])
+
+    def test_invalid_promoted_release_restores_previous_stack_files(self):
+        calls=[]
+        def execute(path, filename, *args):
+            calls.append((path,args))
+            return {'ok':len(calls)!=5}
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)/'control';data_root=Path(temp)/'data'
+            first={"project_id":PROJECT,"action":"releases","body":release('a'*32)}
+            self.assertTrue(guest.run(first,root,execute,data_root)['ok'])
+            stack=data_root/PROJECT
+            original=(stack/'compose.yaml').read_bytes()
+            changed=release('b'*32)
+            changed['files']['compose.yaml']=base64.b64encode(b'invalid promoted compose').decode()
+            second={"project_id":PROJECT,"action":"releases","body":changed}
+            self.assertFalse(guest.run(second,root,execute,data_root)['ok'])
+            self.assertEqual((stack/'compose.yaml').read_bytes(),original)
+            self.assertEqual(json.loads((stack/'.gap-release.json').read_text())['release'],'a'*32)
+
+    def test_new_release_replaces_managed_files_and_keeps_bind_data(self):
+        def execute(path, filename, *args): return {'ok':True}
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)/'control';data_root=Path(temp)/'data';stack=data_root/PROJECT
+            first={"project_id":PROJECT,"action":"releases","body":release('a'*32)}
+            self.assertTrue(guest.run(first,root,execute,data_root)['ok'])
+            (stack/'mariadb').mkdir();(stack/'mariadb'/'database').write_text('persistent')
+            changed=release('b'*32);del changed['files']['.env']
+            changed['files']['compose.yaml']=base64.b64encode(b'services:\n  app:\n    image: busybox\n').decode()
+            second={"project_id":PROJECT,"action":"releases","body":changed}
+            self.assertTrue(guest.run(second,root,execute,data_root)['ok'])
+            self.assertFalse((stack/'.env').exists())
+            self.assertIn('busybox',(stack/'compose.yaml').read_text())
+            self.assertEqual((stack/'mariadb'/'database').read_text(),'persistent')
+
+    def test_existing_release_directory_remains_usable_before_first_promotion(self):
+        calls=[]
+        def execute(path, filename, *args):
+            calls.append(path);return {'ok':True}
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);release_path=root/'releases'/('a'*32);release_path.mkdir(parents=True)
+            (root/'current.json').write_text(json.dumps({'release':'a'*32,'compose_file':'compose.yaml'}))
+            self.assertTrue(guest.run({'action':'status','body':{'request_id':'b'*32}},root,execute)['ok'])
+            self.assertEqual(calls,[release_path])
 
 
 class RunnerTests(unittest.TestCase):
@@ -213,19 +268,42 @@ class RunnerTests(unittest.TestCase):
                 runner.rpc(dict(rpc, body=dict(release(), vm_id='vm_'+'e'*32)))
         calls = []
         runner.execute = lambda vm, payload: calls.append((vm,payload)) or {'ok': True}
+        runner.sync_guest_agent=Mock()
         runner.run_job(job['job_id'])
         runner.hypervisor.guest.assert_called_once_with(PROJECT, OWNER, selected)
         runner.hypervisor.read.assert_any_call(PROJECT, OWNER, selected)
         self.assertNotIn('vm_id', calls[0][1]['body'])
+        self.assertEqual(calls[0][1]['project_id'],PROJECT)
         self.assertEqual(calls[0][0]['vm_id'], selected)
         with runner.db() as db:
             result = json.loads(db.execute('SELECT result FROM jobs').fetchone()[0])
         self.assertEqual(result['vm_id'], selected)
+        runner.sync_guest_agent.assert_called_once()
         for action in ('start', 'stop', 'status', 'logs'):
             with patch('runner.threading.Thread'):
                 with runner.db() as db: db.execute("UPDATE jobs SET status='succeeded'")
                 status,_ = runner.rpc(dict(rpc, action=action, body={'request_id': __import__('uuid').uuid4().hex, 'vm_id':selected}))
                 self.assertEqual(status, 202)
+
+    def test_guest_agent_upgrade_is_atomic_and_revokes_temporary_key(self):
+        from unittest.mock import Mock
+        runner=Runner(self.path)
+        runner.hypervisor=Mock()
+        runner.hypervisor.authorized_keys.return_value='restrict old-key\n'
+        runner.execute=Mock(side_effect=[{'ok':False},{'ok':True},{'ok':True}])
+        def command(args,**kwargs):
+            if args[0]=='ssh-keygen':
+                key=Path(args[-1]);key.write_text('private');key.with_suffix('.pub').write_text('ssh-ed25519 updater')
+            return SimpleNamespace(returncode=0,stdout=b'')
+        with patch('runner.subprocess.run',side_effect=command) as run:
+            runner.sync_guest_agent({'vm_id':'vm_'+'d'*32,'address':'127.0.0.1','port':22001,
+                                     'ssh_key':'key','known_hosts':'known'}, {'ssh_keys':[]})
+        self.assertEqual(runner.execute.call_count,3)
+        granted=runner.execute.call_args_list[1].args[1]['body']['content']
+        restored=runner.execute.call_args_list[2].args[1]['body']['content']
+        self.assertIn('ssh-ed25519 updater',granted)
+        self.assertEqual(restored,'restrict old-key\n')
+        self.assertIn('mv /tmp/gap-compose-guest.py.new',run.call_args_list[1].args[0][-1])
 
     def test_readiness_distinguishes_process_guest_and_docker_without_wake(self):
         from unittest.mock import Mock
