@@ -226,9 +226,10 @@ The authority neither scans nor adopts existing VM catalogs. Keep the existing l
 checks and physical-host admission checks; they solve different constraints.
 No client is migrated by enabling this flag.
 
-Each customer defaults to the Free Tier: one VM, 2 CPU quarters (0.5 vCPU) and
+Each verified customer receives a one-time Free Trial: $1 (1,000,000 microcredits),
+one VM, 2 CPU quarters (0.5 vCPU) and
 512 MiB RAM. A successful operator `set-quotas` marks that customer as approved;
-placement approvals then carry the standard network policy. Free Tier placement
+placement approvals then carry the standard network policy. Free Trial placement
 approvals carry `network_restricted: true` for enforcement by every worker.
 `set-quotas` replaces all three limits in one audited transaction and requires
 the current quota revision (`0` for defaults). Zero is allowed; increasing a
@@ -633,7 +634,9 @@ credential; save it privately (`fleet-control.py --output`), never in logs.
 `/account` on the operator gateway redirects to the isolated management origin.
 Humans sign in using a fresh email challenge (`POST /v1/fleet/login`, then
 `/v1/fleet/login/verify`). Challenges are scoped to human login: an agent bearer
-or an identity-link/signup code cannot grant account-wide access. A newly verified address opens an empty account without promotional funding. Operator-provided human control
+or an identity-link/signup code cannot grant account-wide access. A newly verified
+address receives exactly one $1 promotional trial grant, including an existing
+verified customer on their next login. Operator-provided human control
 credentials can also be entered without sending an email. Credentials stay in
 page memory, expire within one hour, and logout revokes them. Refreshing the
 page requires reconnecting; no credential is stored in browser storage.

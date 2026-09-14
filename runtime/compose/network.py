@@ -181,7 +181,7 @@ class Network:
                 self.manager.save(meta)
                 return {'ok': True, 'ssh': self.ssh_public(meta)}
             if meta.get('network_restricted') and body['mappings']:
-                raise VMError('free_tier_public_ports_disabled')
+                raise VMError('trial_public_ports_disabled')
             if not meta.get('public_ports'):
                 with self.manager.allocation_lock():
                     self.allocate(meta)

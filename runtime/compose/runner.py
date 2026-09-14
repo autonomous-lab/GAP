@@ -318,8 +318,8 @@ class Runner:
             quota = approval.get("quota")
             if not valid_quota(quota):
                 raise Failure(403, "microvm_quota_unavailable")
-            if (approval.get('tier') not in ('free','approved')
-                    or approval.get('network_restricted') is not (approval['tier']=='free')):
+            if (approval.get('tier') not in ('trial','approved')
+                    or approval.get('network_restricted') is not (approval['tier']=='trial')):
                 raise Failure(403,"microvm_network_policy_unavailable")
             guest["quota"] = quota
             guest["always_on_allowed"] = approval.get("always_on_allowed") is True

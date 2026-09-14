@@ -45,6 +45,8 @@ class SuspensionTests(unittest.TestCase):
         with self.assertRaisesRegex(Failure,'customer_suspended'):self.a.issue(self.customer,OWNER)
         self.assertTrue(suspension.snapshot(self.a,'one')['all_blocked'])
     def test_abuse_hold_prevents_early_retention_deletion(self):
+        with self.a.db() as db:
+            db.execute('UPDATE customers SET balance=0 WHERE id=?',(self.customer,))
         retention.status(self.a,'one',PROJECT,OWNER)
         self.change(retention_hours=100);self.now+=73*3600
         with self.assertRaisesRegex(Failure,'retention_not_due'):retention.claim(self.a,'one',PROJECT,OWNER,'purge')

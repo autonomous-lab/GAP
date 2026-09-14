@@ -152,7 +152,7 @@ class RunnerTests(unittest.TestCase):
                 with self.assertRaises(Failure) as failure:
                     runner.authorize(PROJECT, OWNER)
                 self.assertEqual(failure.exception.code, 'microvm_quota_unavailable')
-            response.read.return_value = b'{"allowed":true,"quota":{"vcpus":0.5,"memory_mib":512},"tier":"free","network_restricted":true}'
+            response.read.return_value = b'{"allowed":true,"quota":{"vcpus":0.5,"memory_mib":512},"tier":"trial","network_restricted":true}'
             self.assertEqual(runner.authorize(PROJECT, OWNER)['quota']['memory_mib'], 512)
 
     def test_idempotency_busy_jobs_scoping_and_payload_erasure(self):

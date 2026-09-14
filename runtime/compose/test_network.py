@@ -90,7 +90,7 @@ class NetworkTests(unittest.TestCase):
         self.meta['network_restricted']=True
         self.reserve(self.meta)
         direct=dict(request_id='a'*32,vm_id=V,mappings=[dict(slot=1,guest_port=8000,protocol='tcp')])
-        with self.assertRaisesRegex(VMError,'free_tier_public_ports_disabled'):
+        with self.assertRaisesRegex(VMError,'trial_public_ports_disabled'):
             self.net.perform(P,O,'ports',direct)
         self.net.perform(P,O,'ports',dict(direct,mappings=[]))
 

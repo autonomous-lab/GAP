@@ -8,8 +8,10 @@ import hashlib
 import re
 import secrets
 
-from authority import Failure, encode, identifier
+from authority import Failure, amount, encode, identifier
 import suspension
+
+TRIAL_CREDITS = 1_000_000
 
 
 class Access:
@@ -25,6 +27,18 @@ class Access:
                 customer TEXT NOT NULL REFERENCES customers(id))''')
             db.execute('''CREATE TABLE IF NOT EXISTS identity_sources(agent TEXT PRIMARY KEY,
                 node TEXT NOT NULL,email TEXT NOT NULL REFERENCES verified_emails(email))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS trial_grants(customer TEXT PRIMARY KEY
+                REFERENCES customers(id), granted INTEGER NOT NULL)''')
+
+    def ensure_trial(self, db, customer):
+        inserted=db.execute('INSERT OR IGNORE INTO trial_grants VALUES(?,?)',
+                            (customer,int(self.a.clock())))
+        if inserted.rowcount != 1:return
+        row=self.a.customer(db,customer);balance=amount(row['balance']+TRIAL_CREDITS)
+        db.execute('UPDATE customers SET balance=? WHERE id=?',(balance,customer))
+        db.execute('DELETE FROM retention_clocks WHERE customer=?',(customer,))
+        self.a.entry(db,customer,None,None,'funding',TRIAL_CREDITS,'promotional',
+                     'verified-email','microvm-trial-v1')
 
     def connect(self, node, request, email, agent, project, manual_reason=None):
         # Gateway validates its durable email proof and local owner bearer.
@@ -68,6 +82,7 @@ class Access:
             db.execute('INSERT OR IGNORE INTO identity_sources VALUES(?,?,?)', (agent, node, email))
             db.execute('INSERT OR IGNORE INTO projects VALUES(?,?,?,?)', (project, customer, node, agent))
             db.execute("INSERT OR IGNORE INTO grants VALUES(?,?,'owner')", (project, agent))
+            self.ensure_trial(db,customer)
             return dict(customer_id=customer, agent_did=agent, project_id=project, node_id=node,
                         operator_id=self.a.operator, legacy_balance_transferred=False,
                         confirmation_method="operator_confirmation" if manual_reason else "identity_gateway",
@@ -99,6 +114,7 @@ class Access:
                 db.execute('INSERT INTO customers(id,label,created) VALUES(?,?,?)',(customer,'Verified customer',int(self.a.clock())))
                 db.execute('INSERT INTO verified_emails VALUES(?,?)',(email.lower(),customer))
                 db.execute("INSERT INTO principals VALUES('human',?,?,1)",('email:'+hashlib.sha256(email.lower().encode()).hexdigest(),customer))
+            self.ensure_trial(db,customer)
         return self.a.issue(customer,None)
 
     def members(self, actor):

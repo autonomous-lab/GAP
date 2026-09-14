@@ -243,7 +243,7 @@ def host_approval(authority, node, project, owner):
         quota = dict(max_vms=len(rows), vcpus=sum(r['cpu'] for r in rows)/4,
                      memory_mib=sum(r['memory'] for r in rows), disk_gib=sum(r['disk'] for r in rows))
         tier=db.execute('SELECT tier FROM customer_tiers WHERE customer=?',(bound['customer'],)).fetchone()
-        tier=tier['tier'] if tier else 'free'
+        tier=tier['tier'] if tier else 'trial'
         return dict(operator_id=authority.operator, id=project, node=node, owner=owner,
-                    managed=True, tier=tier, network_restricted=tier=='free',
+                    managed=True, tier=tier, network_restricted=tier=='trial',
                     always_on_allowed=False, quota=quota)

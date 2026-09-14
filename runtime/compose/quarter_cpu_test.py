@@ -10,7 +10,7 @@ def main():
     state=os.environ.get('GAP_TEST_VM_STATE','/test-vms')
     m=MicroVMs({'state_dir':state,'image_dir':'/images','cpu_quota_socket':'/run/gap-cpu/quota.sock','diagnostic_serial':True},execute_guest)
     m.approval_provider=lambda project,owner:{'quota':{'max_vms':1,'vcpus':.5,'memory_mib':512},
-        'tier':'free','network_restricted':True,'always_on_allowed':False}
+        'tier':'trial','network_restricted':True,'always_on_allowed':False}
     project='prj_'+uuid.uuid4().hex[:24]; owner='did:gap:'+uuid.uuid4().hex*2
     key=Path(state)/('rsa-test-'+uuid.uuid4().hex)
     subprocess.run(['ssh-keygen','-q','-t','rsa','-b','2048','-N','','-f',str(key)],check=True)

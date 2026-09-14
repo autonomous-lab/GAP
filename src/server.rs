@@ -2609,7 +2609,7 @@ the content inline"
         }
         (policy.runner.is_some() && self.verified_email(did)).then_some((
             crate::private_node::MicroVMQuota{vcpus:0.5,memory_mib:512,max_vms:1,disk_gib:None},
-            false,true,"free"))
+            false,true,"trial"))
     }
 
     pub(super) fn microvm_project_allowed(&self,project:&str,owner:&str)->bool {
@@ -10488,7 +10488,7 @@ mod tests {
             scope:"cloud_verified_agent_emails".into(),key:did.clone(),
             value:json!({"email":"verified@example.test","verified_at":1}).to_string(),updated_at:1}).unwrap();
         let (status,free)=route_with_ip(&arc,"POST","/internal/compose/authorize",payload.as_bytes(),Some("Bearer runner-secret"),None);
-        assert_eq!(status,200);assert_eq!(free["tier"],"free");assert_eq!(free["network_restricted"],true);
+        assert_eq!(status,200);assert_eq!(free["tier"],"trial");assert_eq!(free["network_restricted"],true);
         assert_eq!(free["quota"]["max_vms"],1);assert_eq!(free["quota"]["vcpus"],0.5);assert_eq!(free["quota"]["memory_mib"],512);
         arc.lock().unwrap().storage.delete_state("cloud_verified_agent_emails",&did).unwrap();
         assert_eq!(arc.lock().unwrap().workload_policy(project,true)["allowed"],false);

@@ -411,9 +411,11 @@ Paths above are relative to `/v1/cloud/projects/{project_id}`. Configure the
 application's base path; root-relative links are not rewritten. Applications
 are long-running services, not time-bounded serverless function invocations.
 MicroVM access on the public deployment is available after email verification.
-The Free Tier provides one serverless VM with 0.5 vCPU and 512 MiB RAM. Its QEMU
+The Free Trial grants each verified customer $1 of promotional credit once and
+provides one serverless VM with 0.5 vCPU and 512 MiB RAM. Its QEMU
 network blocks guest-initiated outbound traffic and direct TCP/UDP publication;
-applications remain reachable through the managed HTTPS reverse proxy.
+applications remain reachable through the managed HTTPS reverse proxy. Once the
+trial credit is spent, prepaid billing stops execution until the account is funded.
 See the [complete quickstart](./AGENTS.md#managed-app-quickstart),
 [lifecycle API](./AGENTS.md#manage-the-microvm-and-publication) and
 [operator setup](./runtime/compose/README.md).
@@ -427,7 +429,7 @@ the guest; no GAT host Docker socket is given to GAP or workloads.
 
 Enable on public or private nodes with `GAP_COMPOSE_ENABLED=1` and the mandatory
 operator-owned `GAP_COMPOSE_APPROVALS_FILE`. Public registration and ordinary
-Cloud services remain open. Email-verified owners receive the Free Tier automatically;
+Cloud services remain open. Email-verified owners receive the Free Trial automatically;
 listed owners use their operator-assigned quota and standard network policy. Allocate the
 minimum needed; the operator can change limits live with `scripts/microvm-access.py
 set-quota <DID> --vcpus 2 --memory-mib 4096 --max-vms 1`. Optional per-agent disk quotas include retained volumes;

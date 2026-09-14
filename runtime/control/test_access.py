@@ -31,7 +31,7 @@ class AccessTests(unittest.TestCase):
         self.assertEqual([p['id'] for p in self.a.projects(actor['customer'],actor['agent'])['projects']], [PROJECT])
         with self.assertRaisesRegex(Failure,'project_management_required'):
             self.access.issue(actor,SECOND)
-        self.assertEqual(self.a.wallet(first['customer_id'])['balance_microcredits'],0)
+        self.assertEqual(self.a.wallet(first['customer_id'])['balance_microcredits'],1_000_000)
         self.assertFalse(first['legacy_balance_transferred'])
 
     def test_concurrent_connection_is_atomic_and_replay_does_not_store_tokens(self):
@@ -41,6 +41,9 @@ class AccessTests(unittest.TestCase):
         self.assertNotEqual(results[0]['credential']['token'],results[1]['credential']['token'])
         with self.a.db() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM customers').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT count(*) FROM trial_grants').fetchone()[0],1)
+            grant=db.execute("SELECT delta,source,actor,operation FROM wallet_entries WHERE kind='funding'").fetchone()
+            self.assertEqual(tuple(grant),(1_000_000,'promotional','verified-email','microvm-trial-v1'))
             self.assertNotIn('gapc_', db.execute('SELECT result FROM operations').fetchone()[0])
         with self.assertRaisesRegex(Failure,'request_id_conflict'):
             self.connect(email='other@example.com')
@@ -182,9 +185,12 @@ class AccessTests(unittest.TestCase):
         self.app.handle('POST','/v1/members',human,dict(body,request_id='reattach'))
         self.assertTrue(self.a.issue(actor['customer'],AGENT)['token'])
 
-    def test_verified_human_can_open_empty_account_without_free_money(self):
+    def test_verified_human_receives_one_trial_credit_once(self):
         first=self.access.human_login('new@example.com')
         second=self.access.human_login('New@example.com')
         self.assertEqual(first['customer_id'],second['customer_id'])
-        self.assertEqual(self.a.wallet(first['customer_id'])['total_remaining_microcredits'],0)
+        self.assertEqual(self.a.wallet(first['customer_id'])['total_remaining_microcredits'],1_000_000)
+        with self.a.db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM trial_grants').fetchone()[0],1)
+            self.assertEqual(db.execute("SELECT count(*) FROM wallet_entries WHERE source='promotional'").fetchone()[0],1)
         self.assertEqual(self.app.handle('GET','/v1/projects',first['token'],{})['projects'],[])

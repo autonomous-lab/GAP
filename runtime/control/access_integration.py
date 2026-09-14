@@ -158,7 +158,7 @@ class FleetIdentityIntegration(unittest.TestCase):
                 current['proc']=current['start']()
                 self.assertEqual(request(current['base'],path,token)[0],401)
                 self.assertEqual(request(current['base'],path,current['identity']['token'])[0],200)
-            self.assertEqual(authority.wallet(one['linked']['customer_id'])['balance_microcredits'],0)
+            self.assertEqual(authority.wallet(one['linked']['customer_id'])['balance_microcredits'],1_000_000)
 
 
 if __name__=='__main__':unittest.main()

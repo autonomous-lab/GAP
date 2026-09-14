@@ -96,9 +96,9 @@ class Authority:
                 'CREATE INDEX IF NOT EXISTS capacity_customer ON capacity(customer,state,vm)',
             ):
                 db.execute(sql)
-            # Quotas written before tiers existed are either the former free
+            # Quotas written before tiers existed are either the former default
             # defaults or an explicit operator override. Preserve overrides as
-            # approved accounts and migrate only the old defaults to Free.
+            # approved accounts and migrate only the old trial defaults.
             db.execute('''INSERT OR IGNORE INTO customer_tiers(customer,tier)
                 SELECT customer,'approved' FROM quotas
                 WHERE NOT (max_vms=1 AND cpu_quarters=4 AND memory_mib=1024)''')

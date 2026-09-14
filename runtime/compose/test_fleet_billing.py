@@ -96,7 +96,7 @@ class FleetTests(unittest.TestCase):
             lambda body:app.handle('POST','/node','target-token',body))
         approval=target.placement_approval(P,O,placed['placement_id'])
         self.assertEqual(approval['quota'],dict(max_vms=1,vcpus=.5,memory_mib=512,disk_gib=8))
-        self.assertEqual((approval['tier'],approval['network_restricted']),('free',True))
+        self.assertEqual((approval['tier'],approval['network_restricted']),('trial',True))
         self.assertTrue(target.dynamically_managed(P))
         self.assertEqual(target.view(P,O)['balance_microcredits'],0)
 

@@ -124,7 +124,7 @@ $('delete-form').onsubmit=e=>{e.preventDefault();action(async()=>{if(!vm?.vm_id|
 function bytes(value){if(value==null||!Number.isFinite(Number(value)))return '—';const n=Number(value);for(const [unit,size]of [['GiB',1073741824],['MiB',1048576],['KiB',1024]])if(n>=size)return (n/size).toLocaleString(undefined,{maximumFractionDigits:2})+' '+unit;return n.toLocaleString(undefined,{maximumFractionDigits:0})+' B'}
 function renderNetwork(ports,ingress,metrics){
  const exists=!!vm?.vm_id&&vm.state!=='destroyed';$('network-panel').hidden=!exists;$('vm-measurements').hidden=!exists;
- const restricted=vm?.network_policy==='reverse_proxy_only';$('network-policy').textContent=restricted?'Free tier · reverse proxy only':'Standard';$('network-policy-help').textContent=restricted?'Outbound connections and direct public TCP/UDP ports are blocked. Publish applications through the HTTPS route below.':'Outbound traffic and direct public ports follow the operator policy.';$('public-ports-panel').hidden=restricted;
+ const restricted=vm?.network_policy==='reverse_proxy_only';$('network-policy').textContent=restricted?'Free Trial · reverse proxy only':'Standard';$('network-policy-help').textContent=restricted?'Outbound connections and direct public TCP/UDP ports are blocked. Publish applications through the HTTPS route below.':'Outbound traffic and direct public ports follow the operator policy.';$('public-ports-panel').hidden=restricted;
  const dns=metrics.public_network,ips=dns?.addresses||[];
  $('network-address').textContent=ports.hostname||dns?.hostname||'Hostname unavailable';
  $('network-ip-note').textContent=ips.length?'· '+ips.join(' / '):metrics.error?'· IP lookup unavailable':'';
@@ -254,7 +254,7 @@ function renderConnections(ssh,ports){
  $('ssh-fingerprint').textContent=ssh.host_key_fingerprint||'Not available';
  $('ssh-command').textContent=connection?.command||'';$('ssh-command-box').hidden=!connection;
  $('ssh-key-count').textContent=(ssh.authorized_keys?.length||0)+' authorized public key(s).';
- $('ssh-help').textContent=ssh.error?'Could not load SSH settings: '+ssh.error:connection?'Run this command locally with the private key matching an authorized public key. Add -i /path/to/private_key if needed. Verify the host fingerprint on first connection.':vm?.network_policy==='reverse_proxy_only'?'Free tier uses the web terminal and does not expose SSH publicly.':ports.error?'Could not load public ports: '+ports.error:'Expose an unused TCP port to guest port 22 to connect from your computer. The web terminal works without public exposure.';
+ $('ssh-help').textContent=ssh.error?'Could not load SSH settings: '+ssh.error:connection?'Run this command locally with the private key matching an authorized public key. Add -i /path/to/private_key if needed. Verify the host fingerprint on first connection.':vm?.network_policy==='reverse_proxy_only'?'Free Trial uses the web terminal and does not expose SSH publicly.':ports.error?'Could not load public ports: '+ports.error:'Expose an unused TCP port to guest port 22 to connect from your computer. The web terminal works without public exposure.';
  if(!ssh.error&&!ssh.authorized_keys?.length)$('ssh-help').textContent+=' Add your public key before connecting from your computer.';
  $('ssh-expose').hidden=vm?.network_policy==='reverse_proxy_only'||!!connection||!ports.ports?.some(p=>!p.guest_port);
  if(terminalSession&&(terminalSession.vm!==selectedVM||vm?.state!=='running'))closeTerminal();

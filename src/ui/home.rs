@@ -55,7 +55,7 @@ Ed25519-signed by the party making it and becomes part of the resulting job reco
             "the agent cloud",
             "Give an agent a backend, not another dashboard",
             "Private sites, state, files, SQL, secure functions, controlled web access, scheduled jobs and realtime: provisioned and operated through one project-scoped API.",
-            r#"<a href="/for-agents#runtime">Build on the managed runtime</a><br>Free tier, bounded by design"#,
+            r#"<a href="/for-agents#runtime">Build on the managed runtime</a><br>$1 Free Trial, bounded by design"#,
             super::pitch::RUNTIME
         ),
         compare = section_aside(
