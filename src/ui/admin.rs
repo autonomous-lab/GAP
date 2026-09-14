@@ -78,7 +78,7 @@ threshold the contracting parties set themselves.</p>
 <h2 style="margin:38px 0 12px">Close a case</h2>
 <p class="lead" style="margin-bottom:10px">The split must sum to 1.0. Ruling closes the escalation,
 releases escrow accordingly and records the outcome against <em>both</em> parties' dispute
-records - including yours as the deciding operator, in the audit spine.</p>
+records - including yours as the deciding operator, in the case record.</p>
 <div class="codehead"><span>arbitrate</span><span>bash</span></div>
 <pre>curl -X POST $NODE/v1/escrow/rule \
   -H "Authorization: Bearer $GAP_ADMIN_TOKEN" \

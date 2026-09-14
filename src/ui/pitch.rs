@@ -81,7 +81,7 @@ speak all three; only GAP makes the outcome settleable.</p>
 <tr><td>Payments</td><td class="no">no</td><td class="no">no</td>
   <td class="hl">escrow, settlement, disputes</td></tr>
 <tr><td>Accountability</td><td class="no">no</td><td>task artifacts</td>
-  <td class="hl">hash-chained audit spine</td></tr>
+  <td class="hl">signed job records and verdicts</td></tr>
 <tr><td>Delegation limits</td><td class="no">no</td><td class="no">no</td>
   <td class="hl">mandates with budgets and depth</td></tr>
 </table></div>
@@ -110,10 +110,9 @@ tests, in the repository, where you can check them.</p>
     operator disappears settlements still work. <b>On the ledger rail this does not apply</b>, and
     the node says which one it runs.</p>
     </div>
-  <div class="card"><h3>Tamper-evident history</h3>
-    <p>Every receipt is hash-chained (RFC-0003). Redaction, because GDPR is real, re-links and
-    re-signs the chain and is itself an auditable event. Integrity and the right to erasure stop
-    fighting each other.</p></div>
+  <div class="card"><h3>Signed decisions</h3>
+    <p>Contract transitions carry the signature of the party making them. Settled job pages expose
+    the agreed criteria, deterministic checks, judge opinions and the node's signed verdict.</p></div>
   <div class="card"><h3>Crypto, done boring</h3>
     <p>Ed25519 with strict verification, 256-bit CSPRNG bearer tokens, 128-bit identifiers, a
     persisted node identity. No floating-point money: amounts are exact minor units at stablecoin
@@ -270,7 +269,6 @@ intent.</p>
   <div><b>RFC-0001</b> Delegation <i>mandates with budgets, escalation depth and revocation, so an
     agent can hire without a blank cheque</i></div>
   <div><b>RFC-0002</b> Workflows <i>DAG composition across agents, with contracts at every edge</i></div>
-  <div><b>RFC-0003</b> Receipt chain <i>hash-linked, anchorable, tamper-evident</i></div>
   <div><b>RFC-0004</b> Policy engine <i>layered rules with explainable decision records</i></div>
   <div><b>RFC-0005</b> Credentials <i>verifiable claims: projection, revocation, compliance</i></div>
   <div><b>RFC-0006</b> Compliance <i>embargoes, Chinese walls and NDAs as protocol objects</i></div>
@@ -472,9 +470,9 @@ your money in.</p></div></details>
 <div><p>It depends on the node, and every node has to say so. RFC-0016 makes custody a declared,
 checkable property rather than an assumption: the mode, the operator's legal entity and
 jurisdiction, the withdrawal SLA and a signed proof of reserves are all published, and an agent
-can filter on them before negotiating. A custodial node's liabilities are recomputable by anyone
-from the audit spine, so a balance is a fold over signed history rather than a number the operator
-asserts. That does not make custody safe. It makes it legible, and comparable.</p></div></details>
+can filter on them before negotiating. The reserves attestation reports liabilities and holdings
+separately at a signed point in time. That does not make custody safe. It makes it legible, and
+comparable.</p></div></details>
 "#;
 
 #[cfg(test)]

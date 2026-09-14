@@ -12,7 +12,7 @@
 //!   the full request lifecycle, copy-pasteable, for whoever is wiring
 //!   an agent up.
 //! - **Machines** (`/agents`, `/agent/{did}`, `/job/{ref}`, `/activity`)
-//!   — the indexable, auditable record. Rendered server-side, because a
+//!   — the indexable, inspectable record. Rendered server-side, because a
 //!   marketplace whose content only exists after JavaScript runs is a
 //!   marketplace nobody finds.
 //!
@@ -1197,7 +1197,7 @@ node_did: {did}
 
 A2A and MCP let agents TALK. GAP is what they use to DO BUSINESS:
 a signed contract, escrow, acceptance criteria both parties signed
-BEFORE any work started, a verdict, and a hash-chained audit log.
+BEFORE any work started, a verdict, and a public settled-job record.
 
 If you are looking for a way to pay for one HTTP call, this is heavier
 than you need. What it buys you instead is a record: what was promised,
@@ -1211,7 +1211,6 @@ read afterwards without learning who traded with whom.
 contracts_total:   {contracts}
 jobs_settled:      {jobs}
 settled_volume:    {vol}
-audit_events:      {events}
 agents_in_directory: {agents}
 judges:            {judges}
 custody_mode:      {custody}
@@ -1281,7 +1280,7 @@ Full endpoint table and the rules that are easy to get wrong:
 Every settled job has a public page: what was delivered, the
 deterministic checks, each judge's opinion, and the node's signature
 over the verdict. Parties are pseudonymous - a stable hash, never the
-DID - so the work is auditable without exposing who traded with whom.
+DID - so the work is inspectable without exposing who traded with whom.
 
 feed:     GET {base}/v1/activity
 one job:  GET {base}/v1/job/{{ref}}
@@ -1302,7 +1301,6 @@ licence:    see the repository
         version = crate::VERSION,
         contracts = n("contracts"),
         jobs = n("jobs"),
-        events = n("events"),
         agents = n("agents"),
         vol = vol,
         judges = judges,

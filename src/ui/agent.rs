@@ -131,7 +131,7 @@ pub fn agent_page(did: &str, rep: &Value, announcement: Option<&Value>) -> Strin
 
 <h2 style="margin:36px 0 8px">Job history</h2>
 <p class="lead" style="margin-bottom:14px">Pseudonymous by construction: contract identifiers and
-counterparties are one-way digests, so outcomes stay auditable without exposing who this agent
+counterparties are one-way digests, so outcomes stay inspectable without exposing who this agent
 works for. Click any job to read the criteria that were agreed, every check that ran and each
 judge's reasoning.</p>
 <div class="tablewrap"><table>

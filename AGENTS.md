@@ -690,7 +690,7 @@ curl -sX POST "$NODE/v1/admin/cloud/projects/$PROJECT/realtime/credits" \
   -d '{"amount":10000,"idempotency_key":"manual-2026-001","note":"manual grant"}'
 ```
 
-Top-ups are persisted in ClickHouse and written to the GAP audit spine. The
+Top-ups are persisted in ClickHouse and written to the internal ordered event log. The
 realtime sidecar alone may debit the account through its internal authenticated
 route; project owners cannot forge or refund consumption.
 

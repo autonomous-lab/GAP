@@ -42,7 +42,7 @@ pub fn home_page(stats: &Value, dir: &Value, activity: &Value) -> String {
             "the protocol",
             "One deal, seven moves, every one signed",
             "This is the actual API of this node. Click through the lifecycle: each transition is \
-Ed25519-signed by the party making it, and every event lands on a hash-chained audit spine.",
+Ed25519-signed by the party making it and becomes part of the resulting job record.",
             r#"<a href="/for-agents">Full endpoint reference</a>"#,
             super::pitch::LIFECYCLE
         ),
@@ -128,7 +128,7 @@ capabilities, sign contracts, escrow payment and settle only against a verified 
                 "license": "MIT OR Apache-2.0",
                 "codeRepository": "https://github.com/autonomous-lab/GAP",
                 "description": "Rust reference implementation of the Geta Agent Protocol: \
-portable agent identity, signed contracts, escrowed payment, verified delivery, an audit spine and \
+portable agent identity, signed contracts, escrowed payment, verified delivery and \
 a managed backend agents can provision for themselves.",
                 "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
             },
@@ -217,7 +217,7 @@ const DEAL_JS: &str = r##"
     ['t-tx','<span class="t-am">analyst-7</span>  POST /v1/contract/c_58d21/deliver    <span class="t-gr">200</span> - proof sha256:ab41c0...'],
     ['t-tx','<span class="t-vi">buyer-01</span>   POST /v1/contract/c_58d21/verify     <span class="t-gr">200</span> - integrity ok - judges: <span class="t-gr">conforms</span>'],
     ['t-gr','settlement  0.050000 USDC -> did:gap:9c17... (analyst-7)'],
-    ['t-gr','audit spine +12 events - hash-chain verified - tamper-evident'],
+    ['t-gr','signed settlement record published - counterparties pseudonymised'],
     ['t-tx','<span class="t-am">gap-node</span>   POST buyer-01.example/gap/events     <span class="t-gr">200</span> - signed push - <span class="t-cy">no polling</span>'],
     ['t-dim','- five cents, settled in 43 s, zero humans. replaying -']
   ];
@@ -392,8 +392,8 @@ fn custody_card(stats: &Value) -> String {
 
     let proof = if stats["liabilities"].is_string() {
         r#"<p style="margin-top:11px"><a href="/v1/reserves">Signed proof of reserves</a> - the
-        liabilities are recomputable from the audit spine, so only the holdings rest on the
-        operator's word.</p>"#
+        attestation reports liabilities and holdings separately, with the node's identity and
+        timestamp.</p>"#
     } else {
         r#"<p style="margin-top:11px"><a href="/.well-known/gap-agent.json">Declared in the
         AgentCard</a>, so an agent can filter on it before negotiating.</p>"#
@@ -602,7 +602,7 @@ fn hero(stats: &Value) -> String {
         s_jobs = stat(&num(jobs), "jobs settled", ""),
         s_rate = rate,
         s_judges = stat(&judges.to_string(), "independent judges", "cy"),
-        s_events = stat(&num(events), "audit spine events", ""),
+        s_events = stat(&num(events), "activity events", ""),
     )
 }
 
@@ -662,12 +662,11 @@ fn trust(stats: &Value) -> String {
       <li><b>It cannot read confidential work.</b> Payloads are sealed to the recipient's X25519
       key; holding signing keys in custody grants no ability to decrypt.</li>
       <li><b>It cannot invent a score.</b> Reputation is recomputed from signed verdicts.</li>
-      <li><b>It cannot silently rewrite history.</b> Every state change is appended to a
-      monotonic audit spine - {events} events so far.</li>
+      <li><b>It cannot settle before verification.</b> Digest, deadline and agreed acceptance
+      criteria are checked before funds move.</li>
     </ul></div>
 </div>"#,
-        panel = panel,
-        events = num(stats["events"].as_u64().unwrap_or(0))
+        panel = panel
     );
 
     section(
@@ -876,7 +875,7 @@ fn recent(activity: &Value) -> String {
     section(
         "live",
         "Settlements, as they happen",
-        "Pseudonymous by construction: you can audit what was delivered and how it was judged \
+        "Pseudonymous by construction: you can inspect what was delivered and how it was judged \
 without learning who traded with whom.",
         &format!(
             r#"<p style="margin-bottom:14px"><span class="live"><i></i> streaming</span></p>
@@ -927,7 +926,7 @@ mod tests {
     #[test]
     fn the_home_page_leads_with_this_nodes_real_numbers() {
         let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": [] }));
-        assert!(html.contains("audit spine events"));
+        assert!(html.contains("activity events"));
         assert!(html.contains("240"), "event count is shown");
         assert!(html.contains("92%"), "11/12 conforming, rounded");
         // Asserted on the stat entry, not just the string: the worked

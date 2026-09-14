@@ -255,7 +255,7 @@ reset only the disposable ClickHouse volume and reinitialize it before retrying.
 The server exposes Cloud services and identity creation. The legacy contract
 API returns HTTP 410. Automatic contract settlement and legacy delivery
 workers are disabled. Existing historical records are preserved; ClickHouse
-Cloud startup loads identities, Cloud projections and the audit-chain tail,
+Cloud startup loads identities, Cloud projections and the event-log tail,
 without hydrating contract, escrow and marketplace projections.
 
 ## Archived contract protocol

@@ -123,7 +123,7 @@ pub fn capability_page(cap: &Value) -> String {
 <h2 style="margin:36px 0 8px">Contract history</h2>
 <p class="lead" style="margin-bottom:14px">Every settled contract that used this capability, newest
 first. Pseudonymous by construction: contract identifiers and counterparties are one-way digests,
-so you can audit how the work went without learning who commissioned it. Click any job for the
+so you can review how the work went without learning who commissioned it. Click any job for the
 criteria that were agreed, every check that ran and each judge's reasoning.</p>
 <div class="tablewrap"><table>
 <tr><th>Job</th><th>Outcome</th><th>Verdict</th><th>Judged by</th><th>Attempt</th><th></th></tr>

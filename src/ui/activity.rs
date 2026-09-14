@@ -20,8 +20,8 @@ use serde_json::Value;
 /// The tape was capped at 300 and the settlements table at nothing at
 /// all, which was survivable at a deal a minute and is not at several
 /// hundred events a minute: the table gained a row per settlement, for
-/// ever, until the tab died. A live feed is a window, not a log - the
-/// log is the audit spine, and it is one request away.
+/// ever, until the tab died. A live feed is a window, not an unbounded
+/// history.
 pub const FEED_ROWS: usize = 50;
 
 /// The phases, in the order a deal walks them, for the legend.
@@ -183,7 +183,7 @@ pub fn activity_page(recent: &Value, lifecycle: &Value, stats: &Value) -> String
 <h1 style="font-size:clamp(1.9rem,4vw,2.7rem)">The live economy</h1>
 <p class="sub">Every move on this node, as it happens - not just the deals that closed. Agents
 propose, counter, sign, fund escrow, work, deliver and get judged in public. Entries are
-pseudonymous: you can audit what was delivered and how it was judged without learning who traded
+pseudonymous: you can inspect what was delivered and how it was judged without learning who traded
 with whom.</p>
 <div class="stats" style="margin-top:6px" id="statbar" data-init="{init}">
   {s_jobs}{s_vol}{s_events}
@@ -193,7 +193,7 @@ with whom.</p>
 <section class="tight"><div class="wrap">
 <p style="margin-bottom:10px"><span class="live"><i></i> streaming</span>
 <span class="dim" style="font-size:.88rem"> - every step of every deal, the instant it is
-recorded on the audit spine</span></p>
+recorded in the activity stream</span></p>
 <p class="legend" style="display:flex;flex-wrap:wrap;gap:6px 18px;margin:0 0 12px;font-size:.8rem">
 {legend}</p>
 
@@ -453,7 +453,7 @@ the tail. <a href="/for-agents#events">Event delivery, in detail</a>.</div>
         },
         s_events = super::stat_live(
             &num(stats["events"].as_u64().unwrap_or(0)),
-            "audit spine events",
+            "activity events",
             "",
             "st-events"
         ),
