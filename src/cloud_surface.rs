@@ -44,15 +44,23 @@ pub fn page(path: &str) -> Option<(&'static str, String)> {
 }
 
 fn product_page(source: &str, active: &str) -> String {
+    // The public /microvms route embeds this console from the admin origin.
+    // Navigation must replace the outer page; otherwise CSP correctly blocks
+    // pages such as /account from being rendered inside that iframe.
+    let navigation_target = if active == "/microvms" {
+        " target=\"_top\""
+    } else {
+        ""
+    };
     let links = [("/", "Home"), ("/explorer", "Explore"), ("/pricing", "Pricing"),
         ("/microvms", "MicroVMs"), ("/docs", "Docs"), ("/account", "Account")];
     let links = links.iter().map(|(href, label)| format!(
-        "<a href=\"{href}\"{}>{label}</a>",
+        "<a href=\"{href}\"{navigation_target}{}>{label}</a>",
         if *href == active { " aria-current=\"page\"" } else { "" }
     )).collect::<String>();
     let wordmark = include_str!("ui/gap_wordmark.svg");
     let navigation = format!(r#"<header class="gap-header"><div class="gap-header-inner">
-<a class="gap-brand" href="/" aria-label="GAP Cloud home">{wordmark}</a>
+<a class="gap-brand" href="/"{navigation_target} aria-label="GAP Cloud home">{wordmark}</a>
 <nav class="gap-desktop" aria-label="Main navigation">{links}</nav>
 <div class="gap-mobile"><details><summary>Menu</summary><nav aria-label="Mobile navigation">{links}</nav></details></div>
 </div></header>"#);
@@ -272,5 +280,16 @@ mod tests {
         assert!(console.contains("id=\"workspace-back\""));
         assert!(console.contains("renewWorkspaceSession"));
         assert!(console.contains("'/v1'+'/fleet/project-token'"));
+    }
+
+    #[test]
+    fn microvm_navigation_escapes_the_public_wrapper_iframe() {
+        let (_, console) = page("/microvms").unwrap();
+        assert!(console.contains("<a href=\"/account\" target=\"_top\">Account</a>"));
+        assert!(console.contains("class=\"gap-brand\" href=\"/\" target=\"_top\""));
+
+        let (_, account) = page("/account").unwrap();
+        assert!(account.contains("<a href=\"/account\" aria-current=\"page\">Account</a>"));
+        assert!(!account.contains("target=\"_top\""));
     }
 }
