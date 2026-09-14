@@ -9,6 +9,7 @@ import json
 import os
 import re
 from sqlite_crypto import connect, sqlite3
+import threading
 import uuid
 
 from billing import BillingError
@@ -21,6 +22,7 @@ class Capacity:
     def __init__(self, manager):
         self.manager=manager
         self.path=manager.root/'fleet-capacity.sqlite'
+        self.connections=threading.local()
         fd=os.open(self.path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600);os.close(fd)
         self.config=None;self.projects=set();self.ready=set();self.transport=None
         with self.db() as db:
@@ -31,15 +33,18 @@ class Capacity:
 
     @contextmanager
     def db(self):
-        db=connect(self.path,'fleet-capacity',timeout=2,isolation_level=None);db.row_factory=sqlite3.Row
+        db=getattr(self.connections,'db',None)
+        if db is None:
+            db=connect(self.path,'fleet-capacity',timeout=2,isolation_level=None);db.row_factory=sqlite3.Row
+            db.execute('PRAGMA journal_mode=WAL');db.execute('PRAGMA synchronous=FULL')
+            self.connections.db=db
         try:
-            db.execute('PRAGMA journal_mode=WAL');db.execute('PRAGMA synchronous=FULL');db.execute('BEGIN IMMEDIATE')
+            db.execute('BEGIN IMMEDIATE')
             yield db
             db.execute('COMMIT')
         except BaseException:
             if db.in_transaction:db.execute('ROLLBACK')
             raise
-        finally:db.close()
 
     def configure(self, config, transport=None):
         self.config=config;self.projects=set(config['projects']) if config else set();self.ready.clear()

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 from sqlite_crypto import connect, sqlite3
+import threading
 import time
 import uuid
 import finance
@@ -36,6 +37,11 @@ def integer(value, minimum=0, maximum=10**15):
 class Ledger:
     def __init__(self, path, clock=time.time):
         self.path, self.clock = str(path), clock
+        # SQLCipher key setup is deliberately expensive. Long-lived runtime
+        # loops used to pay that cost for every short transaction. Keep one
+        # unlocked connection per thread while retaining an explicit durable
+        # transaction around every operation.
+        self.connections = threading.local()
         with self.db() as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1), mode TEXT NOT NULL, tariff TEXT);
@@ -118,10 +124,13 @@ class Ledger:
 
     @contextmanager
     def db(self):
-        db = connect(self.path, 'microvm-credits', timeout=30, isolation_level=None)
-        db.row_factory = sqlite3.Row
-        db.execute('PRAGMA journal_mode=WAL')
-        db.execute('PRAGMA synchronous=FULL')
+        db = getattr(self.connections, 'db', None)
+        if db is None:
+            db = connect(self.path, 'microvm-credits', timeout=30, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('PRAGMA synchronous=FULL')
+            self.connections.db = db
         db.execute('BEGIN IMMEDIATE')
         try:
             yield db
@@ -129,8 +138,6 @@ class Ledger:
         except BaseException:
             if db.in_transaction: db.execute('ROLLBACK')
             raise
-        finally:
-            db.close()
 
     def ensure(self, db, project, owner):
         if not re.fullmatch(r'prj_[0-9a-f]{24}', project) or not re.fullmatch(r'did:gap:[0-9a-f]{64}', owner):

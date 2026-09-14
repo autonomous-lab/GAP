@@ -13,8 +13,10 @@ from billing import Ledger, BillingError
 from microvm import VMError
 
 DESTROYED_RECHECK_SECONDS = 60
+DESTROYED_STORAGE_RECHECK_SECONDS = 60
 BILLING_RECHECK_SECONDS = 3
 CAPACITY_RECHECK_SECONDS = 5
+MAINTENANCE_INTERVAL_SECONDS = 2
 
 
 class Runtime:
@@ -135,6 +137,14 @@ class Runtime:
                 if path.is_file() and not path.is_symlink(): total+=path.stat().st_blocks*512
         return total
 
+    def metered_storage_bytes(self,meta):
+        if meta['state']!='destroyed':return self.storage_bytes(meta)
+        state=self.state(meta);now=time.monotonic()
+        if now-state.get('storage_checked_at',-DESTROYED_STORAGE_RECHECK_SECONDS)>=DESTROYED_STORAGE_RECHECK_SECONDS:
+            state['storage_bytes']=self.storage_bytes(meta)
+            state['storage_checked_at']=now
+        return state['storage_bytes']
+
     def billing_view(self,meta):
         state=self.state(meta);now=time.monotonic()
         if now-state.get('billing_checked_at',-BILLING_RECHECK_SECONDS)>=BILLING_RECHECK_SECONDS:
@@ -156,7 +166,7 @@ class Runtime:
             counters=json.loads(path.read_text()) if path.exists() else {'in':0,'out':0}
             incoming,outgoing=counters['in'],counters['out']
         self.ledger.sample(dict(meta,meter_stop_ms=state.get('meter_stop_ms')),int(time.time()*1000),self.manager.alive(meta) and not state.get('policy_preempted',False),
-                           self.storage_bytes(meta),incoming,outgoing,self.incarnation)
+                           self.metered_storage_bytes(meta),incoming,outgoing,self.incarnation)
         state['last_sample']=time.monotonic()
 
     def view(self,meta,include_entries=True):
@@ -348,10 +358,11 @@ class Runtime:
 
     def tick_project(self,path):
         meta=json.loads(path.read_text())
+        baseline=json.dumps(meta,sort_keys=True)
         if meta['state']=='migrated':return
         if self.manager.network and meta['state']!='destroyed':self.manager.network.expire(meta)
         project=meta['project_id']
-        if meta['state']=='destroyed' and not self.storage_bytes(meta):
+        if meta['state']=='destroyed' and not self.metered_storage_bytes(meta):
             state=self.state(meta);now=time.monotonic()
             if now-state.get('destroyed_checked_at',-DESTROYED_RECHECK_SECONDS)<DESTROYED_RECHECK_SECONDS:return
             state['destroyed_checked_at']=now
@@ -387,12 +398,18 @@ class Runtime:
             self.manager.hibernate(meta)
             self.sample(meta)
             state.pop('fleet_preempted',None)
-        meta['last_incoming_at']=state['last_incoming']; self.manager.save(meta)
+        meta['last_incoming_at']=state['last_incoming']
+        # Atomic catalog writes include two fsyncs. Persist policy/runtime
+        # changes, but do not rewrite identical metadata on every idle tick.
+        if json.dumps(meta,sort_keys=True)!=baseline:self.manager.save(meta)
         if meta.get('execution_mode')=='always_on' and meta['state'] in ('hibernated','stopped') and not meta.get('manual_stop') and not blocked and not busy:
             if self.runner.authorize(project,meta['owner_did']).get('always_on_allowed'):
                 with self.admission(project,meta['vcpus'],meta['memory_mib'],meta['vm_id']):
                     self.manager.perform(project,meta['owner_did'],'vm/start',{'vm_id':meta['vm_id']})
-                self.sample(self.manager.read(project,meta['owner_did'],meta['vm_id']))
+                started=self.manager.read(project,meta['owner_did'],meta['vm_id'])
+                if 'runtime_error' in started:
+                    started.pop('runtime_error');self.manager.save(started)
+                self.sample(started)
                 if self.runner.ingress: self.runner.ingress.sync()
 
     def reconcile_capacity(self):
@@ -431,7 +448,7 @@ class Runtime:
                 if self.gateway: self.gateway.reconcile()
             except Exception as error:
                 self.last_error=str(error)
-            time.sleep(1)
+            time.sleep(MAINTENANCE_INTERVAL_SECONDS)
 
     def fleet_meter_loop(self):
         # Long guest deployments hold lifecycle locks. Fleet metering and lease
@@ -444,11 +461,11 @@ class Runtime:
                     # Tombstones without retained bytes have nothing left to
                     # meter. The main lifecycle loop still checks their remote
                     # deletion claim at a bounded cadence.
-                    if meta['state']=='destroyed' and not self.storage_bytes(meta):continue
+                    if meta['state']=='destroyed' and not self.metered_storage_bytes(meta):continue
                     if self.ledger.fleet_allows(meta['project_id']):self.sample(meta,force=False)
                 except Exception:
                     self.last_error='fleet_meter_unavailable'
-            time.sleep(1)
+            time.sleep(MAINTENANCE_INTERVAL_SECONDS)
 
     def fleet_lease_watchdog(self):
         # No HTTP calls or lifecycle locks here: even a blocked policy callback
