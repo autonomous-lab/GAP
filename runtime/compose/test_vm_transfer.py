@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 
 from microvm import VMError
-from vm_transfer import Transfers, unpack, FILES
+from vm_transfer import ENCRYPTED_FILES, FILES, Transfers, transfer_files, unpack
 
 MOVE='move_'+'a'*32
 VM='vm_'+'b'*32
@@ -55,6 +55,18 @@ class TransferTests(unittest.TestCase):
                 with self.assertRaisesRegex(VMError,'invalid_migration_archive'):unpack(self.archive(name,kind),target)
         with self.assertRaisesRegex(VMError,'migration_archive_incomplete'):unpack(self.archive('meta.json'),self.root/'incomplete')
         self.assertFalse((self.root.parent/'outside').exists())
+    def test_encrypted_seed_transfer_never_requires_plaintext_seed_files(self):
+        meta={'disk_encryption':{'format':'luks'}}
+        self.assertEqual(transfer_files(meta),ENCRYPTED_FILES)
+        self.assertNotIn('seed.ext4',ENCRYPTED_FILES)
+        self.assertNotIn('seed/ssh_host_ed25519_key',ENCRYPTED_FILES)
+        path=self.root/'encrypted.tar'
+        with tarfile.open(path,'w') as tar:
+            for name in ENCRYPTED_FILES:
+                member=tarfile.TarInfo(name);member.size=0
+                tar.addfile(member,io.BytesIO())
+        target=self.root/'encrypted';target.mkdir()
+        self.assertEqual(unpack(path,target,ENCRYPTED_FILES),set(ENCRYPTED_FILES))
     def test_settlement_failure_keeps_source_fenced_and_unmetered(self):
         self.row.update(phase='target_staged',revision=3)
         self.ledger.config['node_id']='one';self.ledger.last_checkpoints={}

@@ -14,6 +14,10 @@ def main():
   try:
    m.perform(project,owner,'vm/create',{'request_id':uuid.uuid4().hex,'vcpus':1,'memory_mib':256,'disk_gib':4,'ssh_keys':[key.with_suffix('.pub').read_text().strip()]})
    meta=m.read(project,owner)
+   assert (m.folder(meta)/'seed.ext4.enc').exists()
+   assert not (m.folder(meta)/'seed.ext4').exists()
+   assert (m.folder(meta)/'seed/ssh_host_ed25519_key.enc').exists()
+   assert not (m.folder(meta)/'seed/ssh_host_ed25519_key').exists()
    def ssh(cmd):
     r=subprocess.run(['ssh','-i',str(key),'-p',str(meta['ssh_port']),'-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-o','ConnectTimeout=2','root@127.0.0.1',cmd],capture_output=True,text=True,timeout=10)
     if r.returncode:raise RuntimeError('guest SSH unavailable')

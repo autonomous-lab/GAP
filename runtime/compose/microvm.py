@@ -112,7 +112,9 @@ class MicroVMs:
         self.root = Path(config['state_dir']).resolve()
         self.images = Path(config['image_dir']).resolve()
         from disk_crypto import DiskCrypto
+        from seed_crypto import SeedCrypto
         self.disk_crypto = DiskCrypto(config.get('disk_keyring'))
+        self.seed_crypto = SeedCrypto(self.disk_crypto)
         if self.disk_crypto.path and self.disk_crypto.path.resolve().is_relative_to(self.root):
             raise VMError('disk_keyring_must_be_outside_vm_storage')
         # QEMU option strings and UNIX socket paths must stay unambiguous.
@@ -136,8 +138,20 @@ class MicroVMs:
             self.network = Network(self, config['public_network'])
         for folder in ('catalog', 'vms', 'retained', 'locks'):
             (self.root / folder).mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.prepare_seed_storage()
         from fleet_capacity import Capacity
         self.capacity=Capacity(self)
+
+    def prepare_seed_storage(self):
+        for path in sorted((self.root / 'catalog').glob('*.json')):
+            meta = json.loads(path.read_text())
+            folder = self.folder(meta)
+            if not folder.is_dir() and meta.get('retained'):
+                folder = self.root / 'retained' / meta['vm_id']
+                if folder.is_symlink() or folder.resolve().parent != self.root / 'retained':
+                    raise VMError('unsafe_vm_path')
+            if folder.is_dir() and meta.get('disk_encryption'):
+                self.seed_crypto.protect(meta, folder)
 
     @contextmanager
     def lock(self, project):
@@ -350,9 +364,7 @@ class MicroVMs:
         (seed / 'authorized_keys').write_text(self.authorized_keys(meta, meta.get('ssh_keys', [])))
         (folder / 'known_hosts').write_text(meta['vm_id'] + ' ' + (seed / 'ssh_host_ed25519_key.pub').read_text())
         (seed / 'runtime.json').write_text(json.dumps(self.environment(meta)))
-        with (folder / 'seed.ext4').open('wb') as image:
-            image.truncate(4 * 1024 * 1024)
-        run(['mkfs.ext4', '-q', '-F', '-d', str(seed), str(folder / 'seed.ext4')])
+        self.seed_crypto.rebuild(meta, folder)
         # Seed contains this guest's identity, never the client's private key.
 
     def environment(self, meta):
@@ -376,11 +388,7 @@ class MicroVMs:
         folder = self.folder(meta)
         (folder / 'seed' / 'authorized_keys').write_text(self.authorized_keys(meta, meta.get('ssh_keys', [])))
         (folder / 'seed' / 'runtime.json').write_text(json.dumps(self.environment(meta)))
-        temporary = folder / 'seed-next.ext4'
-        with temporary.open('wb') as image:
-            image.truncate(4 * 1024 * 1024)
-        run(['mkfs.ext4', '-q', '-F', '-d', str(folder / 'seed'), str(temporary)])
-        temporary.replace(folder / 'seed.ext4')
+        self.seed_crypto.rebuild(meta, folder)
 
     def authorized_keys(self, meta, keys):
         terminal_key = self.folder(meta) / 'terminal_key.pub'
@@ -394,18 +402,14 @@ class MicroVMs:
         content = self.authorized_keys(meta, keys)
         # Prepare a replacement seed; never modify a mounted seed image in place.
         (folder / 'seed' / 'authorized_keys').write_text(content)
-        temporary = folder / 'seed-next.ext4'
-        with temporary.open('wb') as image:
-            image.truncate(4 * 1024 * 1024)
-        run(['mkfs.ext4', '-q', '-F', '-d', str(folder / 'seed'), str(temporary)])
         if self.alive(meta):
             result = self.execute_guest(self.guest(meta['project_id'], meta['owner_did'], meta['vm_id']),
                                         {'action': 'ssh_keys', 'body': {'content': content}}, timeout=15)
             if result.get('ok') is not True:
                 raise VMError('ssh_keys_update_failed')
-        temporary.replace(folder / 'seed.ext4')
+        self.seed_crypto.rebuild(meta, folder)
 
-    def command(self, meta):
+    def command(self, meta, seed_path=None):
         folder = self.folder(meta)
         forwards = [f'hostfwd=tcp:127.0.0.1:{meta["ssh_port"]}-:22']
         forwards += [f'hostfwd=tcp:127.0.0.1:{port["worker_port"]}-:{port["guest_port"]}' for port in meta['ports']]
@@ -420,7 +424,7 @@ class MicroVMs:
                 '-sandbox', 'on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny',
                 '-drive', f'id=root,file={folder}/disk.qcow2,format=qcow2,if=none'+(',encrypt.key-secret=gapdisk' if meta.get('disk_encryption') else ''),
                 '-device', 'virtio-blk-device,drive=root',
-                '-drive', f'id=seed,file={folder}/seed.ext4,format=raw,if=none,readonly=on',
+                '-drive', f'id=seed,file={seed_path or folder / "seed.ext4"},format=raw,if=none,readonly=on',
                 '-device', 'virtio-blk-device,drive=seed',
                 '-device', 'virtio-rng-device',
                 '-netdev', 'user,id=net0,' + ','.join(forwards), '-device', 'virtio-net-device,netdev=net0,mac=' + self.guest_mac(meta),
@@ -514,8 +518,8 @@ class MicroVMs:
         if meta.get('disk_encryption'):
             return self.resume_encrypted(meta)
         log=self.folder(meta)/'restore.log'
-        with log.open('wb') as error, self.disk_crypto.secret(meta) as (secret, fds):
-            process=subprocess.Popen(self.command(meta)+[x.replace('--object','-object') for x in secret]+['-loadvm',tag,'-S'],pass_fds=fds,stdin=subprocess.DEVNULL,
+        with log.open('wb') as error, self.disk_crypto.secret(meta) as (secret, fds), self.seed_crypto.image(meta, folder) as (seed_path, seed_fds):
+            process=subprocess.Popen(self.command(meta,seed_path)+[x.replace('--object','-object') for x in secret]+['-loadvm',tag,'-S'],pass_fds=fds+seed_fds,stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,stderr=error,env={'PATH':'/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'})
         self.children[meta['vm_id']]=process
         deadline=time.monotonic()+90
@@ -555,9 +559,9 @@ class MicroVMs:
         (folder/'memory.sock').unlink(missing_ok=True)
         process=None
         try:
-            with (folder/'restore.log').open('wb') as log, self.disk_crypto.secret(meta) as (secret,fds):
-                process=subprocess.Popen(self.command(meta)+[x.replace('--object','-object') for x in secret]+['-incoming','unix:'+str(folder/'memory.sock'),'-S'],
-                    pass_fds=fds,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=log,
+            with (folder/'restore.log').open('wb') as log, self.disk_crypto.secret(meta) as (secret,fds), self.seed_crypto.image(meta, folder) as (seed_path,seed_fds):
+                process=subprocess.Popen(self.command(meta,seed_path)+[x.replace('--object','-object') for x in secret]+['-incoming','unix:'+str(folder/'memory.sock'),'-S'],
+                    pass_fds=fds+seed_fds,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=log,
                     env={'PATH':'/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'})
             self.children[meta['vm_id']]=process
             self.enforce_cpu(meta,process)
@@ -599,8 +603,8 @@ class MicroVMs:
         self.refresh_seed(meta)
         self.capture_start(meta)
         error_log = folder / 'hypervisor.log'
-        with (error_log.open('wb') if self.diagnostic_serial else open(os.devnull, 'wb')) as log, self.disk_crypto.secret(meta) as (secret, fds):
-            process = subprocess.Popen(self.command(meta)+[x.replace('--object','-object') for x in secret]+['-S'], pass_fds=fds, stdin=subprocess.DEVNULL,
+        with (error_log.open('wb') if self.diagnostic_serial else open(os.devnull, 'wb')) as log, self.disk_crypto.secret(meta) as (secret, fds), self.seed_crypto.image(meta, folder) as (seed_path, seed_fds):
+            process = subprocess.Popen(self.command(meta,seed_path)+[x.replace('--object','-object') for x in secret]+['-S'], pass_fds=fds+seed_fds, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=log, start_new_session=True,
                 env={'PATH': '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'})
         self.children[meta['vm_id']] = process

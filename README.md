@@ -313,6 +313,8 @@ Independent operators must explicitly enable encryption on their workers.
 - VM disk payloads use **AES-256-XTS through qcow2 LUKS**.
 - Saved hibernation memory uses **authenticated AES-256-GCM**; corrupted or
   incomplete checkpoints are rejected before guest execution resumes.
+- Seed images and guest SSH host private keys use **authenticated AES-256-GCM**.
+  Plaintext seed images are supplied to QEMU from anonymous memory only.
 - Each VM has a distinct derived disk key. Keys are held outside the VM storage
   directory and are not included in disk exports or guest images.
 - The cold-move export stays encrypted. Trusted destination nodes need the
@@ -323,12 +325,12 @@ Check `disk_encryption.enabled` in the VM API response. The dashboard shows the
 AES-256 storage badge only when that VM reports encryption enabled. Do not infer
 coverage from a provider name or assume every independent node enables it.
 
-This covers disk payloads and retained hibernation memory, not qcow2 metadata,
-guest seed/SSH files, host swap/logs, registration/admin/realtime/node databases,
-or a compromised host with access to its keyring. Encryption does not replace
-backups. Keep an independent recovery copy of the keyring; losing a required
-key prevents recovery. Rotation of the active key version affects new VMs, not
-existing disk contents.
+This covers disk payloads, retained hibernation memory, seed images and guest SSH
+host private keys, but not qcow2 metadata, public seed metadata, host swap/logs,
+registration/admin/realtime/node databases, or a compromised host with access to
+its keyring. Encryption does not replace backups. Keep an independent recovery
+copy of the keyring; losing a required key prevents recovery. Rotation of the
+active key version affects new VMs, not existing disk contents.
 
 Operator configuration and recovery: [MicroVM encryption](./runtime/compose/ENCRYPTION.md).
 

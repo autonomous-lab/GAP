@@ -18,9 +18,16 @@ import threading
 from microvm import VMError, atomic_json
 
 CHUNK = 512 * 1024
-FILES = ('disk.qcow2', 'client_key', 'client_key.pub', 'known_hosts', 'seed.ext4',
-         'seed/ssh_host_ed25519_key', 'seed/ssh_host_ed25519_key.pub',
-         'seed/authorized_keys', 'seed/runtime.json', 'meta.json')
+COMMON_FILES = ('disk.qcow2', 'client_key', 'client_key.pub', 'known_hosts',
+                'seed/ssh_host_ed25519_key.pub', 'seed/authorized_keys',
+                'seed/runtime.json', 'meta.json')
+FILES = COMMON_FILES + ('seed.ext4', 'seed/ssh_host_ed25519_key')
+ENCRYPTED_FILES = COMMON_FILES + ('seed.ext4.enc', 'seed/ssh_host_ed25519_key.enc')
+ALLOWED_FILES = set(FILES) | set(ENCRYPTED_FILES)
+
+
+def transfer_files(meta):
+    return ENCRYPTED_FILES if meta.get('disk_encryption') else FILES
 
 
 def sha(path):
@@ -30,12 +37,12 @@ def sha(path):
     return h.hexdigest()
 
 
-def unpack(archive, folder):
+def unpack(archive, folder, expected=FILES):
     """No extractall: reject links, duplicate members and unbounded metadata."""
     seen=set()
     with tarfile.open(archive,'r:') as stream:
         for member in stream:
-            if member.name not in FILES or member.name in seen or not member.isfile():
+            if member.name not in ALLOWED_FILES or member.name in seen or not member.isfile():
                 raise VMError('invalid_migration_archive')
             maximum=101*1024**3 if member.name=='disk.qcow2' else 8*1024**2
             if not 0 <= member.size <= maximum:raise VMError('migration_file_too_large')
@@ -46,7 +53,8 @@ def unpack(archive, folder):
                 shutil.copyfileobj(src,dst,1024*1024)
                 dst.flush();os.fsync(dst.fileno())
             target.chmod(0o600)
-    if seen!=set(FILES):raise VMError('migration_archive_incomplete')
+    if expected is not None and seen!=set(expected):raise VMError('migration_archive_incomplete')
+    return seen
 
 
 class Transfers:
@@ -218,11 +226,13 @@ class Transfers:
             if bundle.exists():shutil.rmtree(bundle)
             bundle.mkdir(mode=0o700)
             m.disk_crypto.execute(meta,'convert',m.folder(meta)/'disk.qcow2',output=bundle/'disk.qcow2')
+            m.seed_crypto.protect(meta,m.folder(meta))
+            files=transfer_files(meta)
             info=json.loads(subprocess.check_output(['qemu-img','info','--output=json',str(bundle/'disk.qcow2')],text=True))
             if 'backing-filename' in info:raise VMError('migration_disk_not_standalone')
             if shutil.disk_usage(folder).free < (bundle/'disk.qcow2').stat().st_size+64*1024**2:
                 raise VMError('migration_source_disk_space_insufficient')
-            for name in FILES:
+            for name in files:
                 if name in ('disk.qcow2','meta.json'):continue
                 dest=bundle/name;dest.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
                 shutil.copy2(m.folder(meta)/name,dest)
@@ -230,7 +240,7 @@ class Transfers:
             disk_digest=sha(bundle/'disk.qcow2')
             temporary=folder/'export.next'
             with tarfile.open(temporary,'w') as tar:
-                for name in FILES:tar.add(bundle/name,arcname=name,recursive=False)
+                for name in files:tar.add(bundle/name,arcname=name,recursive=False)
             with temporary.open('rb') as f:os.fsync(f.fileno())
             temporary.replace(folder/'export.tar')
             result=dict(size=(folder/'export.tar').stat().st_size,archive_sha256=sha(folder/'export.tar'),disk_sha256=disk_digest)
@@ -246,8 +256,9 @@ class Transfers:
             raise VMError('migration_archive_digest_mismatch')
         staging=folder/'incoming'
         if staging.exists():shutil.rmtree(staging)
-        staging.mkdir(mode=0o700);unpack(archive,staging)
+        staging.mkdir(mode=0o700);seen=unpack(archive,staging,expected=None)
         receipt=json.loads((staging/'meta.json').read_text());meta=receipt['meta']
+        if seen!=set(transfer_files(meta)):raise VMError('migration_archive_incomplete')
         if (meta['vm_id'],meta['project_id'],meta['owner_did'])!=(row['vm_id'],row['project_id'],row['owner_did']):
             raise VMError('migration_binding_mismatch')
         if receipt['kernel_sha256']!=sha(m.images/'vmlinuz'):raise VMError('migration_kernel_mismatch')

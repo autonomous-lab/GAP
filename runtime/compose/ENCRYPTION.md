@@ -27,6 +27,17 @@ archive. Disk metadata retains only the version and salt. New disks use qcow2 LU
 with AES-256-XTS. Missing keys fail closed; enabling the option rejects legacy
 unencrypted VM starts rather than silently downgrading.
 
+## Seed and SSH identity
+
+For encrypted VMs, `seed.ext4` and the guest SSH host private key are sealed
+with AES-256-GCM keys derived separately from the VM disk key. Existing clear
+seed files are migrated at worker startup, or on the next start/export. The worker rebuilds seed
+images in tmpfs and passes the decrypted image to QEMU through an inherited
+anonymous memfd; it does not create a plaintext seed image on persistent
+storage. Cold-transfer archives contain only `seed.ext4.enc` and
+`ssh_host_ed25519_key.enc` for encrypted VMs. Public keys, `authorized_keys`
+and runtime routing metadata are not secret and remain readable by the worker.
+
 ## Hibernation
 
 QEMU 10.1.5 aborts in `qcow2_co_encdec` when internal `savevm` writes unaligned VM
@@ -56,18 +67,20 @@ and ownership. A running QEMU retains its key until it exits.
 
 ## Protection boundary
 
-This protects VM disk payloads and retained hibernation memory against acquisition
-of those files without the keyring. qcow2 metadata is not encrypted. Guest seed
-images/SSH keys, worker catalogs, serial logs (when enabled), host swap, host logs,
-other databases and a complete host image including the keyring are NOT covered.
+This protects VM disk payloads, retained hibernation memory, seed images and guest
+SSH host private keys against acquisition of those files without the keyring.
+qcow2 metadata, public seed metadata, worker catalogs, serial logs (when enabled),
+host swap, host logs, other databases and a complete host image including the
+keyring are NOT covered.
 Root on a running host can obtain keys or guest memory. No host-wide encryption
 badge is justified. Authenticated memory encryption does not add disk integrity to
 AES-XTS. Transfer transport authentication and existing archive digests still apply.
 
 ## Verification
 
-`python3 -m unittest test_disk_crypto test_memory_crypto test_microvm test_vm_transfer`
-checks key binding, missing keys, version retention and memory corruption/truncation.
+`python3 -m unittest test_disk_crypto test_memory_crypto test_seed_crypto test_microvm test_vm_transfer`
+checks key binding, missing keys, version retention, seed sealing and memory
+corruption/truncation.
 Run `GAP_TEST_ENCRYPTION=1 python3 encryption_kvm_test.py` only in an isolated
 container with /dev/kvm, the proper KVM group and read-only /images. It creates and
 cleans its own VM/catalog. It checks real guest disk writes, memory-preserving
