@@ -18,7 +18,7 @@ class LifecycleEfficiencyTests(unittest.TestCase):
 
     def runtime(self, root):
         runtime=Runtime.__new__(Runtime)
-        runtime.states={};runtime.closed=False
+        runtime.states={};runtime.closed=False;runtime.fleet_renewed_at={}
         runtime.manager=SimpleNamespace(root=root, network=None)
         runtime.storage_bytes=Mock(return_value=0)
         return runtime
@@ -41,11 +41,21 @@ class LifecycleEfficiencyTests(unittest.TestCase):
             running=dict(self.meta('running'),vm_id='vm_'+'d'*32)
             (catalog/'running.json').write_text(json.dumps(running))
             runtime=self.runtime(root)
-            runtime.ledger=SimpleNamespace(fleet_allows=Mock(return_value=True))
+            runtime.ledger=SimpleNamespace(fleet_allows=Mock(return_value=True),sync=Mock())
             runtime.sample=Mock()
             def stop(_):runtime.closed=True
             with patch('lifecycle.time.sleep',side_effect=stop):runtime.fleet_meter_loop()
             runtime.sample.assert_called_once_with(running,force=False)
+
+    def test_fleet_lease_renewal_is_independent_from_minute_metering(self):
+        runtime=self.runtime(Path('/unused'))
+        runtime.ledger=SimpleNamespace(sync=Mock())
+        meta=self.meta('running')
+        with patch('lifecycle.time.monotonic',side_effect=[100,110,115]):
+            runtime.renew_fleet_lease(meta)
+            runtime.renew_fleet_lease(meta)
+            runtime.renew_fleet_lease(meta)
+        self.assertEqual(runtime.ledger.sync.call_count,2)
 
     def test_destroyed_storage_scan_is_cached_for_one_minute(self):
         runtime=self.runtime(Path('/unused'))
@@ -57,12 +67,12 @@ class LifecycleEfficiencyTests(unittest.TestCase):
             self.assertEqual(runtime.metered_storage_bytes(meta),0)
         self.assertEqual(runtime.storage_bytes.call_count,2)
 
-    def test_tick_billing_view_is_cached_for_three_seconds(self):
+    def test_tick_billing_view_is_cached_for_fifteen_seconds(self):
         runtime=Runtime.__new__(Runtime);runtime.states={}
         meta=self.meta('running')
         view={'execution_allowed':True}
         runtime.ledger=SimpleNamespace(view=Mock(return_value=view))
-        with patch('lifecycle.time.monotonic',side_effect=[100,101,103]):
+        with patch('lifecycle.time.monotonic',side_effect=[100,110,115]):
             self.assertIs(runtime.billing_view(meta),view)
             self.assertIs(runtime.billing_view(meta),view)
             self.assertIs(runtime.billing_view(meta),view)

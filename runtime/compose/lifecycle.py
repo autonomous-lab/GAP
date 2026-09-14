@@ -14,9 +14,13 @@ from microvm import VMError
 
 DESTROYED_RECHECK_SECONDS = 60
 DESTROYED_STORAGE_RECHECK_SECONDS = 60
-BILLING_RECHECK_SECONDS = 3
+BILLING_RECHECK_SECONDS = 15
 CAPACITY_RECHECK_SECONDS = 5
 MAINTENANCE_INTERVAL_SECONDS = 2
+METER_INTERVAL_SECONDS = 60
+POLICY_RECHECK_SECONDS = 15
+LEASE_RENEW_INTERVAL_SECONDS = 15
+WATCHDOG_INTERVAL_SECONDS = 15
 
 
 class Runtime:
@@ -32,6 +36,7 @@ class Runtime:
         self.manager.capacity.configure(config.get('fleet_billing'))
         self.incarnation=uuid.uuid4().hex
         self.locks={}; self.guard=threading.Lock(); self.states={}
+        self.fleet_renewed_at={}
         self.capacity_lock=threading.RLock()
         self.reserve_memory_mib=config.get('host_reserve_memory_mib',2048)
         self.reserve_vcpus=config.get('host_reserve_vcpus',1)
@@ -158,7 +163,7 @@ class Runtime:
                 self.manager.stop(meta,True)
             return
         state=self.state(meta)
-        if not force and time.monotonic()-state["last_sample"]<5: return
+        if not force and time.monotonic()-state["last_sample"]<METER_INTERVAL_SECONDS:return
         meter=self.manager.meters.get(meta['vm_id'])
         if meter: incoming,outgoing=meter.values()
         else:
@@ -187,7 +192,7 @@ class Runtime:
         valid=(policy.get('owner_did')==meta['owner_did'] and type(policy.get('generation')) is int
                and type(policy.get('allowed')) is bool and policy['generation']>=known)
         state['policy_allowed']=valid and policy['allowed'] and meta.get('state')!='destroyed'
-        state['policy_expires']=time.monotonic()+5
+        state['policy_expires']=time.monotonic()+POLICY_RECHECK_SECONDS
         if valid:
             state['policy_generation']=policy['generation'];meta['policy_generation']=policy['generation']
             state['operator_suspended']=bool(policy.get('suspended'));meta['operator_suspended']=state['operator_suspended']
@@ -243,7 +248,7 @@ class Runtime:
                     state['connections'].clear()
                 for child in list(self.manager.children.values()):
                     if child.poll() is None:child.terminate()
-            time.sleep(1)
+            time.sleep(WATCHDOG_INTERVAL_SECONDS)
 
     def check_credit(self,meta):
         if hasattr(self.ledger,'sync'):self.ledger.sync(meta['project_id'],meta['owner_did'])
@@ -462,10 +467,18 @@ class Runtime:
                     # meter. The main lifecycle loop still checks their remote
                     # deletion claim at a bounded cadence.
                     if meta['state']=='destroyed' and not self.metered_storage_bytes(meta):continue
-                    if self.ledger.fleet_allows(meta['project_id']):self.sample(meta,force=False)
+                    if self.ledger.fleet_allows(meta['project_id']):
+                        self.renew_fleet_lease(meta)
+                        self.sample(meta,force=False)
                 except Exception:
                     self.last_error='fleet_meter_unavailable'
             time.sleep(MAINTENANCE_INTERVAL_SECONDS)
+
+    def renew_fleet_lease(self,meta):
+        project=meta['project_id'];now=time.monotonic()
+        if now-self.fleet_renewed_at.get(project,-LEASE_RENEW_INTERVAL_SECONDS)<LEASE_RENEW_INTERVAL_SECONDS:return
+        self.ledger.sync(project,meta['owner_did'],force=False)
+        self.fleet_renewed_at[project]=now
 
     def fleet_lease_watchdog(self):
         # No HTTP calls or lifecycle locks here: even a blocked policy callback
@@ -486,4 +499,4 @@ class Runtime:
             except Exception:
                 self.ledger.deadlines.clear()
                 self.last_error='fleet_lease_watchdog_unavailable'
-            time.sleep(1)
+            time.sleep(WATCHDOG_INTERVAL_SECONDS)
