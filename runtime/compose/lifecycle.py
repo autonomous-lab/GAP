@@ -299,18 +299,22 @@ class Runtime:
         if not path.exists(): raise VMError('vm_not_found')
         meta=json.loads(path.read_text())
         if meta['project_id']!=project or (vm_id and meta['vm_id']!=vm_id): raise VMError('vm_generation_mismatch')
-        if meta['state'] not in ('running','hibernated'):
+        automatic_cold_start=meta['state']=='stopped' and not meta.get('manual_stop',False)
+        if meta['state'] not in ('running','hibernated') and not automatic_cold_start:
             raise VMError('vm_not_available_for_automatic_wake')
         if not self.check_policy(meta):raise VMError('microvm_suspended_or_policy_unavailable')
-        self.sample(meta,force=meta['state']=='hibernated'); self.check_credit(meta)
-        if meta['state']=='hibernated':
+        self.sample(meta,force=meta['state'] in ('hibernated','stopped')); self.check_credit(meta)
+        if meta['state'] in ('hibernated','stopped'):
+            was_hibernated=meta['state']=='hibernated'
             self.runner.authorize(project,meta['owner_did'])
             with self.admission(project,meta['vcpus'],meta['memory_mib'],meta['vm_id']):
-                self.manager.perform(project,meta['owner_did'],'vm/resume',{'vm_id':meta['vm_id']})
+                action='vm/resume' if was_hibernated else 'vm/start'
+                self.manager.perform(project,meta['owner_did'],action,{'vm_id':meta['vm_id']})
             meta=self.manager.read(project,meta['owner_did'],meta['vm_id'])
             meta['manual_stop']=False; meta.pop('runtime_error',None); self.manager.save(meta)
-            # Refresh key restrictions before a wake-gateway TCP connection is relayed.
-            self.manager.write_keys(meta,meta.get('ssh_keys',[]))
+            # A resumed guest needs refreshed restrictions before traffic is
+            # relayed. A cold start already rebuilt its seed with those keys.
+            if was_hibernated:self.manager.write_keys(meta,meta.get('ssh_keys',[]))
             self.sample(meta)
         self.touch(meta)
         return meta

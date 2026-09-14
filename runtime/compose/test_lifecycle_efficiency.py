@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -9,6 +10,7 @@ import billing
 from billing import Ledger
 from fleet_billing import FleetLedger
 from lifecycle import Runtime
+from microvm import VMError
 
 
 class LifecycleEfficiencyTests(unittest.TestCase):
@@ -101,6 +103,31 @@ class LifecycleEfficiencyTests(unittest.TestCase):
             ledger=Ledger(Path(directory)/'credits.sqlite')
             ledger.pricing();ledger.pricing()
             self.assertEqual(connect.call_count,1)
+
+    def test_automatic_wake_cold_starts_an_unintentionally_stopped_vm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'vm.json'
+            meta=dict(self.meta('stopped'),vcpus=1,memory_mib=512,manual_stop=False,ssh_keys=[])
+            path.write_text(json.dumps(meta))
+            runtime=self.runtime(Path(directory))
+            started=dict(meta,state='running')
+            runtime.manager=SimpleNamespace(catalog=Mock(return_value=path),perform=Mock(),read=Mock(return_value=started),
+                                            save=Mock(),write_keys=Mock())
+            runtime.runner=SimpleNamespace(authorize=Mock(return_value={'allowed':True}))
+            runtime.check_policy=Mock(return_value=True);runtime.sample=Mock();runtime.check_credit=Mock()
+            runtime.admission=Mock(return_value=nullcontext());runtime.touch=Mock()
+            self.assertEqual(runtime.ensure_awake(meta['project_id'],meta['vm_id'])['state'],'running')
+            runtime.manager.perform.assert_called_once_with(meta['project_id'],meta['owner_did'],'vm/start',{'vm_id':meta['vm_id']})
+            runtime.manager.write_keys.assert_not_called()
+            runtime.sample.assert_any_call(meta,force=True)
+
+    def test_automatic_wake_respects_an_explicit_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'vm.json';meta=dict(self.meta('stopped'),manual_stop=True)
+            path.write_text(json.dumps(meta))
+            runtime=self.runtime(Path(directory));runtime.manager.catalog=Mock(return_value=path)
+            with self.assertRaisesRegex(VMError,'vm_not_available_for_automatic_wake'):
+                runtime.ensure_awake(meta['project_id'],meta['vm_id'])
 
 
 if __name__=='__main__':unittest.main()
