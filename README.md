@@ -554,6 +554,13 @@ as hashes, and agent bearers are encrypted with a separate key derived from
 the master key. Disconnect durably revokes the session. API clients continue using
 their bearer tokens.
 
+From Account, **Manage** opens a dedicated same-origin management route instead
+of nesting the dashboard in another iframe. Secondary nodes use their trusted
+`/nodes/<node-id>/microvms` proxy path. The console retains the selected project
+and VM in tab session storage, renews its short-lived fleet capability every two
+minutes while the Account session remains valid, and provides **Back to fleet**.
+Signing out of Account revokes all MicroVM browser sessions recorded by that tab.
+
 ### SSH and browser terminal
 
 The microVM dashboard shows a copyable SSH command and host fingerprint,

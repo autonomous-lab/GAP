@@ -769,8 +769,9 @@ with an optional comment. Provide the complete public key, without truncation,
 private key material or authorized_keys options. RSA key format does not enable
 legacy SHA-1 signatures.
 
-The `/microvms` console redirects to the isolated `GAP_ADMIN_ORIGIN` management
-origin, where tenant applications are never served. It uses an opaque Secure, HttpOnly, SameSite=Strict session
+The public `/microvms` route keeps its public URL and loads the console from the
+isolated `GAP_ADMIN_ORIGIN` management origin, where tenant applications are
+never served. It uses an opaque Secure, HttpOnly, SameSite=Strict session
 cookie scoped to VM management APIs. The bearer stays on the server. Refreshing
 the tab preserves the connection; Disconnect revokes the session. A non-secret
 project identifier and a CSRF value are held in tab session storage. Sessions
@@ -920,16 +921,18 @@ alone cannot report that node-owned policy. A configured route is not a healthy
 application. See the [complete WordPress example](../../examples/wordpress/README.md).
 
 
-For a second node without a separate DNS name, its MicroVM console can share
-node01's isolated management origin at `/nodes/node-02/microvms`. On the central
-edge set `GAP_FLEET_NODE02_HOST` to the trusted node02 public DNS hostname. On
-node02 set `GAP_ADMIN_ORIGIN` to node01's isolated HTTPS origin and
-`GAP_VM_CONSOLE_PREFIX=/nodes/node-02`. Keep node02's `GAP_PUBLIC_URL` unchanged.
+Secondary MicroVM consoles can share node01's isolated management origin through
+allowlisted `/nodes/<node-id>/microvms` paths. The bundled edge currently accepts
+node02 and node03: set `GAP_FLEET_NODE02_HOST` and `GAP_FLEET_NODE03_HOST` to
+their trusted public DNS hostnames. On each secondary node set
+`GAP_ADMIN_ORIGIN` to node01's isolated HTTPS origin and set
+`GAP_VM_CONSOLE_PREFIX` to `/nodes/node-02` or `/nodes/node-03`. Keep each
+secondary node's `GAP_PUBLIC_URL` unchanged.
 The edge verifies upstream TLS, preserves the management Host/Origin, scopes
 its project cookie to the node prefix, and rewrites management resource paths.
 The target must use the same isolated management boundary; never point this
-setting at tenant-controlled infrastructure. The public node02 origin continues
-to serve applications, but cannot admit terminal cookies. This explicit two-node
+setting at tenant-controlled infrastructure. Each secondary public origin
+continues to serve applications, but cannot admit terminal cookies. This
 management mapping is independent of workload placement and does not move VMs.
 
 Fleet finance uses the existing administrator report with `include_projects`

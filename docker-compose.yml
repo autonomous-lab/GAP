@@ -151,6 +151,7 @@ services:
       GAP_VM_EDGE_TOKEN: "${GAP_VM_EDGE_TOKEN:-}"
       GAP_ADMIN_ORIGIN: "${GAP_ADMIN_ORIGIN:-}"
       GAP_FLEET_NODE02_HOST: "${GAP_FLEET_NODE02_HOST:-}"
+      GAP_FLEET_NODE03_HOST: "${GAP_FLEET_NODE03_HOST:-}"
     ports:
       - "172.17.0.1:8080:8080"
     depends_on:

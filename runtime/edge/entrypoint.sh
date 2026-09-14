@@ -16,6 +16,10 @@ GAP_FLEET_NODE02_HOST=${GAP_FLEET_NODE02_HOST:-}
 case "$GAP_FLEET_NODE02_HOST" in
   *[!a-zA-Z0-9.-]*) echo 'Fleet management target must be a DNS hostname' >&2; exit 1 ;;
 esac
-export GAP_ADMIN_HOST GAP_VM_EDGE_TOKEN GAP_FLEET_NODE02_HOST
-envsubst '${GAP_ADMIN_HOST} ${GAP_VM_EDGE_TOKEN} ${GAP_FLEET_NODE02_HOST}' < /etc/nginx/gap.conf.template > /tmp/gap-nginx.conf
+GAP_FLEET_NODE03_HOST=${GAP_FLEET_NODE03_HOST:-}
+case "$GAP_FLEET_NODE03_HOST" in
+  *[!a-zA-Z0-9.-]*) echo 'Fleet management target must be a DNS hostname' >&2; exit 1 ;;
+esac
+export GAP_ADMIN_HOST GAP_VM_EDGE_TOKEN GAP_FLEET_NODE02_HOST GAP_FLEET_NODE03_HOST
+envsubst '${GAP_ADMIN_HOST} ${GAP_VM_EDGE_TOKEN} ${GAP_FLEET_NODE02_HOST} ${GAP_FLEET_NODE03_HOST}' < /etc/nginx/gap.conf.template > /tmp/gap-nginx.conf
 exec nginx -c /tmp/gap-nginx.conf -g 'daemon off;'

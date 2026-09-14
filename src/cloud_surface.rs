@@ -259,4 +259,18 @@ mod tests {
         assert!(page("/activity").is_none());
         assert!(page("/").unwrap().1.contains("GAP Cloud"));
     }
+
+    #[test]
+    fn account_opens_microvm_management_as_a_dedicated_route() {
+        let (_, account) = page("/account").unwrap();
+        assert!(!account.contains("machineFrame"));
+        assert!(!account.contains("<iframe"));
+        assert!(account.contains("location.assign(path+'?workspace=1')"));
+        assert!(account.contains("revokeMachineSessions"));
+
+        let (_, console) = page("/microvms").unwrap();
+        assert!(console.contains("id=\"workspace-back\""));
+        assert!(console.contains("renewWorkspaceSession"));
+        assert!(console.contains("'/v1'+'/fleet/project-token'"));
+    }
 }
