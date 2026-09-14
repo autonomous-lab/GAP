@@ -312,9 +312,20 @@ class Runtime:
                 self.manager.perform(project,meta['owner_did'],action,{'vm_id':meta['vm_id']})
             meta=self.manager.read(project,meta['owner_did'],meta['vm_id'])
             meta['manual_stop']=False; meta.pop('runtime_error',None); self.manager.save(meta)
-            # A resumed guest needs refreshed restrictions before traffic is
-            # relayed. A cold start already rebuilt its seed with those keys.
-            if was_hibernated:self.manager.write_keys(meta,meta.get('ssh_keys',[]))
+            # Most snapshots already contain the current keys. Avoid adding an
+            # SSH boot probe to every wake; if keys changed while asleep, keep
+            # the first request pending and retry until the guest control plane
+            # is ready before releasing application traffic.
+            if was_hibernated:
+                desired=self.manager.authorized_keys_digest(meta,meta.get('ssh_keys',[]))
+                if meta.get('authorized_keys_sha256')!=desired:
+                    deadline=time.monotonic()+60
+                    while True:
+                        try:
+                            self.manager.write_keys(meta,meta.get('ssh_keys',[]));break
+                        except VMError as error:
+                            if str(error)!='ssh_keys_update_failed' or time.monotonic()>=deadline:raise
+                            time.sleep(.25)
             self.sample(meta)
         self.touch(meta)
         return meta

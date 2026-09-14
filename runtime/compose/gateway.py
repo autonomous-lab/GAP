@@ -16,6 +16,8 @@ from microvm import VMError, free_port
 
 HOP={'connection','keep-alive','proxy-authenticate','proxy-authorization','te','trailer','transfer-encoding','upgrade'}
 MAX_BODY=16*1024*1024
+APPLICATION_READY_TIMEOUT=90
+GATEWAY_REQUEST_TIMEOUT=180
 
 
 class LimitedThreads:
@@ -76,7 +78,10 @@ class Gateway:
             return meta,meta['public_targets'][str(slot)]
 
     def connect(self,port,meta):
-        deadline=time.monotonic()+30
+        # The client connection is already established with this gateway. Keep
+        # it pending while the resumed guest and application restore their
+        # listeners instead of exposing a transient 503 during a normal wake.
+        deadline=time.monotonic()+APPLICATION_READY_TIMEOUT
         with self.runtime.lock(meta['project_id']):
             current=self.manager.read(meta['project_id'],meta['owner_did'],meta['vm_id'])
             if not current or current['vm_id']!=meta['vm_id'] or current['state']!='running':
@@ -219,7 +224,7 @@ class Gateway:
     def http(self,h):
         sent=False; upstream=None
         try:
-            h.connection.settimeout(120)
+            h.connection.settimeout(GATEWAY_REQUEST_TIMEOUT)
             project=h.headers.get('X-GAP-Project','')
             if not re.fullmatch(r'prj_[0-9a-f]{24}',project): raise VMError('unknown_application')
             vm_id=h.headers.get('X-GAP-VM')

@@ -249,7 +249,11 @@ class MicroVMs:
 
     def _qmp(self, meta, command, arguments=None):
         with socket.socket(socket.AF_UNIX) as sock:
-            sock.settimeout(120 if command == 'human-monitor-command' else 3)
+            # Restored guests can briefly keep the monitor busy while QEMU
+            # finalizes incoming RAM. Lifecycle commands must outlive that
+            # transition; readiness polling itself remains short and retryable.
+            timeout=120 if command=='human-monitor-command' else 30 if command in ('cont','stop','quit','migrate','migrate_cancel') else 3
+            sock.settimeout(timeout)
             sock.connect(str(self.folder(meta) / 'qmp.sock'))
             with sock.makefile('rwb') as io:
                 def read():
@@ -402,6 +406,9 @@ class MicroVMs:
                 (self.folder(meta) / 'client_key.pub').read_text().strip() + '\n' +
                 terminal + ''.join(owner_options + key + '\n' for key in keys))
 
+    def authorized_keys_digest(self, meta, keys):
+        return hashlib.sha256(self.authorized_keys(meta, keys).encode()).hexdigest()
+
     def write_keys(self, meta, keys):
         folder = self.folder(meta)
         content = self.authorized_keys(meta, keys)
@@ -412,6 +419,8 @@ class MicroVMs:
                                         {'action': 'ssh_keys', 'body': {'content': content}}, timeout=15)
             if result.get('ok') is not True:
                 raise VMError('ssh_keys_update_failed')
+            meta['authorized_keys_sha256'] = hashlib.sha256(content.encode()).hexdigest()
+            self.save(meta)
         self.seed_crypto.rebuild(meta, folder)
 
     def command(self, meta, seed_path=None):
@@ -477,6 +486,10 @@ class MicroVMs:
             raise VMError('insufficient_disk_for_hibernation')
         meta['snapshot_qemu_version']=subprocess.check_output(['qemu-system-x86_64','--version'],text=True).splitlines()[0]
         tag='idle_' + uuid.uuid4().hex
+        # Record which keys are already present in the memory image. The usual
+        # wake can then skip an SSH round trip while still applying key changes
+        # made during hibernation before application traffic is released.
+        meta['authorized_keys_sha256'] = self.authorized_keys_digest(meta, meta.get('ssh_keys', []))
         meta.update(state='hibernating', snapshot_tag=tag)
         if self.runtime:self.runtime.execution_stopping(meta)
         self.save(meta)
@@ -584,10 +597,11 @@ class MicroVMs:
             self.qmp(meta,'cont')
             if self.runtime:self.runtime.execution_started(meta)
             (folder/'memory.enc').unlink()
-            meta.pop('snapshot_tag',None);meta.pop('snapshot_format',None);self.save(meta)
-        except Exception:
+            meta.pop('snapshot_tag',None);meta.pop('snapshot_format',None);meta.pop('resume_error',None);self.save(meta)
+        except Exception as error:
             if process and process.poll() is None:process.terminate();process.wait(timeout=10)
             self.capture_stop(meta)
+            meta['resume_error'] = str(error) if isinstance(error, VMError) else type(error).__name__
             if meta['state']=='resuming':meta['state']='hibernated'
             else:meta['state']='stopped'
             self.save(meta)
@@ -606,6 +620,7 @@ class MicroVMs:
             raise VMError('guest_base_image_changed')
         folder = self.folder(meta)
         self.refresh_seed(meta)
+        meta['authorized_keys_sha256'] = self.authorized_keys_digest(meta, meta.get('ssh_keys', []))
         self.capture_start(meta)
         error_log = folder / 'hypervisor.log'
         with (error_log.open('wb') if self.diagnostic_serial else open(os.devnull, 'wb')) as log, self.disk_crypto.secret(meta) as (secret, fds), self.seed_crypto.image(meta, folder) as (seed_path, seed_fds):

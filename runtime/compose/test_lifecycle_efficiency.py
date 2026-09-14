@@ -129,5 +129,35 @@ class LifecycleEfficiencyTests(unittest.TestCase):
             with self.assertRaisesRegex(VMError,'vm_not_available_for_automatic_wake'):
                 runtime.ensure_awake(meta['project_id'],meta['vm_id'])
 
+    def test_automatic_wake_skips_key_probe_when_snapshot_keys_are_current(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'vm.json'
+            meta=dict(self.meta('hibernated'),vcpus=1,memory_mib=512,ssh_keys=[],authorized_keys_sha256='current')
+            path.write_text(json.dumps(meta));runtime=self.runtime(Path(directory))
+            resumed=dict(meta,state='running')
+            runtime.manager=SimpleNamespace(catalog=Mock(return_value=path),perform=Mock(),read=Mock(return_value=resumed),
+                save=Mock(),write_keys=Mock(),authorized_keys_digest=Mock(return_value='current'))
+            runtime.runner=SimpleNamespace(authorize=Mock(return_value={'allowed':True}))
+            runtime.check_policy=Mock(return_value=True);runtime.sample=Mock();runtime.check_credit=Mock()
+            runtime.admission=Mock(return_value=nullcontext());runtime.touch=Mock()
+            runtime.ensure_awake(meta['project_id'],meta['vm_id'])
+            runtime.manager.write_keys.assert_not_called()
+
+    def test_automatic_wake_retries_changed_keys_until_guest_is_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'vm.json'
+            meta=dict(self.meta('hibernated'),vcpus=1,memory_mib=512,ssh_keys=['new'],authorized_keys_sha256='old')
+            path.write_text(json.dumps(meta));runtime=self.runtime(Path(directory))
+            resumed=dict(meta,state='running')
+            runtime.manager=SimpleNamespace(catalog=Mock(return_value=path),perform=Mock(),read=Mock(return_value=resumed),
+                save=Mock(),write_keys=Mock(side_effect=[VMError('ssh_keys_update_failed'),None]),
+                authorized_keys_digest=Mock(return_value='new'))
+            runtime.runner=SimpleNamespace(authorize=Mock(return_value={'allowed':True}))
+            runtime.check_policy=Mock(return_value=True);runtime.sample=Mock();runtime.check_credit=Mock()
+            runtime.admission=Mock(return_value=nullcontext());runtime.touch=Mock()
+            with patch('lifecycle.time.sleep'):
+                runtime.ensure_awake(meta['project_id'],meta['vm_id'])
+            self.assertEqual(runtime.manager.write_keys.call_count,2)
+
 
 if __name__=='__main__':unittest.main()

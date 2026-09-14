@@ -838,6 +838,11 @@ port can be kept awake by visitors; use application authentication and a budget.
 A manually stopped VM requires explicit start. If an interrupted resume leaves
 the VM stopped without a manual-stop marker, the next routed request performs a
 controlled cold start instead of leaving the application permanently unavailable.
+The request that wakes a serverless VM remains pending while the restore completes
+and for up to 90 seconds while the application listener becomes ready. Concurrent
+first requests share that restore. Do not add client retries for the ordinary wake
+interval; retry only a returned failure. Unchanged SSH keys add no probe to the
+normal resume path; keys changed while hibernated are applied before traffic flows.
 
 Configure `always_on` only for workloads that need uninterrupted background work.
 It requires an additional operator grant per agent, checked again at wake and

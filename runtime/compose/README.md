@@ -744,6 +744,14 @@ prepaid balance/budget and host capacity. Always-on permission is refreshed with
 hibernation fails. Snapshot creation requires available disk space for guest RAM
 plus a 512 MiB reserve; keep extra host disk headroom.
 
+The always-present HTTP gateway keeps the triggering request open while the VM
+resumes and waits up to 90 seconds for the application listener. Concurrent first
+requests share the same serialized restore. Hibernation records the authorized-key
+digest, so an unchanged VM skips the SSH key probe during normal wake. If keys were
+changed while the VM slept, the gateway keeps waiting while they are applied before
+traffic is forwarded. A 503 therefore represents an actual wake or application
+readiness failure, rather than the ordinary resuming interval.
+
 Retention cleanup is a durable deletion claim serialized with top-ups, followed
 by actual VM and attributable retained-volume removal. A recharge before the
 claim cancels expiry; after it, recharge is rejected until deletion finishes.
