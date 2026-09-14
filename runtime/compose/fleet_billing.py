@@ -219,7 +219,11 @@ class FleetLedger(Ledger):
 
     def sample(self,meta,*args,**kwargs):
         super().sample(meta,*args,**kwargs)
-        self.sync(meta['project_id'],meta['owner_did'],force=True)
+        # Several VM generations can share one project. Their local usage is
+        # committed above; batch the authority checkpoint behind the existing
+        # three-second lease-safe window instead of forcing one HTTP/SQLCipher
+        # round trip per generation.
+        self.sync(meta['project_id'],meta['owner_did'],force=False)
 
     def view(self,project,owner,include_entries=True):
         result=super().view(project,owner,include_entries)

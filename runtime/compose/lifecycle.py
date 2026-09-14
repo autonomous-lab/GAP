@@ -12,6 +12,10 @@ import uuid
 from billing import Ledger, BillingError
 from microvm import VMError
 
+DESTROYED_RECHECK_SECONDS = 60
+BILLING_RECHECK_SECONDS = 3
+CAPACITY_RECHECK_SECONDS = 5
+
 
 class Runtime:
     def __init__(self,runner,config):
@@ -130,6 +134,13 @@ class Runtime:
             for path in folder.rglob('*'):
                 if path.is_file() and not path.is_symlink(): total+=path.stat().st_blocks*512
         return total
+
+    def billing_view(self,meta):
+        state=self.state(meta);now=time.monotonic()
+        if now-state.get('billing_checked_at',-BILLING_RECHECK_SECONDS)>=BILLING_RECHECK_SECONDS:
+            state['billing_view']=self.ledger.view(meta['project_id'],meta['owner_did'],include_entries=False)
+            state['billing_checked_at']=now
+        return state['billing_view']
 
     def sample(self,meta,force=True):
         if (self.manager.folder(meta)/'.migration-meter-off').exists():
@@ -341,11 +352,14 @@ class Runtime:
         if self.manager.network and meta['state']!='destroyed':self.manager.network.expire(meta)
         project=meta['project_id']
         if meta['state']=='destroyed' and not self.storage_bytes(meta):
+            state=self.state(meta);now=time.monotonic()
+            if now-state.get('destroyed_checked_at',-DESTROYED_RECHECK_SECONDS)<DESTROYED_RECHECK_SECONDS:return
+            state['destroyed_checked_at']=now
             if self.ledger.view(project,meta['owner_did'],include_entries=False)['deletion_committed']: self.expire(meta)
             return
         state=self.state(meta)
         self.sample(meta,force=False)
-        account=self.ledger.view(project,meta['owner_did'],include_entries=False)
+        account=self.billing_view(meta)
         if meta['state'] in ('hibernated','stopped') and not self.manager.alive(meta):
             state.pop('fleet_preempted',None)
         if account['deletion_committed'] or (account['billing_mode']=='enforced' and account['delete_after'] is not None and time.time()>=account['delete_after']):
@@ -362,8 +376,12 @@ class Runtime:
         blocked=blocked or (meta['state']=='running' and state.get('policy_preempted',False))
         idle=(meta.get('execution_mode','serverless')=='serverless'
               and time.time()-state['last_incoming']>=meta.get('idle_timeout_seconds',900) and not state['active_http'])
-        with self.runner.db() as db:
-            busy=db.execute("SELECT 1 FROM jobs WHERE project=? AND status IN ('queued','running')",(project,)).fetchone()
+        busy=False
+        needs_busy_check=(meta['state']=='running' and idle) or (
+            meta.get('execution_mode')=='always_on' and meta['state'] in ('hibernated','stopped'))
+        if needs_busy_check:
+            with self.runner.db() as db:
+                busy=bool(db.execute("SELECT 1 FROM jobs WHERE project=? AND status IN ('queued','running')",(project,)).fetchone())
         if meta['state']=='running' and (blocked or (idle and not busy)):
             self.disconnect(meta)
             self.manager.hibernate(meta)
@@ -377,9 +395,10 @@ class Runtime:
                 self.sample(self.manager.read(project,meta['owner_did'],meta['vm_id']))
                 if self.runner.ingress: self.runner.ingress.sync()
 
-
-    def tick(self):
-        errors=[]
+    def reconcile_capacity(self):
+        now=time.monotonic()
+        if now-getattr(self,'capacity_checked_at',-CAPACITY_RECHECK_SECONDS)<CAPACITY_RECHECK_SECONDS:return []
+        self.capacity_checked_at=now;errors=[]
         # Includes intents with no catalog entry (crash before first VM save).
         capacity=self.manager.capacity
         for project,owner in {(r['project'],r['owner']) for r in capacity.records() if r['phase']!='closed'}:
@@ -387,6 +406,10 @@ class Runtime:
             with self.lock(project),self.manager.owner_lock(owner):
                 try:capacity.reconcile_project(project,owner)
                 except Exception:errors.append(project+':fleet_capacity_reconciliation_pending')
+        return errors
+
+    def tick(self):
+        errors=self.reconcile_capacity()
         for path in (self.manager.root/'catalog').glob('*.json'):
             with self.lock(json.loads(path.read_text())['project_id']):
                 try: self.tick_project(path)
@@ -418,6 +441,10 @@ class Runtime:
             for path in (self.manager.root/'catalog').glob('*.json'):
                 try:
                     meta=json.loads(path.read_text())
+                    # Tombstones without retained bytes have nothing left to
+                    # meter. The main lifecycle loop still checks their remote
+                    # deletion claim at a bounded cadence.
+                    if meta['state']=='destroyed' and not self.storage_bytes(meta):continue
                     if self.ledger.fleet_allows(meta['project_id']):self.sample(meta,force=False)
                 except Exception:
                     self.last_error='fleet_meter_unavailable'
