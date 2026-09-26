@@ -652,10 +652,11 @@ Add these fields to the operator-owned runner JSON (container paths):
   "operator_token_file": "/config/billing-admin.token",
   "wake_gateway_port": 8094,
   "host_reserve_memory_mib": 2048,
-  "host_reserve_vcpus": 1,
-  "host_reserve_swap_mib": 2048,
+  "host_reserve_vcpus": 0,
+  "host_reserve_swap_mib": 0,
   "host_min_available_memory_mib": 512,
-  "host_cpu_overcommit_ratio": 8
+  "host_cpu_overcommit_ratio": 8,
+  "host_vms_per_cpu": 8
 }
 ```
 

@@ -14,10 +14,10 @@ P1='prj_'+'1'*24
 P2='prj_'+'2'*24
 
 
-def snapshot(node, region='EU', cpu=1, memory=1024, disk=10, checked=1000):
+def snapshot(node, region='EU', cpu=1, memory=1024, disk=10, checked=1000, slots=2):
     return {'protocol':1,'node_id':node,'checked_at':checked,'max_age_seconds':30,'region':region,
             'microvm':{'available':True,'admission_ready':True,
-                'headroom':{'vcpus':cpu,'memory_mib':memory,'disk_gib':disk},
+                'headroom':{'vcpus':cpu,'vm_slots':slots,'memory_mib':memory,'disk_gib':disk},
                 'pricing':{'available':True,'mode':'enforced','currency':'USD',
                     'tariff':{'version':'usd-v1'}}}}
 
@@ -93,6 +93,13 @@ class PlacementTests(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
             results=list(pool.map(attempt,[('first',P1),('second',P2)]))
         self.assertCountEqual(results,['reserved','no_eligible_placement'])
+
+    def test_vm_slots_block_fractional_cpu_overbooking(self):
+        self.values={'one':snapshot('one',cpu=2,memory=2048,disk=20,slots=1),'two':None}
+        first=self.reserve(request='first',project=P1,cpu=1,memory=256,disk=8)
+        self.assertEqual(first['node_id'],'one')
+        with self.assertRaisesRegex(Failure,'no_eligible_placement'):
+            self.reserve(request='second',project=P2,cpu=1,memory=256,disk=8)
 
     def test_customer_quota_counts_unclaimed_reservations(self):
         self.reserve(project=P1)

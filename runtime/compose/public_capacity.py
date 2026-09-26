@@ -21,12 +21,14 @@ def snapshot(manager, runtime):
         retained = [r for r in rows if r['state'] != 'migrated' and (r['state'] != 'destroyed' or r.get('retained'))]
         cpu = host_capacity.logical_cpus()
         # Reserve host overhead; retain stopped/hibernated VM commitments.
-        reserve_cpu = getattr(runtime,'reserve_vcpus',1)
+        reserve_cpu = getattr(runtime,'reserve_vcpus',0)
         ratio = getattr(runtime,'cpu_overcommit_ratio',8)
+        vms_per_cpu = getattr(runtime,'vms_per_cpu',8)
         reserve_memory = getattr(runtime,'reserve_memory_mib',2048)
-        reserve_swap = getattr(runtime,'reserve_swap_mib',2048)
+        reserve_swap = getattr(runtime,'reserve_swap_mib',0)
         min_available_memory = getattr(runtime,'min_available_memory_mib',512)
         cpu_free = max(0, host_capacity.cpu_limit(cpu,reserve_cpu,ratio) - sum(float(r['vcpus']) for r in active))
+        vm_free = max(0, host_capacity.vm_limit(cpu,vms_per_cpu) - len(active))
         ram_free = min(host_capacity.startable_memory(memory,reserve_memory,reserve_swap,min_available_memory),
                        host_capacity.commitment_memory(memory,sum(r['memory_mib'] for r in active),reserve_memory,reserve_swap))
         disk = shutil.disk_usage(manager.root)
@@ -34,7 +36,7 @@ def snapshot(manager, runtime):
         model = next((line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')), 'Unknown')
         return dict(result, available=True, admission_ready=ready,
                     hardware=dict(cpu_model=model, logical_cpus=cpu, memory_mib=memory['MemTotal'], swap_mib=memory['SwapTotal']),
-                    headroom=dict(vcpus=int(cpu_free*4)/4, memory_mib=(ram_free//256)*256, disk_gib=disk_free),
+                    headroom=dict(vcpus=int(cpu_free*4)/4, vm_slots=vm_free, memory_mib=(ram_free//256)*256, disk_gib=disk_free),
                     pricing=dict(pricing, available=pricing['mode']=='enforced' and pricing['tariff'] is not None, currency='USD'),
                     basis='Overcommitted host CPU and RAM+swap headroom after retained VM commitments and overhead; live admission and account quotas still apply.')
     except Exception:

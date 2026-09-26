@@ -19,6 +19,10 @@ def cpu_limit(cpus, reserve_vcpus, ratio):
     return max(1, (cpus - reserve_vcpus) * ratio)
 
 
+def vm_limit(cpus, vms_per_cpu):
+    return max(1, cpus * vms_per_cpu)
+
+
 def startable_memory(memory, reserve_memory_mib, reserve_swap_mib, min_available_memory_mib=512):
     """Keep a physical safety floor while allowing resident pages to swap."""
     if memory['MemAvailable'] < min_available_memory_mib:

@@ -107,11 +107,13 @@ def valid_snapshot(node, value, now):
         return None
     vcpus = headroom.get('vcpus')
     memory, disk = headroom.get('memory_mib'), headroom.get('disk_gib')
+    slots = headroom.get('vm_slots')
     if (isinstance(vcpus, bool) or not isinstance(vcpus, (int, float)) or not math.isfinite(vcpus)
-            or type(memory) is not int or type(disk) is not int or min(vcpus, memory, disk) < 0):
+            or type(memory) is not int or type(disk) is not int or min(vcpus, memory, disk) < 0
+            or (slots is not None and (type(slots) is not int or slots < 0))):
         return None
     return dict(node_id=node, checked_at=checked, region=value.get('region') if isinstance(value.get('region'), str) else '',
-                tariff=tariff['version'], cpu=math.floor(vcpus * 4), memory=memory, disk=disk)
+                tariff=tariff['version'], cpu=math.floor(vcpus * 4), memory=memory, disk=disk, slots=slots)
 
 
 def actor_key(actor):
@@ -159,11 +161,12 @@ def reserve(authority, actor, request, project, cpu, memory, disk, region, snaps
             if not snap or (region and snap['region'] != region):
                 continue
             held = db.execute('''SELECT coalesce(sum(cpu),0) cpu,coalesce(sum(memory),0) memory,
-                    coalesce(sum(disk),0) disk FROM placement_reservations
+                    coalesce(sum(disk),0) disk,count(*) slots FROM placement_reservations
                 WHERE node=? AND ((state='reserved' AND expires>?) OR state='claimed'
                     OR (state='committed' AND committed>=?))''', (node, now, snap['checked_at'])).fetchone()
             free = dict(cpu=snap['cpu']-held['cpu'], memory=snap['memory']-held['memory'], disk=snap['disk']-held['disk'])
-            if free['cpu'] >= cpu and free['memory'] >= memory and free['disk'] >= disk:
+            if (free['cpu'] >= cpu and free['memory'] >= memory and free['disk'] >= disk
+                    and (snap['slots'] is None or snap['slots']-held['slots'] >= 1)):
                 score = (1 if region and snap['region'] == region else 0,
                          free['cpu']-cpu, free['memory']-memory, free['disk']-disk, node)
                 candidates.append((score, snap))
