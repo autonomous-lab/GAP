@@ -10,6 +10,7 @@ import time
 import uuid
 
 from billing import Ledger, BillingError
+import host_capacity
 from microvm import VMError
 
 DESTROYED_RECHECK_SECONDS = 60
@@ -40,6 +41,13 @@ class Runtime:
         self.capacity_lock=threading.RLock()
         self.reserve_memory_mib=config.get('host_reserve_memory_mib',2048)
         self.reserve_vcpus=config.get('host_reserve_vcpus',1)
+        self.reserve_swap_mib=config.get('host_reserve_swap_mib',2048)
+        self.min_available_memory_mib=config.get('host_min_available_memory_mib',512)
+        self.cpu_overcommit_ratio=config.get('host_cpu_overcommit_ratio',8)
+        if (type(self.cpu_overcommit_ratio) is not int or not 1<=self.cpu_overcommit_ratio<=16
+                or type(self.reserve_swap_mib) is not int or self.reserve_swap_mib<0
+                or type(self.min_available_memory_mib) is not int or self.min_available_memory_mib<256):
+            raise ValueError('invalid_host_capacity_policy')
         self.gateway=None; self.closed=False; self.last_error=None
         self.recover()
 
@@ -286,8 +294,10 @@ class Runtime:
             for path in (self.manager.root/'catalog').glob('*.json'):
                 meta=json.loads(path.read_text())
                 if meta['vm_id']!=vm_id and self.manager.alive(meta): allocated+=meta['vcpus']
-            available=next(int(line.split()[1]) for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))//1024
-            if available<memory_mib+self.reserve_memory_mib or allocated+vcpus>max(1,(os.cpu_count() or 1)-self.reserve_vcpus):
+            memory=host_capacity.memory_mib()
+            startable=host_capacity.startable_memory(memory,self.reserve_memory_mib,self.reserve_swap_mib,self.min_available_memory_mib)
+            cpu_limit=host_capacity.cpu_limit(host_capacity.logical_cpus(),self.reserve_vcpus,self.cpu_overcommit_ratio)
+            if memory_mib>startable or allocated+vcpus>cpu_limit:
                 raise VMError('host_capacity_unavailable_retry_later')
             yield
 
