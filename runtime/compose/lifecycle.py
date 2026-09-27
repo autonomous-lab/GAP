@@ -294,18 +294,18 @@ class Runtime:
     def admission(self,project,vcpus,memory_mib,vm_id=None):
         with self.capacity_lock:
             allocated=0
-            committed_vms=0
+            active_vms=0
             for path in (self.manager.root/'catalog').glob('*.json'):
                 meta=json.loads(path.read_text())
-                if meta['vm_id']!=vm_id:
-                    if meta['state'] not in ('destroyed','migrated'): committed_vms+=1
-                    if self.manager.alive(meta): allocated+=meta['vcpus']
+                if meta['vm_id']!=vm_id and self.manager.alive(meta):
+                    active_vms+=1
+                    allocated+=meta['vcpus']
             memory=host_capacity.memory_mib()
             startable=host_capacity.startable_memory(memory,self.reserve_memory_mib,self.reserve_swap_mib,self.min_available_memory_mib)
             cpus=host_capacity.logical_cpus()
             cpu_limit=host_capacity.cpu_limit(cpus,self.reserve_vcpus,self.cpu_overcommit_ratio)
             vm_limit=host_capacity.vm_limit(cpus,self.vms_per_cpu)
-            if memory_mib>startable or allocated+vcpus>cpu_limit or committed_vms+1>vm_limit:
+            if memory_mib>startable or allocated+vcpus>cpu_limit or active_vms+1>vm_limit:
                 raise VMError('host_capacity_unavailable_retry_later')
             yield
 

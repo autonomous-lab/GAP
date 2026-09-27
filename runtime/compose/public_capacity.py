@@ -17,10 +17,11 @@ def snapshot(manager, runtime):
         pricing = runtime.ledger.pricing()
         memory = host_capacity.memory_mib()
         rows = [json.loads(p.read_text()) for p in (manager.root / 'catalog').glob('*.json')]
-        active = [r for r in rows if r['state'] not in ('destroyed', 'migrated')]
+        active = [r for r in rows if r['state'] not in ('destroyed', 'migrated') and manager.alive(r)]
         retained = [r for r in rows if r['state'] != 'migrated' and (r['state'] != 'destroyed' or r.get('retained'))]
         cpu = host_capacity.logical_cpus()
-        # Reserve host overhead; retain stopped/hibernated VM commitments.
+        # Execution headroom counts only verified live guests. Retained disks
+        # stay committed; a stopped/hibernated guest must pass admission on wake.
         reserve_cpu = getattr(runtime,'reserve_vcpus',0)
         ratio = getattr(runtime,'cpu_overcommit_ratio',8)
         vms_per_cpu = getattr(runtime,'vms_per_cpu',8)
@@ -38,6 +39,6 @@ def snapshot(manager, runtime):
                     hardware=dict(cpu_model=model, logical_cpus=cpu, memory_mib=memory['MemTotal'], swap_mib=memory['SwapTotal']),
                     headroom=dict(vcpus=int(cpu_free*4)/4, vm_slots=vm_free, memory_mib=(ram_free//256)*256, disk_gib=disk_free),
                     pricing=dict(pricing, available=pricing['mode']=='enforced' and pricing['tariff'] is not None, currency='USD'),
-                    basis='Overcommitted host CPU and RAM+swap headroom after retained VM commitments and overhead; live admission and account quotas still apply.')
+                    basis='CPU, VM-slot and RAM+swap headroom after live guests and host overhead; retained disks remain committed, and wake admission and account quotas still apply.')
     except Exception:
         return result

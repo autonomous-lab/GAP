@@ -30,22 +30,30 @@ class HostCapacity(unittest.TestCase):
         self.assertEqual(commitment_memory(memory, 8192, 2048, 0), 22528)
         self.assertEqual(startable_memory(memory, 2048, 0), 16384)
 
-    def test_admission_counts_hibernated_vm_slots_but_allows_their_wake(self):
+    def test_admission_counts_only_live_vm_slots_and_rechecks_on_wake(self):
         with TemporaryDirectory() as tmp:
             catalog = Path(tmp) / 'catalog'
             catalog.mkdir()
             for number in range(64):
-                (catalog / f'{number}.json').write_text(json.dumps(dict(vm_id=f'vm_{number:032x}',state='hibernated',vcpus=1)))
-            runtime = SimpleNamespace(manager=SimpleNamespace(root=Path(tmp),alive=lambda meta: False),
+                (catalog / f'{number}.json').write_text(json.dumps(dict(vm_id=f'vm_{number:032x}',state='hibernated',vcpus=.25)))
+            runtime = SimpleNamespace(manager=SimpleNamespace(root=Path(tmp),alive=lambda meta: meta['state']=='running'),
                                       capacity_lock=threading.RLock(),reserve_memory_mib=2048,
                                       reserve_swap_mib=0,min_available_memory_mib=512,
                                       reserve_vcpus=0,cpu_overcommit_ratio=8,vms_per_cpu=8)
             memory = dict(MemTotal=16384,MemAvailable=14000,SwapTotal=16384,SwapFree=16384)
             with patch('host_capacity.logical_cpus',return_value=8),patch('host_capacity.memory_mib',return_value=memory):
+                with Runtime.admission(runtime,'project',.25,256):
+                    pass
+                for number in range(64):
+                    (catalog / f'{number}.json').write_text(json.dumps(dict(vm_id=f'vm_{number:032x}',state='running',vcpus=.25)))
                 with self.assertRaisesRegex(VMError,'host_capacity_unavailable'):
-                    with Runtime.admission(runtime,'project',1,256):
+                    with Runtime.admission(runtime,'project',.25,256):
                         pass
-                with Runtime.admission(runtime,'project',1,256,'vm_' + f'{0:032x}'):
+                (catalog / '64.json').write_text(json.dumps(dict(vm_id=f'vm_{64:032x}',state='hibernated',vcpus=.25)))
+                with self.assertRaisesRegex(VMError,'host_capacity_unavailable'):
+                    with Runtime.admission(runtime,'project',.25,256,'vm_' + f'{64:032x}'):
+                        pass
+                with Runtime.admission(runtime,'project',.25,256,'vm_' + f'{0:032x}'):
                     pass
 
 

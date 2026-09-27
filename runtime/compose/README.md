@@ -660,6 +660,11 @@ Add these fields to the operator-owned runner JSON (container paths):
 }
 ```
 
+The eight VM slots per logical CPU apply to simultaneously active QEMU guests.
+Stopped and hibernated VMs release execution slots, vCPU and RAM commitments;
+their retained disks still count. A later wake rechecks live host capacity and
+can fail with `host_capacity_unavailable_retry_later` if those slots were taken.
+
 Create `billing-admin.token` with a cryptographically random secret of at least
 32 characters, distinct from `service.token`. Restrict it to the worker UID 10001
 (mode 0600), mount it with the existing private config directory, and never put

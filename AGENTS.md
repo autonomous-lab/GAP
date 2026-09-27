@@ -1835,12 +1835,14 @@ or establish trust between operators.
 
 The view reports operator-declared country/region, software version, services,
 measured hardware, active sale tariff and aggregate host headroom. Missing data
-is unavailable, never zero-priced capacity. Headroom subtracts all retained VM
-commitments, including stopped/hibernated VMs. The host policy allows up to eight
-VM slots and eight allocated vCPUs per logical CPU, counts all configured swap
-alongside RAM, and reserves 2048 MiB RAM and 5 GiB disk for overhead. RAM is also
-bounded by currently available host RAM plus free swap, with a 512 MiB physical
-availability floor; disk by free space. These are capacity observations,
+is unavailable, never zero-priced capacity. Execution headroom counts only
+verified live VMs: stopped and hibernated VMs free CPU, RAM and VM slots, but
+their retained disks remain committed. The host policy allows up to eight
+simultaneously active VM slots and eight allocated vCPUs per logical CPU, counts
+all configured swap alongside RAM, and reserves 2048 MiB RAM and 5 GiB disk for
+overhead. RAM is also bounded by currently available host RAM plus free swap,
+with a 512 MiB physical availability floor; disk by free space. A wake can be
+rejected when another guest has taken the freed capacity. These are capacity observations,
 not reservations or promises of admission. Account quotas, compatible images,
 concurrent jobs and allocation checks remain authoritative.
 
