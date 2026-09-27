@@ -14,6 +14,12 @@
 # repository instead of hunting for a named volume.
 
 services:
+  gap-rust-tests:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+
   gap-node:
     build: .
     # Operator settings live in .env (see .env.example). Without this,
@@ -107,9 +113,10 @@ services:
       SANDBOX_CAPABILITY_TIMEOUT_MS: "${GAP_FUNCTION_CAPABILITY_TIMEOUT_MS:-35000}"
       SANDBOX_MAX_CAPABILITIES: "${GAP_FUNCTION_MAX_CAPABILITIES:-128}"
       SANDBOX_MAX_HTTP_CAPABILITIES: "${GAP_FUNCTION_MAX_HTTP_CAPABILITIES:-32}"
-      SANDBOX_MAX_PROJECT_CONCURRENCY: "${GAP_FUNCTION_PROJECT_CONCURRENCY:-4}"
-      SANDBOX_MAX_GLOBAL_CONCURRENCY: "${GAP_FUNCTION_GLOBAL_CONCURRENCY:-16}"
-      SANDBOX_MAX_QUEUE: "${GAP_FUNCTION_QUEUE_SIZE:-32}"
+      SANDBOX_MAX_PROJECT_CONCURRENCY: "${GAP_FUNCTION_PROJECT_CONCURRENCY:-256}"
+      SANDBOX_MAX_GLOBAL_CONCURRENCY: "${GAP_FUNCTION_GLOBAL_CONCURRENCY:-256}"
+      SANDBOX_MAX_QUEUE: "${GAP_FUNCTION_QUEUE_SIZE:-256}"
+      SANDBOX_MAX_BODY_BYTES: "${GAP_FUNCTION_SANDBOX_MAX_BODY_BYTES:-16777216}"
       SANDBOX_QUEUE_TIMEOUT_MS: "${GAP_FUNCTION_QUEUE_TIMEOUT_MS:-30000}"
       CAPABILITY_URL: "http://gap-node:8080/internal/functions/capability"
     read_only: true
@@ -119,10 +126,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    pids_limit: 256
-    mem_limit: 512m
-    memswap_limit: 512m
-    cpus: 1.00
+    pids_limit: 4096
+    mem_limit: 8g
+    memswap_limit: 8g
+    cpus: 4.00
     networks:
       - sandbox_net
     restart: always

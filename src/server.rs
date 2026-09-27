@@ -3211,7 +3211,6 @@ the content inline"
     }
 
     fn review_cloud_function(
-        judges: &[Arc<dyn crate::verifier::Verifier>],
         name: &str,
         runtime: &str,
         source: &[u8],
@@ -3220,81 +3219,20 @@ the content inline"
         crate::cloud::FunctionSecurityReview,
     )> {
         crate::cloud::validate_identifier("function name", name)?;
-        if !matches!(runtime, "javascript" | "wasm") {
-            return Err(Error::Other("runtime must be javascript or wasm".into()));
+        if runtime != "javascript" {
+            return Err(Error::Other("only javascript functions are executable".into()));
         }
         if source.len() > crate::cloud::MAX_FUNCTION_BYTES {
             return Err(Error::Other("function exceeds size limit".into()));
         }
-        let static_findings = match runtime {
-            "javascript" => crate::cloud::scan_javascript_function(source)?,
-            "wasm" => vec!["WASM requires manual security review".into()],
-            _ => Vec::new(),
-        };
-        let source_text = std::str::from_utf8(source).unwrap_or("");
-        let mut opinions = Vec::new();
-        let mut consulted_judges = Vec::new();
-        let mut security_reasons = Vec::new();
-        for judge in judges {
-            let judge_name = judge.name();
-            consulted_judges.push(judge_name.clone());
-            match judge.judge_function_security(name, source_text) {
-                Ok((ruling, reasons)) => {
-                    security_reasons.extend(
-                        reasons
-                            .into_iter()
-                            .map(|reason| format!("[{judge_name}] {reason}")),
-                    );
-                    opinions.push(ruling);
-                    // A positive security verdict clears the release by itself
-                    // unless a previous judge explicitly found malicious
-                    // behaviour. The second opinion exists to confirm a
-                    // rejection or resolve uncertainty, not to turn a healthy
-                    // publication into a failure because another provider is
-                    // temporarily unavailable.
-                    if ruling == crate::verifier::Ruling::Conforms
-                        && !opinions.contains(&crate::verifier::Ruling::Nonconforming)
-                    {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    security_reasons.push(format!("[{judge_name}] unavailable: {error}"));
-                    opinions.push(crate::verifier::Ruling::Inconclusive);
-                }
-            }
-        }
-        let has_positive = opinions.contains(&crate::verifier::Ruling::Conforms);
-        let has_negative = opinions.contains(&crate::verifier::Ruling::Nonconforming);
-        let release_ruling = if opinions.is_empty() {
-            security_reasons.push("security judge is not configured".into());
-            crate::cloud::ReleaseRuling::NeedsReview
-        } else if has_positive && !has_negative {
-            crate::cloud::ReleaseRuling::ApprovedWithConstraints
-        } else if has_negative
-            && opinions.len() >= 2
-            && opinions
-                .iter()
-                .all(|ruling| *ruling == crate::verifier::Ruling::Nonconforming)
-        {
-            crate::cloud::ReleaseRuling::Rejected
-        } else if has_positive && has_negative {
-            security_reasons.push("security judges disagreed".into());
-            crate::cloud::ReleaseRuling::NeedsReview
-        } else {
-            crate::cloud::ReleaseRuling::NeedsReview
-        };
-        let security_judge = if consulted_judges.is_empty() {
-            "none".into()
-        } else {
-            consulted_judges.join(", ")
-        };
+        std::str::from_utf8(source)
+            .map_err(|_| Error::Other("function source must be valid UTF-8".into()))?;
         Ok((
-            release_ruling,
+            crate::cloud::ReleaseRuling::Approved,
             crate::cloud::FunctionSecurityReview {
-                judge: security_judge,
-                static_findings,
-                reasons: security_reasons,
+                judge: "none".into(),
+                static_findings: Vec::new(),
+                reasons: Vec::new(),
             },
         ))
     }
@@ -3311,8 +3249,7 @@ the content inline"
             crate::cloud::FunctionSecurityReview,
         ),
     ) -> Result<crate::cloud::FunctionVersion> {
-        // Ownership, credential validity, project status and storage quotas may
-        // have changed while the judge was running. Recheck before writing.
+        // Recheck ownership, status and quota at the final write.
         self.cloud_owned_project(token, project_id)?;
         let (release_ruling, security_review) = review;
         let mut store = crate::cloud::ProjectStore::open(&self.cloud_root, project_id)?;
@@ -8638,14 +8575,9 @@ pub fn route_with_ip(
             if let Err(error) = guard.cloud_owned_project(token, project_id) {
                 return error_response(&error);
             }
-            // A review must never hold NodeState or exhaust the HTTP worker
-            // pool. Keep the existing one-at-a-time publication policy, but
-            // reject contention immediately rather than queueing workers.
+            // Keep the existing one-at-a-time publication policy, but reject
+            // contention immediately rather than queueing HTTP workers.
             let publication = guard.function_publication.clone();
-            let judges: Vec<_> = [guard.verifier.clone(), guard.verifier_b.clone()]
-                .into_iter()
-                .flatten()
-                .collect();
             drop(guard);
             let _permit = match publication.try_lock() {
                 Ok(permit) => permit,
@@ -8660,7 +8592,7 @@ pub fn route_with_ip(
                 }
             };
             let review =
-                match NodeState::review_cloud_function(&judges, name, runtime, source.as_bytes()) {
+                match NodeState::review_cloud_function(name, runtime, source.as_bytes()) {
                     Ok(review) => review,
                     Err(error) => return error_response(&error),
                 };
@@ -11693,7 +11625,7 @@ mod tests {
             Some(&auth),
         );
         assert_eq!(status, 200, "{version}");
-        assert_eq!(version["ruling"], "approved_with_constraints");
+        assert_eq!(version["ruling"], "approved");
         let activate = json!({ "version": version["version"] });
         assert_eq!(
             route(
@@ -11852,113 +11784,7 @@ mod tests {
     }
 
     #[test]
-    fn function_review_does_not_block_readers_or_queue_publications() {
-        check_concurrent_function_publication(false);
-    }
-
-    #[test]
-    fn function_publication_rechecks_project_after_review() {
-        check_concurrent_function_publication(true);
-    }
-
-    fn check_concurrent_function_publication(suspend: bool) {
-        use std::sync::mpsc;
-        use std::time::Duration;
-        struct PausedJudge {
-            entered: mpsc::Sender<()>,
-            resume: Mutex<mpsc::Receiver<()>>,
-        }
-        impl crate::verifier::Verifier for PausedJudge {
-            fn name(&self) -> String {
-                "paused-test-judge".into()
-            }
-            fn judge(
-                &self,
-                _: &crate::verifier::Evidence,
-            ) -> Result<(crate::verifier::Ruling, Vec<String>)> {
-                unreachable!()
-            }
-            fn judge_function_security(
-                &self,
-                _: &str,
-                _: &str,
-            ) -> Result<(crate::verifier::Ruling, Vec<String>)> {
-                self.entered.send(()).unwrap();
-                self.resume
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(10))
-                    .unwrap();
-                Ok((crate::verifier::Ruling::Conforms, vec![]))
-            }
-        }
-        let arc = state();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        arc.lock()
-            .unwrap()
-            .set_cloud_root(std::env::temp_dir().join(format!("gap-review-concurrency-{nonce}")));
-        let owner = register(&arc);
-        let auth = format!("Bearer {owner}");
-        let (_, project) = route(&arc, "POST", "/v1/cloud/projects", b"{}", Some(&auth));
-        let project_id = project["project_id"].as_str().unwrap().to_string();
-        let path = format!("/v1/cloud/projects/{project_id}/functions/concurrent");
-        let source = json!({"runtime":"javascript","source":"() => 42"}).to_string();
-        let (entered_tx, entered_rx) = mpsc::channel();
-        let (resume_tx, resume_rx) = mpsc::channel();
-        arc.lock().unwrap().set_verifier(Box::new(PausedJudge {
-            entered: entered_tx,
-            resume: Mutex::new(resume_rx),
-        }));
-        let worker = {
-            let (arc, path, source, auth) =
-                (arc.clone(), path.clone(), source.clone(), auth.clone());
-            std::thread::spawn(move || route(&arc, "POST", &path, source.as_bytes(), Some(&auth)))
-        };
-        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        // Release the judge even on regression, so a failing test never hangs.
-        let available = arc.try_lock().is_ok();
-        if !available {
-            resume_tx.send(()).unwrap();
-            worker.join().unwrap();
-            panic!("security judge held the global state lock");
-        }
-        let health = route(&arc, "GET", "/health", b"", None);
-        let busy = route(&arc, "POST", &path, source.as_bytes(), Some(&auth));
-        if suspend {
-            arc.lock()
-                .unwrap()
-                .cloud_projects
-                .get_mut(&project_id)
-                .unwrap()
-                .status = "suspended".into();
-        }
-        resume_tx.send(()).unwrap();
-        let result = worker.join().unwrap();
-        assert_eq!(health.0, 200);
-        assert_eq!(busy.0, 429);
-        assert_eq!(busy.1["error"]["code"], "publication_busy");
-        let guard = arc.lock().unwrap();
-        assert!(guard.function_publication.try_lock().is_ok());
-        let mut store = crate::cloud::ProjectStore::open(&guard.cloud_root, &project_id).unwrap();
-        if suspend {
-            assert_ne!(result.0, 200);
-            assert!(store.active_function("concurrent").unwrap().is_none());
-            assert!(
-                !store.delete_function("concurrent").unwrap(),
-                "no version may be persisted after suspension"
-            );
-        } else {
-            assert_eq!(result.0, 200, "{:?}", result.1);
-            assert_eq!(result.1["ruling"], "approved_with_constraints");
-            assert_eq!(result.1["version"], 1);
-        }
-    }
-
-    #[test]
-    fn a_positive_primary_function_judge_does_not_wait_for_the_second() {
+    fn function_publication_skips_configured_ai_judges() {
         let arc = state();
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -11969,6 +11795,7 @@ mod tests {
             .set_cloud_root(std::env::temp_dir().join(format!("gap-judge-test-{nonce}")));
         let mut primary = crate::verifier::MockVerifier::new(crate::verifier::Ruling::Conforms);
         primary.label = Some("primary".into());
+        primary.set_fail(true);
         let mut second = crate::verifier::MockVerifier::new(crate::verifier::Ruling::Conforms);
         second.label = Some("second".into());
         second.set_fail(true);
@@ -11988,11 +11815,9 @@ mod tests {
             Some(&auth),
         );
         assert_eq!(status, 200, "{version}");
-        assert_eq!(version["ruling"], "approved_with_constraints");
-        assert_eq!(version["security_review"]["judge"], "primary");
-        assert!(!version["security_review"]["reasons"]
-            .to_string()
-            .contains("unavailable"));
+        assert_eq!(version["ruling"], "approved");
+        assert_eq!(version["security_review"]["judge"], "none");
+        assert_eq!(version["security_review"]["reasons"], json!([]));
     }
 
     #[test]

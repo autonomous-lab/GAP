@@ -100,6 +100,54 @@ test('deadline spans all replays and capability waits', async () => {
   } finally { await f.close(); }
 });
 
+test('web-compatible primitives work without leaking the Node host realm', async () => {
+  const f = await fixture();
+  try {
+    const result = await f.invoke(`async () => {
+      const bytes = new TextEncoder().encode('été');
+      const decoded = new TextDecoder().decode(bytes);
+      const url = new URL('/item?q=1', 'https://example.test/base');
+      const params = new URLSearchParams(url.search);
+      params.append('q', '2');
+      await new Promise(resolve => setTimeout(resolve, 2));
+      return {
+        base64: btoa(atob('YQ==')),
+        decoded, href: url.href, all: params.getAll('q'),
+        uuid: crypto.randomUUID().length,
+        hostProcess: typeof process,
+        bridgeEscape: typeof gap.kv.get.constructor('return process')(),
+      };
+    }`);
+    // Dynamic Function is disabled even through a function constructor.
+    assert.equal(result.status, 422);
+    assert.match(result.body.error, /function failed/);
+    const safe = await f.invoke(`async () => {
+      await new Promise(resolve => setTimeout(resolve, 2));
+      const params = new URLSearchParams('q=1'); params.append('q', '2');
+      return { base64: btoa(atob('YQ==')), text: new TextDecoder().decode(new TextEncoder().encode('été')),
+        href: new URL('/x', 'https://example.test').href, all: params.getAll('q'),
+        uuid: crypto.randomUUID().length, process: typeof process,
+        bridgeConstructor: typeof __gapBridge.constructor };
+    }`);
+    assert.equal(safe.status, 200, JSON.stringify(safe.body));
+    assert.deepEqual(safe.body.result, { base64: 'YQ==', text: 'été',
+      href: 'https://example.test/x', all: ['1','2'], uuid: 36, process: 'undefined',
+      bridgeConstructor: 'undefined' });
+  } finally { await f.close(); }
+});
+
+test('five MiB source executes, one extra byte is refused', async () => {
+  const f = await fixture();
+  try {
+    const prefix = '() => 42 /*';
+    const suffix = '*/';
+    const source = prefix + ' '.repeat(5 * 1024 * 1024 - prefix.length - suffix.length) + suffix;
+    assert.equal((await f.invoke(source)).status, 200);
+    const oversized = await f.invoke(source + ' ');
+    assert.equal(oversized.status, 400);
+  } finally { await f.close(); }
+});
+
 
 test('suspension kills an active worker, denies queued execution and fails closed on policy outage', {timeout:15000}, async()=>{
   const settings={concurrency:1};const f=await fixture(settings);

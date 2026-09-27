@@ -5,16 +5,16 @@ import { fileURLToPath } from "node:url";
 const addr = process.env.SANDBOX_ADDR || "0.0.0.0";
 const port = Number(process.env.SANDBOX_PORT || "8090");
 const token = process.env.SANDBOX_TOKEN || "";
-const maxBody = Number(process.env.SANDBOX_MAX_BODY_BYTES || "600000");
+const maxBody = Number(process.env.SANDBOX_MAX_BODY_BYTES || "16777216");
 const timeoutMs = Number(process.env.SANDBOX_TIMEOUT_MS || "30000");
 const vmTimeoutMs = Number(process.env.SANDBOX_VM_TIMEOUT_MS || "30000");
 const capabilityTimeoutMs = Number(process.env.SANDBOX_CAPABILITY_TIMEOUT_MS || "35000");
 const capabilityUrl = process.env.CAPABILITY_URL || "http://gap-node:8080/internal/functions/capability";
 const maxCapabilities = Number(process.env.SANDBOX_MAX_CAPABILITIES || "128");
 const maxHttpCapabilities = Number(process.env.SANDBOX_MAX_HTTP_CAPABILITIES || "32");
-const maxGlobalConcurrency = Number(process.env.SANDBOX_MAX_GLOBAL_CONCURRENCY || "16");
-const maxProjectConcurrency = Number(process.env.SANDBOX_MAX_PROJECT_CONCURRENCY || "4");
-const maxQueue = Number(process.env.SANDBOX_MAX_QUEUE || "32");
+const maxGlobalConcurrency = Number(process.env.SANDBOX_MAX_GLOBAL_CONCURRENCY || "256");
+const maxProjectConcurrency = Number(process.env.SANDBOX_MAX_PROJECT_CONCURRENCY || "256");
+const maxQueue = Number(process.env.SANDBOX_MAX_QUEUE || "256");
 const queueTimeoutMs = Number(process.env.SANDBOX_QUEUE_TIMEOUT_MS || "30000");
 const workerPath = fileURLToPath(new URL("./worker.mjs", import.meta.url));
 
@@ -254,7 +254,7 @@ const server = http.createServer((req, res) => {
   req.on("end", async () => {
     try {
       const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      if (typeof payload.source !== "string" || Buffer.byteLength(payload.source) > 524288) {
+      if (typeof payload.source !== "string" || Buffer.byteLength(payload.source) > 5 * 1024 * 1024) {
         return reply(res, 400, { error: "invalid or oversized function source" });
       }
       if (typeof payload.project_id !== "string" || !payload.project_id) {

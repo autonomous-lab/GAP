@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 pub const MAX_KEY_BYTES: usize = 512;
 pub const MAX_KV_BYTES: usize = 64 * 1024;
 pub const MAX_OBJECT_BYTES: usize = 1024 * 1024;
-pub const MAX_FUNCTION_BYTES: usize = 1024 * 1024;
+pub const MAX_FUNCTION_BYTES: usize = 5 * 1024 * 1024;
 pub const MAX_PROJECT_KV_BYTES: u64 = 25 * 1024 * 1024;
 pub const MAX_PROJECT_OBJECT_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_PROJECT_FUNCTION_BYTES: u64 = 100 * 1024 * 1024;
@@ -35,7 +35,7 @@ pub const MAX_DATABASE_RESULT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_DATABASE_TIME: Duration = Duration::from_millis(250);
 pub const FUNCTION_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_FUNCTION_HTTP_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
-pub const MAX_SITE_FILE_BYTES: usize = 3 * 1024 * 1024;
+pub const MAX_SITE_FILE_BYTES: usize = 5 * 1024 * 1024;
 /// Browser policy shared by private paths and custom-domain sites. This does
 /// not grant sandbox egress or isolate browser storage between URL paths.
 pub const SITE_CONTENT_SECURITY_POLICY: &str = concat!(
@@ -104,88 +104,6 @@ pub struct SiteFileInfo {
     pub media_type: String,
     pub size_bytes: u64,
     pub digest: String,
-}
-
-/// Deterministic publication gate for JavaScript functions. This deliberately
-/// targets intent and evasion indicators rather than pretending to be a full
-/// JavaScript parser; runtime isolation remains authoritative.
-pub fn scan_javascript_function(source: &[u8]) -> Result<Vec<String>> {
-    let text = std::str::from_utf8(source)
-        .map_err(|_| Error::Other("function source must be valid UTF-8".into()))?;
-    if text
-        .bytes()
-        .any(|byte| byte == 0 || (byte < 0x09) || (byte > 0x0d && byte < 0x20))
-    {
-        return Err(Error::Other(
-            "function security scan: control bytes are forbidden".into(),
-        ));
-    }
-    if text.len() > 32 * 1024 && text.lines().any(|line| line.len() > 32 * 1024) {
-        return Err(Error::Other(
-            "function security scan: excessive minification or padding".into(),
-        ));
-    }
-
-    let lower = text.to_ascii_lowercase();
-    let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
-    let forbidden = [
-        ("process.env", "environment-secret access"),
-        ("deno.env", "environment-secret access"),
-        ("bun.env", "environment-secret access"),
-        ("child_process", "process execution"),
-        ("worker_threads", "worker creation"),
-        ("require(", "module loading"),
-        ("import(", "dynamic module loading"),
-        ("eval(", "dynamic code execution"),
-        ("newfunction(", "dynamic code execution"),
-        ("__proto__", "prototype manipulation"),
-        ("constructor.prototype", "prototype manipulation"),
-        ("xmlhttprequest", "unbrokered network access"),
-        ("websocket(", "unbrokered network access"),
-        ("fetch(", "unbrokered network access; use gap.http"),
-    ];
-    for (pattern, reason) in forbidden {
-        if compact.contains(pattern) {
-            return Err(Error::Other(format!(
-                "function security scan: forbidden {reason}"
-            )));
-        }
-    }
-
-    let encoded_markers = compact.matches("\\x").count()
-        + compact.matches("\\u00").count()
-        + compact.matches("fromcharcode").count()
-        + compact.matches("atob(").count()
-        + compact.matches("unescape(").count();
-    if encoded_markers > 32 {
-        return Err(Error::Other(
-            "function security scan: excessive encoded or obfuscated content".into(),
-        ));
-    }
-    let has_http = compact.contains("gap.http.");
-    let has_loop = ["for(", "while(", "dowhile("]
-        .iter()
-        .any(|p| compact.contains(p));
-    if has_http && (has_loop || compact.contains("promise.all(")) {
-        return Err(Error::Other(
-            "function security scan: bulk or looped outbound HTTP is forbidden".into(),
-        ));
-    }
-
-    let mut findings = Vec::new();
-    if has_http {
-        findings.push("outbound HTTP requires semantic review and the project allowlist".into());
-    }
-    if compact.contains("gap.kv.")
-        || compact.contains("gap.db.")
-        || compact.contains("gap.objects.")
-    {
-        findings.push("project data access requires semantic exfiltration review".into());
-    }
-    if compact.contains("gap.realtime.") {
-        findings.push("realtime token issuance requires semantic scope review".into());
-    }
-    Ok(findings)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -910,7 +828,7 @@ impl ProjectStore {
     ) -> Result<SiteAsset> {
         validate_site_path(path)?;
         enforce_size("site file", content.len(), MAX_SITE_FILE_BYTES)?;
-        scan_static_site_file(path, content)?;
+        // Content is opaque at publication; only path, media type and quotas apply.
         let media_type = site_media_type(path)?.to_string();
         let digest = format!("sha256:{}", crate::sha256_hex(content));
         let tx = self.control.transaction().map_err(db_error)?;
@@ -1748,70 +1666,6 @@ fn site_media_type(path: &str) -> Result<&'static str> {
     }
 }
 
-fn scan_static_site_file(path: &str, content: &[u8]) -> Result<()> {
-    let media = site_media_type(path)?;
-    if !media.starts_with("text/")
-        && !matches!(
-            media,
-            "application/json; charset=utf-8" | "application/xml; charset=utf-8" | "image/svg+xml"
-        )
-    {
-        return Ok(());
-    }
-    let text = std::str::from_utf8(content)
-        .map_err(|_| Error::Other("text site file must be valid UTF-8".into()))?;
-    if text
-        .bytes()
-        .any(|byte| byte == 0 || byte < 0x09 || (byte > 0x0d && byte < 0x20))
-    {
-        return Err(Error::Other(
-            "site security scan: control bytes are forbidden".into(),
-        ));
-    }
-    // Browser bundles are not server functions. Accept minified/encoded
-    // CSS and JS without content judgement; retain structural validation.
-    if matches!(
-        media,
-        "text/css; charset=utf-8" | "text/javascript; charset=utf-8"
-    ) {
-        return Ok(());
-    }
-    if text.len() > 32 * 1024 && text.lines().any(|line| line.len() > 32 * 1024) {
-        return Err(Error::Other(
-            "site security scan: excessive minification or padding".into(),
-        ));
-    }
-    let lower = text.to_ascii_lowercase();
-    let forbidden = [
-        ("-----begin private key", "embedded private key"),
-        ("-----begin rsa private key", "embedded private key"),
-        ("aws_secret_access_key=", "embedded cloud credential"),
-        ("openai_api_key=", "embedded API credential"),
-        ("github_token=", "embedded API credential"),
-        ("<meta http-equiv=\"refresh\"", "automatic redirect"),
-        ("<meta http-equiv='refresh'", "automatic redirect"),
-        ("<base ", "base URL override"),
-    ];
-    for (pattern, reason) in forbidden {
-        if lower.contains(pattern) {
-            return Err(Error::Other(format!(
-                "site security scan: forbidden {reason}"
-            )));
-        }
-    }
-    let encoded_markers = lower.matches("\\x").count()
-        + lower.matches("\\u00").count()
-        + lower.matches("fromcharcode").count()
-        + lower.matches("atob(").count()
-        + lower.matches("unescape(").count();
-    if encoded_markers > 64 {
-        return Err(Error::Other(
-            "site security scan: excessive encoded or obfuscated content".into(),
-        ));
-    }
-    Ok(())
-}
-
 fn site_version_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SiteVersion> {
     Ok(SiteVersion {
         version: row.get::<_, i64>(0)? as u64,
@@ -2053,29 +1907,6 @@ mod tests {
     fn project_ids_cannot_escape_the_base_directory() {
         assert!(ProjectStore::open(&std::env::temp_dir(), "../escape").is_err());
         assert!(ProjectStore::open(&std::env::temp_dir(), "a/b").is_err());
-    }
-
-    #[test]
-    fn function_security_scan_rejects_escape_obfuscation_and_http_fanout() {
-        assert!(scan_javascript_function(b"async () => fetch('https://evil.test')").is_err());
-        assert!(scan_javascript_function(b"() => process.env.SECRET").is_err());
-        assert!(scan_javascript_function(
-            b"async (_, gap) => { while (true) await gap.http.get('https://x.test'); }"
-        )
-        .is_err());
-        let encoded = format!("() => '{}';", "\\x41".repeat(33));
-        assert!(scan_javascript_function(encoded.as_bytes()).is_err());
-    }
-
-    #[test]
-    fn function_security_scan_allows_bounded_brokered_http() {
-        let findings = scan_javascript_function(
-            b"async (request, gap) => gap.http.get('https://api.example.com/item')",
-        )
-        .unwrap();
-        assert!(findings
-            .iter()
-            .any(|finding| finding.contains("outbound HTTP")));
     }
 
     #[test]
@@ -2327,7 +2158,7 @@ mod tests {
     }
 
     #[test]
-    fn static_site_scan_blocks_secrets_redirects_and_unsafe_paths() {
+    fn static_site_rejects_unsafe_paths_and_types_but_not_content() {
         let mut store = temp_store();
         store
             .configure_site(
@@ -2352,17 +2183,17 @@ mod tests {
                 br#"<meta http-equiv="refresh" content="0;url=https://evil.test">"#,
                 3
             )
-            .is_err());
+            .is_ok());
         assert!(store
             .put_site_file(1, "credentials.txt", b"OPENAI_API_KEY=not-allowed", 3)
-            .is_err());
+            .is_ok());
         assert!(store
             .put_site_file(1, "huge.js", &vec![b'a'; MAX_SITE_FILE_BYTES + 1], 3)
             .is_err());
     }
 
     #[test]
-    fn static_bundles_accept_three_mib_without_content_judgement() {
+    fn static_bundles_accept_five_mib_without_content_judgement() {
         let mut store = temp_store();
         store
             .configure_site(
@@ -2382,11 +2213,9 @@ mod tests {
             let mut oversized = bundle.clone();
             oversized.push(b' ');
             assert!(store.put_site_file(1, name, &oversized, 3).is_err());
-            assert!(store.put_site_file(1, name, b"\x00", 3).is_err());
-            assert!(store.put_site_file(1, name, b"\xff", 3).is_err());
+            assert!(store.put_site_file(1, name, b"\x00", 3).is_ok());
+            assert!(store.put_site_file(1, name, b"\xff", 3).is_ok());
         }
-        assert!(scan_static_site_file("bundle.js", "atob('x');".repeat(100).as_bytes()).is_ok());
-        assert!(scan_static_site_file("index.html", &bundle).is_err());
         assert_eq!(store.site_files(1).unwrap().len(), 3);
     }
 

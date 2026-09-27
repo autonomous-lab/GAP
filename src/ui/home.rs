@@ -1127,7 +1127,7 @@ mod tests {
         let html = home_page(&stats(), &json!({ "agents": [] }), &json!({ "jobs": [] }));
         assert!(html.contains("Give an agent a backend, not another dashboard"));
         assert!(html.contains("gap.http.get/post"));
-        assert!(html.contains("security judges"));
+        assert!(html.contains("without an AI judge or content scan"));
         assert!(html.contains("x402-shaped endpoint"));
         assert!(html.contains("custom domains"));
         assert!(html.contains("wss://gap.geta.team/v1/realtime"));

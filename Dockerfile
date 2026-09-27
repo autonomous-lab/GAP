@@ -50,6 +50,13 @@ RUN --mount=type=cache,id=gap-cargo-registry,target=/usr/local/cargo/registry \
     grep -q "GAP_STORAGE" target/release/gap && \
     cp target/release/gap /tmp/gap-node
 
+# Operator/CI regression target; the production image still uses the stage below.
+FROM builder AS test
+RUN --mount=type=cache,id=gap-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=gap-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=gap-cargo-target,target=/build/target \
+    cargo test --release --lib
+
 # Stage 2: minimal runtime image.
 #
 # Installs nothing. The previous "apk add ca-certificates tzdata" was

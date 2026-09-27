@@ -403,7 +403,7 @@ mod tests {
             runner: None,
         };
         std::fs::write(&path, json!({"agents": [&did]}).to_string()).unwrap();
-        assert_eq!(policy.microvm_quota(&did).unwrap().vcpus, 2);
+        assert_eq!(policy.microvm_quota(&did).unwrap().vcpus, 2.0);
         assert_eq!(policy.microvm_quota(&did).unwrap().memory_mib, 4096);
         assert_eq!(policy.microvm_quota(&did).unwrap().max_vms, 1);
         assert!(!policy.always_on_allowed(&did));
@@ -426,7 +426,7 @@ mod tests {
                 .to_string(),
         )
         .unwrap();
-        assert_eq!(policy.microvm_quota(&did).unwrap().vcpus, 4);
+        assert_eq!(policy.microvm_quota(&did).unwrap().vcpus, 4.0);
         assert_eq!(policy.microvm_quota(&did).unwrap().disk_gib, None);
         std::fs::write(&path,json!({"agents":[&did],"quotas":{&did:{"vcpus":4,"memory_mib":8192,"disk_gib":32}}}).to_string()).unwrap();
         assert_eq!(policy.microvm_quota(&did).unwrap().disk_gib,Some(32));

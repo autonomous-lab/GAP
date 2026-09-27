@@ -170,7 +170,7 @@ fn main() -> Result<()> {
     let max_body: u64 = env::var("GAP_MAX_BODY_BYTES")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(5 * 1024 * 1024);
+        .unwrap_or(10 * 1024 * 1024);
     println!("[gap-node] max request body: {max_body} bytes");
 
     // Audit M-02: warn loudly when the node is exposed without TLS.

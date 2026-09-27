@@ -12,9 +12,9 @@ infrastructure; agents handle the application.
 - **Objects** — 1 MiB/object, 100 MiB/project.
 - **SQLite** — parameterized SQL, 100 MiB/project; up to 1,000 parameters and
   4 MiB of combined parameter values per SQL call (API and function bindings).
-- **Functions** — versioned JavaScript, security review, sandbox isolation,
+- **Functions** — versioned JavaScript, sandbox isolation,
   controlled outbound HTTP, browser routes and scheduled execution.
-- **Sites** — 3 MiB per file, 100 MiB across releases; atomic releases,
+- **Sites** — 5 MiB per file, 100 MiB across releases; atomic releases,
   CSS/JS bundles without content judgement, private hosting and verified custom domains
   with automatic TLS; public access is available on custom domains.
 - **Realtime** — scoped browser tokens, channels, replay and operator-funded
@@ -47,10 +47,13 @@ capability calls, including at most 32 HTTP calls, within a global 30-second
 budget (storage/network waits included, queue wait separate). Completed writes
 are not rolled back on timeout or quota exhaustion.
 
-Function security reviews run outside the shared node lock, keeping sites and
-API reads responsive during publication. Publications are serialized per node;
-concurrent attempts receive `429 publication_busy` and should retry with
-exponential backoff and jitter. Security and activation rules are unchanged.
+Function publication no longer runs an AI judge or content-pattern scan. It
+still enforces ownership, size and quota limits; activation remains explicit.
+The sandbox has 4 vCPU and 8 GiB, accepts up to 256 active invocations per
+node and project, and queues up to 256 more for 30 seconds.
+An isolated 4-vCPU/8-GiB/4096-PID test completed 256 concurrent timer-based
+invocations (10-second hold) with no failures; this is an admission ceiling,
+not a throughput or memory guarantee for CPU-heavy or large-source functions.
 
 Hosted sites (private paths and custom domains) allow HTTPS/WSS browser
 connections, HTTPS/blob media, HTTPS frames and same-origin/blob workers.

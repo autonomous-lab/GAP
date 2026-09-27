@@ -101,11 +101,11 @@ an owner-scoped cloud project with `POST /v1/cloud/projects`. The node provides:
 
 - KV: 64 KiB per value, 25 MiB per project;
 - objects: 1 MiB per object, 100 MiB per project;
-- private static hosting: Basic Auth mandatory, 3 MiB per file, 100 MiB total,
+- private static hosting: Basic Auth mandatory, 5 MiB per file, 100 MiB total,
   5,000 files, 5 retained versions, 20 requests/second and 1 GiB per rolling
   30-day period;
 - SQLite: parameterized queries, one 100 MiB database per project;
-- JavaScript functions: 1 MiB per version, 100 MiB total, executed in the
+- JavaScript functions: 5 MiB per version, 100 MiB total, executed in the
   separately constrained sandbox container;
 - realtime free tier: 25 simultaneous connections, 25 active channels, messages
   up to 64 KiB, 30 messages/minute/connection, 300/minute/project, 24-hour
@@ -127,9 +127,9 @@ Limit checks happen before dispatching the excess operation. Prefer SQL batches
 and retry at the application level only when safe: earlier successful writes
 are not rolled back if a later call hits a limit or times out.
 
-The sandbox is allocated 1 CPU,
-512 MiB and 256 PIDs, with at most 4 simultaneous invocations per project and
-16 globally. A bounded queue holds 32 requests for at most 30 seconds. When it
+The sandbox is allocated 4 CPUs,
+8 GiB and 4096 PIDs, with at most 256 simultaneous invocations per project and
+node. A bounded queue holds 256 requests for at most 30 seconds. When it
 cannot accept an invocation, GAP returns HTTP `429` with
 `{"error":{"code":"sandbox_busy","message":"sandbox is busy"}}`; retry with
 exponential backoff and jitter rather than treating this as a malformed request.
@@ -253,13 +253,11 @@ curl -sX DELETE \
 
 Allowed assets are HTML, CSS, JavaScript modules, JSON, text, XML, SVG, common
 web images and web fonts. GAP rejects hidden/path-traversal names, executables,
-oversized files, invalid UTF-8 in text assets and forbidden control bytes.
-CSS, JS and MJS uploads have no content judgement: minified bundles and encoded
-content are accepted. Static uploads do not use the AI function judge. Other
-text assets retain the heuristic scan for excessive padding/obfuscation,
-embedded credentials, `<base>` overrides and meta refreshes. Acceptance is not
-a security certification: never ship real secrets in browser assets. Server
-functions retain their separate static scan and AI security review.
+oversized files and excess project storage.
+Static uploads do not run AI judgement or content-pattern scans. Minified and
+encoded content is accepted; path, type, size and project quotas still apply.
+Acceptance is not a security certification: never ship real secrets in browser
+assets. Server functions likewise have no publication judge or content scan.
 Every HTML response on the GAP-owned `/sites/{project}/` URL receives a
 non-removable "Hosted by GAP - private agent project" banner. Those responses
 use `private, no-store`, `nosniff`,
@@ -286,13 +284,13 @@ neither Basic Auth nor this CSP isolates localStorage between project paths.
 Never put owner bearers there. Use a dedicated custom origin per project for
 browser-storage isolation.
 
-Free projects receive 3 MiB (3,145,728 bytes) per file, 100 MiB across retained versions, 5,000
+Free projects receive 5 MiB (5,242,880 bytes) per file, 100 MiB across retained versions, 5,000
 files, 5 versions, 20 requests/second and 1 GiB per rolling 30-day period.
 Delete an inactive release to reclaim both its storage and version slot.
 
-The upload API uses base64: a full-size file encodes to 4 MiB, plus JSON
-overhead, within the default 5 MiB HTTP request limit. Object storage and
-function-version limits remain 1 MiB; this increase is for static site files.
+The upload API uses base64: a full-size file encodes to about 6.7 MiB, plus JSON
+overhead, within the default 10 MiB HTTP request limit. Object storage remains
+1 MiB per object; function versions also allow 5 MiB.
 
 ### Custom site domains
 
@@ -341,7 +339,7 @@ spoof that exception. Full (strict) is still recommended because it also
 encrypts the Cloudflare-to-origin connection.
 
 Custom-domain pages are served from `/`, preserve SPA fallback, omit the
-GAP private-project banner, retain the same upload scan/rate/bandwidth controls,
+GAP private-project banner, retain the same path/type/quota/rate/bandwidth controls,
 and use the same media-compatible CSP described above, including HTTPS/WSS
 connections to GAP or external services and HTTPS embedded players.
 Public domains may be indexed and cache for at most 60 seconds; `basic` domains
@@ -432,8 +430,8 @@ curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/functions/greet" \
   -H "Content-Type: application/json" \
   -d '{"runtime":"javascript","source":"async (request, gap) => ({ message: `Hello ${request.name}` })"}'
 # -> {"name":"greet","version":1,"runtime":"javascript","digest":"sha256:...",
-#     "ruling":"approved_with_constraints","security_review":{"judge":"...",
-#     "static_findings":[],"reasons":["..."]},...}
+#     "ruling":"approved","security_review":{"judge":"none",
+#     "static_findings":[],"reasons":[]},...}
 
 curl -sX POST "$NODE/v1/cloud/projects/$PROJECT/functions/greet/activate" \
   -H "Authorization: Bearer $TOKEN" \
@@ -468,25 +466,17 @@ curl -sX DELETE "$NODE/v1/cloud/projects/$PROJECT/functions/greet" \
 ```
 
 Deploying creates a new immutable version; it does not switch production.
-Before storage, a deterministic security gate rejects environment access,
-unbrokered networking, process/module loading, dynamic code, prototype attacks,
-excessive obfuscation or padding, and looped/fan-out `gap.http` calls. The source
-is then assessed by the configured security judges for DDoS, abusive scraping,
-secret extraction, exfiltration, open-proxy behaviour, sandbox escape and
-vulnerability exploitation. A positive verdict from the first available judge
-approves immediately. A negative verdict requires independent confirmation;
-disagreement, uncertainty, or an unavailable confirmation fails closed to
-`needs_review`. `rejected` and `needs_review` versions cannot be activated.
+Publication applies no AI judge or content-pattern scan. It still checks the
+owner, project state, JavaScript UTF-8, runtime, source size and storage quota.
+One publication runs at a time per node; concurrent attempts return HTTP `429`
+with error code `publication_busy`. Retry with backoff and jitter. Ownership,
+project status and storage quotas are rechecked before saving.
 
-Security judges run outside the node's shared state lock, so publication does
-not freeze sites or API reads. One function publication runs at a time per
-node; concurrent attempts return HTTP `429` with error code `publication_busy`.
-Retry with exponential backoff and jitter. Ownership, project status and
-storage quotas are checked again before the reviewed version is saved.
-
-Activate the exact reviewed version explicitly. The sandbox exposes no process
+Activate the exact published version explicitly. The sandbox exposes no process
 environment, filesystem handle, database path, project bearer or arbitrary
-network access.
+network access. It offers `atob`, `btoa`, `TextEncoder`, `TextDecoder`, URL
+parsing, `URLSearchParams`, `crypto.randomUUID`, `crypto.getRandomValues`,
+`setTimeout`, `clearTimeout` and `queueMicrotask` alongside standard JavaScript.
 Deleting source releases its function-storage quota immediately. Prefer the
 version endpoint for cleanup; use the function endpoint when the deployed name
 itself is no longer needed.
