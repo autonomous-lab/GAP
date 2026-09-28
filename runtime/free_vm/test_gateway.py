@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import asyncssh
 
@@ -10,6 +10,18 @@ from gateway import FreeServer, GatewayError, retry_mutation, shell, stable_id
 
 
 class GatewayTests(unittest.TestCase):
+    def test_missing_key_gets_a_useful_authentication_hint(self):
+        server=FreeServer()
+        connection=Mock()
+        server.connection_made(connection)
+        self.assertTrue(server.begin_auth('free'))
+        message=connection.send_auth_banner.call_args.args[0]
+        self.assertIn('ssh-keygen -t ed25519',message)
+        self.assertIn('ssh -i ~/.ssh/id_ed25519 -p 2121',message)
+        connection.send_auth_banner.reset_mock()
+        self.assertTrue(server.begin_auth('wrong'))
+        connection.send_auth_banner.assert_not_called()
+
     def test_transient_guest_readiness_is_retried_with_new_job_id(self):
         with (patch('gateway.rpc_wait',side_effect=[GatewayError('vm_operation_failed'),{'ok':True}]) as rpc,
               patch('gateway.time.sleep')):
@@ -32,21 +44,32 @@ class GatewayTests(unittest.TestCase):
                 process.exit(0)
             host=asyncssh.generate_private_key('ssh-ed25519')
             client=asyncssh.generate_private_key('ssh-ed25519')
+            rsa=asyncssh.generate_private_key('ssh-rsa',key_size=2048)
+            weak_rsa=asyncssh.generate_private_key('ssh-rsa',key_size=1024)
             server=await asyncssh.listen('127.0.0.1',0,server_factory=FreeServer,
-                server_host_keys=[host],process_factory=handler)
+                server_host_keys=[host],process_factory=handler,
+                signature_algs=['ssh-ed25519','rsa-sha2-512','rsa-sha2-256'])
             port=server.get_port()
             try:
                 with self.assertRaises(asyncssh.PermissionDenied):
                     await asyncssh.connect('127.0.0.1',port=port,username='wrong',
                         client_keys=[client],known_hosts=None,password_auth=False)
                 self.assertEqual(sessions,[])
+                with self.assertRaises(asyncssh.PermissionDenied):
+                    await asyncssh.connect('127.0.0.1',port=port,username='free',
+                        client_keys=[weak_rsa],known_hosts=None,password_auth=False)
                 async with asyncssh.connect('127.0.0.1',port=port,username='free',
                         client_keys=[client],known_hosts=None,password_auth=False) as connection:
                     result=await connection.run('true')
                     self.assertEqual(result.stdout,'authenticated\n')
-                self.assertEqual(len(sessions),1)
+                async with asyncssh.connect('127.0.0.1',port=port,username='free',
+                        client_keys=[rsa],known_hosts=None,password_auth=False) as connection:
+                    result=await connection.run('true')
+                    self.assertEqual(result.stdout,'authenticated\n')
+                self.assertEqual(len(sessions),2)
                 self.assertTrue(sessions[0][0].startswith('ssh-ed25519 '))
                 self.assertEqual(sessions[0][1][0],'127.0.0.1')
+                self.assertTrue(sessions[1][0].startswith('ssh-rsa '))
             finally:
                 server.close();await server.wait_closed()
         asyncio.run(run())

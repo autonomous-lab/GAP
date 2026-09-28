@@ -1,10 +1,10 @@
 # Anonymous free MicroVM — implementation contract
 
-This is the implementation and rollout record. Node 2 is an intentionally small
-public pilot; node 1 is its central admission authority. Other nodes must not
-open port 2121 until their images, measured capacity and abuse controls are
-validated. The node-2 active cap is 2, a pilot value rather than a fleet-wide
-hard limit. The public entry page is `/free-vm` on node 2.
+This is the implementation and rollout record. Nodes 1, 2 and 3 each serve
+the public SSH pilot on TCP 2121; node 1 is the central admission authority.
+Each node has its own dedicated free guest image and a configured active cap
+of 2, a pilot value rather than a fleet-wide hard limit. The public entry page
+is `/free-vm` on each node and displays that node's direct SSH hostname.
 
 ## User journey
 
@@ -40,7 +40,8 @@ to stop; the lease check must fail closed even if the cleanup process is down.
 At the claim deadline, destroy with an idempotent worker job and only then
 acknowledge `finish-free-vm` to node 1 so it releases the IP and SSH key.
 Expiry alone must not release them. Retry failed deletion and surface it to operators.
-The SSH public key is the anonymous trial identity: reconnecting with the
+An Ed25519 or RSA (2048–8192 bit) SSH public key is the anonymous trial
+identity; RSA signatures must use SHA-2. Reconnecting with the
 same key returns to the same VM. No email or account is required to start the
 trial. Claim uses the one-use link from the terminal. The link leads to GAP's
 account creation/login flow only when the visitor chooses to keep the VM.
@@ -63,8 +64,7 @@ may need billing activation before it can resume; explain this on the page.
   reject password login and SSH forwarding, and cap concurrent SSH sessions.
 - Node 1 is the single-writer authority for IP and SSH-key reservations across
   the fleet. Its SQLite transaction must reject cross-node races; nodes fail
-  closed if the authority cannot be reached. The initial pilot may expose a
-  single entry node, but its admission still goes through node 1.
+  closed if the authority cannot be reached. All three entry nodes use it.
 - Keep QEMU `restrict=on`. Provide outbound access only through an authenticated
   per-VM package proxy or controlled mirrors for Debian apt, npm, PyPI, Go
   modules, Composer, Docker Hub and GHCR. DNS and redirects must be resolved
@@ -76,6 +76,9 @@ may need billing activation before it can resume; explain this on the page.
   generated credentials. Do not attach custom domains to unclaimed VMs;
   otherwise the custom-domain path can bypass the preview password. Expired
   preview routes must fail closed even if the edge cache is stale.
+  On node 1, the public preview uses `gap.geta.team` behind Cloudflare; the
+  browser must use the same IP family as the SSH connection. IPv6 after an
+  IPv4 SSH session is intentionally denied by the exact-IP pin.
 - Use a dedicated Debian guest image with apt and preinstalled Docker, Python,
   Node, common Linux tools, and the supported package clients. Never replace
   the backing image used by existing paid VMs. Image integrity and version
@@ -83,7 +86,9 @@ may need billing activation before it can resume; explain this on the page.
 
 ## Validation and remaining rollout gates
 
-The node-2 pilot has passed a real Ed25519 SSH session, reconnection after a
+The pilot has passed real Ed25519 SSH sessions on nodes 1 and 3, a 3072-bit
+RSA SSH session on node 2, and a cross-node same-IP denial. It also passed
+reconnection after a
 worker/image upgrade, Docker Hub and GHCR image pulls, Docker execution,
 apt/npm/pip/Go/Composer package traffic, denied arbitrary egress, and private
 preview checks (401 without Basic Auth; 403 from a different IP). A verified
@@ -92,20 +97,9 @@ stopped that VM and rejected its old anonymous SSH key. The Debian v2 guest
 includes `php-curl` for Composer. Unit tests cover deadline stop/deletion and
 central reservation races. These tests do **not** constitute a 25-hour live
 expiry observation or a load test of the pilot capacity. Keep the active cap
-small and monitor it before expanding to other nodes.
+small and monitor it before raising capacity.
 
-1. Unit tests for state boundaries, SSH-key reconnect, idempotent reservation
-   and claim, restart hydration, simultaneous SSH arrivals, abuse quotas and
-   deletion retries. The first SSH connection must never ask for an email.
-   Test the one-VM-per-IP rule across IPv4, IPv6, IPv4-mapped IPv6, and a
-   reconnect from a different network.
-2. Network tests proving allowed package and public image pulls work while
-   arbitrary outbound, scanning, private addresses and redirects are denied.
-3. End-to-end test on a non-production node: fresh SSH connection, toolchain,
-   Docker build/run, Basic Auth preview, stop at one hour, claim during grace,
-   expiry/deletion of an unclaimed VM, and persistence after restart.
-4. Capacity and resource accounting test: include guest memory, proxy, SSH
-   gateway, image cache, disk I/O and swap pressure. Set a separate anonymous
-   reservation budget so the offer cannot evict paying workloads.
-5. Only after passing these gates: publish port 2121, enable the landing page,
-   observe a small pilot, then roll out to the other nodes.
+Remaining observations before increasing the cap: a live one-hour stop and
+25-hour unclaimed deletion, sustained concurrent VM/package-proxy load,
+and measured guest memory, image cache, disk I/O and swap pressure alongside
+paying workloads. The automated deadline and deletion-retry tests already pass.

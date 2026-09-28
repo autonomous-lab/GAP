@@ -16,6 +16,9 @@ This is separate from approved-agent VMs. On an entry node, set
 `GAP_FREE_VM_ENABLED=1`, a random `GAP_FREE_VM_ABUSE_KEY`, an explicit
 `GAP_FREE_VM_MAX_ACTIVE` chosen from spare capacity, and
 `GAP_FREE_VM_BIND_ADDRESS=0.0.0.0` only when TCP 2121 is intentionally public.
+Set `GAP_FREE_VM_SSH_HOST` to the direct, non-HTTP-proxied DNS name of that
+node so its page displays the correct SSH command. Ed25519 and RSA keys of at
+least 2048 bits are accepted; RSA authentication uses SHA-2 signatures.
 The runner's `free_vm.enabled` must also be true. Node 1 is the central
 single-writer IP/key reservation authority; an unreachable authority denies new
 sessions. A trial offers one vCPU, 1 GiB RAM, an 8-GiB disk, one hour of SSH,
@@ -155,6 +158,10 @@ RPC port. To persist across boots and Docker restarts, install
 `runtime/compose/gap-compose-ports.service` in `/etc/systemd/system/`, set
 `GAP_PUBLIC_IPV4=YOUR_DIRECT_IPV4` in `/etc/gap-compose-ports.env`, then run
 `systemctl daemon-reload && systemctl enable --now gap-compose-ports.service`.
+When publishing the free SSH entry on a host with a deny-by-default firewall,
+also allow TCP 2121 in the host firewall. The supplied systemd unit adds the
+matching `DOCKER-USER` DNAT exception through `--free-vm-ssh`; keep both rules
+persisted across Docker and firewall restarts.
 Adapt the checkout path in the unit for other installations. Reapply after an
 external firewall tool replaces the Docker user chain. The default deployment
 provides IPv4 access; IPv6 publication is not configured.

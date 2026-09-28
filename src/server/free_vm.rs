@@ -70,16 +70,43 @@ impl Trial {
 
 fn ssh_fingerprint(input: &str) -> Result<String> {
     let parts: Vec<_> = input.split_whitespace().collect();
-    if parts.len() != 2 || parts[0] != "ssh-ed25519" || parts[1].len() > 128 {
-        return Err(Error::Other("an Ed25519 SSH public key is required".into()));
+    if parts.len() != 2 || !matches!(parts[0], "ssh-ed25519" | "ssh-rsa") || parts[1].len() > 2048 {
+        return Err(Error::Other("an Ed25519 or RSA SSH public key is required".into()));
     }
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(parts[1])
         .map_err(|_| Error::Other("invalid SSH public key".into()))?;
-    if decoded.len() != 51 || &decoded[..4] != b"\0\0\0\x0b"
-        || &decoded[4..15] != b"ssh-ed25519" || &decoded[15..19] != b"\0\0\0\x20"
-    {
-        return Err(Error::Other("invalid Ed25519 SSH public key".into()));
+    let mut cursor=0usize;
+    let field=|cursor:&mut usize| -> Option<&[u8]> {
+        let end=cursor.checked_add(4)?;
+        let count=u32::from_be_bytes(decoded.get(*cursor..end)?.try_into().ok()?) as usize;
+        *cursor=end;
+        let end=cursor.checked_add(count)?;
+        let value=decoded.get(*cursor..end)?;
+        *cursor=end;
+        Some(value)
+    };
+    let valid=match parts[0] {
+        "ssh-ed25519" => field(&mut cursor)==Some(b"ssh-ed25519".as_slice())
+            && field(&mut cursor).is_some_and(|value|value.len()==32),
+        "ssh-rsa" => {
+            let algorithm=field(&mut cursor);
+            let exponent=field(&mut cursor);
+            let modulus=field(&mut cursor);
+            let exponent=exponent.and_then(|bytes| {
+                if bytes.is_empty() || bytes.len()>4 || bytes[0]==0 {return None}
+                Some(bytes.iter().fold(0u32,|value,byte|(value<<8)|u32::from(*byte)))
+            });
+            let modulus=modulus.map(|bytes|if bytes.first()==Some(&0) {&bytes[1..]} else {bytes});
+            let bits=modulus.and_then(|bytes|bytes.first().map(|first|
+                bytes.len()*8-first.leading_zeros() as usize)).unwrap_or(0);
+            algorithm==Some(b"ssh-rsa".as_slice()) && exponent.is_some_and(|value|value>=3 && value%2==1)
+                && (2048..=8192).contains(&bits)
+        },
+        _ => false,
+    };
+    if !valid || cursor!=decoded.len() {
+        return Err(Error::Other("invalid SSH public key".into()));
     }
     Ok(crate::sha256_hex(&decoded))
 }
@@ -329,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn only_well_formed_ed25519_keys_are_trial_identities() {
+    fn only_well_formed_ed25519_or_rsa_keys_are_trial_identities() {
         let mut encoded = Vec::from(&b"\0\0\0\x0bssh-ed25519\0\0\0\x20"[..]);
         encoded.extend([7u8; 32]);
         let key = format!("ssh-ed25519 {}", base64::engine::general_purpose::STANDARD.encode(encoded));
@@ -337,6 +364,24 @@ mod tests {
         assert!(ssh_fingerprint("ssh-rsa AAAA").is_err());
         assert!(ssh_fingerprint("ssh-ed25519 AAAA").is_err());
         assert!(ssh_fingerprint(&(key + " unexpected-comment")).is_err());
+        let field=|value:&[u8]| {
+            let mut result=(value.len() as u32).to_be_bytes().to_vec();
+            result.extend_from_slice(value);
+            result
+        };
+        let mut rsa=field(b"ssh-rsa");
+        rsa.extend(field(&[1,0,1]));
+        let mut modulus=vec![0,0x80];
+        modulus.extend([0u8;255]);
+        rsa.extend(field(&modulus));
+        let rsa_key=format!("ssh-rsa {}",base64::engine::general_purpose::STANDARD.encode(&rsa));
+        assert_eq!(ssh_fingerprint(&rsa_key).unwrap().len(),64);
+        let mut short=field(b"ssh-rsa");
+        short.extend(field(&[1,0,1]));
+        let mut short_modulus=vec![0,0x80];
+        short_modulus.extend([0u8;127]);
+        short.extend(field(&short_modulus));
+        assert!(ssh_fingerprint(&format!("ssh-rsa {}",base64::engine::general_purpose::STANDARD.encode(short))).is_err());
     }
 
     #[test]

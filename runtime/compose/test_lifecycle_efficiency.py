@@ -193,5 +193,20 @@ class LifecycleEfficiencyTests(unittest.TestCase):
             with patch('lifecycle.time.time',return_value=90000):runtime.tick_project(path)
             runtime.runner.finish_free_vm.assert_called_once_with(meta['project_id'],meta['owner_did'],meta['vm_id'])
 
+    def test_anonymous_vm_recovers_after_transient_authority_outage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'vm.json'
+            meta=dict(self.meta('stopped'),tier='anonymous',anonymous_until=3600,claim_until=90000)
+            path.write_text(json.dumps(meta))
+            runtime=self.runtime(Path(directory))
+            runtime.manager=SimpleNamespace(alive=Mock(return_value=False),start=Mock(),
+                owner_lock=Mock(return_value=nullcontext()))
+            runtime.runner=SimpleNamespace(authorize=Mock(return_value={'tier':'anonymous'}),ingress=None)
+            runtime.disconnect=Mock()
+            with patch('lifecycle.time.time',return_value=100),patch('lifecycle.time.monotonic',return_value=100):
+                runtime.tick_project(path)
+            runtime.manager.start.assert_called_once()
+            runtime.disconnect.assert_not_called()
+
 
 if __name__=='__main__':unittest.main()

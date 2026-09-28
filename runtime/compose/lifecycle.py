@@ -427,6 +427,17 @@ class Runtime:
                 if meta['state']!='stopped':
                     meta['state']='stopped';self.manager.save(meta)
                 if self.runner.ingress:self.runner.ingress.sync()
+            elif approval.get('tier')=='anonymous' and meta['state']=='stopped':
+                # A temporary node/authority outage fails closed, but must not
+                # silently waste the rest of an otherwise valid trial hour.
+                state=self.state(meta)
+                if time.monotonic()>=state.get('anonymous_restart_after',0):
+                    state['anonymous_restart_after']=time.monotonic()+30
+                    try:
+                        with self.manager.owner_lock(meta['owner_did']):self.manager.start(meta)
+                        if self.runner.ingress:self.runner.ingress.sync()
+                    except Exception:
+                        pass  # Retry on the next bounded interval.
             if now>=meta.get('claim_until',0):
                 if meta['state']!='destroyed':
                     with self.manager.owner_lock(meta['owner_did']):

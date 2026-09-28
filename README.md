@@ -25,9 +25,10 @@ infrastructure; agents handle the application.
   HTTPS/API/WebSocket publication. Run native binaries or language runtimes.
 - **Optional Docker/Compose** — deploy and manage containers inside the same
   microVM when your application needs them.
-- **Free MicroVM pilot (node 2)** — one-hour anonymous SSH access to a 1-vCPU,
+- **Free MicroVM pilot (three nodes)** — one-hour anonymous SSH access to a 1-vCPU,
   1-GiB Debian VM with Docker and common runtimes, followed by a 24-hour
-  verified-email claim window. Start at [the Free VM page](https://gap-node-02-u3.vm.elestio.app/free-vm).
+  verified-email claim window. Start at [the Free VM page](https://gap.geta.team/free-vm)
+  or select a node's own page. Ed25519 and RSA (2048-bit minimum) SSH keys are accepted.
 
 ## Quick start
 

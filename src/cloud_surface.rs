@@ -70,9 +70,14 @@ fn product_page(source: &str, active: &str) -> String {
 <div class="gap-mobile"><details><summary>Menu</summary><nav aria-label="Mobile navigation">{links}</nav></details></div>
 </div></header>"#);
     let variant = if active == "/" { "gap-home" } else if active == "/microvms" { "gap-compute" } else { "gap-product" };
+    let free_vm_host=std::env::var("GAP_FREE_VM_SSH_HOST")
+        .ok().filter(|value|!value.is_empty() && value.bytes().all(|byte|
+            byte.is_ascii_alphanumeric() || byte==b'-' || byte==b'.'))
+        .unwrap_or_else(||"gap-node-02-u3.vm.elestio.app".into());
     source.replace("<!-- GAP-WORDMARK -->", wordmark).replace("<!-- GAP-NAV -->", &navigation)
         .replace("<!-- GAP-DESIGN -->", &format!("<style>{}</style>", include_str!("ui/cloud_design.css")))
         .replace("<html lang=\"en\">", &format!("<html lang=\"en\" class=\"{variant}\">"))
+        .replace("gap-node-02-u3.vm.elestio.app",&free_vm_host)
 }
 
 const HOME: &str = include_str!("ui/cloud_home.html");
@@ -189,7 +194,7 @@ mod tests {
     #[test]
     fn free_vm_entry_point_explains_trial_and_claim_without_exposing_a_token() {
         let (_, html) = page("/free-vm").unwrap();
-        for expected in ["ssh -p 2121 free@", "1 vCPU", "1 GiB", "60 min", "24 h", "Basic Auth", "verified email"] {
+        for expected in ["ssh -p 2121 free&#64;", "1 vCPU", "1 GiB", "60 min", "24 h", "Basic Auth", "verified email"] {
             assert!(html.contains(expected), "missing {expected}");
         }
         assert!(html.contains("aria-current=\"page\">Free VM"));

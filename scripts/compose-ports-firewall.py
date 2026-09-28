@@ -11,6 +11,8 @@ def main():
     parser.add_argument('--public-ip', required=True)
     parser.add_argument('--first-port', type=int, default=24000)
     parser.add_argument('--last-port', type=int, default=24099)
+    parser.add_argument('--free-vm-ssh', action='store_true',
+                        help='also allow the GAP free MicroVM SSH entry on TCP 2121')
     args = parser.parse_args()
     address = ipaddress.IPv4Address(args.public_ip)
     if os.geteuid() != 0 or not 1024 <= args.first_port <= args.last_port <= 65535:
@@ -21,6 +23,12 @@ def main():
                 '-m', 'comment', '--comment', 'gap-microvm-public-ports', '-j', 'ACCEPT']
         if subprocess.run(['iptables', '-w', '-C', 'DOCKER-USER', *rule], capture_output=True).returncode:
             subprocess.run(['iptables', '-w', '-I', 'DOCKER-USER', '1', *rule], check=True)
+    if args.free_vm_ssh:
+        rule=['-p','tcp','-m','conntrack','--ctstate','DNAT',
+              '--ctorigdst',str(address),'--ctorigdstport','2121',
+              '-m','comment','--comment','gap-free-vm-ssh','-j','ACCEPT']
+        if subprocess.run(['iptables','-w','-C','DOCKER-USER',*rule],capture_output=True).returncode:
+            subprocess.run(['iptables','-w','-I','DOCKER-USER','1',*rule],check=True)
     print('GAP reserved TCP/UDP DNAT range allowed')
 
 

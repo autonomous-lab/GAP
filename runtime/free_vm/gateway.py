@@ -112,15 +112,24 @@ class FreeServer(asyncssh.SSHServer):
         self.conn=conn
 
     def begin_auth(self,username):
+        if username=='free':
+            self.conn.send_auth_banner(
+                'GAP Free MicroVM nécessite une clé SSH Ed25519 ou RSA (2048 bits minimum). '
+                'Sur cette machine : ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 '
+                '(si ce fichier n’existe pas), puis réessayez avec '
+                'ssh -i ~/.ssh/id_ed25519 -p 2121 free@<hôte-du-nœud>. '
+                'Pour une clé RSA existante, utilisez -i ~/.ssh/id_rsa.\n',
+                lang='fr')
         return True
 
     def public_key_auth_supported(self):
         return True
 
     def validate_public_key(self,username,key):
-        if username!='free' or key.get_algorithm()!='ssh-ed25519':return False
+        if username!='free' or key.get_algorithm() not in ('ssh-ed25519','ssh-rsa'):return False
+        if key.get_algorithm()=='ssh-rsa' and not 2048<=key.pyca_key.key_size<=8192:return False
         exported=key.export_public_key().decode().strip()
-        if not re.fullmatch(r'ssh-ed25519 [A-Za-z0-9+/=]{60,128}',exported):return False
+        if not re.fullmatch(r'(ssh-ed25519|ssh-rsa) [A-Za-z0-9+/=]{60,2048}',exported):return False
         self.conn.set_extra_info(free_vm_public_key=exported)
         return True
 
@@ -188,7 +197,8 @@ async def shell(runner,process):
 async def serve(runner,port,host_key):
     server=await asyncssh.listen('0.0.0.0',port,server_factory=FreeServer,
         server_host_keys=[str(host_key)],process_factory=lambda process:shell(runner,process),
-        encoding=None,agent_forwarding=False,x11_forwarding=False)
+        encoding=None,agent_forwarding=False,x11_forwarding=False,
+        signature_algs=['ssh-ed25519','rsa-sha2-512','rsa-sha2-256'])
     await server.wait_closed()
 
 
