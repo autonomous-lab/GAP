@@ -62,13 +62,30 @@ def stable_id(project,operation):
 
 
 def interactive_shell_command(active_until):
-    """Show the server-issued deadline again at every Bash prompt."""
+    """Keep the server-issued deadline visible without adding prompt noise."""
     deadline=int(active_until)
     prompt=(f'gap_left=$(({deadline} - $(date +%s))); '
             'if (( gap_left < 0 )); then gap_left=0; fi; '
-            'printf "GAP · %d min %02d s restantes\\n" '
-            '"$((gap_left / 60))" "$((gap_left % 60))"')
+            'printf -v gap_time "%dm %02ds" "$((gap_left / 60))" "$((gap_left % 60))"; '
+            'PS1="GAP · ${gap_time} left · \\w ❯ "')
     return 'env PROMPT_COMMAND=' + shlex.quote(prompt) + ' bash --login -i'
+
+
+def welcome_banner(details,remaining,colored=False):
+    reset='\x1b[0m' if colored else ''
+    brand='\x1b[1;36m' if colored else ''
+    accent='\x1b[1;32m' if colored else ''
+    muted='\x1b[2m' if colored else ''
+    left=f'{remaining//60}m {remaining%60:02d}s'
+    return (f'\r\n  {brand}GAP  /  FREE MICROVM{reset}\r\n'
+            f'  Your workspace is ready  ·  1 vCPU  ·  1 GiB  ·  {accent}{left} left{reset}\r\n'
+            f'\r\n'
+            f'  {muted}PREVIEW{reset}      {details["preview"]["preview_url"]}\r\n'
+            f'  {muted}BASIC AUTH{reset}   {details["preview"]["username"]} / {details["preview"]["password"]}\r\n'
+            f'  {muted}CLAIM{reset}        {details["claim_url"]}\r\n'
+            f'\r\n'
+            f'  Serve your app on port 8080 to use the preview.\r\n'
+            f'  After the VM stops, you have 24 hours to claim it.\r\n\r\n')
 
 
 def retry_mutation(runner,project,owner,action,method,body,timeout=90):
@@ -123,14 +140,7 @@ class FreeServer(asyncssh.SSHServer):
         self.conn=conn
 
     def begin_auth(self,username):
-        if username=='free':
-            self.conn.send_auth_banner(
-                'GAP Free MicroVM nécessite une clé SSH Ed25519 ou RSA (2048 bits minimum). '
-                'Sur cette machine : ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 '
-                '(si ce fichier n’existe pas), puis réessayez avec '
-                'ssh -i ~/.ssh/id_ed25519 -p 2121 free@<hôte-du-nœud>. '
-                'Pour une clé RSA existante, utilisez -i ~/.ssh/id_rsa.\n',
-                lang='fr')
+        # Keep successful SSH logins clean. Key-generation help is on /free-vm.
         return True
 
     def public_key_auth_supported(self):
@@ -164,17 +174,17 @@ async def shell(runner,process):
     key=conn.get_extra_info('free_vm_public_key') if conn else None
     peer=process.get_extra_info('peername')
     if not key or not peer or not isinstance(peer[0],str):
-        process.stderr.write(b'Authentification invalide.\r\n');process.exit(1);return
+        process.stderr.write(b'Invalid authentication.\r\n');process.exit(1);return
     if process.subsystem is not None:
-        process.stderr.write(b'Les sous-syst\xc3\xa8mes SSH sont d\xc3\xa9sactiv\xc3\xa9s.\r\n');process.exit(1);return
+        process.stderr.write(b'SSH subsystems are disabled.\r\n');process.exit(1);return
     try:
         details=await asyncio.to_thread(prepare,runner,key,peer[0])
     except Exception as error:
         print('free_vm_provision_error:',type(error).__name__,str(error)[:160],flush=True)
-        process.stderr.write(b'VM indisponible ou limite atteinte. R\xc3\xa9essayez plus tard.\r\n')
+        process.stderr.write(b'VM unavailable or capacity reached. Please try again later.\r\n')
         process.exit(1);return
     if time.time()>=details['active_until']:
-        process.stderr.write(b'La p\xc3\xa9riode active est termin\xc3\xa9e.\r\n');process.exit(1);return
+        process.stderr.write(b'The active trial has ended.\r\n');process.exit(1);return
     known=asyncssh.import_known_hosts(f"[127.0.0.1]:{details['ssh_port']} {details['guest_host_key']}\n")
     try:
         async with asyncssh.connect('127.0.0.1',port=details['ssh_port'],username='root',
@@ -184,11 +194,8 @@ async def shell(runner,process):
             remote=await guest.create_process(command,term_type=process.term_type,
                 term_size=process.term_size,encoding=None)
             remaining=max(0,int(details['active_until']-time.time()))
-            banner=(f"\r\nGAP MicroVM · 1 vCPU / 1 Gio · {remaining//60} min {remaining%60:02d} s restantes\r\n"
-                    f"Preview : {details['preview']['preview_url']}\r\n"
-                    f"Basic Auth : {details['preview']['username']} / {details['preview']['password']}\r\n"
-                    f"Réclamer : {details['claim_url']}\r\n\r\n")
-            process.stdout.write(banner.encode());await process.stdout.drain()
+            process.stdout.write(welcome_banner(details,remaining,process.term_type is not None).encode())
+            await process.stdout.drain()
             input_task=asyncio.create_task(bridge(process.stdin,remote.stdin))
             output_tasks=[asyncio.create_task(bridge(remote.stdout,process.stdout)),
                           asyncio.create_task(bridge(remote.stderr,process.stderr))]
@@ -201,7 +208,7 @@ async def shell(runner,process):
                 await asyncio.gather(input_task,*output_tasks,return_exceptions=True)
             process.exit(remote.exit_status if remote.exit_status is not None else 0)
     except (asyncssh.Error,OSError,asyncio.TimeoutError):
-        process.stderr.write(b'Connexion de la VM interrompue.\r\n')
+        process.stderr.write(b'VM connection interrupted.\r\n')
         process.exit(1)
 
 

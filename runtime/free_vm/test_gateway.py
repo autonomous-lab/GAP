@@ -6,19 +6,15 @@ from unittest.mock import Mock, patch
 
 import asyncssh
 
-from gateway import FreeServer, GatewayError, interactive_shell_command, retry_mutation, shell, stable_id
+from gateway import FreeServer, GatewayError, interactive_shell_command, retry_mutation, shell, stable_id, welcome_banner
 
 
 class GatewayTests(unittest.TestCase):
-    def test_missing_key_gets_a_useful_authentication_hint(self):
+    def test_authentication_does_not_clutter_successful_terminal_sessions(self):
         server=FreeServer()
         connection=Mock()
         server.connection_made(connection)
         self.assertTrue(server.begin_auth('free'))
-        message=connection.send_auth_banner.call_args.args[0]
-        self.assertIn('ssh-keygen -t ed25519',message)
-        self.assertIn('ssh -i ~/.ssh/id_ed25519 -p 2121',message)
-        connection.send_auth_banner.reset_mock()
         self.assertTrue(server.begin_auth('wrong'))
         connection.send_auth_banner.assert_not_called()
 
@@ -39,7 +35,24 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('PROMPT_COMMAND=',command)
         self.assertIn('1234567890 - $(date +%s)',command)
         self.assertIn('bash --login -i',command)
-        self.assertIn('min %02d s restantes',command)
+        self.assertIn('PS1=',command)
+        self.assertIn('left',command)
+        self.assertNotIn('restantes',command)
+
+    def test_welcome_panel_is_english_and_only_colored_for_terminals(self):
+        details={'preview':{'preview_url':'https://example.invalid/apps/demo',
+                            'username':'free','password':'unique-password'},
+                 'claim_url':'https://example.invalid/free-vm/claim#private-token'}
+        plain=welcome_banner(details,3542)
+        self.assertIn('59m 02s left',plain)
+        self.assertIn('1 vCPU  ·  1 GiB',plain)
+        self.assertIn('PREVIEW      https://example.invalid/apps/demo',plain)
+        self.assertIn('BASIC AUTH   free / unique-password',plain)
+        self.assertIn('CLAIM        https://example.invalid/free-vm/claim#private-token',plain)
+        self.assertNotIn('\x1b[',plain)
+        colored=welcome_banner(details,3542,True)
+        self.assertIn('\x1b[1;36m',colored)
+        self.assertIn('59m 02s left',colored)
 
     def test_ssh_requires_a_valid_ed25519_signature_before_session(self):
         async def run():
@@ -115,14 +128,15 @@ class GatewayTests(unittest.TestCase):
                                 client_keys=[user_key],known_hosts=None,encoding=None) as connection:
                             result=await connection.run('true')
                             self.assertEqual(result.exit_status,0,repr((result.stdout,result.stderr)))
-                            self.assertIn(b'GAP MicroVM',result.stdout)
-                            self.assertIn(b'Preview : https://test.invalid',result.stdout)
-                            self.assertIn(b'Basic Auth : u / p',result.stdout)
-                            self.assertIn(b'R\xc3\xa9clamer : https://test.invalid/claim#token',result.stdout)
+                            self.assertIn(b'GAP  /  FREE MICROVM',result.stdout)
+                            self.assertIn(b'PREVIEW      https://test.invalid',result.stdout)
+                            self.assertIn(b'BASIC AUTH   u / p',result.stdout)
+                            self.assertIn(b'CLAIM        https://test.invalid/claim#token',result.stdout)
                             self.assertIn(b'from-guest\n',result.stdout)
                             interactive=await connection.create_process(term_type='xterm',encoding=None)
                             welcome=await interactive.wait()
-                            self.assertIn(b'GAP MicroVM',welcome.stdout)
+                            self.assertIn(b'GAP  /  FREE MICROVM',welcome.stdout)
+                            self.assertIn(b'\x1b[1;36m',welcome.stdout)
                             self.assertIn(b'from-guest\n',welcome.stdout)
                             self.assertEqual(guest_commands[0],'true')
                             self.assertIn('PROMPT_COMMAND=',guest_commands[-1])
