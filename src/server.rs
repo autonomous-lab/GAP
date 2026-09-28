@@ -11,6 +11,7 @@ mod terminal_http;
 pub use terminal_http::admit_terminal;
 mod vm_http;
 pub use vm_http::admit_vm_http;
+mod free_vm;
 
 use crate::amount::Amount;
 use crate::contract::{Contract, ContractState, Terms};
@@ -486,6 +487,7 @@ pub struct NodeState {
     /// handshake and a Host-routed request are O(1), not a scan of tenant DBs.
     custom_domains: HashMap<String, crate::cloud::SiteDomain>,
     vm_http: HashMap<String, vm_http::Record>,
+    free_vm_trials: HashMap<String, free_vm::Trial>,
     /// Paid realtime overage balance, separate from escrow/payment balances.
     realtime_credits: HashMap<String, crate::cloud::RealtimeCreditAccount>,
     /// Operator top-ups are idempotent and durably auditable.
@@ -783,6 +785,10 @@ impl NodeState {
                 .expect("invalid project suspension policy; refusing to serve"))).collect();
         let vm_http = storage.list_state("cloud_vm_http").expect("cannot load VM HTTP policy")
             .into_iter().map(|r| (r.key,serde_json::from_str::<vm_http::Record>(&r.value).expect("invalid VM HTTP policy"))).collect();
+        let free_vm_trials = storage.list_state("cloud_free_vm_trials")
+            .expect("cannot load anonymous MicroVM reservations")
+            .into_iter().map(|r| (r.key,serde_json::from_str::<free_vm::Trial>(&r.value)
+                .expect("invalid anonymous MicroVM reservation"))).collect();
         let custom_domains: HashMap<String, crate::cloud::SiteDomain> =
             load(&*storage, "cloud_domains", cloud_only);
 
@@ -951,6 +957,7 @@ impl NodeState {
             cloud_admin: None,
             custom_domains,
             vm_http,
+            free_vm_trials,
             realtime_credits,
             realtime_credit_topups,
             cloud_root: std::env::var("GAP_CLOUD_ROOT")
@@ -1221,7 +1228,7 @@ impl NodeState {
         }
     }
 
-    fn issue_token(&mut self) -> String {
+    fn issue_token(&self) -> String {
         // Audit fix C-01: CSPRNG 256-bit token — sequential tokens were
         // guessable (full account takeover).
         use rand::RngCore;
@@ -2604,6 +2611,15 @@ the content inline"
 
     pub(super) fn microvm_approval(&self,did:&str)->Option<(crate::private_node::MicroVMQuota,bool,bool,&'static str)> {
         let policy=self.private_node.as_ref()?;
+        if let Some(trial)=self.free_vm_trials.values().find(|trial|trial.owner_did==did) {
+            return match trial.phase(now_unix()) {
+                free_vm::Phase::Active=>policy.runner.is_some().then_some((crate::private_node::MicroVMQuota{vcpus:1.0,memory_mib:1024,max_vms:1,disk_gib:Some(8)},
+                    false,true,"anonymous")),
+                free_vm::Phase::Claimed=>policy.runner.is_some().then_some((crate::private_node::MicroVMQuota{vcpus:1.0,memory_mib:1024,max_vms:1,disk_gib:Some(8)},
+                    false,true,"trial")),
+                _=>None,
+            };
+        }
         if let Ok(quota)=policy.microvm_quota(did) {
             return Some((quota,policy.always_on_allowed(did),false,"approved"));
         }
@@ -7570,6 +7586,7 @@ pub fn route_with_ip(
     if let Some(result)=crate::fleet_finance::node_report(state,method,raw_path,auth) {return result}
     if let Some(result)=crate::fleet_migration::worker(state,method,raw_path,auth,&body) {return result}
     if let Some(result)=vm_http::manage(state,method,raw_path,&body,auth) {return result}
+    if let Some(result)=free_vm::claim_route(state,method,path,&body,client_ip) {return result}
 
     let mut guard = match state.lock() {
         Ok(g) => g,
@@ -7759,6 +7776,60 @@ pub fn route_with_ip(
             _=>(405,json!({"error":{"code":"method_not_allowed"}})),
         };
     }
+    if method=="POST" && path=="/internal/free-vm/reserve" {
+        let authorized=guard.private_node.as_ref().and_then(|p|p.runner.as_ref())
+            .is_some_and(|(_,secret)|token==Some(secret.as_str()));
+        if !authorized {return error_response(&Error::Unauthorized("service credential required".into()))}
+        let Some(key)=body["ssh_key"].as_str() else {return (400,json!({"error":{"code":"ssh_key_required"}}))};
+        let Some(ip)=body["source_ip"].as_str() else {return (400,json!({"error":{"code":"source_ip_required"}}))};
+        let enabled=std::env::var("GAP_FREE_VM_ENABLED").ok().as_deref()==Some("1");
+        let abuse_key=std::env::var("GAP_FREE_VM_ABUSE_KEY").unwrap_or_default();
+        let max_active=std::env::var("GAP_FREE_VM_MAX_ACTIVE").ok()
+            .and_then(|s|s.parse::<usize>().ok()).filter(|n|*n<=1024).unwrap_or(0);
+        return match free_vm::reserve(&mut guard,key,ip,enabled,&abuse_key,max_active) {
+            Ok(value)=>(200,value),Err(error)=>error_response(&error),
+        };
+    }
+    if method=="POST" && path=="/internal/free-vm/preview" {
+        let authorized=guard.private_node.as_ref().and_then(|p|p.runner.as_ref())
+            .is_some_and(|(_,secret)|token==Some(secret.as_str()));
+        if !authorized {return error_response(&Error::Unauthorized("service credential required".into()))}
+        let Some(project)=body["project_id"].as_str() else {return (400,json!({"error":{"code":"project_id_required"}}))};
+        let Some(owner)=body["owner_did"].as_str() else {return (400,json!({"error":{"code":"owner_did_required"}}))};
+        let Some(vm)=body["vm_id"].as_str() else {return (400,json!({"error":{"code":"vm_id_required"}}))};
+        return match vm_http::trial_access(&mut guard,project,owner,vm) {
+            Ok(value)=>(200,value),Err(error)=>error_response(&error),
+        };
+    }
+    if method=="POST" && path=="/internal/free-vm/finish" {
+        let authorized=guard.private_node.as_ref().and_then(|p|p.runner.as_ref())
+            .is_some_and(|(_,secret)|token==Some(secret.as_str()));
+        if !authorized {return error_response(&Error::Unauthorized("service credential required".into()))}
+        let Some(project)=body["project_id"].as_str() else {return (400,json!({"error":{"code":"project_id_required"}}))};
+        let Some(owner)=body["owner_did"].as_str() else {return (400,json!({"error":{"code":"owner_did_required"}}))};
+        let Some(vm)=body["vm_id"].as_str() else {return (400,json!({"error":{"code":"vm_id_required"}}))};
+        let Some(trial)=guard.free_vm_trials.get(project).cloned() else {return (404,json!({"error":{"code":"trial_not_found"}}))};
+        if trial.owner_did!=owner || trial.phase(now_unix())!=free_vm::Phase::Expired {
+            return (409,json!({"error":{"code":"trial_not_expired"}}));
+        }
+        let Some(access)=guard.fleet_access.clone() else {return (503,json!({"error":{"code":"fleet_authority_unavailable"}}))};
+        drop(guard);
+        let (status,response)=access.connect(&json!({"action":"finish-free-vm",
+            "project_id":project,"agent_did":owner}));
+        if status!=200 || response["released"]!=true {return (status,response)}
+        let mut guard=match state.lock(){Ok(g)=>g,Err(_)=>return (503,json!({"error":{"code":"state_unavailable"}}))};
+        if guard.free_vm_trials.get(project).is_none_or(|t|t.owner_did!=owner || t.phase(now_unix())!=free_vm::Phase::Expired) {
+            return (409,json!({"error":{"code":"trial_state_changed"}}));
+        }
+        guard.purge_destroyed_vm_records(project,owner,vm);
+        if guard.storage.delete_state("cloud_free_vm_trials",project).is_err()
+            || guard.storage.delete_state("cloud_projects",project).is_err() {
+            return (503,json!({"error":{"code":"trial_cleanup_pending"}}));
+        }
+        guard.free_vm_trials.remove(project);
+        guard.cloud_projects.remove(project);
+        return (200,json!({"released":true,"project_id":project}));
+    }
     if method=="POST" && path=="/internal/workload-policy" {
         let compose=token.is_some() && guard.private_node.as_ref().and_then(|p|p.runner.as_ref()).is_some_and(|(_,secret)|Some(secret.as_str())==token);
         let authorized=compose || (token.is_some() && (guard.function_sandbox_token.as_deref()==token || guard.realtime_secret.as_deref()==token));
@@ -7790,7 +7861,12 @@ pub fn route_with_ip(
             Some((quota,always,restricted,tier))=>(Some(quota),always,restricted,Some(tier)),
             None=>(None,false,false,None),
         };
-        return (if quota.is_some() { 200 } else { 403 }, json!({"allowed": quota.is_some(), "quota": quota, "always_on_allowed": always_on_allowed, "network_restricted": network_restricted, "tier": tier}));
+        let anonymous_until=body["project_id"].as_str().and_then(|id|guard.free_vm_trials.get(id))
+            .filter(|trial|trial.phase(now_unix())==free_vm::Phase::Active).map(free_vm::Trial::active_until);
+        let claim_until=body["project_id"].as_str().and_then(|id|guard.free_vm_trials.get(id))
+            .filter(|trial|trial.phase(now_unix())==free_vm::Phase::Active).map(free_vm::Trial::claim_until);
+        return (if quota.is_some() { 200 } else { 403 }, json!({"allowed": quota.is_some(), "quota": quota, "always_on_allowed": always_on_allowed, "network_restricted": network_restricted, "tier": tier,
+            "anonymous_until":anonymous_until,"claim_until":claim_until}));
     }
 
     if let Some((project_id, action)) = crate::private_node::runtime_route(path) {

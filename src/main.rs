@@ -516,6 +516,11 @@ fn main() -> Result<()> {
                         for (name,value) in [("Cache-Control","no-store"),("X-Frame-Options","DENY"),("Referrer-Policy","no-referrer"),("Content-Security-Policy","frame-ancestors 'none'; base-uri 'none'")] {response.add_header(Header::from_bytes(name,value).unwrap());}
                     }
                 }
+                if clean_path=="/free-vm/claim" {
+                    for (name,value) in [("Cache-Control","no-store"),("Referrer-Policy","no-referrer"),("X-Frame-Options","DENY"),("Content-Security-Policy","default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")] {
+                        response.add_header(Header::from_bytes(name,value).unwrap());
+                    }
+                }
                 response.add_header(
                     Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap(),
                 );

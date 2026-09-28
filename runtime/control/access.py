@@ -22,6 +22,7 @@ class Access:
         from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
         self.a = authority
         self.trial_key = hashlib.sha256(b'gap-trial-ip-v1\0' + seed).digest()
+        self.free_vm_ip_secret = hashlib.sha256(b'gap-free-vm-ip-v1\0' + seed).digest()
         self.key = Ed25519PrivateKey.from_private_bytes(seed)
         self.public_key = self.key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
         with authority.db() as db:
@@ -34,12 +35,96 @@ class Access:
                 REFERENCES customers(id), granted INTEGER NOT NULL)''')
             db.execute('''CREATE TABLE IF NOT EXISTS trial_ip_grants(ip_key TEXT PRIMARY KEY,
                 customer TEXT NOT NULL REFERENCES customers(id), granted INTEGER NOT NULL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS free_vm_trials(project TEXT PRIMARY KEY,
+                node TEXT NOT NULL,agent TEXT NOT NULL,ssh_key TEXT NOT NULL UNIQUE,
+                created INTEGER NOT NULL,claimed INTEGER)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS free_vm_trial_ips(ip_key TEXT PRIMARY KEY,
+                project TEXT NOT NULL REFERENCES free_vm_trials(project))''')
+
+    def reserve_free_vm(self, node, project, agent, ssh_key, source_ip):
+        """Single-writer fleet admission; identity gateway token pins the node."""
+        identifier(node)
+        if not isinstance(project, str) or not re.fullmatch(r'prj_[0-9a-f]{24}', project):
+            raise Failure('invalid_project')
+        if not isinstance(agent, str) or not re.fullmatch(r'did:gap:[0-9a-f]{64}', agent):
+            raise Failure('invalid_agent')
+        if not isinstance(ssh_key, str) or not re.fullmatch(r'[0-9a-f]{64}', ssh_key):
+            raise Failure('invalid_ssh_key_hash')
+        ip_key = self.free_vm_ip_key(source_ip)
+        if ip_key is None:
+            raise Failure('invalid_source_ip')
+        now = int(self.a.clock())
+        with self.a.db() as db:
+            # An expired reservation stays occupied until the worker confirms
+            # destruction of the VM and disk. Time alone cannot release it.
+            existing = db.execute('SELECT * FROM free_vm_trials WHERE ssh_key=?', (ssh_key,)).fetchone()
+            if existing:
+                if existing['claimed'] is not None:
+                    raise Failure('free_vm_already_claimed', 409)
+                if (existing['node'], existing['project'], existing['agent']) != (node, project, agent):
+                    raise Failure('free_vm_key_already_reserved', 409)
+                if now >= existing['created'] + 90000:
+                    raise Failure('free_vm_expired_pending_cleanup', 409)
+                if now >= existing['created'] + 3600:
+                    raise Failure('free_vm_no_longer_active', 409)
+            else:
+                conflict = db.execute('SELECT 1 FROM free_vm_trials WHERE project=? OR agent=?', (project, agent)).fetchone()
+                if conflict:
+                    raise Failure('free_vm_identity_conflict', 409)
+            occupied = db.execute('SELECT project FROM free_vm_trial_ips WHERE ip_key=?', (ip_key,)).fetchone()
+            if occupied and occupied['project'] != project:
+                raise Failure('free_vm_ip_already_reserved', 409)
+            if not existing:
+                db.execute('INSERT INTO free_vm_trials VALUES(?,?,?,?,?,NULL)',
+                           (project, node, agent, ssh_key, now))
+            ip_count = db.execute('SELECT count(*) FROM free_vm_trial_ips WHERE project=?', (project,)).fetchone()[0]
+            if not occupied and ip_count >= 9:
+                raise Failure('free_vm_too_many_source_ips', 409)
+            db.execute('INSERT OR IGNORE INTO free_vm_trial_ips VALUES(?,?)', (ip_key, project))
+            created = existing['created'] if existing else now
+            return dict(project_id=project, node_id=node, owner_did=agent,
+                        active_until=created+3600, claim_until=created+90000,
+                        reused=bool(existing))
+
+    def finish_free_vm(self, node, project, agent):
+        """Worker attests deletion before the IP/key can be reused."""
+        identifier(node)
+        if not isinstance(project, str) or not re.fullmatch(r'prj_[0-9a-f]{24}', project):
+            raise Failure('invalid_project')
+        if not isinstance(agent, str) or not re.fullmatch(r'did:gap:[0-9a-f]{64}', agent):
+            raise Failure('invalid_agent')
+        with self.a.db() as db:
+            row = db.execute('SELECT node,agent,created,claimed FROM free_vm_trials WHERE project=?',
+                             (project,)).fetchone()
+            if not row:
+                return dict(project_id=project, released=True)
+            if (row['node'], row['agent']) != (node, agent):
+                raise Failure('free_vm_identity_conflict', 403)
+            if row['claimed'] is not None:
+                raise Failure('free_vm_already_claimed', 409)
+            if int(self.a.clock()) < row['created'] + 90000:
+                raise Failure('free_vm_cleanup_too_early', 409)
+            db.execute('DELETE FROM free_vm_trial_ips WHERE project=?', (project,))
+            db.execute('DELETE FROM free_vm_trials WHERE project=?', (project,))
+            return dict(project_id=project, released=True)
 
     def trial_ip_key(self, value):
         try: address=ipaddress.ip_address(value)
         except ValueError:return None
+        if address.version == 6 and address.ipv4_mapped:
+            address = address.ipv4_mapped
         identity=str(address) if address.version==4 else str(ipaddress.ip_network(f'{address}/64',strict=False))
         return hmac.new(self.trial_key,identity.encode(),hashlib.sha256).hexdigest()
+
+    def free_vm_ip_key(self, value):
+        try: address = ipaddress.ip_address(value)
+        except ValueError: return None
+        if address.version == 6 and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        if not address.is_global:
+            return None
+        identity = str(address) if address.version == 4 else str(ipaddress.ip_network(f'{address}/64', strict=False))
+        return hmac.new(self.free_vm_ip_secret, identity.encode(), hashlib.sha256).hexdigest()
 
     def ensure_trial(self, db, customer, trial_ip):
         if db.execute('SELECT 1 FROM trial_grants WHERE customer=?',(customer,)).fetchone():return False
@@ -56,7 +141,7 @@ class Access:
                      'verified-email','microvm-trial-v1')
         return True
 
-    def connect(self, node, request, email, agent, project, manual_reason=None, trial_ip=None):
+    def connect(self, node, request, email, agent, project, manual_reason=None, trial_ip=None, free_vm_claim=False):
         # Gateway validates its durable email proof and local owner bearer.
         if not isinstance(email, str) or len(email) > 254 or not re.fullmatch(r'[^\s@<>;,"\x00-\x1f]+@[^\s@<>;,"\x00-\x1f]+', email) or not email.isascii():
             raise Failure('invalid_verified_email')
@@ -66,13 +151,24 @@ class Access:
         if not isinstance(project, str) or not re.fullmatch(r'prj_[0-9a-f]{24}', project):
             raise Failure('invalid_project')
         identifier(node)
-        body = dict(action='connect', email=email, agent=agent, project=project)
+        if type(free_vm_claim) is not bool:
+            raise Failure('invalid_free_vm_claim')
+        body = dict(action='claim-free-vm' if free_vm_claim else 'connect', email=email, agent=agent, project=project)
         if manual_reason is not None:
             if not isinstance(manual_reason, str) or not 10 <= len(manual_reason) <= 1000 or any(ord(c) < 32 for c in manual_reason):
                 raise Failure('invalid_manual_confirmation')
             body.update(manual_reason=manual_reason, node=node)
 
         def apply(db):
+            free_trial = None
+            if free_vm_claim:
+                free_trial = db.execute('SELECT * FROM free_vm_trials WHERE project=?', (project,)).fetchone()
+                if not free_trial or (free_trial['node'],free_trial['agent']) != (node,agent):
+                    raise Failure('free_vm_identity_conflict',403)
+                if free_trial['claimed'] is not None:
+                    raise Failure('free_vm_already_claimed',409)
+                if int(self.a.clock()) >= free_trial['created'] + 90000:
+                    raise Failure('free_vm_claim_expired',409)
             if db.execute('SELECT 1 FROM detached_members WHERE agent=?',(agent,)).fetchone():
                 raise Failure('membership_detached',403)
             source = db.execute('SELECT * FROM identity_sources WHERE agent=?', (agent,)).fetchone()
@@ -99,11 +195,15 @@ class Access:
             db.execute('INSERT OR IGNORE INTO projects VALUES(?,?,?,?)', (project, customer, node, agent))
             db.execute("INSERT OR IGNORE INTO grants VALUES(?,?,'owner')", (project, agent))
             trial_credit_granted=self.ensure_trial(db,customer,trial_ip)
+            claimed_at = int(self.a.clock()) if free_vm_claim else None
+            if free_vm_claim:
+                db.execute('UPDATE free_vm_trials SET claimed=? WHERE project=?',(claimed_at,project))
+                db.execute('DELETE FROM free_vm_trial_ips WHERE project=?',(project,))
             return dict(customer_id=customer, agent_did=agent, project_id=project, node_id=node,
                         operator_id=self.a.operator, legacy_balance_transferred=False,
                         trial_credit_granted=trial_credit_granted,
                         confirmation_method="operator_confirmation" if manual_reason else "identity_gateway",
-                        confirmation_reason=manual_reason)
+                        confirmation_reason=manual_reason,free_vm_claimed_at=claimed_at)
         result = self.a.mutation('operator' if manual_reason else 'identity:'+node, request, body, apply)
         # Never persist a credential in an idempotency result. Repeating the
         # same successful connection mints a fresh bounded credential.

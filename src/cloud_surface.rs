@@ -3,7 +3,7 @@
 pub fn allowed_api(path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     if matches!(path,"/v1/fleet/browser-session" | "/v1/fleet/connect" | "/v1/fleet/login" | "/v1/fleet/login/verify" | "/v1/fleet/migration-worker") || crate::fleet_access::relay_path("GET",path).is_some() || crate::fleet_access::relay_path("POST",path).is_some() {return true}
-    matches!(path, "/health" | "/v1/registration" | "/v1/identity" | "/v1/identity/verify" | "/v1/identity/email" | "/v1/identity/email/verify" | "/v1/cloud/projects" | "/v1/fleet/node" | "/v1/fleet/node-finance" | "/v1/pricing" | "/v1/public-node" | "/v1/explorer")
+    matches!(path, "/health" | "/v1/registration" | "/v1/identity" | "/v1/identity/verify" | "/v1/identity/email" | "/v1/identity/email/verify" | "/v1/free-vm/claim/request" | "/v1/free-vm/claim/verify" | "/v1/cloud/projects" | "/v1/fleet/node" | "/v1/fleet/node-finance" | "/v1/pricing" | "/v1/public-node" | "/v1/explorer")
         || path.starts_with("/v1/cloud/projects/")
         || path.starts_with("/v1/admin/cloud/projects/")
         || path.starts_with("/functions/")
@@ -12,6 +12,9 @@ pub fn allowed_api(path: &str) -> bool {
             "/internal/tls/ask"
                 | "/internal/workload-policy"
                 | "/internal/compose/authorize"
+                | "/internal/free-vm/reserve"
+                | "/internal/free-vm/preview"
+                | "/internal/free-vm/finish"
                 | "/internal/functions/capability"
                 | "/internal/realtime/custom-domain"
                 | "/internal/realtime/credits/spend"
@@ -24,7 +27,7 @@ pub fn page(path: &str) -> Option<(&'static str, String)> {
         "/sitemap.xml" => {
             let origin = std::env::var("GAP_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:8080".into());
             let origin = origin.trim_end_matches('/').replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-            Some(("application/xml", format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"><url><loc>{origin}/</loc></url><url><loc>{origin}/docs</loc></url></urlset>")))
+            Some(("application/xml", format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"><url><loc>{origin}/</loc></url><url><loc>{origin}/free-vm</loc></url><url><loc>{origin}/docs</loc></url></urlset>")))
         }
         "/agents.md" | "/AGENTS.md" | "/llms.txt" => Some(("text/plain; charset=utf-8", include_str!("../AGENTS.md").into())),
         "/robots.txt" => Some(("text/plain", "User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /internal/\nDisallow: /sites/\n".into())),
@@ -33,6 +36,8 @@ pub fn page(path: &str) -> Option<(&'static str, String)> {
         "/pricing" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_pricing.html"), path))),
         "/account" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_account.html"), path))),
         "/signup" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_signup.html"), path))),
+        "/free-vm" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_free_vm.html"), path))),
+        "/free-vm/claim" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_free_vm_claim.html"), path))),
         "/microvms/assets/xterm.js" => Some(("text/javascript; charset=utf-8", include_str!("ui/vendor/xterm.js").into())),
         "/microvms/assets/xterm-fit.js" => Some(("text/javascript; charset=utf-8", include_str!("ui/vendor/xterm-fit.js").into())),
         "/microvms/assets/xterm.css" => Some(("text/css; charset=utf-8", include_str!("ui/vendor/xterm.css").into())),
@@ -52,7 +57,7 @@ fn product_page(source: &str, active: &str) -> String {
     } else {
         ""
     };
-    let links = [("/", "Home"), ("/explorer", "Explore"), ("/pricing", "Pricing"),
+    let links = [("/", "Home"), ("/explorer", "Explore"), ("/pricing", "Pricing"), ("/free-vm", "Free VM"),
         ("/microvms", "MicroVMs"), ("/docs", "Docs"), ("/account", "Account")];
     let links = links.iter().map(|(href, label)| format!(
         "<a href=\"{href}\"{navigation_target}{}>{label}</a>",
@@ -181,6 +186,16 @@ fn documentation() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn free_vm_entry_point_explains_trial_and_claim_without_exposing_a_token() {
+        let (_, html) = page("/free-vm").unwrap();
+        for expected in ["ssh -p 2121 free@", "1 vCPU", "1 GiB", "60 min", "24 h", "Basic Auth", "verified email"] {
+            assert!(html.contains(expected), "missing {expected}");
+        }
+        assert!(html.contains("aria-current=\"page\">Free VM"));
+        assert!(!html.contains("fvc_"));
+        assert!(page("/sitemap.xml").unwrap().1.contains("/free-vm</loc>"));
+    }
     #[test]
     fn documentation_renders_markdown_and_preserves_raw_agent_instructions() {
         let html = page("/docs").unwrap().1;

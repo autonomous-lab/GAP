@@ -66,7 +66,9 @@ if yaml:
                 public_vm_range = (f == "runtime/compose/deploy.yml" and name == "compose-edge"
                     and str(port) in ("0.0.0.0:24000-24099:24000-24099/tcp",
                                       "0.0.0.0:24000-24099:24000-24099/udp"))
-                if not str(port).startswith("172.17.0.1:") and not public_vm_range:
+                free_vm_opt_in = (f == "runtime/compose/deploy.yml" and name == "compose-edge"
+                    and str(port) == "${GAP_FREE_VM_BIND_ADDRESS:-127.0.0.1}:2121:2121/tcp")
+                if not str(port).startswith("172.17.0.1:") and not public_vm_range and not free_vm_opt_in:
                     print(f"{f}: service {name} publishes {port} outside the bridge")
                     sys.exit(1)
 

@@ -106,11 +106,15 @@ class MicroVMs:
         if (self.folder(meta)/'.migration-fence').exists():return False
         if not self.capacity.allows(meta):return False
         if not self.runtime:return True
+        if meta.get('tier')=='anonymous':
+            return time.time()<meta.get('anonymous_until',0) and self.runtime.check_policy(meta,force=True)
         ledger=getattr(self.runtime,'ledger',None)
         return self.runtime.check_policy(meta,force=True) and (ledger is None or ledger.lease_allowed(meta['project_id']))
     def __init__(self, config, execute_guest):
         self.root = Path(config['state_dir']).resolve()
         self.images = Path(config['image_dir']).resolve()
+        self.free_images = Path(config['free_image_dir']).resolve() if config.get('free_image_dir') else None
+        self.free_images_v1 = Path(config['free_image_v1_dir']).resolve() if config.get('free_image_v1_dir') else self.free_images
         from disk_crypto import DiskCrypto
         from seed_crypto import SeedCrypto
         self.disk_crypto = DiskCrypto(config.get('disk_keyring'))
@@ -122,6 +126,10 @@ class MicroVMs:
             raise VMError('hypervisor_state_dir_must_be_short_absolute_safe_path')
         if not re.fullmatch(r'/[A-Za-z0-9_./-]+', str(self.images)):
             raise VMError('invalid_image_dir')
+        if self.free_images and not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(self.free_images)):
+            raise VMError('invalid_free_image_dir')
+        if self.free_images_v1 and not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(self.free_images_v1)):
+            raise VMError('invalid_free_image_v1_dir')
         self.execute_guest = execute_guest
         self.diagnostic_serial = config.get('diagnostic_serial', False)
         self.children = {}
@@ -178,6 +186,7 @@ class MicroVMs:
             other=json.loads(path.read_text())
             if other['state'] in ('destroyed','migrated'): continue
             occupied.add(other['ssh_port'])
+            if other.get('proxy_port'):occupied.add(other['proxy_port'])
             occupied.update(p['worker_port'] for p in other.get('ports',[]))
             occupied.update(other.get('public_targets',{}).values())
             occupied.update(other.get('public_ports',[]))
@@ -338,8 +347,18 @@ class MicroVMs:
             if self.alive(meta):raise VMError('migration_source_still_alive')
             return dict(transfer_id=transfer_id,vm_id=vm_id,source_stopped=True)
 
-    def image_version(self):
-        manifest = (self.images / 'SHA256SUMS').read_text()
+    def image_dir(self,meta):
+        if meta.get('guest_image')=='free-vm-v1':
+            if not self.free_images_v1:raise VMError('free_guest_image_unavailable')
+            return self.free_images_v1
+        if meta.get('guest_image')=='free-vm-v2':
+            if not self.free_images:raise VMError('free_guest_image_unavailable')
+            return self.free_images
+        return self.images
+
+    def image_version(self,meta=None):
+        image_dir=self.image_dir(meta or {})
+        manifest = (image_dir / 'SHA256SUMS').read_text()
         seen = set()
         for line in manifest.splitlines():
             digest, name = line.split()
@@ -347,7 +366,7 @@ class MicroVMs:
                 raise VMError('invalid_guest_image_manifest')
             seen.add(name)
             hasher = hashlib.sha256()
-            with (self.images / name).open('rb') as source:
+            with (image_dir / name).open('rb') as source:
                 for chunk in iter(lambda: source.read(1024 * 1024), b''):
                     hasher.update(chunk)
             if hasher.hexdigest() != digest:
@@ -359,12 +378,13 @@ class MicroVMs:
     def prepare(self, meta):
         folder = self.folder(meta)
         folder.mkdir(mode=0o700)
-        meta['image_version'] = self.image_version()
+        image_dir=self.image_dir(meta)
+        meta['image_version'] = self.image_version(meta)
         self.disk_crypto.initialize(meta)
         if self.disk_crypto.path:
-            self.disk_crypto.execute(meta, 'create', folder / 'disk.qcow2', size=str(meta['disk_gib'])+'G', base=self.images / 'rootfs.ext4')
+            self.disk_crypto.execute(meta, 'create', folder / 'disk.qcow2', size=str(meta['disk_gib'])+'G', base=image_dir / 'rootfs.ext4')
         else:
-            run(['qemu-img', 'create', '-f', 'qcow2', '-F', 'raw', '-b', str(self.images / 'rootfs.ext4'),str(folder/'disk.qcow2'),str(meta['disk_gib'])+'G'])
+            run(['qemu-img', 'create', '-f', 'qcow2', '-F', 'raw', '-b', str(image_dir / 'rootfs.ext4'),str(folder/'disk.qcow2'),str(meta['disk_gib'])+'G'])
         seed = folder / 'seed'
         seed.mkdir(mode=0o700)
         run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(folder / 'client_key')])
@@ -400,7 +420,9 @@ class MicroVMs:
 
     def authorized_keys(self, meta, keys):
         terminal_key = self.folder(meta) / 'terminal_key.pub'
-        terminal = ('restrict,pty,command="/bin/sh -l" ' + terminal_key.read_text().strip() + '\n') if terminal_key.exists() else ''
+        terminal_options=('restrict,pty ' if meta.get('tier')=='anonymous'
+                          else 'restrict,pty,command="/bin/sh -l" ')
+        terminal = (terminal_options + terminal_key.read_text().strip() + '\n') if terminal_key.exists() else ''
         owner_options = 'restrict,pty ' if meta.get('network_restricted') else 'no-agent-forwarding,no-X11-forwarding '
         return ('restrict,command="python3 /usr/local/lib/gap-compose-guest.py" ' +
                 (self.folder(meta) / 'client_key.pub').read_text().strip() + '\n' +
@@ -425,17 +447,26 @@ class MicroVMs:
 
     def command(self, meta, seed_path=None):
         folder = self.folder(meta)
+        image_dir=self.image_dir(meta)
         forwards = [f'hostfwd=tcp:127.0.0.1:{meta["ssh_port"]}-:22']
         forwards += [f'hostfwd=tcp:127.0.0.1:{port["worker_port"]}-:{port["guest_port"]}' for port in meta['ports']]
         if self.network:
             forwards += ['hostfwd=' + rule for rule in self.network.rules(meta)]
+        if meta.get('guest_image') in ('free-vm-v1','free-vm-v2'):
+            if not meta.get('network_restricted') or not meta.get('proxy_port'):
+                raise VMError('free_vm_egress_policy_unavailable')
+            # A -tcp chardev is shared for QEMU's whole lifetime, which corrupts
+            # the second HTTP request. -cmd spawns a fixed connector per guest
+            # TCP connection instead.
+            forwards.append(f'guestfwd=tcp:10.0.2.100:3128-cmd:/usr/bin/nc 127.0.0.1 {meta["proxy_port"]}')
         command = ['qemu-system-x86_64', '-machine', 'microvm,accel=kvm', '-cpu', 'host',
                 '-name', meta['vm_id'], '-m', str(meta['memory_mib']), '-smp', str(math.ceil(meta['vcpus'])),
-                '-kernel', str(self.images / 'vmlinuz'), '-initrd', str(self.images / 'initramfs'),
+                '-kernel', str(image_dir / 'vmlinuz'), '-initrd', str(image_dir / 'initramfs'),
                 '-append', 'console=ttyS0 root=/dev/vda rootfstype=ext4 modules=virtio_mmio,virtio_blk,ext4 rootwait rw reboot=t net.ifnames=0',
                 '-nodefaults', '-no-user-config', '-display', 'none',
                 '-serial', f'file:{folder}/serial.log' if self.diagnostic_serial else 'null', '-no-reboot',
-                '-sandbox', 'on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny',
+                '-sandbox', ('on,obsolete=deny,spawn=allow,resourcecontrol=deny' if meta.get('guest_image') in ('free-vm-v1','free-vm-v2')
+                             else 'on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny'),
                 '-drive', f'id=root,file={folder}/disk.qcow2,format=qcow2,if=none'+(',encrypt.key-secret=gapdisk' if meta.get('disk_encryption') else ''),
                 '-device', 'virtio-blk-device,drive=root',
                 '-drive', f'id=seed,file={seed_path or folder / "seed.ext4"},format=raw,if=none,readonly=on',
@@ -528,7 +559,7 @@ class MicroVMs:
             return self.start(meta)
         tag=meta.get('snapshot_tag','')
         if not re.fullmatch(r'idle_[0-9a-f]{32}',tag): raise VMError('invalid_snapshot_identity')
-        if self.image_version()!=meta['image_version']: raise VMError('guest_base_image_changed')
+        if self.image_version(meta)!=meta['image_version']: raise VMError('guest_base_image_changed')
         if meta.get('snapshot_qemu_version')!=subprocess.check_output(['qemu-system-x86_64','--version'],text=True).splitlines()[0]:
             raise VMError('snapshot_requires_original_qemu_version')
         meta['state']='resuming'; self.save(meta)
@@ -610,13 +641,17 @@ class MicroVMs:
     def start(self, meta):
         self.disk_crypto.key(meta)
         if not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
+        if meta.get('guest_image') in ('free-vm-v1','free-vm-v2'):
+            manager=getattr(self,'free_vm_proxy',None)
+            if manager is None:raise VMError('free_vm_egress_proxy_unavailable')
+            manager.ensure(meta['vm_id'],meta['proxy_port'])
         if meta['state'] == 'creating':
             raise VMError('vm_creation_incomplete_destroy_and_retry')
         if self.public(meta)['state'] == 'running':
             return
         if self.alive(meta):
             raise VMError('vm_process_alive_but_unresponsive')
-        if self.image_version() != meta['image_version']:
+        if self.image_version(meta) != meta['image_version']:
             raise VMError('guest_base_image_changed')
         folder = self.folder(meta)
         self.refresh_seed(meta)
@@ -667,6 +702,8 @@ class MicroVMs:
         if not self.alive(meta):
             meta['state'] = 'stopped'
             self.save(meta)
+            if meta.get('guest_image') in ('free-vm-v1','free-vm-v2') and getattr(self,'free_vm_proxy',None):
+                self.free_vm_proxy.release(meta['vm_id'])
             return
         if force:
             try: self.qmp(meta, 'quit')
@@ -690,6 +727,8 @@ class MicroVMs:
         child = self.children.pop(meta['vm_id'], None)
         if child:
             child.wait(timeout=5)
+        if meta.get('guest_image') in ('free-vm-v1','free-vm-v2') and getattr(self,'free_vm_proxy',None):
+            self.free_vm_proxy.release(meta['vm_id'])
 
     @contextmanager
     def owner_lock(self, owner):
@@ -729,7 +768,7 @@ class MicroVMs:
             return {'limits': limits, 'allocated': dict(self.quota_usage(owner,include_disk=True), max_vms=self.vm_count(owner)),
                     'always_on_allowed': bool(self.runtime and self.runtime.runner.authorize(project,owner).get('always_on_allowed')),
                     'tier':approval.get('tier','approved'),'network_policy':'reverse_proxy_only' if approval.get('network_restricted') else 'standard',
-                    'minimum_disk_gib': max(1,((self.images/'rootfs.ext4').stat().st_size+1024**3-1)//1024**3)}
+                    'minimum_disk_gib': max(1,((self.free_images if approval.get('tier')=='anonymous' and self.free_images else self.images).joinpath('rootfs.ext4').stat().st_size+1024**3-1)//1024**3)}
 
     def perform(self, project, owner, action, body):
         validate(action, body)
@@ -778,7 +817,8 @@ class MicroVMs:
             if action=='vm/create':
                 if body.get('execution_mode')=='always_on' and not (self.runtime and self.runtime.runner.authorize(project,owner).get('always_on_allowed')):
                     raise VMError('always_on_not_approved')
-                minimum=max(1,((self.images/'rootfs.ext4').stat().st_size+1024**3-1)//1024**3)
+                image_dir=self.free_images if approval.get('tier')=='anonymous' and self.free_images else self.images
+                minimum=max(1,((image_dir/'rootfs.ext4').stat().st_size+1024**3-1)//1024**3)
                 if body.get('disk_gib',8)<minimum:raise VMError('disk_smaller_than_guest_image')
             if (action == 'vm/create' and (not meta or meta['state'] == 'destroyed')
                     and self.vm_count(owner) >= limits.get('max_vms', 1)):
@@ -811,11 +851,17 @@ class MicroVMs:
                             'state': 'creating', 'vcpus': body.get('vcpus', default_vcpus),
                             'execution_mode': body.get('execution_mode','serverless'),
                             'network_restricted': network_restricted, 'tier': approval.get('tier','approved'),
+                            **({'guest_image':'free-vm-v2'} if approval.get('tier')=='anonymous' else {}),
+                            **({'anonymous_until':approval['anonymous_until'],'claim_until':approval['claim_until']}
+                               if approval.get('tier')=='anonymous' else {}),
                             'memory_mib': body.get('memory_mib', default_memory_mib), 'disk_gib': body.get('disk_gib', 8),
                             'ssh_port': self.reserved_port(), 'ports': [], 'retained': False,
                             'ssh_keys': __import__('network').keys(body.get('ssh_keys', []))}
                     meta['catalog_key']=meta['vm_id'] if additional else project
                     used = {meta['ssh_port']}
+                    if meta.get('guest_image') in ('free-vm-v1','free-vm-v2'):
+                        meta['proxy_port']=self.reserved_port(used)
+                        used.add(meta['proxy_port'])
                     for port in body.get('ports', []):
                         candidate = self.reserved_port(used)
                         while candidate in used:

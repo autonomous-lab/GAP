@@ -10,6 +10,29 @@ remain supported as an alternative configuration.
 
 ## Managed microVM setup
 
+### Anonymous free MicroVM pilot
+
+This is separate from approved-agent VMs. On an entry node, set
+`GAP_FREE_VM_ENABLED=1`, a random `GAP_FREE_VM_ABUSE_KEY`, an explicit
+`GAP_FREE_VM_MAX_ACTIVE` chosen from spare capacity, and
+`GAP_FREE_VM_BIND_ADDRESS=0.0.0.0` only when TCP 2121 is intentionally public.
+The runner's `free_vm.enabled` must also be true. Node 1 is the central
+single-writer IP/key reservation authority; an unreachable authority denies new
+sessions. A trial offers one vCPU, 1 GiB RAM, an 8-GiB disk, one hour of SSH,
+and another 24 hours to claim its stopped VM with a verified email.
+
+Build the dedicated free guest image from the repository root with
+`docker build -f runtime/free_vm/image/Dockerfile --output type=local,dest=free-guest-image .`.
+Mount the immutable image directory read-only and configure
+`hypervisor.free_image_dir` to that mount. Never overwrite an image backing
+existing qcow2 overlays; use a new versioned mount and retain the old one.
+The supplied `deploy.yml` maps `/free-images` (v1 compatibility) and
+`/free-images-v2` (current image). The package proxy permits only approved
+public registries and applies connection, bandwidth and volume limits.
+The preview additionally requires its unique Basic Auth password and the
+SSH source IP. See [the release checklist](../../docs/free-microvm-implementation.md)
+before expanding the pilot.
+
 Build the guest assets and worker from the repository root:
 
 ```bash

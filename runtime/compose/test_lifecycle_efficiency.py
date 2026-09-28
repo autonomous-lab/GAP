@@ -159,5 +159,39 @@ class LifecycleEfficiencyTests(unittest.TestCase):
                 runtime.ensure_awake(meta['project_id'],meta['vm_id'])
             self.assertEqual(runtime.manager.write_keys.call_count,2)
 
+    def test_anonymous_hour_stops_vm_without_releasing_abuse_reservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'vm.json'
+            meta=dict(self.meta('running'),tier='anonymous',anonymous_until=3600,claim_until=90000)
+            path.write_text(json.dumps(meta))
+            runtime=self.runtime(Path(directory))
+            runtime.manager=SimpleNamespace(alive=Mock(return_value=True),stop=Mock(),save=Mock())
+            runtime.runner=SimpleNamespace(authorize=Mock(return_value={'tier':'anonymous'}),finish_free_vm=Mock(),ingress=None)
+            runtime.disconnect=Mock()
+            with patch('lifecycle.time.time',return_value=3600):runtime.tick_project(path)
+            runtime.disconnect.assert_called_once()
+            runtime.manager.stop.assert_called_once()
+            self.assertEqual(runtime.manager.stop.call_args.args[0]['vm_id'],meta['vm_id'])
+            self.assertIs(runtime.manager.stop.call_args.args[1],True)
+            runtime.runner.finish_free_vm.assert_not_called()
+
+    def test_anonymous_expiry_destroys_before_releasing_ip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'vm.json'
+            meta=dict(self.meta('stopped'),tier='anonymous',anonymous_until=3600,claim_until=90000)
+            path.write_text(json.dumps(meta))
+            runtime=self.runtime(Path(directory))
+            runtime.manager=SimpleNamespace(alive=Mock(return_value=False),save=Mock(),
+                owner_lock=Mock(return_value=nullcontext()),_perform=Mock())
+            runtime.runner=SimpleNamespace(authorize=Mock(return_value=None),finish_free_vm=Mock(),ingress=None)
+            runtime.disconnect=Mock()
+            runtime.manager._perform.side_effect=VMError('deletion_failed')
+            with patch('lifecycle.time.time',return_value=90000):
+                with self.assertRaisesRegex(VMError,'deletion_failed'):runtime.tick_project(path)
+            runtime.runner.finish_free_vm.assert_not_called()
+            runtime.manager._perform.side_effect=None
+            with patch('lifecycle.time.time',return_value=90000):runtime.tick_project(path)
+            runtime.runner.finish_free_vm.assert_called_once_with(meta['project_id'],meta['owner_did'],meta['vm_id'])
+
 
 if __name__=='__main__':unittest.main()

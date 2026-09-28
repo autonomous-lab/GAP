@@ -169,6 +169,8 @@ class Runtime:
         return state['billing_view']
 
     def sample(self,meta,force=True):
+        if meta.get('tier')=='anonymous':
+            return
         if (self.manager.folder(meta)/'.migration-meter-off').exists():
             if self.manager.alive(meta):
                 self.manager.stop(meta,True)
@@ -187,6 +189,9 @@ class Runtime:
 
     def view(self,meta,include_entries=True):
         if not meta: return {}
+        if meta.get('tier')=='anonymous':
+            return {'mode':'anonymous','active_until':meta.get('anonymous_until'),
+                    'claim_until':meta.get('claim_until'),'billing':None}
         state=self.state(meta)
         account=self.ledger.view(meta['project_id'],meta['owner_did'],include_entries=include_entries)
         tariff=account['tariff']
@@ -234,7 +239,7 @@ class Runtime:
                     for m in metas:
                         policy_allowed=self.accept_policy(m,policies.get(m['project_id'],{}))
                         ledger=getattr(self,'ledger',None)
-                        lease_allowed=not ledger or ledger.lease_allowed(m['project_id'])
+                        lease_allowed=m.get('tier')=='anonymous' or not ledger or ledger.lease_allowed(m['project_id'])
                         if not lease_allowed:self.state(m)['fleet_preempted']=True
                         if not policy_allowed or not lease_allowed:
                             blocked.append(m)
@@ -262,6 +267,10 @@ class Runtime:
             time.sleep(WATCHDOG_INTERVAL_SECONDS)
 
     def check_credit(self,meta):
+        if meta.get('tier')=='anonymous':
+            if time.time()>=meta.get('anonymous_until',0):
+                raise VMError('anonymous_trial_expired')
+            return
         if hasattr(self.ledger,'sync'):self.ledger.sync(meta['project_id'],meta['owner_did'])
         view=self.ledger.view(meta['project_id'],meta['owner_did'],include_entries=False)
         if view.get('fleet') and not view['fleet']['lease_valid']:
@@ -398,6 +407,36 @@ class Runtime:
         meta=json.loads(path.read_text())
         baseline=json.dumps(meta,sort_keys=True)
         if meta['state']=='migrated':return
+        if meta.get('tier')=='anonymous':
+            now=time.time()
+            # A verified claim is reflected by node approval. Do not turn a
+            # missing authority response into a paid ownership assertion.
+            try:approval=self.runner.authorize(meta['project_id'],meta['owner_did'])
+            except Exception:approval=None
+            if approval and approval.get('tier')=='trial':
+                if self.manager.alive(meta):
+                    self.disconnect(meta);self.manager.stop(meta,True)
+                meta['tier']='trial'
+                meta.pop('anonymous_until',None);meta.pop('claim_until',None)
+                self.manager.save(meta)
+                if self.runner.ingress:self.runner.ingress.sync()
+                return
+            if now>=meta.get('anonymous_until',0) or not approval:
+                self.disconnect(meta)
+                if self.manager.alive(meta):self.manager.stop(meta,True)
+                if meta['state']!='stopped':
+                    meta['state']='stopped';self.manager.save(meta)
+                if self.runner.ingress:self.runner.ingress.sync()
+            if now>=meta.get('claim_until',0):
+                if meta['state']!='destroyed':
+                    with self.manager.owner_lock(meta['owner_did']):
+                        self.manager._perform(meta['project_id'],meta['owner_did'],'vm/destroy',
+                            {'vm_id':meta['vm_id'],'delete_data':True,'confirm_data_loss':True},
+                            approval={'quota':{'vcpus':1,'memory_mib':1024,'max_vms':1,'disk_gib':8},
+                                      'network_restricted':True,'tier':'anonymous'})
+                if self.runner.ingress:self.runner.ingress.sync()
+                self.runner.finish_free_vm(meta['project_id'],meta['owner_did'],meta['vm_id'])
+            return
         if self.manager.network and meta['state']!='destroyed':self.manager.network.expire(meta)
         project=meta['project_id']
         if meta['state']=='destroyed' and not self.metered_storage_bytes(meta):
@@ -496,6 +535,7 @@ class Runtime:
             for path in (self.manager.root/'catalog').glob('*.json'):
                 try:
                     meta=json.loads(path.read_text())
+                    if meta.get('tier')=='anonymous':continue
                     # Tombstones without retained bytes have nothing left to
                     # meter. The main lifecycle loop still checks their remote
                     # deletion claim at a bounded cadence.
@@ -520,6 +560,7 @@ class Runtime:
             try:
                 for path in (self.manager.root/'catalog').glob('*.json'):
                     meta=json.loads(path.read_text())
+                    if meta.get('tier')=='anonymous':continue
                     if self.ledger.lease_allowed(meta['project_id']) or not self.manager.alive(meta):continue
                     state=self.state(meta);state['fleet_preempted']=True
                     self.disconnect(meta)

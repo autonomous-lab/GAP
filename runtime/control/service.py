@@ -89,6 +89,14 @@ class Application:
                 raise Failure('identity_gateway_credentials_required', 403)
             if not self.access:
                 raise Failure('fleet_access_disabled', 409)
+            if body.get('action') == 'reserve-free-vm':
+                return self.access.reserve_free_vm(actor, body['project_id'], body['agent_did'],
+                                                   body['ssh_key_hash'], body['source_ip'])
+            if body.get('action') == 'finish-free-vm':
+                return self.access.finish_free_vm(actor, body['project_id'], body['agent_did'])
+            if body.get('action') == 'claim-free-vm':
+                return self.access.connect(actor, body['request_id'], body['email'], body['agent_did'],
+                                           body['project_id'], free_vm_claim=True)
             if body.get('action') == 'reconnect':
                 return self.access.reconnect(actor,body['agent_did'],body['project_id'])
             if body.get('action') == 'human-login':

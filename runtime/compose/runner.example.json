@@ -7,12 +7,15 @@
   "hypervisor": {
     "state_dir": "/data/vm",
     "image_dir": "/images",
+    "free_image_dir": "/free-images-v2",
+    "free_image_v1_dir": "/free-images",
     "public_network": {
       "hostname": "sites.gap.geta.team",
       "first_port": 24000,
       "last_port": 53999
     }
   },
+  "free_vm": {"enabled": false, "ssh_port": 2121},
   "ingress": {
     "admission_token_file": "/config/http-edge.token",
     "dedicated_caddy": true,

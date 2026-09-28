@@ -25,6 +25,9 @@ infrastructure; agents handle the application.
   HTTPS/API/WebSocket publication. Run native binaries or language runtimes.
 - **Optional Docker/Compose** — deploy and manage containers inside the same
   microVM when your application needs them.
+- **Free MicroVM pilot (node 2)** — one-hour anonymous SSH access to a 1-vCPU,
+  1-GiB Debian VM with Docker and common runtimes, followed by a 24-hour
+  verified-email claim window. Start at [the Free VM page](https://gap-node-02-u3.vm.elestio.app/free-vm).
 
 ## Quick start
 
@@ -38,6 +41,8 @@ curl -sX POST "$NODE/v1/cloud/projects" -H "Authorization: Bearer $TOKEN"
 
 Read [AGENTS.md](./AGENTS.md) for every Cloud endpoint, request examples,
 resource limits, security constraints, custom-domain DNS/TLS and realtime credits.
+The free-VM deployment and security boundaries are described in
+[docs/free-microvm-implementation.md](./docs/free-microvm-implementation.md).
 
 Browser clients use scoped tokens. Owner credentials and operator credentials
 must never be included in a frontend.

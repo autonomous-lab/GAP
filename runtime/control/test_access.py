@@ -23,6 +23,108 @@ class AccessTests(unittest.TestCase):
     def connect(self, node='node-one', agent=OWNER, project=PROJECT, request='connect', email='owner@example.com',trial_ip='203.0.113.10'):
         return self.access.connect(node, request, email, agent, project,trial_ip=trial_ip)
 
+    def test_free_vm_admission_is_fleet_global_atomic_and_gateway_only(self):
+        key = 'a' * 64
+        first = dict(action='reserve-free-vm', project_id=PROJECT, agent_did=OWNER,
+                     ssh_key_hash=key, source_ip='8.8.8.10')
+        for unauthorized in ('worker1', 'admin'):
+            with self.assertRaisesRegex(Failure, 'identity_gateway_credentials_required'):
+                self.app.handle('POST', '/identity', unauthorized, first)
+        with self.assertRaisesRegex(Failure, 'invalid_control_credentials'):
+            self.app.handle('POST', '/identity', 'garbage', first)
+        for ip in ('127.0.0.1', '10.0.0.1', '169.254.1.1', '::1', 'not-an-ip'):
+            with self.assertRaisesRegex(Failure, 'invalid_source_ip'):
+                self.app.handle('POST', '/identity', 'identity1', dict(first, source_ip=ip))
+        result = self.app.handle('POST', '/identity', 'identity1', first)
+        self.assertFalse(result['reused'])
+        self.assertEqual(result['active_until'], 3700)
+        self.assertEqual(result['claim_until'], 90100)
+        self.assertTrue(self.app.handle('POST', '/identity', 'identity1', first)['reused'])
+        moved = dict(first, source_ip='8.8.8.11')
+        self.assertTrue(self.app.handle('POST', '/identity', 'identity1', moved)['reused'])
+        self.assertTrue(self.app.handle('POST', '/identity', 'identity1',
+                                        dict(first, source_ip='::ffff:8.8.8.10'))['reused'])
+        second = dict(first, project_id=SECOND, agent_did=AGENT, ssh_key_hash='b' * 64)
+        for ip in ('8.8.8.10', '8.8.8.11'):
+            with self.assertRaisesRegex(Failure, 'free_vm_ip_already_reserved'):
+                self.app.handle('POST', '/identity', 'identity2', dict(second, source_ip=ip))
+        with self.assertRaisesRegex(Failure, 'free_vm_key_already_reserved'):
+            self.app.handle('POST', '/identity', 'identity2', dict(second, ssh_key_hash=key, source_ip='8.8.8.12'))
+        self.assertFalse(self.app.handle('POST', '/identity', 'identity2',
+                                         dict(second, source_ip='8.8.8.12'))['reused'])
+        # The authority's durable SQLite state is shared after restart.
+        restored = Access(Authority(self.a.path, 'one', clock=lambda: 100), b'k'*32)
+        self.assertTrue(restored.reserve_free_vm('node-one', PROJECT, OWNER, key, '8.8.8.10')['reused'])
+
+    def test_free_vm_concurrent_nodes_cannot_reserve_one_ip(self):
+        bodies = [dict(action='reserve-free-vm', project_id=project, agent_did=agent,
+                       ssh_key_hash=letter*64, source_ip='8.8.8.20')
+                  for project, agent, letter in ((PROJECT, OWNER, 'a'), (SECOND, AGENT, 'b'))]
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            futures = [pool.submit(self.app.handle, 'POST', '/identity', 'identity'+str(i+1), body)
+                       for i, body in enumerate(bodies)]
+            outcomes = []
+            for future in futures:
+                try: outcomes.append(future.result())
+                except Failure as error: outcomes.append(error.code)
+        self.assertEqual(sum(isinstance(value, dict) for value in outcomes), 1)
+        self.assertIn('free_vm_ip_already_reserved', outcomes)
+
+    def test_free_vm_reservation_expires_after_claim_window(self):
+        first = dict(action='reserve-free-vm', project_id=PROJECT, agent_did=OWNER,
+                     ssh_key_hash='a'*64, source_ip='2606:4700:4700:1::10')
+        self.app.handle('POST', '/identity', 'identity1', first)
+        second = dict(first, project_id=SECOND, agent_did=AGENT,
+                      ssh_key_hash='b'*64, source_ip='2606:4700:4700:1::20')
+        with self.assertRaisesRegex(Failure, 'free_vm_ip_already_reserved'):
+            self.app.handle('POST', '/identity', 'identity2', second)
+        self.a.clock = lambda: 3700
+        with self.assertRaisesRegex(Failure, 'free_vm_no_longer_active'):
+            self.app.handle('POST', '/identity', 'identity1', first)
+        self.a.clock = lambda: 90100
+        with self.assertRaisesRegex(Failure, 'free_vm_expired_pending_cleanup'):
+            self.app.handle('POST', '/identity', 'identity1', first)
+        with self.assertRaisesRegex(Failure, 'free_vm_ip_already_reserved'):
+            self.app.handle('POST', '/identity', 'identity2', second)
+        finished = dict(action='finish-free-vm', project_id=PROJECT, agent_did=OWNER)
+        with self.assertRaisesRegex(Failure, 'free_vm_identity_conflict'):
+            self.app.handle('POST', '/identity', 'identity2', finished)
+        self.assertTrue(self.app.handle('POST', '/identity', 'identity1', finished)['released'])
+        self.assertTrue(self.app.handle('POST', '/identity', 'identity1', finished)['released'])
+        self.assertFalse(self.app.handle('POST', '/identity', 'identity2', second)['reused'])
+
+    def test_verified_claim_binds_existing_project_once_and_releases_ip(self):
+        reservation = dict(action='reserve-free-vm', project_id=PROJECT, agent_did=OWNER,
+                           ssh_key_hash='a'*64, source_ip='8.8.8.40')
+        self.app.handle('POST', '/identity', 'identity1', reservation)
+        claim = dict(action='claim-free-vm', request_id='claim-one', project_id=PROJECT,
+                     agent_did=OWNER, email='owner@example.com')
+        with self.assertRaisesRegex(Failure, 'identity_gateway_credentials_required'):
+            self.app.handle('POST', '/identity', 'worker1', claim)
+        result = self.app.handle('POST', '/identity', 'identity1', claim)
+        self.assertEqual(result['free_vm_claimed_at'],100)
+        self.assertFalse(result['trial_credit_granted'])
+        self.assertEqual(result['project_id'], PROJECT)
+        self.assertEqual(self.app.handle('POST', '/identity', 'identity1', claim)['customer_id'],result['customer_id'])
+        with self.assertRaisesRegex(Failure, 'free_vm_already_claimed'):
+            self.app.handle('POST', '/identity', 'identity1', reservation)
+        with self.a.db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM free_vm_trial_ips').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT count(*) FROM trial_grants').fetchone()[0],0)
+        other = dict(reservation, project_id=SECOND, agent_did=AGENT, ssh_key_hash='b'*64)
+        self.assertFalse(self.app.handle('POST', '/identity', 'identity2', other)['reused'])
+
+    def test_free_vm_claim_after_deadline_does_not_create_account(self):
+        reservation = dict(action='reserve-free-vm', project_id=PROJECT, agent_did=OWNER,
+                           ssh_key_hash='a'*64, source_ip='8.8.8.41')
+        self.app.handle('POST', '/identity', 'identity1', reservation)
+        self.a.clock = lambda: 90100
+        with self.assertRaisesRegex(Failure, 'free_vm_claim_expired'):
+            self.app.handle('POST', '/identity', 'identity1', dict(action='claim-free-vm',
+                request_id='late',project_id=PROJECT,agent_did=OWNER,email='owner@example.com'))
+        with self.a.db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM customers').fetchone()[0],0)
+
     def test_same_verified_email_shares_customer_but_not_agent_grants(self):
         first=self.connect()
         second=self.connect('node-two',AGENT,SECOND,email='Owner@example.com')

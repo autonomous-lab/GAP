@@ -180,6 +180,9 @@ class Runner:
             self.hypervisor = MicroVMs(config['hypervisor'], execute)
             self.hypervisor.quota_provider = lambda project, owner: self.authorize(project, owner)['quota']
             self.hypervisor.approval_provider = self.authorize
+            if config.get('free_vm',{}).get('enabled') is True:
+                from free_vm_proxy_manager import ProxyManager
+                self.hypervisor.free_vm_proxy=ProxyManager()
         self.runtime = None
         self.operator_token = None
         if config.get('serverless'):
@@ -222,6 +225,9 @@ class Runner:
             if config.get('fleet_billing') is not None:
                 threading.Thread(target=self.runtime.fleet_meter_loop,daemon=True).start()
                 threading.Thread(target=self.runtime.fleet_lease_watchdog,daemon=True).start()
+        if config.get('free_vm',{}).get('enabled') is True:
+            from free_vm_gateway import start
+            self.free_vm_ssh_thread=start(self,config)
 
     @contextmanager
     def db(self):
@@ -273,6 +279,20 @@ class Runner:
             return {'allowed':False,'unavailable':True,'generation':0}
         return policy
 
+    def finish_free_vm(self,project,owner,vm_id):
+        config=load_config(self.path)
+        request=urllib.request.Request(config['node_url'].rstrip('/')+'/internal/free-vm/finish',
+            data=json.dumps({'project_id':project,'owner_did':owner,'vm_id':vm_id}).encode(),
+            headers={'Authorization':'Bearer '+self.token,'Content-Type':'application/json'})
+        try:
+            with urllib.request.build_opener(NoRedirect).open(request,timeout=5) as response:
+                result=json.loads(response.read(4096))
+                if response.status!=200 or result.get('released') is not True:
+                    raise ValueError()
+        except Exception:
+            from microvm import VMError
+            raise VMError('free_vm_cleanup_ack_pending') from None
+
     def authorize(self, project, owner, placement_id=None):
         origin=self.migration_origin(project)
         ledger=self.runtime.ledger if self.runtime else None
@@ -322,11 +342,22 @@ class Runner:
             quota = approval.get("quota")
             if not valid_quota(quota):
                 raise Failure(403, "microvm_quota_unavailable")
-            if (approval.get('tier') not in ('trial','approved')
-                    or approval.get('network_restricted') is not (approval['tier']=='trial')):
+            if (approval.get('tier') not in ('trial','approved','anonymous')
+                    or approval.get('network_restricted') is not (approval['tier'] in ('trial','anonymous'))):
                 raise Failure(403,"microvm_network_policy_unavailable")
+            if approval['tier']=='anonymous':
+                now=int(time.time())
+                if (type(approval.get('anonymous_until')) is not int or not now < approval['anonymous_until'] <= now+3600
+                        or type(approval.get('claim_until')) is not int
+                        or approval['claim_until']!=approval['anonymous_until']+86400):
+                    raise Failure(403,'anonymous_deadline_unavailable')
             guest["quota"] = quota
             guest["always_on_allowed"] = approval.get("always_on_allowed") is True
+            guest['network_restricted']=approval['network_restricted']
+            guest['tier']=approval['tier']
+            if approval['tier']=='anonymous':
+                guest['anonymous_until']=approval['anonymous_until']
+                guest['claim_until']=approval['claim_until']
         return guest
 
     @staticmethod
@@ -517,7 +548,7 @@ class Runner:
                 return 200, self.public_job(old)
             if db.execute("SELECT 1 FROM jobs WHERE project=? AND status IN ('queued','running')", (project,)).fetchone():
                 raise Failure(409, "stack_operation_in_progress")
-            if action=='vm/create' and self.runtime:
+            if action=='vm/create' and self.runtime and self.authorize(project,owner,placement_id).get('tier')!='anonymous':
                 from admission import check
                 readiness=check(self.runtime.ledger)
                 if not readiness['ready']:raise Failure(503,readiness['errors'][0])
@@ -541,7 +572,7 @@ class Runner:
                     current=self.hypervisor.read(row['project'],row['owner'],payload['body'].get('vm_id'))
                     if current: self.runtime.sample(current)
                     if payload['action'] in ('vm/create','vm/start','vm/resume'):
-                        self.runtime.check_credit({'project_id':row['project'],'owner_did':row['owner']})
+                        self.runtime.check_credit(dict(guest,project_id=row['project'],owner_did=row['owner']))
                     if current and current['state']=='hibernated' and payload['action'] not in ('vm/create','vm/start','vm/resume','vm/stop','vm/hibernate','vm/destroy','vm/update','runtime','readiness'):
                         self.runtime.ensure_awake(row['project'],current['vm_id'])
                 admission=nullcontext()

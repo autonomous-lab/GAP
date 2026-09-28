@@ -12,6 +12,7 @@ services:
       - "172.17.0.1:8092:8092"
       - "0.0.0.0:24000-24099:24000-24099/tcp"
       - "0.0.0.0:24000-24099:24000-24099/udp"
+      - "${GAP_FREE_VM_BIND_ADDRESS:-127.0.0.1}:2121:2121/tcp"
     volumes:
       - ./runtime/compose/caddy-bootstrap.json:/etc/caddy/bootstrap.json:ro
       - ./data/gap-compose/caddy-data:/data
@@ -31,6 +32,8 @@ services:
     build:
       context: .
       dockerfile: runtime/compose/Dockerfile
+    init: true
+    pids_limit: 1024
     network_mode: service:compose-edge
     devices: [/dev/kvm:/dev/kvm]
     group_add: ["${GAP_COMPOSE_KVM_GID:?Set the numeric group owning /dev/kvm}"]
@@ -41,6 +44,8 @@ services:
       - ./data/gap-compose/worker:/data
       - ./data/gap-compose/admin:/run/caddy-admin
       - ./data/gap-compose/guest-image:/images:ro
+      - ./data/gap-compose/free-guest-image:/free-images:ro
+      - ./data/gap-compose/free-guest-image-v2:/free-images-v2:ro
       - /run/gap-cpu:/run/gap-cpu:ro
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

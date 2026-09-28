@@ -36,6 +36,34 @@ fn save_record(g:&mut NodeState,r:&Record)->Result<()> {
     g.storage.upsert_state(&crate::storage::StateRecord{scope:"cloud_vm_http".into(),key:r.vm_id.clone(),value:serde_json::to_string(r).map_err(|e|Error::Other(e.to_string()))?,updated_at:now_unix()})?;
     g.vm_http.insert(r.vm_id.clone(),r.clone());Ok(())
 }
+pub(super) fn trial_access(g:&mut NodeState,project:&str,owner:&str,vm:&str)->Result<Value> {
+    if !valid_vm(vm) {return Err(denied("invalid trial VM identity"))}
+    let trial=g.free_vm_trials.get(project).ok_or_else(||denied("unknown trial"))?;
+    if trial.owner_did!=owner || trial.phase(now_unix())!=super::free_vm::Phase::Active {
+        return Err(denied("trial not active"));
+    }
+    if let Some(old)=g.vm_http.get(vm) {
+        if old.project_id!=project || old.owner_did!=owner {return Err(denied("VM access conflict"))}
+        if let Some(sealed)=&old.password_sealed {
+            let vault=g.vault.as_ref().ok_or_else(||denied("credential vault unavailable"))?;
+            let stored:Value=serde_json::from_str(&vault.open(sealed)?)?;
+            return Ok(json!({"vm_id":vm,"username":old.username,"password":stored["password"],
+                "preview_url":format!("{}/apps/{project}/",std::env::var("GAP_PUBLIC_URL").unwrap_or_default().trim_end_matches('/'))}));
+        }
+    }
+    use rand::RngCore;
+    let mut random=[0u8;24];rand::rngs::OsRng.fill_bytes(&mut random);
+    let password=hex::encode(random);
+    let username="free";
+    let hash=crate::cloud::hash_site_password(&password)?;
+    let vault=g.vault.as_ref().ok_or_else(||denied("credential vault unavailable"))?;
+    let sealed=vault.seal(&json!({"purpose":"vm-http-password-v1","vm_id":vm,
+        "project_id":project,"username":username,"password":password}).to_string());
+    save_record(g,&Record{vm_id:vm.into(),project_id:project.into(),owner_did:owner.into(),
+        route_key:project.into(),username:Some(username.into()),password_hash:Some(hash),password_sealed:Some(sealed)})?;
+    Ok(json!({"vm_id":vm,"username":username,"password":password,
+        "preview_url":format!("{}/apps/{project}/",std::env::var("GAP_PUBLIC_URL").unwrap_or_default().trim_end_matches('/'))}))
+}
 fn denied(message:&str)->Error {Error::Other(message.into())}
 
 pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Value,auth:Option<&str>)->Option<(u16,Value)> {
@@ -152,6 +180,12 @@ pub fn admit_vm_http(state:&Arc<Mutex<NodeState>>,secret:&str,host:&str,path:&st
     if !g.microvm_project_allowed(&record.project_id,&record.owner_did){return answer(403)}
     if g.private_node.as_ref().is_none_or(|p|p.runner.is_none()){return answer(503)}
     if g.check_rate_limit(None,ip).is_err(){return answer(403)}
+    if let Some(trial)=g.free_vm_trials.get(&record.project_id).filter(|trial|trial.claimed_at.is_none()) {
+        if trial.phase(now_unix())!=super::free_vm::Phase::Active || domain.is_some() {return answer(403)}
+        let secret=std::env::var("GAP_FREE_VM_ABUSE_KEY").unwrap_or_default();
+        if secret.len()<32 || !ip.and_then(|ip|super::free_vm::source_fingerprint(ip,secret.as_bytes()).ok())
+            .is_some_and(|source|trial.occupies_ip(&source)) {return answer(403)}
+    }
     drop(g);
     if domain.is_none() {
         let credentials=authorization.and_then(parse_basic_credentials);
