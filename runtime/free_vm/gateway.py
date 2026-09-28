@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import threading
 import time
 import urllib.request
@@ -58,6 +59,16 @@ def rpc_wait(runner,project,owner,action,method,body,timeout=120):
 
 def stable_id(project,operation):
     return hashlib.sha256((project+'\0'+operation).encode()).hexdigest()[:32]
+
+
+def interactive_shell_command(active_until):
+    """Show the server-issued deadline again at every Bash prompt."""
+    deadline=int(active_until)
+    prompt=(f'gap_left=$(({deadline} - $(date +%s))); '
+            'if (( gap_left < 0 )); then gap_left=0; fi; '
+            'printf "GAP · %d min %02d s restantes\\n" '
+            '"$((gap_left / 60))" "$((gap_left % 60))"')
+    return 'env PROMPT_COMMAND=' + shlex.quote(prompt) + ' bash --login -i'
 
 
 def retry_mutation(runner,project,owner,action,method,body,timeout=90):
@@ -164,20 +175,20 @@ async def shell(runner,process):
         process.exit(1);return
     if time.time()>=details['active_until']:
         process.stderr.write(b'La p\xc3\xa9riode active est termin\xc3\xa9e.\r\n');process.exit(1);return
-    remaining=max(0,int(details['active_until']-time.time()))
-    banner=(f"\r\nGAP MicroVM · 1 vCPU / 1 Gio · {remaining//60} min restantes\r\n"
-            f"Preview : {details['preview']['preview_url']}\r\n"
-            f"Basic Auth : {details['preview']['username']} / {details['preview']['password']}\r\n"
-            f"Réclamer : {details['claim_url']}\r\n\r\n")
-    process.stdout.write(banner.encode());await process.stdout.drain()
     known=asyncssh.import_known_hosts(f"[127.0.0.1]:{details['ssh_port']} {details['guest_host_key']}\n")
     try:
         async with asyncssh.connect('127.0.0.1',port=details['ssh_port'],username='root',
                 client_keys=[details['guest_key']],known_hosts=known,encoding=None,
                 agent_path=None,connect_timeout=10) as guest:
-            command=process.command
+            command=process.command if process.command is not None else interactive_shell_command(details['active_until'])
             remote=await guest.create_process(command,term_type=process.term_type,
                 term_size=process.term_size,encoding=None)
+            remaining=max(0,int(details['active_until']-time.time()))
+            banner=(f"\r\nGAP MicroVM · 1 vCPU / 1 Gio · {remaining//60} min {remaining%60:02d} s restantes\r\n"
+                    f"Preview : {details['preview']['preview_url']}\r\n"
+                    f"Basic Auth : {details['preview']['username']} / {details['preview']['password']}\r\n"
+                    f"Réclamer : {details['claim_url']}\r\n\r\n")
+            process.stdout.write(banner.encode());await process.stdout.drain()
             input_task=asyncio.create_task(bridge(process.stdin,remote.stdin))
             output_tasks=[asyncio.create_task(bridge(remote.stdout,process.stdout)),
                           asyncio.create_task(bridge(remote.stderr,process.stderr))]

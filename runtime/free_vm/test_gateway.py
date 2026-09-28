@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import asyncssh
 
-from gateway import FreeServer, GatewayError, retry_mutation, shell, stable_id
+from gateway import FreeServer, GatewayError, interactive_shell_command, retry_mutation, shell, stable_id
 
 
 class GatewayTests(unittest.TestCase):
@@ -33,6 +33,13 @@ class GatewayTests(unittest.TestCase):
         project='prj_'+'a'*24
         self.assertEqual(stable_id(project,'create'),stable_id(project,'create'))
         self.assertNotEqual(stable_id(project,'create'),stable_id(project,'terminal'))
+
+    def test_interactive_shell_displays_the_live_deadline_at_each_prompt(self):
+        command=interactive_shell_command(1234567890)
+        self.assertIn('PROMPT_COMMAND=',command)
+        self.assertIn('1234567890 - $(date +%s)',command)
+        self.assertIn('bash --login -i',command)
+        self.assertIn('min %02d s restantes',command)
 
     def test_ssh_requires_a_valid_ed25519_signature_before_session(self):
         async def run():
@@ -80,7 +87,9 @@ class GatewayTests(unittest.TestCase):
             guest_host=asyncssh.generate_private_key('ssh-ed25519')
             user_key=asyncssh.generate_private_key('ssh-ed25519')
             terminal_key=asyncssh.generate_private_key('ssh-ed25519')
+            guest_commands=[]
             async def guest_handler(process):
+                guest_commands.append(process.command)
                 process.stdout.write(b'from-guest\n')
                 await process.stdout.drain()
                 process.exit(0)
@@ -106,7 +115,17 @@ class GatewayTests(unittest.TestCase):
                                 client_keys=[user_key],known_hosts=None,encoding=None) as connection:
                             result=await connection.run('true')
                             self.assertEqual(result.exit_status,0,repr((result.stdout,result.stderr)))
+                            self.assertIn(b'GAP MicroVM',result.stdout)
+                            self.assertIn(b'Preview : https://test.invalid',result.stdout)
+                            self.assertIn(b'Basic Auth : u / p',result.stdout)
+                            self.assertIn(b'R\xc3\xa9clamer : https://test.invalid/claim#token',result.stdout)
                             self.assertIn(b'from-guest\n',result.stdout)
+                            interactive=await connection.create_process(term_type='xterm',encoding=None)
+                            welcome=await interactive.wait()
+                            self.assertIn(b'GAP MicroVM',welcome.stdout)
+                            self.assertIn(b'from-guest\n',welcome.stdout)
+                            self.assertEqual(guest_commands[0],'true')
+                            self.assertIn('PROMPT_COMMAND=',guest_commands[-1])
                     finally:
                         gateway.close();await gateway.wait_closed()
             guest.close();await guest.wait_closed()

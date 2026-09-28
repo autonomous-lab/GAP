@@ -16,6 +16,10 @@ preview URL, Basic Auth username/password, and claim URL. Show the same
 information in a small machine-readable JSON document inside the guest for
 agents. The claim page must explain that the VM remains the same VM after
 claiming; it must not silently copy data into a different project.
+The SSH gateway prints the private welcome panel only after the guest shell is
+ready. An interactive Bash prompt then recomputes the remaining minutes and
+seconds from the server-issued deadline after each command; SSH exec commands
+retain their normal behavior.
 
 ## Authority and lifecycle
 
