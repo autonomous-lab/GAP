@@ -3,7 +3,7 @@
 This is the implementation and rollout record. Nodes 1, 2 and 3 each serve
 the public SSH pilot on TCP 2121; node 1 is the central admission authority.
 Each node has its own dedicated free guest image and a configured active cap
-of 2, a pilot value rather than a fleet-wide hard limit. The public entry page
+of 16, a pilot value rather than a fleet-wide hard limit. The public entry page
 is `/free-vm` on each node and displays that node's direct SSH hostname.
 
 ## User journey
@@ -97,7 +97,9 @@ stopped that VM and rejected its old anonymous SSH key. The Debian v2 guest
 includes `php-curl` for Composer. Unit tests cover deadline stop/deletion and
 central reservation races. These tests do **not** constitute a 25-hour live
 expiry observation or a load test of the pilot capacity. Keep the active cap
-small and monitor it before raising capacity.
+under observation before raising capacity further. The active cap is an upper
+bound, not a guaranteed number of runnable VMs: host CPU, RAM, swap and VM
+admission checks still apply.
 
 Remaining observations before increasing the cap: a live one-hour stop and
 25-hour unclaimed deletion, sustained concurrent VM/package-proxy load,
