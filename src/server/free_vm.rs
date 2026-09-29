@@ -38,6 +38,12 @@ pub(super) enum Phase {
     Expired,
 }
 
+impl Phase {
+    fn holds_ip_reservation(self) -> bool {
+        matches!(self, Self::Active | Self::Claimable)
+    }
+}
+
 impl Trial {
     pub fn active_until(&self) -> u64 {
         self.created_at.saturating_add(ACTIVE_SECONDS)
@@ -173,7 +179,7 @@ pub(super) fn reserve(g: &mut NodeState, ssh_key: &str, source_ip: &str,
     if let Some(previous) = g.free_vm_trials.values().find(|trial|
         trial.ssh_key_hash == key_hash && trial.phase(now) == Phase::Active).cloned() {
         if g.free_vm_trials.values().any(|other|other.project_id != previous.project_id
-            && other.phase(now) != Phase::Expired && other.occupies_ip(&source_hash)) {
+            && other.phase(now).holds_ip_reservation() && other.occupies_ip(&source_hash)) {
             return Err(Error::Other("one anonymous VM per IP".into()));
         }
         if !previous.occupies_ip(&source_hash) {
@@ -217,7 +223,7 @@ pub(super) fn reserve(g: &mut NodeState, ssh_key: &str, source_ip: &str,
         return Ok(json!({"status":"claimed","project_id":previous.project_id,
             "owner_did":previous.owner_did}));
     }
-    if g.free_vm_trials.values().any(|trial| trial.phase(now) != Phase::Expired
+    if g.free_vm_trials.values().any(|trial| trial.phase(now).holds_ip_reservation()
         && (trial.ssh_key_hash == key_hash || trial.occupies_ip(&source_hash))) {
         return Err(Error::Other("anonymous trial limit reached".into()));
     }
@@ -462,6 +468,14 @@ mod tests {
         assert_eq!(claimed["owner_did"],did);
         assert!(claimed["claim_token"].is_null());
         assert_eq!(state.free_vm_trials.len(),2,"claimed reconnect must not create another trial");
+        let mut next_wire=Vec::from(&b"\0\0\0\x0bssh-ed25519\0\0\0\x20"[..]);
+        next_wire.extend([10u8;32]);
+        let next_key=format!("ssh-ed25519 {}",base64::engine::general_purpose::STANDARD.encode(next_wire));
+        let next=reserve(&mut state,&next_key,"203.0.113.8",true,secret,16).unwrap();
+        assert_ne!(next["project_id"],first["project_id"],
+            "claiming a VM releases its source IP for a new anonymous trial");
+        assert!(reserve(&mut state,&key,"203.0.113.8",true,secret,16).is_ok(),
+            "the claimed key must still reconnect even when another trial uses its old IP");
         std::fs::remove_dir_all(root).unwrap();
     }
 

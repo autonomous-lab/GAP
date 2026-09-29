@@ -108,6 +108,12 @@ Joseph's existing claimed v2 VM was switched to the same direct-network path
 without rebasing its encrypted disk; `apt update`, Docker Hub and a keyless
 OpenCode `big-pickle` prompt succeeded. The other free OpenCode model tested
 returned an upstream error, so it is not a guaranteed GAP allowance.
+The first public SSH trial of the v3 image on node 2 also passed: the guest had
+DNS, HTTPS, `apt update`, Docker Hub execution and a keyless OpenCode response;
+its port-8080 preview returned 401 without Basic Auth and 200 with it. A second
+key from the same IP was denied. This test revealed and fixed a stale local
+IP reservation after an older VM was claimed; only active or claimable
+unclaimed trials now hold an IP, matching the fleet authority.
 
 The older pilot passed real Ed25519 SSH sessions on nodes 1 and 3, a 3072-bit
 RSA SSH session on node 2, and a cross-node same-IP denial. It also passed
