@@ -203,6 +203,19 @@ pub(super) fn reserve(g: &mut NodeState, ssh_key: &str, source_ip: &str,
         return Ok(json!({"project_id":previous.project_id,"owner_did":previous.owner_did,
             "claim_token":claim_token,"claim_url":claim_url(&claim_token),"active_until":previous.active_until(),"claim_until":previous.claim_until(),"reused":true}));
     }
+    // A stopped trial cannot be restarted, but proof of the original SSH key
+    // may recover its one-use claim link until the claim deadline. This does
+    // not reserve another IP or grant access to the stopped guest.
+    if let Some(previous) = g.free_vm_trials.values().find(|trial|
+        trial.ssh_key_hash == key_hash && trial.phase(now) == Phase::Claimable) {
+        let claim_token = vault.open(&previous.claim_sealed)?;
+        return Ok(json!({"status":"claimable","claim_url":claim_url(&claim_token),
+            "claim_until":previous.claim_until()}));
+    }
+    if g.free_vm_trials.values().any(|trial|
+        trial.ssh_key_hash == key_hash && trial.phase(now) == Phase::Claimed) {
+        return Err(Error::Other("anonymous trial already claimed".into()));
+    }
     if g.free_vm_trials.values().any(|trial| trial.phase(now) != Phase::Expired
         && (trial.ssh_key_hash == key_hash || trial.occupies_ip(&source_hash))) {
         return Err(Error::Other("anonymous trial limit reached".into()));
@@ -434,6 +447,13 @@ mod tests {
         let project=first["project_id"].as_str().unwrap();
         state.free_vm_trials.get_mut(project).unwrap().created_at=now_unix().saturating_sub(ACTIVE_SECONDS);
         assert!(state.microvm_approval(did).is_none(),"the runner must lose execution approval at one hour");
+        let claimable=reserve(&mut state,&key,"203.0.113.200",true,secret,16).unwrap();
+        assert_eq!(claimable["status"],"claimable");
+        assert!(claimable["claim_url"].as_str().unwrap().ends_with(first["claim_token"].as_str().unwrap()));
+        assert!(claimable["project_id"].is_null(),"claim recovery must not provision a new VM");
+        assert_eq!(state.free_vm_trials.len(),2,"claim recovery must not reserve the new IP");
+        assert!(reserve(&mut state,&other_key,"203.0.113.8",true,secret,16).is_err(),
+            "another key on the original IP must not recover the claim link");
         std::fs::remove_dir_all(root).unwrap();
     }
 

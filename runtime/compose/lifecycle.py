@@ -408,6 +408,8 @@ class Runtime:
         baseline=json.dumps(meta,sort_keys=True)
         if meta['state']=='migrated':return
         if meta.get('tier')=='anonymous':
+            if meta.get('free_vm_cleanup_complete'):
+                return
             now=time.time()
             # A verified claim is reflected by node approval. Do not turn a
             # missing authority response into a paid ownership assertion.
@@ -424,7 +426,7 @@ class Runtime:
             if now>=meta.get('anonymous_until',0) or not approval:
                 self.disconnect(meta)
                 if self.manager.alive(meta):self.manager.stop(meta,True)
-                if meta['state']!='stopped':
+                if meta['state'] not in ('stopped','destroyed'):
                     meta['state']='stopped';self.manager.save(meta)
                 if self.runner.ingress:self.runner.ingress.sync()
             elif approval.get('tier')=='anonymous' and meta['state']=='stopped':
@@ -447,6 +449,8 @@ class Runtime:
                                       'network_restricted':True,'tier':'anonymous'})
                 if self.runner.ingress:self.runner.ingress.sync()
                 self.runner.finish_free_vm(meta['project_id'],meta['owner_did'],meta['vm_id'])
+                meta['free_vm_cleanup_complete']=True
+                self.manager.save(meta)
             return
         if self.manager.network and meta['state']!='destroyed':self.manager.network.expire(meta)
         project=meta['project_id']

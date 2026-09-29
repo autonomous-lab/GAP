@@ -23,6 +23,10 @@ The runner's `free_vm.enabled` must also be true. Node 1 is the central
 single-writer IP/key reservation authority; an unreachable authority denies new
 sessions. A trial offers one vCPU, 1 GiB RAM, an 8-GiB disk, one hour of SSH,
 and another 24 hours to claim its stopped VM with a verified email.
+During that claim window, reconnecting with the original SSH key displays the
+claim link and time remaining but does not restart the VM. After the window,
+the worker deletes the unclaimed VM and disk, acknowledges cleanup to node 1,
+and only then releases the IP/key so the visitor can start a new free trial.
 
 Build the dedicated free guest image from the repository root with
 `docker build -f runtime/free_vm/image/Dockerfile --output type=local,dest=free-guest-image .`.

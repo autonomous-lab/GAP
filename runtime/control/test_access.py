@@ -91,7 +91,10 @@ class AccessTests(unittest.TestCase):
             self.app.handle('POST', '/identity', 'identity2', finished)
         self.assertTrue(self.app.handle('POST', '/identity', 'identity1', finished)['released'])
         self.assertTrue(self.app.handle('POST', '/identity', 'identity1', finished)['released'])
-        self.assertFalse(self.app.handle('POST', '/identity', 'identity2', second)['reused'])
+        # The same visitor can start a fresh trial with the same IP and key
+        # after the old VM and disk have actually been destroyed.
+        again = dict(first, project_id=SECOND, agent_did=AGENT)
+        self.assertFalse(self.app.handle('POST', '/identity', 'identity1', again)['reused'])
 
     def test_verified_claim_binds_existing_project_once_and_releases_ip(self):
         reservation = dict(action='reserve-free-vm', project_id=PROJECT, agent_did=OWNER,

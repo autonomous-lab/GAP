@@ -190,8 +190,12 @@ class LifecycleEfficiencyTests(unittest.TestCase):
                 with self.assertRaisesRegex(VMError,'deletion_failed'):runtime.tick_project(path)
             runtime.runner.finish_free_vm.assert_not_called()
             runtime.manager._perform.side_effect=None
+            runtime.manager.save.side_effect=lambda value:path.write_text(json.dumps(value))
             with patch('lifecycle.time.time',return_value=90000):runtime.tick_project(path)
             runtime.runner.finish_free_vm.assert_called_once_with(meta['project_id'],meta['owner_did'],meta['vm_id'])
+            self.assertTrue(json.loads(path.read_text())['free_vm_cleanup_complete'])
+            with patch('lifecycle.time.time',return_value=90002):runtime.tick_project(path)
+            runtime.runner.finish_free_vm.assert_called_once()
 
     def test_anonymous_vm_recovers_after_transient_authority_outage(self):
         with tempfile.TemporaryDirectory() as directory:

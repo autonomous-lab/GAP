@@ -1,12 +1,18 @@
 import asyncio
+import io
 from pathlib import Path
+import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import Mock, patch
+import urllib.error
 
 import asyncssh
 
-from gateway import FreeServer, GatewayError, interactive_shell_command, retry_mutation, shell, stable_id, welcome_banner
+from gateway import (FreeServer, GatewayError, admission_error, claimable_banner,
+                     gateway_error_message, interactive_shell_command, prepare,
+                     request_node, retry_mutation, shell, stable_id, welcome_banner)
 
 
 class GatewayTests(unittest.TestCase):
@@ -53,6 +59,66 @@ class GatewayTests(unittest.TestCase):
         colored=welcome_banner(details,3542,True)
         self.assertIn('\x1b[1;36m',colored)
         self.assertIn('59m 02s left',colored)
+
+    def test_claimable_key_recovers_link_without_provisioning_a_guest(self):
+        details={'status':'claimable','claim_url':'https://example.invalid/claim#private-token',
+                 'claim_until':90100}
+        with patch('gateway.request_node',return_value=details):
+            self.assertEqual(prepare(object(),'ssh-ed25519 test','203.0.113.1'),details)
+        panel=claimable_banner(details,3700)
+        self.assertIn('TRIAL COMPLETE',panel)
+        self.assertIn('24h 00m left to claim it',panel)
+        self.assertIn('CLAIM        https://example.invalid/claim#private-token',panel)
+        self.assertNotIn('BASIC AUTH',panel)
+        self.assertNotIn('\x1b[',panel)
+        self.assertIn('\x1b[1;36m',claimable_banner(details,3700,True))
+
+    def test_admission_errors_do_not_pretend_every_failure_is_capacity(self):
+        self.assertEqual(admission_error('anonymous trial capacity reached'),'capacity_reached')
+        self.assertEqual(admission_error('anonymous trial limit reached'),'trial_already_reserved')
+        self.assertEqual(admission_error('fleet admission rejected the anonymous VM: free_vm_ip_already_reserved'),
+                         'trial_already_reserved')
+        self.assertEqual(admission_error('fleet admission rejected the anonymous VM: free_vm_expired_pending_cleanup'),
+                         'cleanup_pending')
+        self.assertIn('cleanup',gateway_error_message(GatewayError('cleanup_pending')))
+        self.assertNotIn('capacity',gateway_error_message(GatewayError('admission_or_node_unavailable')))
+
+    def test_node_http_error_is_classified_without_exposing_internal_body(self):
+        runner_module=types.ModuleType('runner')
+        runner_module.load_config=lambda path:{'node_url':'http://127.0.0.1:8080'}
+        runner_module.NoRedirect=type('NoRedirect',(),{})
+        error=urllib.error.HTTPError('http://127.0.0.1:8080',400,'Bad request',{},
+            io.BytesIO(b'{"error":{"code":"invalid_request","message":"anonymous trial limit reached"}}'))
+        opener=Mock()
+        opener.open.side_effect=error
+        with patch.dict(sys.modules,{'runner':runner_module}),patch('gateway.urllib.request.build_opener',return_value=opener):
+            with self.assertRaisesRegex(GatewayError,'trial_already_reserved'):
+                request_node(Mock(path='runner.json',token='test-token'),'/internal/free-vm/reserve',{})
+
+    def test_claimable_ssh_session_returns_link_and_no_shell(self):
+        async def run():
+            host=asyncssh.generate_private_key('ssh-ed25519')
+            client=asyncssh.generate_private_key('ssh-ed25519')
+            details={'status':'claimable','claim_url':'https://example.invalid/claim#private-token',
+                     'claim_until':int(__import__('time').time())+3600}
+            with patch('gateway.prepare',return_value=details):
+                server=await asyncssh.listen('127.0.0.1',0,server_factory=FreeServer,
+                    server_host_keys=[host],process_factory=lambda process:shell(None,process),encoding=None)
+                try:
+                    async with asyncssh.connect('127.0.0.1',port=server.get_port(),username='free',
+                            client_keys=[client],known_hosts=None,encoding=None) as connection:
+                        command=await connection.run('true',check=False)
+                        self.assertEqual(command.exit_status,1)
+                        self.assertIn(b'TRIAL COMPLETE',command.stdout)
+                        session=await connection.create_process(term_type='xterm',encoding=None)
+                        result=await session.wait()
+                        self.assertIn(result.exit_status,(None,0))
+                        self.assertIn(b'TRIAL COMPLETE',result.stdout)
+                        self.assertIn(b'CLAIM        https://example.invalid/claim#private-token',result.stdout)
+                        self.assertNotIn(b'Your workspace is ready',result.stdout)
+                finally:
+                    server.close();await server.wait_closed()
+        asyncio.run(run())
 
     def test_ssh_requires_a_valid_ed25519_signature_before_session(self):
         async def run():

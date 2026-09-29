@@ -37,7 +37,7 @@ hardcoded VM limit; it must be set from measured spare capacity.
 | State | Condition | Allowed operations |
 | --- | --- | --- |
 | Active | now < creation + 1 hour | SSH, package proxy, private preview, claim |
-| Claimable | 1 hour <= now < creation + 25 hours | claim only; VM stopped, no preview or guest egress |
+| Claimable | 1 hour <= now < creation + 25 hours | claim only; VM stopped, no preview or guest egress; the original SSH key can retrieve the claim link and remaining claim time |
 | Claimed | email verified and claim token consumed before expiry | owner-managed VM under normal billing/quota policy |
 | Expired | unclaimed after 25 hours | revoke access, securely destroy VM and project data |
 
@@ -46,6 +46,10 @@ to stop; the lease check must fail closed even if the cleanup process is down.
 At the claim deadline, destroy with an idempotent worker job and only then
 acknowledge `finish-free-vm` to node 1 so it releases the IP and SSH key.
 Expiry alone must not release them. Retry failed deletion and surface it to operators.
+After successful deletion and fleet release, the same IP and SSH key may start
+a new trial. If cleanup is pending, the SSH gateway must say so rather than
+misreporting a capacity limit. A different key on the reserved IP must never
+receive the original claim link.
 An Ed25519 or RSA (2048–8192 bit) SSH public key is the anonymous trial
 identity; RSA signatures must use SHA-2. Reconnecting with the
 same key returns to the same VM. No email or account is required to start the

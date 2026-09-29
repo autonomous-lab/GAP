@@ -13,6 +13,7 @@ import secrets
 import shlex
 import threading
 import time
+import urllib.error
 import urllib.request
 
 import asyncssh
@@ -20,6 +21,20 @@ import asyncssh
 
 class GatewayError(Exception):
     pass
+
+
+def admission_error(message):
+    if message=='anonymous trial capacity reached':
+        return 'capacity_reached'
+    if message in ('one anonymous VM per IP','anonymous trial limit reached') or 'free_vm_ip_already_reserved' in message:
+        return 'trial_already_reserved'
+    if 'free_vm_key_already_reserved' in message:
+        return 'key_reserved_on_another_node'
+    if 'free_vm_expired_pending_cleanup' in message:
+        return 'cleanup_pending'
+    if message=='anonymous trial already claimed' or 'free_vm_already_claimed' in message:
+        return 'trial_already_claimed'
+    return 'admission_or_node_unavailable'
 
 
 def request_node(runner, endpoint, body):
@@ -33,6 +48,14 @@ def request_node(runner, endpoint, body):
             result=json.loads(response.read(8192))
             if response.status!=200 or not isinstance(result,dict):raise ValueError()
             return result
+    except urllib.error.HTTPError as error:
+        try:
+            response=json.loads(error.read(8192))
+            message=response.get('error',{}).get('message','')
+            if not isinstance(message,str):raise ValueError()
+        except (AttributeError,ValueError,TypeError,UnicodeDecodeError):
+            message=''
+        raise GatewayError(admission_error(message)) from None
     except Exception:
         raise GatewayError('admission_or_node_unavailable') from None
 
@@ -88,6 +111,33 @@ def welcome_banner(details,remaining,colored=False):
             f'  After the VM stops, you have 24 hours to claim it.\r\n\r\n')
 
 
+def claimable_banner(details,now,colored=False):
+    reset='\x1b[0m' if colored else ''
+    brand='\x1b[1;36m' if colored else ''
+    accent='\x1b[1;32m' if colored else ''
+    remaining=max(0,details['claim_until']-now)
+    minutes=(remaining+59)//60
+    return (f'\r\n  {brand}GAP  /  TRIAL COMPLETE{reset}\r\n'
+            f'  Your MicroVM has stopped after its one-hour free session.\r\n'
+            f'  You have {accent}{minutes//60}h {minutes%60:02d}m left to claim it{reset} and keep its files.\r\n'
+            f'\r\n'
+            f'  CLAIM        {details["claim_url"]}\r\n'
+            f'\r\n'
+            f'  Create or sign in to your GAP account and verify your email.\r\n'
+            f'  After the claim window, unclaimed data is deleted; you can then\r\n'
+            f'  start a new free VM once cleanup is complete.\r\n\r\n')
+
+
+def gateway_error_message(error):
+    return {
+        'capacity_reached':'All free VM slots on this node are in use. Try another node or try again later.',
+        'trial_already_reserved':'This IP or SSH key already has an unclaimed free VM. Reconnect with its original key on its original node to see the claim link.',
+        'key_reserved_on_another_node':'This SSH key has a free VM on another node. Reconnect to that node to see its claim link.',
+        'cleanup_pending':'Your previous trial has ended. Secure cleanup is still in progress; try again shortly.',
+        'trial_already_claimed':'This SSH key belongs to a claimed VM. Sign in to GAP to manage it.',
+    }.get(str(error),'Unable to start a free VM right now. Please try again later.')
+
+
 def retry_mutation(runner,project,owner,action,method,body,timeout=90):
     deadline=time.monotonic()+timeout
     while True:
@@ -101,6 +151,10 @@ def retry_mutation(runner,project,owner,action,method,body,timeout=90):
 
 def prepare(runner,key,ip):
     admission=request_node(runner,'/internal/free-vm/reserve',{'ssh_key':key,'source_ip':ip})
+    if admission.get('status')=='claimable':
+        if not isinstance(admission.get('claim_url'),str) or not isinstance(admission.get('claim_until'),int):
+            raise GatewayError('invalid_admission')
+        return admission
     project,owner=admission['project_id'],admission['owner_did']
     if not re.fullmatch(r'prj_[0-9a-f]{24}',project) or not re.fullmatch(r'did:gap:[0-9a-f]{64}',owner):
         raise GatewayError('invalid_admission')
@@ -181,8 +235,13 @@ async def shell(runner,process):
         details=await asyncio.to_thread(prepare,runner,key,peer[0])
     except Exception as error:
         print('free_vm_provision_error:',type(error).__name__,str(error)[:160],flush=True)
-        process.stderr.write(b'VM unavailable or capacity reached. Please try again later.\r\n')
+        process.stderr.write((gateway_error_message(error)+'\r\n').encode())
         process.exit(1);return
+    if details.get('status')=='claimable':
+        process.stdout.write(claimable_banner(details,int(time.time()),process.term_type is not None).encode())
+        await process.stdout.drain()
+        process.exit(1 if process.command is not None else 0)
+        return
     if time.time()>=details['active_until']:
         process.stderr.write(b'The active trial has ended.\r\n');process.exit(1);return
     known=asyncssh.import_known_hosts(f"[127.0.0.1]:{details['ssh_port']} {details['guest_host_key']}\n")
