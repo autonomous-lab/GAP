@@ -29,6 +29,9 @@ infrastructure; agents handle the application.
   1-GiB Debian VM with Docker and common runtimes, followed by a 24-hour
   verified-email claim window. Start at [the Free VM page](https://gap.geta.team/free-vm)
   or select a node's own page. Ed25519 and RSA (2048-bit minimum) SSH keys are accepted.
+  Claim verification signs the visitor in and opens the same VM's management
+  workspace. After claim, metering draws from the customer's shared fleet wallet;
+  the per-node figure is only a short-lived spending reservation.
 
 ## Quick start
 

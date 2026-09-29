@@ -43,6 +43,7 @@ ENV CARGO_INCREMENTAL=1
 RUN --mount=type=cache,id=gap-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=gap-cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=gap-cargo-target,target=/build/target \
+    find src -type f -exec touch {} + && \
     cargo build --release && \
     # Fail loudly here rather than shipping an empty binary again.
     # GAP_STORAGE is an env-var name read by main.rs, so it is present

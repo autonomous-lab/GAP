@@ -76,6 +76,43 @@ class FleetTests(unittest.TestCase):
         self.assertFalse(target.lease_allowed(P))
         self.assertEqual(self.authority.wallet(self.customer)['balance_microcredits'],10000)
 
+    def test_claimed_free_vm_uses_customer_wallet_and_settles_unpaid_storage_once(self):
+        path=self.path.parent/'claimed.sqlite'
+        legacy=Ledger(path);legacy.set_pricing('enforced',PRICE)
+        with legacy.db() as db:
+            legacy._charge(db,P,O,'old-storage',dict.fromkeys(UNITS,0)|{'vcpu_ms':1},'enforced',PRICE)
+        config=dict(self.config,projects=[])
+        def transport(body):
+            if body['action']=='project':
+                with self.authority.db() as db:
+                    return dict(self.authority.node_project(db,'node',P),operator_id='operator')
+            return self.transport(body)
+        claimed=FleetLedger(path,config,lambda:self.now,lambda:self.mono,transport)
+        claimed.adopt_claimed_free_vm(P,O)
+        self.assertEqual(claimed.view(P,O)['balance_microcredits'],99)
+        self.assertFalse(claimed.dynamically_managed(P))
+        claimed.sync(P,O,True)
+        self.assertEqual(self.authority.wallet(self.customer)['spent_microcredits'],1)
+        self.assertEqual(self.authority.wallet(self.customer)['total_remaining_microcredits'],9999)
+        restored=FleetLedger(path,config,lambda:self.now,lambda:self.mono,transport)
+        self.assertIn(P,restored.projects)
+        self.assertFalse(restored.dynamically_managed(P))
+        restored.sync(P,O,True)
+        self.assertEqual(self.authority.wallet(self.customer)['spent_microcredits'],1)
+
+    def test_claimed_free_vm_cannot_merge_funded_legacy_wallet(self):
+        path=self.path.parent/'funded-claim.sqlite'
+        old=Ledger(path);old.set_pricing('enforced',PRICE);old.topup(P,O,10,'funded')
+        config=dict(self.config,projects=[])
+        def transport(body):
+            with self.authority.db() as db:
+                return dict(self.authority.node_project(db,'node',body['project_id']),operator_id='operator')
+        claimed=FleetLedger(path,config,lambda:self.now,lambda:self.mono,transport)
+        with self.assertRaisesRegex(BillingError,'legacy_wallet_migration_required'):
+            claimed.adopt_claimed_free_vm(P,O)
+        self.assertEqual(old.view(P,O)['balance_microcredits'],10)
+        self.assertEqual(self.authority.wallet(self.customer)['balance_microcredits'],10000)
+
     def test_placement_adopts_a_target_project_with_central_quota(self):
         now=self.now
         snapshot=lambda source:{'protocol':1,'node_id':source['node_id'],'checked_at':now,

@@ -27,6 +27,11 @@ During that claim window, reconnecting with the original SSH key displays the
 claim link and time remaining but does not restart the VM. After the window,
 the worker deletes the unclaimed VM and disk, acknowledges cleanup to node 1,
 and only then releases the IP/key so the visitor can start a new free trial.
+On verified claim, the existing VM and disk are retained. A previously anonymous
+project with no local prepaid funds is bound to the central customer wallet;
+unpaid storage metering accumulated during activation is settled once from its
+first node reservation. A funded or otherwise used legacy wallet is not silently
+merged. The claim page signs the visitor in and opens the VM workspace.
 
 Build the dedicated free guest image from the repository root with
 `docker build -f runtime/free_vm/image/Dockerfile --output type=local,dest=free-guest-image .`.

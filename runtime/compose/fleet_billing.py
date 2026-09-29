@@ -83,9 +83,57 @@ class FleetLedger(Ledger):
         super().__init__(path,clock)
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS migration_projects(project TEXT PRIMARY KEY,owner TEXT NOT NULL,operator TEXT NOT NULL,node TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS claimed_free_vm_projects(project TEXT PRIMARY KEY,owner TEXT NOT NULL,operator TEXT NOT NULL,node TEXT NOT NULL)')
             dynamic=db.execute('SELECT project FROM migration_projects WHERE operator=? AND node=?',(config['operator_id'],config['node_id'])).fetchall()
+            claimed=db.execute('SELECT project FROM claimed_free_vm_projects WHERE operator=? AND node=?',(config['operator_id'],config['node_id'])).fetchall()
         for row in dynamic:
             self.projects.add(row[0]);self.locks.setdefault(row[0],threading.RLock())
+        self.claimed_free_vms={row[0] for row in claimed}
+        for project in self.claimed_free_vms:
+            self.projects.add(project);self.locks.setdefault(project,threading.RLock())
+
+    def adopt_claimed_free_vm(self,project,owner):
+        """Fence a previously anonymous VM's empty local wallet after account claim.
+
+        Its unpaid storage metering predates the first fleet reservation. Keep
+        that estimate as a baseline: the first allocation pays local arrears,
+        and the next checkpoint settles exactly that debit centrally.
+        """
+        if project in self.projects:return
+        placement=self.transport(dict(action='project',project_id=project))
+        if (placement.get('operator_id'),placement.get('id'),placement.get('node'),placement.get('owner')) != (
+                self.config['operator_id'],project,self.config['node_id'],owner):
+            raise BillingError('fleet_authority_binding_mismatch')
+        with self.db() as db:
+            account=super().ensure(db,project,owner)
+            mode,_=self.tariff(db)
+            if mode!='enforced':raise BillingError('fleet_requires_enforced_billing')
+            if (account['balance'] or account['spent'] or account['retention_claim'] or account['budget'] is not None
+                    or account['budget_spent'] or account['shadow_remainder']
+                    or db.execute('SELECT 1 FROM fleet_bindings WHERE project=?',(project,)).fetchone()):
+                raise BillingError('legacy_wallet_migration_required')
+            if db.execute('SELECT 1 FROM legacy_meter_entries WHERE project=? LIMIT 1',(project,)).fetchone():
+                raise BillingError('legacy_wallet_migration_required')
+            unpaid=0
+            for row in db.execute('SELECT payload FROM entries WHERE project=?',(project,)):
+                entry=json.loads(row[0])
+                if (entry.get('kind')!='usage' or entry.get('billing_mode')!='enforced'
+                        or entry.get('debited_microcredits')!=0
+                        or type(entry.get('estimated_microcredits')) is not int
+                        or entry.get('estimated_microcredits')<0
+                        or entry.get('unpaid_microcredits')!=entry['estimated_microcredits']):
+                    raise BillingError('legacy_wallet_migration_required')
+                unpaid+=entry['estimated_microcredits']
+            if unpaid!=account['estimated']:raise BillingError('legacy_wallet_migration_required')
+            db.execute('INSERT INTO fleet_bindings(project,owner,reservation,operator,node,legacy_spent,legacy_estimated) VALUES(?,?,?,?,?,?,?)',
+                       (project,owner,'rsv_'+uuid.uuid4().hex,self.config['operator_id'],self.config['node_id'],0,account['estimated']))
+            db.execute('INSERT INTO claimed_free_vm_projects VALUES(?,?,?,?)',
+                       (project,owner,self.config['operator_id'],self.config['node_id']))
+            db.execute('UPDATE accounts SET exhausted_at=NULL WHERE project=?',(project,))
+        self.claimed_free_vms.add(project)
+        self.projects.add(project);self.locks.setdefault(project,threading.RLock())
+        self.fenced_projects.add(project)
+        self.sync(project,owner,force=True)
 
     def adopt_migrated_project(self,project,owner):
         placement=self.transport(dict(action='project',project_id=project))
@@ -126,7 +174,7 @@ class FleetLedger(Ledger):
         return approval
 
     def dynamically_managed(self,project):
-        return project in self.projects and project not in self.configured_projects
+        return project in self.projects and project not in self.configured_projects and project not in self.claimed_free_vms
 
 
     def fleet_allows(self,project):
