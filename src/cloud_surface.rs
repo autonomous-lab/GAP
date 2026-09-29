@@ -199,6 +199,13 @@ mod tests {
         }
         assert!(html.contains("aria-current=\"page\">Free VM"));
         assert!(!html.contains("fvc_"));
+        assert!(html.contains("/free-vm-motion.mp4"));
+        assert!(html.contains("/free-vm-motion.webm"));
+        assert!(html.contains("From command line"));
+        let (media, motion)=crate::server::static_asset("/free-vm-motion.mp4").unwrap();
+        assert_eq!(media,"video/mp4");
+        assert!(motion.starts_with(&[0,0,0]) && motion.len()>100_000);
+        assert_eq!(crate::server::static_asset("/free-vm-motion.webm").unwrap().0,"video/webm");
         assert!(page("/sitemap.xml").unwrap().1.contains("/free-vm</loc>"));
     }
     #[test]

@@ -28,7 +28,9 @@ infrastructure; agents handle the application.
 - **Free MicroVM pilot (three nodes)** — one-hour anonymous SSH access to a 1-vCPU,
   1-GiB Debian VM with Docker and common runtimes, followed by a 24-hour
   verified-email claim window. Start at [the Free VM page](https://gap.geta.team/free-vm)
-  or select a node's own page. Ed25519 and RSA (2048-bit minimum) SSH keys are accepted.
+  or select a node's own page. The page includes a 30-second motion-design walkthrough;
+  its reproducible source is in `marketing/free-vm-motion/`. Ed25519 and RSA
+  (2048-bit minimum) SSH keys are accepted.
   Claim verification signs the visitor in and opens the same VM's management
   workspace. The original SSH key can reconnect through port 2121 to the claimed
   VM; a stopped or hibernated VM is resumed subject to credit and policy checks.
