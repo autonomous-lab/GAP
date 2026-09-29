@@ -53,8 +53,17 @@ chmod 755 guest-image
 docker build -f runtime/compose/Dockerfile -t gap-compose-runner:local .
 ```
 
-The image contains Alpine, a virtio-compatible kernel/initramfs, Docker Engine,
-Compose/buildx, OpenSSH and the guest helper. Keep the exported image directory
+The legacy image contains Alpine, a virtio-compatible kernel/initramfs, Docker Engine,
+Compose/buildx, OpenSSH and the guest helper. Existing Alpine VM overlays continue
+to use `/images`; do not replace or remove it. New approved/trial VMs use the
+dedicated Debian image when `hypervisor.debian_image_dir` is configured. Build it
+with `docker build -f runtime/compose/debian_image/Dockerfile --output
+type=local,dest=data/gap-compose/debian-guest-image-v1 .`, then run
+`chmod 755 data/gap-compose/debian-guest-image-v1`. Mount it at
+`/debian-images` and run `python3 scripts/configure-debian-vm-node.py --root
+<checkout>` before restarting the worker. The Debian image has no free-trial package proxy; its SSH
+terminal uses interactive Bash. This is not an in-place OS migration for
+existing VMs. Keep the exported image directory
 read-only to the worker. Each VM has its own qcow2 overlay and SSH seed disk;
 checksums are verified at creation/start. Do not replace base assets used by
 existing overlays: use a separate image directory and worker for a new version.

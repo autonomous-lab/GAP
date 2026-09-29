@@ -63,11 +63,13 @@ class TerminalTests(unittest.TestCase):
             folder=Path(d);(folder/'client_key.pub').write_text('ssh-ed25519 DEPLOY')
             (folder/'terminal_key.pub').write_text('ssh-ed25519 TERMINAL')
             m=MicroVMs.__new__(MicroVMs);m.folder=lambda meta:folder
-            keys=m.authorized_keys({},['ssh-rsa USER'])
+            keys=m.authorized_keys({'guest_image':'free-vm-v2'},['ssh-rsa USER'])
             self.assertIn('restrict,command="python3 /usr/local/lib/gap-compose-guest.py" ssh-ed25519 DEPLOY',keys)
-            self.assertIn('restrict,pty,command="/bin/sh -l" ssh-ed25519 TERMINAL',keys)
+            self.assertIn('restrict,pty,command="/bin/bash --login -i" ssh-ed25519 TERMINAL',keys)
             self.assertIn('no-agent-forwarding,no-X11-forwarding ssh-rsa USER',keys)
             self.assertIn('restrict,pty ssh-rsa USER',m.authorized_keys({'network_restricted':True},['ssh-rsa USER']))
+            self.assertIn('restrict,pty,command="/bin/sh -l" ssh-ed25519 TERMINAL',m.authorized_keys({},[]))
+            self.assertIn('restrict,pty,command="/bin/bash --login -i" ssh-ed25519 TERMINAL',m.authorized_keys({'guest_image':'debian-v1'},[]))
 
     def test_polling_does_not_touch_activity_but_input_does(self):
         s=self.session()

@@ -235,6 +235,20 @@ class MicroVMTests(unittest.TestCase):
                 self.manager.perform(PROJECT,OWNER,'vm/create',{'new_vm':True,'disk_gib':1})
             execute.assert_not_called()
 
+    def test_new_classic_vm_uses_debian_without_rebasing_existing_alpine_vm(self):
+        debian=self.root/'debian-images'
+        debian.mkdir()
+        for name in ('vmlinuz','initramfs','rootfs.ext4','SHA256SUMS'):
+            (debian/name).write_bytes((self.images/name).read_bytes())
+        self.manager.debian_images=debian
+        self.assertEqual(self.manager.image_dir(self.meta),self.images)
+        self.manager.quota_provider=lambda *_:{'vcpus':2,'memory_mib':4096,'max_vms':2}
+        with patch.object(self.manager,'prepare'):
+            result=self.manager.perform(PROJECT,OWNER,'vm/create',{'new_vm':True,'start':False})
+        created=self.manager.read(PROJECT,OWNER,result['vm']['vm_id'])
+        self.assertEqual(created['guest_image'],'debian-v1')
+        self.assertEqual(self.manager.image_dir(created),debian)
+
     def test_parallel_projects_cannot_overallocate_one_owner(self):
         self.manager.quota_provider = lambda *_: {'vcpus':2,'memory_mib':4096,'max_vms':3}
         import concurrent.futures
