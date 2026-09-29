@@ -212,9 +212,10 @@ pub(super) fn reserve(g: &mut NodeState, ssh_key: &str, source_ip: &str,
         return Ok(json!({"status":"claimable","claim_url":claim_url(&claim_token),
             "claim_until":previous.claim_until()}));
     }
-    if g.free_vm_trials.values().any(|trial|
+    if let Some(previous) = g.free_vm_trials.values().find(|trial|
         trial.ssh_key_hash == key_hash && trial.phase(now) == Phase::Claimed) {
-        return Err(Error::Other("anonymous trial already claimed".into()));
+        return Ok(json!({"status":"claimed","project_id":previous.project_id,
+            "owner_did":previous.owner_did}));
     }
     if g.free_vm_trials.values().any(|trial| trial.phase(now) != Phase::Expired
         && (trial.ssh_key_hash == key_hash || trial.occupies_ip(&source_hash))) {
@@ -454,6 +455,13 @@ mod tests {
         assert_eq!(state.free_vm_trials.len(),2,"claim recovery must not reserve the new IP");
         assert!(reserve(&mut state,&other_key,"203.0.113.8",true,secret,16).is_err(),
             "another key on the original IP must not recover the claim link");
+        state.free_vm_trials.get_mut(project).unwrap().claimed_at=Some(now_unix());
+        let claimed=reserve(&mut state,&key,"203.0.113.200",true,secret,0).unwrap();
+        assert_eq!(claimed["status"],"claimed");
+        assert_eq!(claimed["project_id"],project);
+        assert_eq!(claimed["owner_did"],did);
+        assert!(claimed["claim_token"].is_null());
+        assert_eq!(state.free_vm_trials.len(),2,"claimed reconnect must not create another trial");
         std::fs::remove_dir_all(root).unwrap();
     }
 

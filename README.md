@@ -30,7 +30,9 @@ infrastructure; agents handle the application.
   verified-email claim window. Start at [the Free VM page](https://gap.geta.team/free-vm)
   or select a node's own page. Ed25519 and RSA (2048-bit minimum) SSH keys are accepted.
   Claim verification signs the visitor in and opens the same VM's management
-  workspace. After claim, metering draws from the customer's shared fleet wallet;
+  workspace. The original SSH key can reconnect through port 2121 to the claimed
+  VM; a stopped or hibernated VM is resumed subject to credit and policy checks.
+  After claim, metering draws from the customer's shared fleet wallet;
   the per-node figure is only a short-lived spending reservation.
 
 ## Quick start

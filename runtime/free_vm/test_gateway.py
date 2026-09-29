@@ -10,9 +10,9 @@ import urllib.error
 
 import asyncssh
 
-from gateway import (FreeServer, GatewayError, admission_error, claimable_banner,
+from gateway import (FreeServer, GatewayError, admission_error, claimable_banner, claimed_banner,
                      gateway_error_message, interactive_shell_command, prepare,
-                     request_node, retry_mutation, shell, stable_id, welcome_banner)
+                     request_node, retry_mutation, rpc_wait, shell, stable_id, welcome_banner)
 
 
 class GatewayTests(unittest.TestCase):
@@ -30,6 +30,19 @@ class GatewayTests(unittest.TestCase):
             result=retry_mutation(None,'prj_'+'a'*24,'did:gap:'+'b'*64,'ingress','PUT',{'vm_id':'vm_'+'c'*32})
         self.assertEqual(result,{'ok':True})
         self.assertNotEqual(rpc.call_args_list[0].args[5]['request_id'],rpc.call_args_list[1].args[5]['request_id'])
+
+    def test_claimed_vm_credit_failure_is_explained_without_retries(self):
+        runner=Mock()
+        runner.rpc.return_value=(200,{'status':'failed','result':{'error':'microvm_credits_or_budget_exhausted'}})
+        with self.assertRaisesRegex(GatewayError,'claimed_vm_no_credits'):
+            rpc_wait(runner,'prj_'+'a'*24,'did:gap:'+'b'*64,'vm/start','POST',{})
+        with (patch('gateway.rpc_wait',side_effect=GatewayError('claimed_vm_no_credits')) as rpc,
+              patch('gateway.time.sleep') as sleep):
+            with self.assertRaisesRegex(GatewayError,'claimed_vm_no_credits'):
+                retry_mutation(runner,'prj_'+'a'*24,'did:gap:'+'b'*64,'terminal/prepare','POST',{})
+        rpc.assert_called_once()
+        sleep.assert_not_called()
+        self.assertIn('credits',gateway_error_message(GatewayError('claimed_vm_no_credits')))
 
     def test_request_ids_are_stable_and_operation_scoped(self):
         project='prj_'+'a'*24
@@ -72,6 +85,33 @@ class GatewayTests(unittest.TestCase):
         self.assertNotIn('BASIC AUTH',panel)
         self.assertNotIn('\x1b[',panel)
         self.assertIn('\x1b[1;36m',claimable_banner(details,3700,True))
+
+    def test_claimed_key_prepares_existing_vm_without_new_trial(self):
+        project='prj_'+'a'*24
+        owner='did:gap:'+'b'*64
+        meta={'vm_id':'vm_'+'c'*32,'state':'stopped','tier':'trial',
+              'guest_image':'free-vm-v2','ssh_port':2200}
+        manager=Mock()
+        manager.read.side_effect=[meta,dict(meta,state='running')]
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory)
+            (folder/'seed').mkdir()
+            (folder/'terminal_key').write_text('test')
+            (folder/'seed'/'ssh_host_ed25519_key.pub').write_text('ssh-ed25519 test-key')
+            manager.folder.return_value=folder
+            runner=Mock(hypervisor=manager)
+            admission={'status':'claimed','project_id':project,'owner_did':owner}
+            with (patch('gateway.request_node',return_value=admission),
+                  patch('gateway.rpc_wait',return_value={'ok':True}) as rpc,
+                  patch('gateway.retry_mutation',return_value={'ok':True}) as terminal):
+                result=prepare(runner,'ssh-ed25519 test','203.0.113.1')
+            self.assertEqual(result['status'],'claimed')
+            self.assertEqual(result['vm_id'],meta['vm_id'])
+            self.assertNotIn('active_until',result)
+            self.assertEqual(rpc.call_args.args[3],'vm/start')
+            self.assertEqual(terminal.call_args.args[3],'terminal/prepare')
+            self.assertIn('YOUR MICROVM',claimed_banner(result))
+            self.assertNotIn('CLAIM',claimed_banner(result))
 
     def test_admission_errors_do_not_pretend_every_failure_is_capacity(self):
         self.assertEqual(admission_error('anonymous trial capacity reached'),'capacity_reached')
@@ -206,6 +246,50 @@ class GatewayTests(unittest.TestCase):
                             self.assertIn(b'from-guest\n',welcome.stdout)
                             self.assertEqual(guest_commands[0],'true')
                             self.assertIn('PROMPT_COMMAND=',guest_commands[-1])
+                        claimed=dict(details,status='claimed',manage_url='https://gap.geta.team/account#machines')
+                        claimed.pop('active_until')
+                        with patch('gateway.prepare',return_value=claimed):
+                            async with asyncssh.connect('127.0.0.1',port=gateway.get_port(),username='free',
+                                    client_keys=[user_key],known_hosts=None,encoding=None) as connection:
+                                result=await connection.run('true')
+                                self.assertEqual(result.exit_status,0)
+                                self.assertIn(b'YOUR MICROVM',result.stdout)
+                                self.assertIn(b'from-guest\n',result.stdout)
+                                self.assertNotIn(b'FREE MICROVM',result.stdout)
+                    finally:
+                        gateway.close();await gateway.wait_closed()
+            guest.close();await guest.wait_closed()
+        asyncio.run(run())
+
+    def test_claimed_command_forwards_stdin_eof_and_finishes(self):
+        async def run():
+            gateway_host=asyncssh.generate_private_key('ssh-ed25519')
+            guest_host=asyncssh.generate_private_key('ssh-ed25519')
+            user_key=asyncssh.generate_private_key('ssh-ed25519')
+            terminal_key=asyncssh.generate_private_key('ssh-ed25519')
+            async def guest_handler(process):
+                await process.stdin.read()
+                process.stdout.write(b'input-finished\n')
+                process.exit(0)
+            guest=await asyncssh.listen('127.0.0.1',0,server_host_keys=[guest_host],
+                process_factory=guest_handler,authorized_client_keys=asyncssh.import_authorized_keys(terminal_key.export_public_key().decode()),encoding=None)
+            with tempfile.TemporaryDirectory() as directory:
+                key_path=Path(directory)/'terminal_key'
+                key_path.write_bytes(terminal_key.export_private_key())
+                details={'status':'claimed','ssh_port':guest.get_port(),'guest_key':str(key_path),
+                    'guest_host_key':guest_host.export_public_key().decode().strip(),
+                    'manage_url':'https://gap.geta.team/account'}
+                with patch('gateway.prepare',return_value=details):
+                    gateway=await asyncssh.listen('127.0.0.1',0,server_factory=FreeServer,
+                        server_host_keys=[gateway_host],process_factory=lambda process:shell(None,process),encoding=None)
+                    try:
+                        async with asyncssh.connect('127.0.0.1',port=gateway.get_port(),username='free',
+                                client_keys=[user_key],known_hosts=None,encoding=None) as connection:
+                            process=await connection.create_process('true')
+                            process.stdin.write_eof()
+                            result=await asyncio.wait_for(process.wait(),5)
+                            self.assertEqual(result.exit_status,0)
+                            self.assertIn(b'input-finished',result.stdout)
                     finally:
                         gateway.close();await gateway.wait_closed()
             guest.close();await guest.wait_closed()

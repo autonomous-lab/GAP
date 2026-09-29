@@ -65,7 +65,10 @@ def rpc_wait(runner,project,owner,action,method,body,timeout=120):
                               'method':method,'body':body})
     if status not in (200,202):raise GatewayError('vm_operation_rejected')
     if result.get('status') in ('succeeded','failed'):
-        if result['status']=='failed':raise GatewayError('vm_operation_failed')
+        if result['status']=='failed':
+            if result.get('result',{}).get('error')=='microvm_credits_or_budget_exhausted':
+                raise GatewayError('claimed_vm_no_credits')
+            raise GatewayError('vm_operation_failed')
         return result.get('result',{})
     job=result.get('job_id')
     if not isinstance(job,str):raise GatewayError('vm_job_missing')
@@ -76,7 +79,10 @@ def rpc_wait(runner,project,owner,action,method,body,timeout=120):
             'action':'jobs/'+job,'method':'GET','body':{}})
         if status!=200:raise GatewayError('vm_job_unavailable')
         if value['status']=='succeeded':return value['result']
-        if value['status'] in ('failed','interrupted'):raise GatewayError('vm_operation_failed')
+        if value['status'] in ('failed','interrupted'):
+            if value.get('result',{}).get('error')=='microvm_credits_or_budget_exhausted':
+                raise GatewayError('claimed_vm_no_credits')
+            raise GatewayError('vm_operation_failed')
     raise GatewayError('vm_operation_timeout')
 
 
@@ -128,6 +134,14 @@ def claimable_banner(details,now,colored=False):
             f'  start a new free VM once cleanup is complete.\r\n\r\n')
 
 
+def claimed_banner(details,colored=False):
+    brand='\x1b[1;36m' if colored else ''
+    reset='\x1b[0m' if colored else ''
+    return (f'\r\n  {brand}GAP  /  YOUR MICROVM{reset}\r\n'
+            f'  Reconnected to your claimed VM. Your files are where you left them.\r\n'
+            f'  Manage billing and settings at {details["manage_url"]}\r\n\r\n')
+
+
 def gateway_error_message(error):
     return {
         'capacity_reached':'All free VM slots on this node are in use. Try another node or try again later.',
@@ -135,6 +149,8 @@ def gateway_error_message(error):
         'key_reserved_on_another_node':'This SSH key has a free VM on another node. Reconnect to that node to see its claim link.',
         'cleanup_pending':'Your previous trial has ended. Secure cleanup is still in progress; try again shortly.',
         'trial_already_claimed':'This SSH key belongs to a claimed VM. Sign in to GAP to manage it.',
+        'claimed_vm_unavailable':'Your claimed VM is unavailable. Sign in to GAP to check its status and billing.',
+        'claimed_vm_no_credits':'Your claimed VM cannot start because its project has no available credits. Check your GAP account billing.',
     }.get(str(error),'Unable to start a free VM right now. Please try again later.')
 
 
@@ -144,7 +160,8 @@ def retry_mutation(runner,project,owner,action,method,body,timeout=90):
         try:
             return rpc_wait(runner,project,owner,action,method,
                 dict(body,request_id=secrets.token_hex(16)),timeout=30)
-        except GatewayError:
+        except GatewayError as error:
+            if str(error)=='claimed_vm_no_credits':raise
             if time.monotonic()+2>=deadline:raise
             time.sleep(2)
 
@@ -157,6 +174,28 @@ def prepare(runner,key,ip):
         return admission
     project,owner=admission['project_id'],admission['owner_did']
     if not re.fullmatch(r'prj_[0-9a-f]{24}',project) or not re.fullmatch(r'did:gap:[0-9a-f]{64}',owner):
+        raise GatewayError('invalid_admission')
+    if admission.get('status')=='claimed':
+        manager=runner.hypervisor
+        meta=manager.read(project,owner)
+        if not meta or meta.get('guest_image')!='free-vm-v2' or meta.get('state')=='destroyed':
+            raise GatewayError('claimed_vm_unavailable')
+        if meta.get('state') in ('stopped','hibernated') or (meta.get('state')=='running' and not manager.alive(meta)):
+            rpc_wait(runner,project,owner,'vm/resume' if meta['state']=='hibernated' else 'vm/start',
+                'POST',{'request_id':secrets.token_hex(16),'vm_id':meta['vm_id']},timeout=180)
+            meta=manager.read(project,owner)
+        if not meta or meta.get('state')!='running' or meta.get('tier') not in ('trial','approved'):
+            raise GatewayError('claimed_vm_unavailable')
+        retry_mutation(runner,project,owner,'terminal/prepare','POST',{'vm_id':meta['vm_id']})
+        folder=manager.folder(meta)
+        key_file=folder/'terminal_key'
+        host_key=(folder/'seed'/'ssh_host_ed25519_key.pub').read_text().strip()
+        if not key_file.is_file() or not host_key.startswith('ssh-ed25519 '):
+            raise GatewayError('guest_ssh_identity_unavailable')
+        return dict(admission,vm_id=meta['vm_id'],ssh_port=meta['ssh_port'],
+            guest_key=str(key_file),guest_host_key=host_key,
+            manage_url='https://gap.geta.team/account')
+    if admission.get('status') not in (None,'active'):
         raise GatewayError('invalid_admission')
     if time.time()>=admission['active_until']:
         raise GatewayError('trial_hour_finished')
@@ -215,12 +254,14 @@ class FreeServer(asyncssh.SSHServer):
         return False
 
 
-async def bridge(source,destination):
+async def bridge(source,destination,close_on_eof=False):
     while True:
         chunk=await source.read(65536)
         if not chunk:break
         destination.write(chunk)
         await destination.drain()
+    if close_on_eof:
+        destination.write_eof()
 
 
 async def shell(runner,process):
@@ -242,24 +283,33 @@ async def shell(runner,process):
         await process.stdout.drain()
         process.exit(1 if process.command is not None else 0)
         return
-    if time.time()>=details['active_until']:
+    claimed=details.get('status')=='claimed'
+    if not claimed and time.time()>=details['active_until']:
         process.stderr.write(b'The active trial has ended.\r\n');process.exit(1);return
     known=asyncssh.import_known_hosts(f"[127.0.0.1]:{details['ssh_port']} {details['guest_host_key']}\n")
     try:
         async with asyncssh.connect('127.0.0.1',port=details['ssh_port'],username='root',
                 client_keys=[details['guest_key']],known_hosts=known,encoding=None,
                 agent_path=None,connect_timeout=10) as guest:
-            command=process.command if process.command is not None else interactive_shell_command(details['active_until'])
+            command=process.command if process.command is not None else (
+                'bash --login -i' if claimed else interactive_shell_command(details['active_until']))
             remote=await guest.create_process(command,term_type=process.term_type,
                 term_size=process.term_size,encoding=None)
-            remaining=max(0,int(details['active_until']-time.time()))
-            process.stdout.write(welcome_banner(details,remaining,process.term_type is not None).encode())
+            if claimed:
+                panel=claimed_banner(details,process.term_type is not None)
+            else:
+                remaining=max(0,int(details['active_until']-time.time()))
+                panel=welcome_banner(details,remaining,process.term_type is not None)
+            process.stdout.write(panel.encode())
             await process.stdout.drain()
-            input_task=asyncio.create_task(bridge(process.stdin,remote.stdin))
+            input_task=asyncio.create_task(bridge(process.stdin,remote.stdin,True))
             output_tasks=[asyncio.create_task(bridge(remote.stdout,process.stdout)),
                           asyncio.create_task(bridge(remote.stderr,process.stderr))]
             try:
-                await asyncio.wait_for(remote.wait(),timeout=max(1,details['active_until']-time.time()))
+                if claimed:
+                    await remote.wait()
+                else:
+                    await asyncio.wait_for(remote.wait(),timeout=max(1,details['active_until']-time.time()))
                 await asyncio.wait_for(asyncio.gather(*output_tasks),timeout=5)
             finally:
                 input_task.cancel()
