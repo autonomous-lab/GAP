@@ -562,6 +562,7 @@ class MicroVMs:
         if self.image_version(meta)!=meta['image_version']: raise VMError('guest_base_image_changed')
         if meta.get('snapshot_qemu_version')!=subprocess.check_output(['qemu-system-x86_64','--version'],text=True).splitlines()[0]:
             raise VMError('snapshot_requires_original_qemu_version')
+        self.ensure_free_vm_proxy(meta)
         meta['state']='resuming'; self.save(meta)
         self.capture_start(meta)
         if meta.get('disk_encryption'):
@@ -638,13 +639,16 @@ class MicroVMs:
             self.save(meta)
             raise
 
-    def start(self, meta):
-        self.disk_crypto.key(meta)
-        if not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
+    def ensure_free_vm_proxy(self, meta):
         if meta.get('guest_image') in ('free-vm-v1','free-vm-v2'):
             manager=getattr(self,'free_vm_proxy',None)
             if manager is None:raise VMError('free_vm_egress_proxy_unavailable')
             manager.ensure(meta['vm_id'],meta['proxy_port'])
+
+    def start(self, meta):
+        self.disk_crypto.key(meta)
+        if not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
+        self.ensure_free_vm_proxy(meta)
         if meta['state'] == 'creating':
             raise VMError('vm_creation_incomplete_destroy_and_retry')
         if self.public(meta)['state'] == 'running':

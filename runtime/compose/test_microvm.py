@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 from microvm import MicroVMs, VMError, validate
@@ -74,6 +74,33 @@ class MicroVMTests(unittest.TestCase):
             with self.assertRaises(VMError):validate(action,dict(base,disk_gib=101))
             # A disk-only update does not force an existing VM's RAM to change.
             validate(action,dict(base,disk_gib=8))
+
+    def test_hibernated_free_vm_restores_its_proxy_before_resume(self):
+        self.meta.update(state='hibernated',guest_image='free-vm-v2',proxy_port=57267,
+                         snapshot_tag='idle_'+'d'*32,snapshot_qemu_version='QEMU test',
+                         disk_encryption={'format':'luks'})
+        self.manager.free_vm_proxy=Mock()
+        with (patch.object(self.manager.disk_crypto,'key'),
+              patch.object(self.manager,'image_version',return_value='image-v1'),
+              patch('microvm.subprocess.check_output',return_value='QEMU test\n'),
+              patch.object(self.manager,'resume_encrypted') as restore):
+            self.meta['image_version']='image-v1'
+            self.manager.resume(self.meta)
+        self.manager.free_vm_proxy.ensure.assert_called_once_with(VM,57267)
+        restore.assert_called_once_with(self.meta)
+
+    def test_failed_proxy_restore_does_not_change_hibernated_state(self):
+        self.meta.update(state='hibernated',guest_image='free-vm-v2',proxy_port=57267,
+                         snapshot_tag='idle_'+'d'*32,snapshot_qemu_version='QEMU test',
+                         image_version='image-v1')
+        self.manager.save(self.meta)
+        self.manager.free_vm_proxy=Mock()
+        self.manager.free_vm_proxy.ensure.side_effect=RuntimeError('port unavailable')
+        with (patch.object(self.manager,'image_version',return_value='image-v1'),
+              patch('microvm.subprocess.check_output',return_value='QEMU test\n')):
+            with self.assertRaisesRegex(RuntimeError,'port unavailable'):
+                self.manager.resume(self.meta)
+        self.assertEqual(self.manager.read(PROJECT,OWNER,VM)['state'],'hibernated')
 
     def test_manifest_requires_every_asset_once_and_valid_hash(self):
         self.meta['network_restricted']=True
