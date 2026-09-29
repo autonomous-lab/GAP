@@ -33,14 +33,28 @@ unpaid storage metering accumulated during activation is settled once from its
 first node reservation. A funded or otherwise used legacy wallet is not silently
 merged. The claim page signs the visitor in and opens the VM workspace.
 
-Build the dedicated free guest image from the repository root with
-`docker build -f runtime/free_vm/image/Dockerfile --output type=local,dest=free-guest-image .`.
-Mount the immutable image directory read-only and configure
-`hypervisor.free_image_dir` to that mount. Never overwrite an image backing
-existing qcow2 overlays; use a new versioned mount and retain the old one.
-The supplied `deploy.yml` maps `/free-images` (v1 compatibility) and
-`/free-images-v2` (current image). The package proxy permits only approved
-public registries and applies connection, bandwidth and volume limits.
+Build the versioned direct-network image with
+`docker build -f runtime/free_vm/image/Dockerfile.direct --output type=local,dest=data/gap-compose/free-guest-image-v3 .`,
+then `chmod 755 data/gap-compose/free-guest-image-v3` and run
+`python3 scripts/configure-free-vm-v3-node.py --root <checkout>` before restarting
+the CPU broker and worker. The supplied `deploy.yml` mounts `/free-images-v3`
+read-only. Keep `/free-images` and `/free-images-v2` for existing qcow2 disks;
+never overwrite a backing image. The v3 guest includes OpenCode, common
+developer tools and a `tmux`-backed reconnectable terminal. OpenCode's free
+models are upstream, rate-limited services, not a GAP inference guarantee.
+
+New anonymous guests use QEMU slirp with a default route. Before the paused
+guest runs, the host CPU broker installs per-VM cgroup firewall rules in the
+shared edge network namespace. Only public DNS and TCP 80/443 are allowed;
+private/link-local/metadata destinations, SMTP, other ports and IPv6 are
+blocked. The policy also limits new web connections and total outbound bytes.
+If the broker or firewall cannot install rules, startup fails closed. The
+legacy v2 package proxy remains for old disks. A stopped encrypted v2 disk may
+be opted into the direct network path with
+`scripts/enable-free-vm-direct-egress.py`; this preserves its backing image and
+files, but its guest proxy settings must then be removed manually. Do not
+rebase an encrypted overlay onto v3 in place. Test host rules with
+`scripts/test-free-vm-egress.py` from the checkout on the target node.
 The preview requires its unique Basic Auth password from any visitor IP;
 the source-IP reservation still limits anonymous VM creation. See [the release checklist](../../docs/free-microvm-implementation.md)
 before expanding the pilot.

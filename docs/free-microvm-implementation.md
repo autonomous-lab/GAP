@@ -36,7 +36,7 @@ hardcoded VM limit; it must be set from measured spare capacity.
 
 | State | Condition | Allowed operations |
 | --- | --- | --- |
-| Active | now < creation + 1 hour | SSH, package proxy, private preview, claim |
+| Active | now < creation + 1 hour | SSH, host-filtered public web egress (legacy guests: package proxy), Basic Auth preview, claim |
 | Claimable | 1 hour <= now < creation + 25 hours | claim only; VM stopped, no preview or guest egress; the original SSH key can retrieve the claim link and remaining claim time |
 | Claimed | email verified and claim token consumed before expiry | owner-managed VM under normal billing/quota policy |
 | Expired | unclaimed after 25 hours | revoke access, securely destroy VM and project data |
@@ -75,13 +75,15 @@ may need billing activation before it can resume; explain this on the page.
 - Node 1 is the single-writer authority for IP and SSH-key reservations across
   the fleet. Its SQLite transaction must reject cross-node races; nodes fail
   closed if the authority cannot be reached. All three entry nodes use it.
-- Keep QEMU `restrict=on`. Provide outbound access only through an authenticated
-  per-VM package proxy or controlled mirrors for Debian apt, npm, PyPI, Go
-  modules, Composer, Docker Hub and GHCR. DNS and redirects must be resolved
-  against an explicit policy at every hop; deny private, link-local, metadata,
-  raw-IP, arbitrary-port and general CONNECT destinations. Apply bandwidth,
-  request, download-size and total egress limits. Public registry pulls only
-  unless private credentials get a separate security design.
+- The v3 image has a normal IPv4 default route and DNS/HTTPS egress. QEMU slirp
+  starts paused; the host CPU broker must install its per-VM cgroup firewall
+  before continuing. The firewall permits only Docker DNS, selected public
+  DNS resolvers and TCP 80/443; it rejects private/link-local/metadata
+  destinations, SMTP, arbitrary ports and IPv6, with a connection rate and
+  10-GiB outbound byte quota per VM start. An unavailable firewall fails
+  closed. The older v1/v2 images keep their `restrict=on` package proxy unless
+  a stopped v2 VM is explicitly opted into the new host-filtered path. A
+  claimed trial remains filtered; approved paid VMs use standard egress.
 - Preview must use the existing GAP Basic Auth at the edge, with unique
   generated credentials. Do not attach custom domains to unclaimed VMs;
   otherwise the custom-domain path can bypass the preview password. Expired
@@ -90,13 +92,24 @@ may need billing activation before it can resume; explain this on the page.
   including a different IP family from the SSH connection. Source IP still
   limits anonymous VM reservations, not preview access.
 - Use a dedicated Debian guest image with apt and preinstalled Docker, Python,
-  Node, common Linux tools, and the supported package clients. Never replace
+  Node, common Linux tools, OpenCode and the supported package clients. Free
+  OpenCode models are third-party services and may be rate-limited or removed.
+  Never replace
   the backing image used by existing paid VMs. Image integrity and version
   must be pinned, and the image build must be reproducible.
 
 ## Validation and remaining rollout gates
 
-The pilot has passed real Ed25519 SSH sessions on nodes 1 and 3, a 3072-bit
+The v3 network pilot passed a live host-cgroup test on all three nodes: Docker
+DNS and HTTPS succeeded while metadata, private destinations and SMTP were
+blocked. The immutable Debian v3 image is installed on all three nodes, and
+new anonymous VMs select it. The 28 worker/gateway tests pass on each node.
+Joseph's existing claimed v2 VM was switched to the same direct-network path
+without rebasing its encrypted disk; `apt update`, Docker Hub and a keyless
+OpenCode `big-pickle` prompt succeeded. The other free OpenCode model tested
+returned an upstream error, so it is not a guaranteed GAP allowance.
+
+The older pilot passed real Ed25519 SSH sessions on nodes 1 and 3, a 3072-bit
 RSA SSH session on node 2, and a cross-node same-IP denial. It also passed
 reconnection after a
 worker/image upgrade, Docker Hub and GHCR image pulls, Docker execution,

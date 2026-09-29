@@ -118,6 +118,31 @@ class MicroVMTests(unittest.TestCase):
         with self.assertRaises(VMError):
             self.manager.image_version()
 
+    def test_direct_free_image_requires_host_broker_and_allows_slirp_egress(self):
+        self.meta.update(guest_image='free-vm-v3', network_restricted=True)
+        self.manager.free_images_v3=self.images
+        with self.assertRaisesRegex(VMError, 'free_vm_host_egress_policy_unavailable'):
+            self.manager.command(self.meta)
+        self.manager.cpu_quota_socket='/run/gap-cpu/quota.sock'
+        command=self.manager.command(self.meta)
+        netdev=command[command.index('-netdev')+1]
+        self.assertIn('ipv6=off',netdev)
+        self.assertNotIn('restrict=on',netdev)
+        self.assertNotIn('guestfwd=',netdev)
+
+    def test_existing_v2_disk_can_opt_in_without_rebasing_it(self):
+        self.meta.update(guest_image='free-vm-v2', network_restricted=True,
+                         proxy_port=57267, direct_egress=True)
+        self.manager.cpu_quota_socket='/run/gap-cpu/quota.sock'
+        self.manager.free_images=self.images
+        self.assertEqual(self.manager.image_dir(self.meta),self.images)
+        self.assertTrue(self.manager.direct_free_egress(self.meta))
+        command=self.manager.command(self.meta)
+        netdev=command[command.index('-netdev')+1]
+        self.assertNotIn('restrict=on',netdev)
+        self.assertNotIn('guestfwd=',netdev)
+        self.assertIn('ipv6=off',netdev)
+
     def test_owner_and_generation_cannot_mutate_another_vm(self):
         with self.assertRaises(VMError):
             self.manager.read(PROJECT, 'did:gap:' + 'd' * 64)

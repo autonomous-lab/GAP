@@ -454,7 +454,7 @@ class Runtime:
             return
         if self.manager.network and meta['state']!='destroyed':self.manager.network.expire(meta)
         project=meta['project_id']
-        if (meta.get('guest_image')=='free-vm-v2' and meta.get('tier')=='trial'
+        if (meta.get('guest_image') in ('free-vm-v2','free-vm-v3') and meta.get('tier')=='trial'
                 and hasattr(self.ledger,'adopt_claimed_free_vm') and project not in self.ledger.projects):
             try:self.runner.authorize(project,meta['owner_did'])
             except Exception:pass  # The claim is retried; never infer it during an authority outage.

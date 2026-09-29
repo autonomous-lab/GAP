@@ -360,7 +360,7 @@ class Runner:
                 guest['claim_until']=approval['claim_until']
             elif (approval['tier']=='trial' and self.runtime and hasattr(self.runtime.ledger,'adopt_claimed_free_vm')
                     and project not in self.runtime.ledger.projects
-                    and any(m.get('guest_image')=='free-vm-v2' for m in self.hypervisor.list(project,owner))):
+                    and any(m.get('guest_image') in ('free-vm-v2','free-vm-v3') for m in self.hypervisor.list(project,owner))):
                 try:self.runtime.ledger.adopt_claimed_free_vm(project,owner)
                 except Exception:raise Failure(503,'free_vm_billing_activation_unavailable') from None
         return guest

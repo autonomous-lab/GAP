@@ -22,8 +22,12 @@ def quarters(value):
 
 
 def apply_quota(peer, request, expected_container):
-    if set(request) != {'pid', 'vm_id', 'vcpus'}: raise ValueError('invalid_request')
+    if not {'pid', 'vm_id', 'vcpus'} <= set(request) <= {'pid', 'vm_id', 'vcpus', 'egress_policy'}:
+        raise ValueError('invalid_request')
     pid = request['pid']; vm = request['vm_id']; q = quarters(request['vcpus'])
+    egress = request.get('egress_policy')
+    if egress not in (None, 'free_web_v1', 'standard'):
+        raise ValueError('invalid_egress_policy')
     if type(pid) is not int or pid <= 1 or not isinstance(vm, str) or not re.fullmatch(r'vm_[0-9a-f]{32}', vm):
         raise ValueError('invalid_request')
     # Docker's cgroup is root-owned. Pin its full container ID using the
@@ -63,6 +67,14 @@ def apply_quota(peer, request, expected_container):
     (root/'cgroup.subtree_control').write_text('+cpu')
     leaf = root/vm; leaf.mkdir(exist_ok=True)
     (leaf/'cpu.max').write_text(f'{q*25000} 100000')
+    if egress is not None:
+        from egress_policy import install, release
+        # Slirp is unrestricted for this guest image. A missing host firewall
+        # must therefore abort before QEMU leaves its paused -S state.
+        if egress == 'free_web_v1':
+            install(vm, base+'/'+vm, target)
+        else:
+            release(vm, base+'/'+vm)
     # The runner holds this child unreaped for the RPC lifetime, preventing PID
     # reuse. QEMU starts with -S and cannot run guest code before this succeeds.
     (leaf/'cgroup.procs').write_text(str(target))
@@ -74,6 +86,23 @@ def apply_quota(peer, request, expected_container):
     return {'ok': True, 'quota_us': q*25000, 'period_us': 100000}
 
 
+def release_egress(peer, request, expected_container):
+    if set(request) != {'action', 'vm_id'} or request['action'] != 'release_egress':
+        raise ValueError('invalid_request')
+    vm = request['vm_id']
+    if not isinstance(vm, str) or not re.fullmatch(r'vm_[0-9a-f]{32}', vm):
+        raise ValueError('invalid_vm_id')
+    if not re.fullmatch(r'[0-9a-f]{64}', expected_container):
+        raise ValueError('invalid_container_pin')
+    group = Path(f'/proc/{peer}/cgroup').read_text().strip().split('0::')[-1]
+    base = group.split('/controller')[0]
+    if not re.fullmatch(r'/system.slice/docker-' + expected_container + r'\.scope', base):
+        raise ValueError('unauthorized_worker')
+    from egress_policy import release
+    release(vm, base + '/' + vm)
+    return {'ok': True}
+
+
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         self.connection.settimeout(5)
@@ -83,7 +112,9 @@ class Handler(socketserver.StreamRequestHandler):
             line = self.rfile.readline(2049)
             if len(line) > 2048: raise ValueError('request_too_large')
             container = subprocess.check_output(['docker','inspect','--format','{{.Id}}',self.server.container_name],text=True,timeout=3).strip()
-            result = apply_quota(peer, json.loads(line), container)
+            request = json.loads(line)
+            result = (release_egress(peer, request, container) if request.get('action') == 'release_egress'
+                      else apply_quota(peer, request, container))
         except Exception:
             result = {'ok': False, 'error': 'cpu_quota_unavailable'}
         self.wfile.write(json.dumps(result).encode()+b'\n')

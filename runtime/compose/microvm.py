@@ -115,6 +115,7 @@ class MicroVMs:
         self.images = Path(config['image_dir']).resolve()
         self.debian_images = Path(config['debian_image_dir']).resolve() if config.get('debian_image_dir') else None
         self.free_images = Path(config['free_image_dir']).resolve() if config.get('free_image_dir') else None
+        self.free_images_v3 = Path(config['free_image_v3_dir']).resolve() if config.get('free_image_v3_dir') else None
         self.free_images_v1 = Path(config['free_image_v1_dir']).resolve() if config.get('free_image_v1_dir') else self.free_images
         from disk_crypto import DiskCrypto
         from seed_crypto import SeedCrypto
@@ -129,6 +130,8 @@ class MicroVMs:
             raise VMError('invalid_image_dir')
         if self.free_images and not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(self.free_images)):
             raise VMError('invalid_free_image_dir')
+        if self.free_images_v3 and not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(self.free_images_v3)):
+            raise VMError('invalid_free_image_v3_dir')
         if self.debian_images and not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(self.debian_images)):
             raise VMError('invalid_debian_image_dir')
         if self.free_images_v1 and not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(self.free_images_v1)):
@@ -313,7 +316,7 @@ class MicroVMs:
             return {'state': 'absent'}
         result = {key: meta[key] for key in ('vm_id', 'project_id', 'state', 'vcpus', 'memory_mib', 'disk_gib', 'ports')}
         result['tier']=meta.get('tier','approved')
-        result['network_policy']='reverse_proxy_only' if meta.get('network_restricted') else 'standard'
+        result['network_policy']=('web_egress' if self.direct_free_egress(meta) else 'reverse_proxy_only') if meta.get('network_restricted') else 'standard'
         if meta['state'] not in ('destroyed', 'creating', 'hibernated', 'hibernating', 'resuming', 'migrated'):
             try:
                 result['state'] = self.qmp(meta, 'query-status')['status']
@@ -360,7 +363,17 @@ class MicroVMs:
         if meta.get('guest_image')=='free-vm-v2':
             if not self.free_images:raise VMError('free_guest_image_unavailable')
             return self.free_images
+        if meta.get('guest_image')=='free-vm-v3':
+            if not self.free_images_v3:raise VMError('free_guest_image_unavailable')
+            return self.free_images_v3
         return self.images
+
+    @staticmethod
+    def direct_free_egress(meta):
+        # An existing encrypted v2 overlay cannot be switched to a different
+        # backing file in place. Operators may opt one stopped VM into the
+        # v3 network path while preserving its original backing image.
+        return meta.get('guest_image')=='free-vm-v3' or (meta.get('guest_image')=='free-vm-v2' and meta.get('direct_egress') is True)
 
     def image_version(self,meta=None):
         image_dir=self.image_dir(meta or {})
@@ -428,7 +441,7 @@ class MicroVMs:
         terminal_key = self.folder(meta) / 'terminal_key.pub'
         terminal_options=('restrict,pty ' if meta.get('tier')=='anonymous'
                           else ('restrict,pty,command="/bin/bash --login -i" '
-                                if meta.get('guest_image') in ('free-vm-v2','debian-v1')
+                                if meta.get('guest_image') in ('free-vm-v2','free-vm-v3','debian-v1')
                                 else 'restrict,pty,command="/bin/sh -l" '))
         terminal = (terminal_options + terminal_key.read_text().strip() + '\n') if terminal_key.exists() else ''
         owner_options = 'restrict,pty ' if meta.get('network_restricted') else 'no-agent-forwarding,no-X11-forwarding '
@@ -460,27 +473,29 @@ class MicroVMs:
         forwards += [f'hostfwd=tcp:127.0.0.1:{port["worker_port"]}-:{port["guest_port"]}' for port in meta['ports']]
         if self.network:
             forwards += ['hostfwd=' + rule for rule in self.network.rules(meta)]
-        if meta.get('guest_image') in ('free-vm-v1','free-vm-v2'):
+        if meta.get('guest_image') in ('free-vm-v1','free-vm-v2') and not self.direct_free_egress(meta):
             if not meta.get('network_restricted') or not meta.get('proxy_port'):
                 raise VMError('free_vm_egress_policy_unavailable')
             # A -tcp chardev is shared for QEMU's whole lifetime, which corrupts
             # the second HTTP request. -cmd spawns a fixed connector per guest
             # TCP connection instead.
             forwards.append(f'guestfwd=tcp:10.0.2.100:3128-cmd:/usr/bin/nc 127.0.0.1 {meta["proxy_port"]}')
+        if self.direct_free_egress(meta) and meta.get('network_restricted') and not self.cpu_quota_socket:
+            raise VMError('free_vm_host_egress_policy_unavailable')
         command = ['qemu-system-x86_64', '-machine', 'microvm,accel=kvm', '-cpu', 'host',
                 '-name', meta['vm_id'], '-m', str(meta['memory_mib']), '-smp', str(math.ceil(meta['vcpus'])),
                 '-kernel', str(image_dir / 'vmlinuz'), '-initrd', str(image_dir / 'initramfs'),
                 '-append', 'console=ttyS0 root=/dev/vda rootfstype=ext4 modules=virtio_mmio,virtio_blk,ext4 rootwait rw reboot=t net.ifnames=0',
                 '-nodefaults', '-no-user-config', '-display', 'none',
                 '-serial', f'file:{folder}/serial.log' if self.diagnostic_serial else 'null', '-no-reboot',
-                '-sandbox', ('on,obsolete=deny,spawn=allow,resourcecontrol=deny' if meta.get('guest_image') in ('free-vm-v1','free-vm-v2')
+                '-sandbox', ('on,obsolete=deny,spawn=allow,resourcecontrol=deny' if meta.get('guest_image') in ('free-vm-v1','free-vm-v2') and not self.direct_free_egress(meta)
                              else 'on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny'),
                 '-drive', f'id=root,file={folder}/disk.qcow2,format=qcow2,if=none'+(',encrypt.key-secret=gapdisk' if meta.get('disk_encryption') else ''),
                 '-device', 'virtio-blk-device,drive=root',
                 '-drive', f'id=seed,file={seed_path or folder / "seed.ext4"},format=raw,if=none,readonly=on',
                 '-device', 'virtio-blk-device,drive=seed',
                 '-device', 'virtio-rng-device',
-                '-netdev', 'user,id=net0,' + ('restrict=on,' if meta.get('network_restricted') else '') + ','.join(forwards), '-device', 'virtio-net-device,netdev=net0,mac=' + self.guest_mac(meta),
+                '-netdev', 'user,id=net0,' + ('restrict=on,' if meta.get('network_restricted') and not self.direct_free_egress(meta) else '') + ('ipv6=off,' if self.direct_free_egress(meta) else '') + ','.join(forwards), '-device', 'virtio-net-device,netdev=net0,mac=' + self.guest_mac(meta),
                 '-qmp', f'unix:{folder}/qmp.sock,server=on,wait=off',
                 '-pidfile', str(folder / 'qemu.pid')]
         if self.runtime:
@@ -490,13 +505,18 @@ class MicroVMs:
 
     def enforce_cpu(self, meta, process):
         if not self.cpu_quota_socket:
+            if self.direct_free_egress(meta) and meta.get('network_restricted'):
+                raise VMError('free_vm_host_egress_policy_unavailable')
             if meta['vcpus'] != int(meta['vcpus']):
                 raise VMError('fractional_cpu_requires_quota_broker')
             return
+        request={'pid':process.pid,'vm_id':meta['vm_id'],'vcpus':meta['vcpus']}
+        if self.direct_free_egress(meta):
+            request['egress_policy']='free_web_v1' if meta.get('network_restricted') else 'standard'
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(5)
             sock.connect(self.cpu_quota_socket)
-            sock.sendall((json.dumps({'pid':process.pid,'vm_id':meta['vm_id'],'vcpus':meta['vcpus']})+'\n').encode())
+            sock.sendall((json.dumps(request)+'\n').encode())
             response = sock.makefile('rb').readline(2049)
         expected = int(meta['vcpus']*100000)
         result = json.loads(response)
@@ -582,6 +602,7 @@ class MicroVMs:
         self.children[meta['vm_id']]=process
         deadline=time.monotonic()+90
         try:
+            self.enforce_cpu(meta,process)
             while time.monotonic()<deadline:
                 if process.poll() is not None: raise VMError('snapshot_restore_failed')
                 try:
@@ -648,10 +669,21 @@ class MicroVMs:
             raise
 
     def ensure_free_vm_proxy(self, meta):
-        if meta.get('guest_image') in ('free-vm-v1','free-vm-v2'):
+        if meta.get('guest_image') in ('free-vm-v1','free-vm-v2') and not self.direct_free_egress(meta):
             manager=getattr(self,'free_vm_proxy',None)
             if manager is None:raise VMError('free_vm_egress_proxy_unavailable')
             manager.ensure(meta['vm_id'],meta['proxy_port'])
+
+    def release_free_vm_egress(self, meta):
+        if not self.direct_free_egress(meta) or not self.cpu_quota_socket:
+            return
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect(self.cpu_quota_socket)
+            sock.sendall((json.dumps({'action':'release_egress','vm_id':meta['vm_id']})+'\n').encode())
+            response=sock.makefile('rb').readline(2049)
+        if json.loads(response)!={'ok':True}:
+            raise VMError('free_vm_egress_cleanup_unavailable')
 
     def start(self, meta):
         self.disk_crypto.key(meta)
@@ -716,6 +748,7 @@ class MicroVMs:
             self.save(meta)
             if meta.get('guest_image') in ('free-vm-v1','free-vm-v2') and getattr(self,'free_vm_proxy',None):
                 self.free_vm_proxy.release(meta['vm_id'])
+            self.release_free_vm_egress(meta)
             return
         if force:
             try: self.qmp(meta, 'quit')
@@ -741,6 +774,7 @@ class MicroVMs:
             child.wait(timeout=5)
         if meta.get('guest_image') in ('free-vm-v1','free-vm-v2') and getattr(self,'free_vm_proxy',None):
             self.free_vm_proxy.release(meta['vm_id'])
+        self.release_free_vm_egress(meta)
 
     @contextmanager
     def owner_lock(self, owner):
@@ -779,8 +813,8 @@ class MicroVMs:
             approval=self.approval_provider(project,owner);limits=approval.get('quota')
             return {'limits': limits, 'allocated': dict(self.quota_usage(owner,include_disk=True), max_vms=self.vm_count(owner)),
                     'always_on_allowed': bool(self.runtime and self.runtime.runner.authorize(project,owner).get('always_on_allowed')),
-                    'tier':approval.get('tier','approved'),'network_policy':'reverse_proxy_only' if approval.get('network_restricted') else 'standard',
-                    'minimum_disk_gib': max(1,((self.free_images if approval.get('tier')=='anonymous' and self.free_images else self.debian_images or self.images).joinpath('rootfs.ext4').stat().st_size+1024**3-1)//1024**3)}
+                    'tier':approval.get('tier','approved'),'network_policy':('web_egress' if self.free_images_v3 else 'reverse_proxy_only') if approval.get('network_restricted') else 'standard',
+                    'minimum_disk_gib': max(1,((self.free_images_v3 or self.free_images if approval.get('tier')=='anonymous' else self.debian_images or self.images).joinpath('rootfs.ext4').stat().st_size+1024**3-1)//1024**3)}
 
     def perform(self, project, owner, action, body):
         validate(action, body)
@@ -829,7 +863,7 @@ class MicroVMs:
             if action=='vm/create':
                 if body.get('execution_mode')=='always_on' and not (self.runtime and self.runtime.runner.authorize(project,owner).get('always_on_allowed')):
                     raise VMError('always_on_not_approved')
-                image_dir=self.free_images if approval.get('tier')=='anonymous' and self.free_images else self.debian_images or self.images
+                image_dir=(self.free_images_v3 or self.free_images) if approval.get('tier')=='anonymous' and (self.free_images_v3 or self.free_images) else self.debian_images or self.images
                 minimum=max(1,((image_dir/'rootfs.ext4').stat().st_size+1024**3-1)//1024**3)
                 if body.get('disk_gib',8)<minimum:raise VMError('disk_smaller_than_guest_image')
             if (action == 'vm/create' and (not meta or meta['state'] == 'destroyed')
@@ -863,7 +897,7 @@ class MicroVMs:
                             'state': 'creating', 'vcpus': body.get('vcpus', default_vcpus),
                             'execution_mode': body.get('execution_mode','serverless'),
                             'network_restricted': network_restricted, 'tier': approval.get('tier','approved'),
-                            **({'guest_image':'free-vm-v2'} if approval.get('tier')=='anonymous' else {}),
+                            **({'guest_image':'free-vm-v3' if self.free_images_v3 else 'free-vm-v2'} if approval.get('tier')=='anonymous' else {}),
                             **({'guest_image':'debian-v1'} if approval.get('tier')!='anonymous' and self.debian_images else {}),
                             **({'anonymous_until':approval['anonymous_until'],'claim_until':approval['claim_until']}
                                if approval.get('tier')=='anonymous' else {}),

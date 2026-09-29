@@ -90,31 +90,42 @@ def stable_id(project,operation):
     return hashlib.sha256((project+'\0'+operation).encode()).hexdigest()[:32]
 
 
-def interactive_shell_command(active_until):
+def interactive_shell_command(active_until,persistent=False):
     """Keep the server-issued deadline visible without adding prompt noise."""
     deadline=int(active_until)
     prompt=(f'gap_left=$(({deadline} - $(date +%s))); '
             'if (( gap_left < 0 )); then gap_left=0; fi; '
             'printf -v gap_time "%dm %02ds" "$((gap_left / 60))" "$((gap_left % 60))"; '
             'PS1="GAP · ${gap_time} left · \\w ❯ "')
-    return 'env PROMPT_COMMAND=' + shlex.quote(prompt) + ' bash --login -i'
+    shell=('tmux new-session -A -s gap -c /app ' + shlex.quote('bash --login -i')) if persistent else 'bash --login -i'
+    return 'env PROMPT_COMMAND=' + shlex.quote(prompt) + ' ' + shell
 
 
-def welcome_banner(details,remaining,colored=False):
+def welcome_banner(details,remaining,colored=False,ready_seconds=None):
     reset='\x1b[0m' if colored else ''
     brand='\x1b[1;36m' if colored else ''
     accent='\x1b[1;32m' if colored else ''
     muted='\x1b[2m' if colored else ''
     left=f'{remaining//60}m {remaining%60:02d}s'
-    return (f'\r\n  {brand}GAP  /  FREE MICROVM{reset}\r\n'
-            f'  Your workspace is ready  ·  1 vCPU  ·  1 GiB  ·  {accent}{left} left{reset}\r\n'
+    ready=(f'  {accent}✓ Ready in {ready_seconds}s{reset}\r\n\r\n' if ready_seconds is not None else '')
+    detach=('  Press Ctrl+B, then D to detach; reconnect with the same SSH key.\r\n'
+            if details.get('guest_image')=='free-vm-v3' else
+            '  Type exit to disconnect; reconnect with the same SSH key.\r\n')
+    feature=('  │  Run `opencode` to build with free AI models.         │\r\n'
+             if details.get('guest_image')=='free-vm-v3' else
+             '  │  Docker, Python, Node, Go and PHP are ready to use.  │\r\n')
+    return (f'\r\n{ready}  {brand}Welcome to your GAP MicroVM.{reset} You have {accent}{left} left{reset} to build.\r\n'
+            f'  1 vCPU · 1 GiB RAM · 8 GiB disk. Run your app on $PORT (8080).\r\n'
             f'\r\n'
-            f'  {muted}PREVIEW{reset}      {details["preview"]["preview_url"]}\r\n'
-            f'  {muted}BASIC AUTH{reset}   {details["preview"]["username"]} / {details["preview"]["password"]}\r\n'
-            f'  {muted}CLAIM{reset}        {details["claim_url"]}\r\n'
+            f'  {muted}• Claim:{reset}       {details["claim_url"]}\r\n'
+            f'  {muted}• Preview:{reset}     {details["preview"]["preview_url"]}\r\n'
+            f'  {muted}• Basic Auth:{reset}  {details["preview"]["username"]} / {details["preview"]["password"]}\r\n'
             f'\r\n'
-            f'  Serve your app on port 8080 to use the preview.\r\n'
-            f'  After the VM stops, you have 24 hours to claim it.\r\n\r\n')
+            f'  ┌────────────────────────────────────────────────────────┐\r\n'
+            f'{feature}'
+            f'  └────────────────────────────────────────────────────────┘\r\n'
+            f'\r\n{detach}'
+            f'  After the hour, you have 24 hours to claim your files.\r\n\r\n')
 
 
 def claimable_banner(details,now,colored=False):
@@ -185,7 +196,7 @@ def prepare(runner,key,ip):
     if admission.get('status')=='claimed':
         manager=runner.hypervisor
         meta=manager.read(project,owner)
-        if not meta or meta.get('guest_image')!='free-vm-v2' or meta.get('state')=='destroyed':
+        if not meta or meta.get('guest_image') not in ('free-vm-v2','free-vm-v3') or meta.get('state')=='destroyed':
             raise GatewayError('claimed_vm_unavailable')
         if meta.get('state') in ('stopped','hibernated') or (meta.get('state')=='running' and not manager.alive(meta)):
             rpc_wait(runner,project,owner,'vm/resume' if meta['state']=='hibernated' else 'vm/start',
@@ -199,7 +210,7 @@ def prepare(runner,key,ip):
         host_key=(folder/'seed'/'ssh_host_ed25519_key.pub').read_text().strip()
         if not key_file.is_file() or not host_key.startswith('ssh-ed25519 '):
             raise GatewayError('guest_ssh_identity_unavailable')
-        return dict(admission,vm_id=meta['vm_id'],ssh_port=meta['ssh_port'],
+        return dict(admission,vm_id=meta['vm_id'],ssh_port=meta['ssh_port'],guest_image=meta['guest_image'],
             guest_key=str(key_file),guest_host_key=host_key,
             vcpus=meta['vcpus'],memory_mib=meta['memory_mib'],disk_gib=meta['disk_gib'],
             app_ports=sorted({port['guest_port'] for port in meta['ports']}),
@@ -233,7 +244,7 @@ def prepare(runner,key,ip):
     host_key=(folder/'seed'/'ssh_host_ed25519_key.pub').read_text().strip()
     if not key_file.is_file() or not host_key.startswith('ssh-ed25519 '):
         raise GatewayError('guest_ssh_identity_unavailable')
-    return dict(admission,vm_id=meta['vm_id'],ssh_port=meta['ssh_port'],
+    return dict(admission,vm_id=meta['vm_id'],ssh_port=meta['ssh_port'],guest_image=meta['guest_image'],
                 guest_key=str(key_file),guest_host_key=host_key,preview=preview)
 
 
@@ -274,6 +285,7 @@ async def bridge(source,destination,close_on_eof=False):
 
 
 async def shell(runner,process):
+    started=time.monotonic()
     conn=process.get_extra_info('connection')
     key=conn.get_extra_info('free_vm_public_key') if conn else None
     peer=process.get_extra_info('peername')
@@ -300,15 +312,18 @@ async def shell(runner,process):
         async with asyncssh.connect('127.0.0.1',port=details['ssh_port'],username='root',
                 client_keys=[details['guest_key']],known_hosts=known,encoding=None,
                 agent_path=None,connect_timeout=10) as guest:
+            persistent=details.get('guest_image')=='free-vm-v3' and process.term_type is not None
             command=process.command if process.command is not None else (
-                'bash --login -i' if claimed else interactive_shell_command(details['active_until']))
+                ('tmux new-session -A -s gap -c /app '+shlex.quote('bash --login -i') if persistent else 'bash --login -i')
+                if claimed else interactive_shell_command(details['active_until'],persistent))
             remote=await guest.create_process(command,term_type=process.term_type,
                 term_size=process.term_size,encoding=None)
             if claimed:
                 panel=claimed_banner(details,process.term_type is not None)
             else:
                 remaining=max(0,int(details['active_until']-time.time()))
-                panel=welcome_banner(details,remaining,process.term_type is not None)
+                panel=welcome_banner(details,remaining,process.term_type is not None,
+                                     max(1,round(time.monotonic()-started)))
             process.stdout.write(panel.encode())
             await process.stdout.drain()
             input_task=asyncio.create_task(bridge(process.stdin,remote.stdin,True))
