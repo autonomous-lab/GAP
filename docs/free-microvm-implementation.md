@@ -86,9 +86,9 @@ may need billing activation before it can resume; explain this on the page.
   generated credentials. Do not attach custom domains to unclaimed VMs;
   otherwise the custom-domain path can bypass the preview password. Expired
   preview routes must fail closed even if the edge cache is stale.
-  On node 1, the public preview uses `gap.geta.team` behind Cloudflare; the
-  browser must use the same IP family as the SSH connection. IPv6 after an
-  IPv4 SSH session is intentionally denied by the exact-IP pin.
+  The preview is accessible from any visitor IP with valid Basic Auth,
+  including a different IP family from the SSH connection. Source IP still
+  limits anonymous VM reservations, not preview access.
 - Use a dedicated Debian guest image with apt and preinstalled Docker, Python,
   Node, common Linux tools, and the supported package clients. Never replace
   the backing image used by existing paid VMs. Image integrity and version
@@ -100,8 +100,9 @@ The pilot has passed real Ed25519 SSH sessions on nodes 1 and 3, a 3072-bit
 RSA SSH session on node 2, and a cross-node same-IP denial. It also passed
 reconnection after a
 worker/image upgrade, Docker Hub and GHCR image pulls, Docker execution,
-apt/npm/pip/Go/Composer package traffic, denied arbitrary egress, and private
-preview checks (401 without Basic Auth; 403 from a different IP). A verified
+apt/npm/pip/Go/Composer package traffic and denied arbitrary egress. Unit
+coverage verifies preview admission with Basic Auth from a different IP, 401
+without credentials, and 403 after the free hour. A verified
 email claim attached the existing project and VM ID to an account; the worker
 stopped that VM and rejected its old anonymous SSH key. The Debian v2 guest
 includes `php-curl` for Composer. Unit tests cover deadline stop/deletion and

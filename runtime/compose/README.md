@@ -41,8 +41,8 @@ existing qcow2 overlays; use a new versioned mount and retain the old one.
 The supplied `deploy.yml` maps `/free-images` (v1 compatibility) and
 `/free-images-v2` (current image). The package proxy permits only approved
 public registries and applies connection, bandwidth and volume limits.
-The preview additionally requires its unique Basic Auth password and the
-SSH source IP. See [the release checklist](../../docs/free-microvm-implementation.md)
+The preview requires its unique Basic Auth password from any visitor IP;
+the source-IP reservation still limits anonymous VM creation. See [the release checklist](../../docs/free-microvm-implementation.md)
 before expanding the pilot.
 
 Build the guest assets and worker from the repository root:

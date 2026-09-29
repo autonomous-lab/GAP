@@ -154,6 +154,9 @@ fn encode_path(path:&str)->String {
 
 pub fn admit_vm_http(state:&Arc<Mutex<NodeState>>,secret:&str,host:&str,path:&str,raw:&str,authorization:Option<&str>,ip:Option<&str>)->Admission {
     let expected=std::env::var("GAP_VM_EDGE_TOKEN").unwrap_or_default();
+    admit_vm_http_with_expected(state,&expected,secret,host,path,raw,authorization,ip)
+}
+fn admit_vm_http_with_expected(state:&Arc<Mutex<NodeState>>,expected:&str,secret:&str,host:&str,path:&str,raw:&str,authorization:Option<&str>,ip:Option<&str>)->Admission {
     let mut g=match state.lock(){Ok(g)=>g,Err(_)=>return answer(503)};
     let domain=g.custom_domain(host).filter(|d|d.vm_id.is_some());
     let private=path.starts_with("/apps/");
@@ -182,9 +185,6 @@ pub fn admit_vm_http(state:&Arc<Mutex<NodeState>>,secret:&str,host:&str,path:&st
     if g.check_rate_limit(None,ip).is_err(){return answer(403)}
     if let Some(trial)=g.free_vm_trials.get(&record.project_id).filter(|trial|trial.claimed_at.is_none()) {
         if trial.phase(now_unix())!=super::free_vm::Phase::Active || domain.is_some() {return answer(403)}
-        let secret=std::env::var("GAP_FREE_VM_ABUSE_KEY").unwrap_or_default();
-        if secret.len()<32 || !ip.and_then(|ip|super::free_vm::source_fingerprint(ip,secret.as_bytes()).ok())
-            .is_some_and(|source|trial.occupies_ip(&source)) {return answer(403)}
     }
     drop(g);
     if domain.is_none() {
@@ -206,6 +206,47 @@ pub fn admit_vm_http(state:&Arc<Mutex<NodeState>>,secret:&str,host:&str,path:&st
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn anonymous_preview_accepts_other_ips_only_with_basic_auth_while_active() {
+        use base64::Engine;
+        let project=format!("prj_{}","a".repeat(24));
+        let owner=format!("did:gap:{}","b".repeat(64));
+        let vm=format!("vm_{}","c".repeat(32));
+        let password="unique-preview-password";
+        let mut node=NodeState::new(Box::new(crate::storage::sqlite::SqliteStorage::open(":memory:").unwrap()));
+        node.cloud_projects.insert(project.clone(),crate::cloud::ProjectRecord {
+            project_id:project.clone(),owner_did:owner.clone(),status:"active".into(),
+            plan:"free".into(),created_at:now_unix(),updated_at:now_unix(),
+        });
+        node.private_node=Some(crate::private_node::PrivateNode {
+            private:false,approvals:std::path::PathBuf::new(),compose_approvals:None,
+            runner:Some(("http://127.0.0.1:8092".into(),"test-token".into())),
+        });
+        node.vm_http.insert(vm.clone(),Record {
+            vm_id:vm.clone(),project_id:project.clone(),owner_did:owner.clone(),route_key:project.clone(),
+            username:Some("free".into()),password_hash:Some(crate::cloud::hash_site_password(password).unwrap()),
+            password_sealed:None,
+        });
+        node.free_vm_trials.insert(project.clone(),super::super::free_vm::Trial {
+            project_id:project.clone(),owner_did:owner,created_at:now_unix(),claimed_at:None,
+            ssh_key_hash:"d".repeat(64),source_hash:super::super::free_vm::source_fingerprint(
+                "203.0.113.10",b"0123456789abcdef0123456789abcdef").unwrap(),
+            additional_source_hashes:Vec::new(),claim_hash:String::new(),claim_sealed:String::new(),
+        });
+        let state=Arc::new(Mutex::new(node));
+        let edge="e".repeat(32);
+        let path=format!("/apps/{project}/");
+        let basic=format!("Basic {}",base64::engine::general_purpose::STANDARD.encode(format!("free:{password}")));
+        let admit=|auth|admit_vm_http_with_expected(&state,&edge,&edge,"example.test",&path,&path,auth,Some("198.51.100.77"));
+        assert_eq!(admit(None).status,401);
+        assert_eq!(admit(Some("Basic Zm9vOmJhcg==")).status,401);
+        let allowed=admit(Some(&basic));
+        assert_eq!(allowed.status,200);
+        assert_eq!(allowed.vm_id.as_deref(),Some(vm.as_str()));
+        assert!(allowed.strip_authorization);
+        state.lock().unwrap().free_vm_trials.get_mut(&project).unwrap().created_at=now_unix()-3601;
+        assert_eq!(admit(Some(&basic)).status,403);
+    }
     #[test]
     fn ingress_reports_missing_credentials_and_never_claims_health() {
         let mut state=NodeState::new(Box::new(crate::storage::sqlite::SqliteStorage::open(":memory:").unwrap()));
