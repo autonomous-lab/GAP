@@ -90,7 +90,9 @@ class GatewayTests(unittest.TestCase):
         project='prj_'+'a'*24
         owner='did:gap:'+'b'*64
         meta={'vm_id':'vm_'+'c'*32,'state':'stopped','tier':'trial',
-              'guest_image':'free-vm-v2','ssh_port':2200}
+              'guest_image':'free-vm-v2','ssh_port':2200,'vcpus':1.5,
+              'memory_mib':1536,'disk_gib':12,
+              'ports':[{'guest_port':8080,'worker_port':2201}]}
         manager=Mock()
         manager.read.side_effect=[meta,dict(meta,state='running')]
         with tempfile.TemporaryDirectory() as directory:
@@ -107,10 +109,14 @@ class GatewayTests(unittest.TestCase):
                 result=prepare(runner,'ssh-ed25519 test','203.0.113.1')
             self.assertEqual(result['status'],'claimed')
             self.assertEqual(result['vm_id'],meta['vm_id'])
+            self.assertEqual(result['app_ports'],[8080])
             self.assertNotIn('active_until',result)
             self.assertEqual(rpc.call_args.args[3],'vm/start')
             self.assertEqual(terminal.call_args.args[3],'terminal/prepare')
             self.assertIn('YOUR MICROVM',claimed_banner(result))
+            self.assertIn('1.5 vCPU  ·  1536 MiB RAM  ·  12 GiB disk',claimed_banner(result))
+            self.assertIn('APP PORTS   8080 (inside VM)',claimed_banner(result))
+            self.assertIn('SSH ENTRY   port 2121',claimed_banner(result))
             self.assertNotIn('CLAIM',claimed_banner(result))
 
     def test_admission_errors_do_not_pretend_every_failure_is_capacity(self):
@@ -246,7 +252,8 @@ class GatewayTests(unittest.TestCase):
                             self.assertIn(b'from-guest\n',welcome.stdout)
                             self.assertEqual(guest_commands[0],'true')
                             self.assertIn('PROMPT_COMMAND=',guest_commands[-1])
-                        claimed=dict(details,status='claimed',manage_url='https://gap.geta.team/account#machines')
+                        claimed=dict(details,status='claimed',manage_url='https://gap.geta.team/account#machines',
+                                     vcpus=1,memory_mib=1024,disk_gib=8,app_ports=[8080])
                         claimed.pop('active_until')
                         with patch('gateway.prepare',return_value=claimed):
                             async with asyncssh.connect('127.0.0.1',port=gateway.get_port(),username='free',
@@ -254,6 +261,8 @@ class GatewayTests(unittest.TestCase):
                                 result=await connection.run('true')
                                 self.assertEqual(result.exit_status,0)
                                 self.assertIn(b'YOUR MICROVM',result.stdout)
+                                self.assertIn(b'1 vCPU  \xc2\xb7  1 GiB RAM  \xc2\xb7  8 GiB disk',result.stdout)
+                                self.assertIn(b'APP PORTS   8080 (inside VM)',result.stdout)
                                 self.assertIn(b'from-guest\n',result.stdout)
                                 self.assertNotIn(b'FREE MICROVM',result.stdout)
                     finally:
@@ -278,7 +287,8 @@ class GatewayTests(unittest.TestCase):
                 key_path.write_bytes(terminal_key.export_private_key())
                 details={'status':'claimed','ssh_port':guest.get_port(),'guest_key':str(key_path),
                     'guest_host_key':guest_host.export_public_key().decode().strip(),
-                    'manage_url':'https://gap.geta.team/account'}
+                    'manage_url':'https://gap.geta.team/account',
+                    'vcpus':1,'memory_mib':1024,'disk_gib':8,'app_ports':[8080]}
                 with patch('gateway.prepare',return_value=details):
                     gateway=await asyncssh.listen('127.0.0.1',0,server_factory=FreeServer,
                         server_host_keys=[gateway_host],process_factory=lambda process:shell(None,process),encoding=None)

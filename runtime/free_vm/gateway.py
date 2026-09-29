@@ -137,9 +137,16 @@ def claimable_banner(details,now,colored=False):
 def claimed_banner(details,colored=False):
     brand='\x1b[1;36m' if colored else ''
     reset='\x1b[0m' if colored else ''
+    memory=details['memory_mib']
+    memory_label=f'{memory//1024} GiB' if memory%1024==0 else f'{memory} MiB'
+    app_ports=', '.join(str(port) for port in details['app_ports']) or 'none configured'
     return (f'\r\n  {brand}GAP  /  YOUR MICROVM{reset}\r\n'
-            f'  Reconnected to your claimed VM. Your files are where you left them.\r\n'
-            f'  Manage billing and settings at {details["manage_url"]}\r\n\r\n')
+            f'  Reconnected. Your files are where you left them.\r\n'
+            f'\r\n'
+            f'  COMPUTE     {details["vcpus"]:g} vCPU  ·  {memory_label} RAM  ·  {details["disk_gib"]} GiB disk\r\n'
+            f'  APP PORTS   {app_ports} (inside VM)\r\n'
+            f'  SSH ENTRY   port 2121\r\n'
+            f'  MANAGE      {details["manage_url"]}\r\n\r\n')
 
 
 def gateway_error_message(error):
@@ -194,6 +201,8 @@ def prepare(runner,key,ip):
             raise GatewayError('guest_ssh_identity_unavailable')
         return dict(admission,vm_id=meta['vm_id'],ssh_port=meta['ssh_port'],
             guest_key=str(key_file),guest_host_key=host_key,
+            vcpus=meta['vcpus'],memory_mib=meta['memory_mib'],disk_gib=meta['disk_gib'],
+            app_ports=sorted({port['guest_port'] for port in meta['ports']}),
             manage_url='https://gap.geta.team/account')
     if admission.get('status') not in (None,'active'):
         raise GatewayError('invalid_admission')
