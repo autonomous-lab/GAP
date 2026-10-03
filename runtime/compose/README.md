@@ -555,11 +555,12 @@ value surviving stop/resize/restart. Without opt-in it keeps simulated guests.
 These tests do not establish HA, adversarial hypervisor isolation or production
 load capacity. Production microVM activation remains a separate operator step.
 
-## Application paths on the existing GAP origin
+## Application paths on each existing node origin
 
-Applications use `https://gap.geta.team/apps/{project_id}/`, through the node's
-existing DNS, TLS certificate and public edge. **No new DNS record, hostname or
-certificate is required.** The internal microVM HTTP gateway listens on the private
+Applications use `{node_origin}/apps/{project_id}/` (for example,
+`https://gap.geta.team/apps/{project_id}/` on node-01). They pass through that
+node's existing DNS, TLS certificate and public edge. **No new DNS record,
+hostname or certificate is required.** The internal microVM HTTP gateway listens on the private
 bridge at port 8093; the existing GAP edge forwards `/apps/` to it. All other
 Cloud/function/realtime routes retain their current handling.
 
@@ -581,7 +582,9 @@ Operator configuration (also in `runner.example.json`):
 ```
 
 `public_url` is the **existing node origin**, not a new app domain; it defaults
-to `https://gap.geta.team`. For another node, use that node's existing origin.
+to `https://gap.geta.team` for node-01 only. Set each other worker to its own
+node origin (for example `https://gap-node-02-u3.vm.elestio.app` on node-02),
+or the dashboard will advertise an `/apps/` URL that has no local ingress route.
 The gateway runs plain HTTP internally and does not request TLS certificates.
 Its separate Caddy instance owns only application paths. Its admin API uses a
 Unix socket shared with the worker, not TCP: guest networking can reach worker
@@ -600,7 +603,7 @@ curl -sX PUT "$NODE/v1/cloud/projects/$PROJECT/vm/ingress" \
 
 curl -s "$NODE/v1/cloud/projects/$PROJECT/vm/ingress" \
   -H "Authorization: Bearer $TOKEN"
-# url: https://gap.geta.team/apps/prj_<24-hex-id>/
+# url: <this node's public origin>/apps/prj_<24-hex-id>/
 # base_path: /apps/prj_<24-hex-id>/
 ```
 

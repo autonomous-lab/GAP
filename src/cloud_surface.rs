@@ -329,6 +329,7 @@ mod tests {
         assert!(console.contains("'/v1'+'/fleet/project-token'"));
         assert!(console.contains("id = 'vmTabs'"));
         assert!(console.contains("Open your dashboard"));
+        assert!(console.contains("if(['reverse_proxy_only','web_egress'].includes(vm?.network_policy))body.expires_in=3600"));
     }
 
     #[test]
