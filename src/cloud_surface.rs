@@ -35,17 +35,32 @@ pub fn page(path: &str) -> Option<(&'static str, String)> {
         "/" => Some(("text/html; charset=utf-8", product_page(HOME, path))),
         "/explorer" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_explorer.html"), path))),
         "/pricing" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_pricing.html"), path))),
-        "/account" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_account.html"), path))),
+        "/account" => Some(("text/html; charset=utf-8", console_page(
+            include_str!("ui/cloud_account.html"), path,
+            include_str!("ui/console_account.css"), include_str!("ui/console_account.js")))),
         "/signup" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_signup.html"), path))),
         "/free-vm" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_free_vm.html"), path))),
         "/free-vm/claim" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_free_vm_claim.html"), path))),
         "/microvms/assets/xterm.js" => Some(("text/javascript; charset=utf-8", include_str!("ui/vendor/xterm.js").into())),
         "/microvms/assets/xterm-fit.js" => Some(("text/javascript; charset=utf-8", include_str!("ui/vendor/xterm-fit.js").into())),
         "/microvms/assets/xterm.css" => Some(("text/css; charset=utf-8", include_str!("ui/vendor/xterm.css").into())),
-        "/microvms" => Some(("text/html; charset=utf-8", product_page(include_str!("ui/cloud_microvms.html"), path))),
+        "/microvms" => Some(("text/html; charset=utf-8", console_page(
+            include_str!("ui/cloud_microvms.html"), path,
+            include_str!("ui/console_vm.css"), include_str!("ui/console_vm.js")))),
         "/docs" | "/for-agents" | "/for-humans" | "/how-it-works" => Some(("text/html; charset=utf-8", product_page(documentation(), "/docs"))),
         "/.well-known/gap-agent.json" => Some(("application/json", "{\"name\":\"GAP Cloud\",\"description\":\"Application infrastructure for AI agents\",\"documentation\":\"/agents.md\",\"projects\":\"/v1/cloud/projects\"}".into())),
         _ => None,
+    }
+}
+
+fn console_page(source: &str, active: &str, css: &str, script: &str) -> String {
+    let page = product_page(source, active);
+    if active == "/account" {
+        // The account's original script is a module. Its lexical state is not
+        // visible to a separate script, so extend that same module instead.
+        page.replacen("</script></html>", &format!("{script}</script><style>{css}</style></html>"), 1)
+    } else {
+        page.replacen("</html>", &format!("<style>{css}</style><script>{script}</script></html>"), 1)
     }
 }
 
@@ -59,10 +74,10 @@ fn product_page(source: &str, active: &str) -> String {
         ""
     };
     let links = [("/", "Home"), ("/explorer", "Explore"), ("/pricing", "Pricing"), ("/free-vm", "Free VM"),
-        ("/microvms", "MicroVMs"), ("/docs", "Docs"), ("/account", "Account")];
+        ("/account#machines", "MicroVMs"), ("/docs", "Docs"), ("/account", "Account")];
     let links = links.iter().map(|(href, label)| format!(
         "<a href=\"{href}\"{navigation_target}{}>{label}</a>",
-        if *href == active { " aria-current=\"page\"" } else { "" }
+        if *href == active || (*href == "/account#machines" && active == "/microvms") { " aria-current=\"page\"" } else { "" }
     )).collect::<String>();
     let wordmark = include_str!("ui/gap_wordmark.svg");
     let navigation = format!(r#"<header class="gap-header"><div class="gap-header-inner">
@@ -75,7 +90,8 @@ fn product_page(source: &str, active: &str) -> String {
         .ok().filter(|value|!value.is_empty() && value.bytes().all(|byte|
             byte.is_ascii_alphanumeric() || byte==b'-' || byte==b'.'))
         .unwrap_or_else(||"gap-node-02-u3.vm.elestio.app".into());
-    source.replace("<!-- GAP-WORDMARK -->", wordmark).replace("<!-- GAP-NAV -->", &navigation)
+    source.replace("href=\"/microvms\"", "href=\"/account#machines\"")
+        .replace("<!-- GAP-WORDMARK -->", wordmark).replace("<!-- GAP-NAV -->", &navigation)
         .replace("<!-- GAP-DESIGN -->", &format!("<style>{}</style>", include_str!("ui/cloud_design.css")))
         .replace("<html lang=\"en\">", &format!("<html lang=\"en\" class=\"{variant}\">"))
         .replace("gap-node-02-u3.vm.elestio.app",&free_vm_host)
@@ -304,11 +320,15 @@ mod tests {
         assert!(!account.contains("<iframe"));
         assert!(account.contains("location.assign(path+'?workspace=1')"));
         assert!(account.contains("revokeMachineSessions"));
+        assert!(account.contains("id = 'vmCards'"));
+        assert!(account.contains("Your MicroVMs"));
 
         let (_, console) = page("/microvms").unwrap();
         assert!(console.contains("id=\"workspace-back\""));
         assert!(console.contains("renewWorkspaceSession"));
         assert!(console.contains("'/v1'+'/fleet/project-token'"));
+        assert!(console.contains("id = 'vmTabs'"));
+        assert!(console.contains("Open your dashboard"));
     }
 
     #[test]

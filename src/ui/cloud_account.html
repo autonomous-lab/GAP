@@ -62,14 +62,16 @@ function placementDialog(){
  const dialog=document.createElement('dialog');dialog.style.cssText='width:min(560px,calc(100% - 28px));border:1px solid #dce1e7;border-radius:8px;padding:26px;color:#182333';
  const form=document.createElement('form'),title=document.createElement('h2');title.textContent='Create a MicroVM';form.append(title);
  const description=document.createElement('p');description.className='section-intro';description.textContent='GAP selects a healthy host with enough available capacity and reserves it while the machine is created.';form.append(description);
- const field=(labelText,values)=>{const label=document.createElement('label');label.textContent=labelText;const select=document.createElement('select');for(const [name,value]of values)select.append(new Option(name,value));label.append(select);form.append(label);return select};
+ const custom=document.createElement('details');const customLabel=document.createElement('summary');customLabel.textContent='Customize resources and SSH (optional)';custom.append(customLabel);form.append(custom);
+ const field=(labelText,values,parent=form)=>{const label=document.createElement('label');label.textContent=labelText;const select=document.createElement('select');for(const [name,value]of values)select.append(new Option(name,value));label.append(select);parent.append(label);return select};
  const project=field('Project',projects.map(p=>[p.id,p.id]));
- const cpu=field('CPU',[['0.25 vCPU','.25'],['0.5 vCPU — Free Trial','.5'],['1 vCPU','1'],['2 vCPU','2'],['4 vCPU','4']]);cpu.value='.5';
- const ram=field('Memory',[['256 MiB','256'],['512 MiB — Free Trial','512'],['1 GiB','1024'],['2 GiB','2048'],['4 GiB','4096'],['8 GiB','8192']]);ram.value='512';
- const disk=field('Disk',[['8 GiB','8'],['16 GiB','16'],['32 GiB','32'],['64 GiB','64'],['100 GiB','100']]);
- const sshLabel=document.createElement('label');sshLabel.textContent='SSH public key (optional)';const ssh=document.createElement('input');ssh.placeholder='ssh-ed25519 …';sshLabel.append(ssh);form.append(sshLabel);
+ if(projects.length===1)project.parentElement.hidden=true;
+ const cpu=field('CPU',[['0.25 vCPU','.25'],['0.5 vCPU — Starter','.5'],['1 vCPU','1'],['2 vCPU','2'],['4 vCPU','4']],custom);cpu.value='.5';
+ const ram=field('Memory',[['256 MiB','256'],['512 MiB — Starter','512'],['1 GiB','1024'],['2 GiB','2048'],['4 GiB','4096'],['8 GiB','8192']],custom);ram.value='512';
+ const disk=field('Disk',[['8 GiB','8'],['16 GiB','16'],['32 GiB','32'],['64 GiB','64'],['100 GiB','100']],custom);
+ const sshLabel=document.createElement('label');sshLabel.textContent='SSH public key (optional)';const ssh=document.createElement('input');ssh.placeholder='ssh-ed25519 …';sshLabel.append(ssh);custom.append(sshLabel);
  const status=document.createElement('p');status.className='status-line';status.setAttribute('role','status');form.append(status);
- const submit=document.createElement('button');submit.type='submit';submit.className='primary';submit.textContent='Select host and create';form.append(submit);
+ const submit=document.createElement('button');submit.type='submit';submit.className='primary';submit.textContent='Create MicroVM';form.append(submit);
  const close=document.createElement('button');close.type='button';close.textContent='Cancel';close.onclick=()=>dialog.close();form.append(close);
  form.onsubmit=run(async()=>{submit.disabled=true;close.disabled=true;status.textContent='Selecting a host…';try{
   const vcpus=Number(cpu.value),memory_mib=Number(ram.value),disk_gib=Number(disk.value),original=projects.find(p=>p.id===project.value);

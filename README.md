@@ -632,6 +632,16 @@ and VM in tab session storage, renews its short-lived fleet capability every two
 minutes while the Account session remains valid, and provides **Back to fleet**.
 Signing out of Account revokes all MicroVM browser sessions recorded by that tab.
 
+The customer entry point is `/account`: its overview shows MicroVM cards and the
+shared wallet, while Projects, Access and Activity remain under Advanced. Creating
+a MicroVM picks an available host and starter resources by default; resource and
+SSH customization remain optional. A machine opens its project-scoped console
+with Overview, Connect, Network, Usage and Settings tabs. The old direct
+`/microvms` project-token form remains available under Advanced for API users.
+When a claimed VM cannot start due to exhausted wallet credits or a project
+budget, SSH explains which limit blocked it and links to the relevant dashboard
+section. The VM console also shows a funding notice with the corresponding action.
+
 ### SSH and browser terminal
 
 The microVM dashboard shows a copyable SSH command and host fingerprint,

@@ -339,7 +339,9 @@ fn main() -> Result<()> {
                 }
             }
             if matches!(clean_path,"/microvms" | "/account") && !custom_domain_request && !on_admin_host && !admin_host.is_empty() {
-                let prefix=if clean_path=="/microvms" {env::var("GAP_VM_CONSOLE_PREFIX").ok().filter(|p|p=="/nodes/node-02").unwrap_or_default()} else {String::new()};
+                let prefix=if clean_path=="/microvms" {env::var("GAP_VM_CONSOLE_PREFIX").ok()
+                    .filter(|p|matches!(p.as_str(),"/nodes/node-02" | "/nodes/node-03"))
+                    .unwrap_or_default()} else {String::new()};
                 if clean_path=="/microvms" {
                     // Keep the public URL stable while the console itself stays
                     // on the isolated management origin. Its Secure, HttpOnly

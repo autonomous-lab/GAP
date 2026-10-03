@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import serialization
 from gateway import (FreeServer, GatewayError, admission_error, claimable_banner, claimed_banner,
                      gateway_error_message, interactive_shell_command, prepare,
                      request_node, retry_mutation, rpc_wait, shell, stable_id, welcome_banner,
-                     key_hash, verify_relay_ticket, _used_relay_nonces)
+                     key_hash, verify_relay_ticket, _used_relay_nonces, credit_block_reason)
 
 
 class GatewayTests(unittest.TestCase):
@@ -117,7 +117,8 @@ class GatewayTests(unittest.TestCase):
 
     def test_claimed_vm_credit_failure_is_explained_without_retries(self):
         runner=Mock()
-        runner.rpc.return_value=(200,{'status':'failed','result':{'error':'microvm_credits_or_budget_exhausted'}})
+        runner.rpc.side_effect=[(200,{'status':'failed','result':{'error':'microvm_credits_or_budget_exhausted'}}),
+                                (200,{'alerts':['credits_exhausted']})]
         with self.assertRaisesRegex(GatewayError,'claimed_vm_no_credits'):
             rpc_wait(runner,'prj_'+'a'*24,'did:gap:'+'b'*64,'vm/start','POST',{})
         with (patch('gateway.rpc_wait',side_effect=GatewayError('claimed_vm_no_credits')) as rpc,
@@ -126,7 +127,29 @@ class GatewayTests(unittest.TestCase):
                 retry_mutation(runner,'prj_'+'a'*24,'did:gap:'+'b'*64,'terminal/prepare','POST',{})
         rpc.assert_called_once()
         sleep.assert_not_called()
-        self.assertIn('credits',gateway_error_message(GatewayError('claimed_vm_no_credits')))
+        for blocked in ('claimed_vm_budget_exhausted','claimed_vm_funding_blocked'):
+            with (patch('gateway.rpc_wait',side_effect=GatewayError(blocked)) as rpc,
+                  patch('gateway.time.sleep') as sleep):
+                with self.assertRaisesRegex(GatewayError,blocked):
+                    retry_mutation(runner,'prj_'+'a'*24,'did:gap:'+'b'*64,'terminal/prepare','POST',{})
+            rpc.assert_called_once()
+            sleep.assert_not_called()
+        self.assertIn('https://gap.geta.team/account#billing',
+                      gateway_error_message(GatewayError('claimed_vm_no_credits')))
+
+    def test_credit_denial_distinguishes_project_budget_from_wallet(self):
+        runner=Mock()
+        runner.rpc.return_value=(200,{'alerts':['budget_exhausted'],
+                                      'fleet':{'funding_status':'available'}})
+        self.assertEqual(credit_block_reason(runner,'prj_'+'a'*24,'did:gap:'+'b'*64),
+                         'claimed_vm_budget_exhausted')
+        self.assertIn('/account#machines',gateway_error_message(GatewayError('claimed_vm_budget_exhausted')))
+        runner.rpc.return_value=(200,{'alerts':[], 'fleet':{'funding_status':'exhausted'}})
+        self.assertEqual(credit_block_reason(runner,'prj_'+'a'*24,'did:gap:'+'b'*64),
+                         'claimed_vm_no_credits')
+        runner.rpc.side_effect=RuntimeError('ledger unavailable')
+        self.assertEqual(credit_block_reason(runner,'prj_'+'a'*24,'did:gap:'+'b'*64),
+                         'claimed_vm_funding_blocked')
 
     def test_request_ids_are_stable_and_operation_scoped(self):
         project='prj_'+'a'*24

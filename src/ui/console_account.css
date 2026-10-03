@@ -1,0 +1,66 @@
+/* The account page is the signed-in entry point, not a second VM console. */
+body{background:#f5f7f2;color:#182719}
+.shell{max-width:1540px;padding:35px 42px 72px}
+.console-nav{background:#102018;color:#dcead6;border-right:1px solid #304337;padding:25px 16px}
+.console-label{color:#91aa97}
+.console-nav a{color:#dcead6}
+.console-nav a:hover{background:#21372a}
+.console-nav a[aria-current=page]{background:#caff82;color:#172914;box-shadow:none;font-weight:700}
+.console-nav hr{border-color:#304337}
+.console-nav-bottom{color:#a8bca9}
+.console-advanced{margin:20px 0 0;border-top:1px solid #304337;padding-top:16px}
+.console-advanced summary{cursor:pointer;color:#b8cbb8;font-size:12px;font-weight:650;padding:10px 14px;list-style:none}
+.console-advanced summary:after{content:'⌄';float:right}
+.console-advanced[open] summary:after{content:'⌃'}
+.console-advanced summary::-webkit-details-marker{display:none}
+.console-advanced a{font-size:12px}
+.account-hero{margin-bottom:22px}
+.account-hero h1{font-size:36px;letter-spacing:-1.6px;color:#162518}
+.account-hero p{font-size:14px;color:#647467}
+#account section{border-radius:16px;border:1px solid #e2e9dc;box-shadow:0 10px 32px #19351d09;background:#fff;padding:26px;margin-bottom:20px}
+#account #fleetSection{background:#fff}
+#account #fleetSection>h2{font-size:23px;letter-spacing:-.7px;margin:0 0 5px}
+#account #fleetSection>p{margin-top:0;max-width:760px}
+#account #fleetSection>p a{display:none}
+#account #fleetSection>.table-scroll,#account #fleetSection>div[style*='overflow'],#fleetDetails{display:none!important}
+#fleetNode,#fleetProject,#fleetRefresh{display:none}
+#fleetSection>label{display:none}
+#placeVM{float:right;background:#caff82;color:#152712;border:0;font-weight:750;border-radius:9px;padding:12px 18px}
+#placeVM:hover{background:#b9f36f}
+#vmCards{clear:both;display:grid;grid-template-columns:repeat(auto-fill,minmax(275px,1fr));gap:15px;padding-top:18px}
+.vm-card{border:1px solid #dce6d8;border-radius:13px;background:linear-gradient(160deg,#fbfdf9,#f4f9ef);padding:19px;display:flex;flex-direction:column;gap:16px;min-height:195px}
+.vm-card-head{display:flex;align-items:flex-start;gap:11px}
+.vm-card-icon{display:grid;place-items:center;width:39px;height:39px;border-radius:10px;background:#e5f7d0;color:#315b24;font-size:18px;flex:none}
+.vm-card h3{font-size:16px;margin:0;color:#1a2c1b;letter-spacing:-.25px}
+.vm-card-sub{color:#66766a;font-size:11px;margin-top:3px;overflow-wrap:anywhere}
+.vm-card .state-pill{align-self:flex-start;font-size:11px;font-weight:700;border-radius:99px;padding:5px 10px}
+.vm-card-summary{color:#516454;font-size:12px;line-height:1.6;margin:auto 0 0}
+.vm-card-actions{display:flex;gap:9px;align-items:center}
+.vm-card-actions button{background:#203c27;border-color:#203c27;color:#fff;padding:10px 15px;font-weight:700;border-radius:8px}
+.vm-card-actions button:hover{background:#31563a}
+.vm-card-error{background:#fff9f2;border-color:#f2dac0}
+.vm-card-details{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;line-height:1.6;background:#edf5e8;border-radius:8px;padding:12px;margin:0}
+.vm-empty{grid-column:1/-1;border:1px dashed #bed3b6;border-radius:12px;padding:22px;color:#566d57;background:#f8fcf5}
+#overviewStats{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:18px}
+#overviewStats .console-stat:last-child{display:none}
+.console-stat{border-radius:13px;border-color:#e2e9dc;background:#fff;box-shadow:0 6px 20px #19351d08}
+.console-stat strong{color:#1c3020}
+#billingSection{display:grid;grid-template-columns:1fr auto;align-items:center;gap:4px 24px}
+#billingSection>.eyebrow,#billingSection>h2,#billingSection>p,#billingSection>details{grid-column:1}
+#billingSection>button{grid-column:2;grid-row:2/5;justify-self:end}
+#billingSection h2{font-size:19px}
+#billingSection #balance{font-size:28px;margin:0}
+#billingHelp{grid-column:1/-1;padding:14px 16px;border-radius:9px;background:#f1f7e9;color:#3f5843;font-size:12px}
+#billingHelp[data-blocked=true]{background:#fff2e7;color:#794722}
+#billingHelp a{font-weight:750;text-decoration:underline;text-underline-offset:3px}
+#projectsSection{color:#526353}
+#projectsSection h2{color:#1c3020}
+#login{max-width:550px;margin:55px auto;border-radius:16px;padding:35px;background:#fff;border:1px solid #e1e9dc;box-shadow:0 25px 80px #172c1b12}
+body:not(.console-signed-in) .console-nav,body:not(.console-signed-in) .login-story,body:not(.console-signed-in) .console-stats{display:none}
+body:not(.console-signed-in) .shell{margin:0 auto;padding:35px 20px 70px;max-width:1100px}
+body:not(.console-signed-in) .login-layout{display:block}
+body:not(.console-signed-in) .account-hero{text-align:center;margin-top:24px}
+body:not(.console-signed-in) .account-hero h1{font-size:34px}
+body:not(.console-signed-in) #login{margin-top:35px}
+@media(max-width:900px){.shell{padding:28px 22px 55px}.console-nav{width:200px}#account #fleetSection{padding:22px}}
+@media(max-width:650px){.shell{margin:0;padding:20px 14px 55px}.console-nav{position:static;width:auto;padding:9px 12px}.console-nav .console-links{overflow:auto}.console-nav a{color:#dcead6}.console-advanced{display:block;border:0;margin:3px 0;padding:0}.console-advanced[open] a{display:block}.account-hero h1{font-size:27px}#overviewStats{grid-template-columns:1fr 1fr}#billingSection{display:block}#placeVM{float:none;margin:10px 0 0;width:100%}#vmCards{grid-template-columns:1fr}#login{padding:24px;margin:20px auto}}

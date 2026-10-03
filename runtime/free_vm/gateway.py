@@ -126,7 +126,7 @@ def rpc_wait(runner,project,owner,action,method,body,timeout=120):
     if result.get('status') in ('succeeded','failed'):
         if result['status']=='failed':
             if result.get('result',{}).get('error')=='microvm_credits_or_budget_exhausted':
-                raise GatewayError('claimed_vm_no_credits')
+                raise GatewayError(credit_block_reason(runner,project,owner))
             raise GatewayError('vm_operation_failed')
         return result.get('result',{})
     job=result.get('job_id')
@@ -140,9 +140,26 @@ def rpc_wait(runner,project,owner,action,method,body,timeout=120):
         if value['status']=='succeeded':return value['result']
         if value['status'] in ('failed','interrupted'):
             if value.get('result',{}).get('error')=='microvm_credits_or_budget_exhausted':
-                raise GatewayError('claimed_vm_no_credits')
+                raise GatewayError(credit_block_reason(runner,project,owner))
             raise GatewayError('vm_operation_failed')
     raise GatewayError('vm_operation_timeout')
+
+
+def credit_block_reason(runner,project,owner):
+    """Turn a generic worker denial into the user's actionable billing cause."""
+    try:
+        status,view=runner.rpc({'project_id':project,'owner_did':owner,
+                                'action':'credits','method':'GET','body':{}})
+        if status==200 and isinstance(view,dict):
+            alerts=view.get('alerts',[])
+            if isinstance(alerts,list) and 'budget_exhausted' in alerts:
+                return 'claimed_vm_budget_exhausted'
+            if (isinstance(alerts,list) and 'credits_exhausted' in alerts
+                    or view.get('fleet',{}).get('funding_status')=='exhausted'):
+                return 'claimed_vm_no_credits'
+    except Exception:
+        pass
+    return 'claimed_vm_funding_blocked'
 
 
 def stable_id(project,operation):
@@ -227,7 +244,9 @@ def gateway_error_message(error):
         'cleanup_pending':'Your previous trial has ended. Secure cleanup is still in progress; try again shortly.',
         'trial_already_claimed':'This SSH key belongs to a claimed VM. Sign in to GAP to manage it.',
         'claimed_vm_unavailable':'Your claimed VM is unavailable. Sign in to GAP to check its status and billing.',
-        'claimed_vm_no_credits':'Your claimed VM cannot start because its project has no available credits. Check your GAP account billing.',
+        'claimed_vm_no_credits':'Your VM is paused: account credits are exhausted. Open billing: https://gap.geta.team/account#billing',
+        'claimed_vm_budget_exhausted':'Your VM is paused: the project spending budget is reached. Review your VM budget: https://gap.geta.team/account#machines',
+        'claimed_vm_funding_blocked':'Your VM is paused by a funding limit. Review billing and your project budget: https://gap.geta.team/account#billing',
     }.get(str(error),'Unable to start a free VM right now. Please try again later.')
 
 
@@ -238,7 +257,8 @@ def retry_mutation(runner,project,owner,action,method,body,timeout=90):
             return rpc_wait(runner,project,owner,action,method,
                 dict(body,request_id=secrets.token_hex(16)),timeout=30)
         except GatewayError as error:
-            if str(error)=='claimed_vm_no_credits':raise
+            if str(error) in ('claimed_vm_no_credits','claimed_vm_budget_exhausted',
+                              'claimed_vm_funding_blocked'):raise
             if time.monotonic()+2>=deadline:raise
             time.sleep(2)
 

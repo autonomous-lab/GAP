@@ -1,0 +1,60 @@
+/* One VM workspace: the common actions first, the controls on demand. */
+body{background:#f5f7f2;color:#1c2d1d}
+.sidebar{display:none!important}
+.shell{margin-left:0!important;max-width:none}
+.topbar{background:#fff;border-bottom:1px solid #e1e9dc;padding:0 max(24px,calc((100vw - 1340px)/2))}
+main{max-width:1390px;margin:auto;padding:34px 38px 80px}
+.heading h1{font-size:36px;letter-spacing:-1.5px;color:#182c1b}
+.heading .subtitle{font-size:14px;color:#68796a}
+.workspace-return{background:#eaf5df;color:#315139;border-bottom-color:#d4e4c7}
+.workspace-return a{border-radius:8px;font-weight:700}
+#connect{border-radius:13px;border:1px solid #dce6d8;box-shadow:none;background:#fff}
+#connect .connect-title{font-size:17px;color:#213a26}
+#connect .connect-title span{font-size:12px;font-weight:400;color:#738374}
+#connect .connect-head{padding:19px 22px}
+#connect-form{margin:0}
+.vm-account-entry{padding:0 22px 22px;display:flex;align-items:center;justify-content:space-between;gap:14px}
+.vm-account-entry p{margin:0;color:#607562;font-size:13px}
+.vm-account-entry a{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:10px 17px;border-radius:8px;background:#caff82;color:#173017;font-weight:750;white-space:nowrap}
+.vm-account-entry a:hover{background:#bdf274}
+.vm-token-access{border-top:1px solid #e4ece0;padding:12px 22px}
+.vm-token-access summary{cursor:pointer;font-size:12px;color:#687b6a;font-weight:650}
+.vm-token-access #connect-form{padding:18px 0 8px}
+body.vm-connected #connect{padding:0;background:transparent;border:0;box-shadow:none}
+body.vm-connected #connect .connect-head{padding:0 0 15px}
+body.vm-connected .vm-account-entry,body.vm-connected .vm-token-access{display:none}
+body.vm-connected #connection-title{font-size:12px;color:#697d6c}
+body.vm-connected #connection-title:before{content:'PROJECT  ';font-size:10px;letter-spacing:.12em;color:#7a947a}
+body.vm-connected #disconnect{font-size:11px}
+.vm-tabs{display:flex;gap:5px;overflow:auto;margin:22px 0 18px;padding:5px;background:#e9efe6;border-radius:11px;position:sticky;top:60px;z-index:10}
+.vm-tabs button{border:0;background:transparent;color:#56705a;border-radius:8px;padding:11px 17px;font-size:12px;font-weight:700;white-space:nowrap}
+.vm-tabs button:hover{background:#f7faf5}
+.vm-tabs button[aria-selected=true]{background:#fff;color:#1b3b22;box-shadow:0 2px 8px #18391917}
+#workspace [data-vm-section]:not([data-active]){display:none!important}
+#workspace .panel{border:1px solid #e0e8dc;border-radius:14px;box-shadow:0 10px 30px #19351d08;background:#fff}
+#workspace .metric-card{border-radius:12px;background:#fff}
+#workspace .vm-overview{border:1px solid #d9e6d1}
+#workspace .vm-overview .toolbar{gap:7px;flex-wrap:wrap}
+#workspace .vm-overview [data-action=resume]{background:#caff82;color:#1a3018;border-color:#caff82;font-weight:750}
+#workspace .vm-overview [data-action=resume]:hover{background:#bdf274}
+.vm-quick{padding:22px 25px;margin-bottom:20px;background:linear-gradient(120deg,#173321,#28442c)!important;color:#f3faef;border-color:#203c2b!important}
+.vm-quick h2{font-size:19px;margin:0 0 5px;color:#f6fff1}
+.vm-quick p{font-size:12px;color:#b7d0b4;margin:0}
+.vm-quick-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+.vm-quick-actions button,.vm-quick-actions a{display:inline-flex;align-items:center;justify-content:center;border-radius:8px;padding:10px 15px;min-height:40px;font-size:12px;font-weight:750;text-decoration:none}
+.vm-quick-actions button:first-child{background:#caff82;color:#153018;border:0}
+.vm-quick-actions button:not(:first-child),.vm-quick-actions a{background:#ffffff17;color:#f3faef;border:1px solid #ffffff46}
+.vm-quick-actions [disabled],.vm-quick-actions a[aria-disabled=true]{opacity:.45;pointer-events:none}
+.vm-quick-note{margin-top:12px!important;color:#cfdec8!important}
+.vm-funding{padding:16px 18px;background:#fff4e6;border:1px solid #f0d7b8;border-radius:10px;color:#5d3e1c;margin:18px 0;font-size:13px}
+.vm-funding strong{display:block;margin-bottom:5px}
+.vm-funding a,.vm-funding button{display:inline-block;margin-top:8px;color:#173c24;background:#fff;border:1px solid #bdcfae;border-radius:7px;padding:8px 12px;font-weight:750;text-decoration:none;cursor:pointer}
+.vm-funding[hidden]{display:none!important}
+#workspace .usage .table-wrap{max-height:430px;overflow:auto}
+#workspace .columns{margin-top:0}
+.vm-settings-intro{font-size:13px;color:#657966;margin:4px 0 20px}
+body:not(.vm-connected) .heading{margin-bottom:20px}
+body:not(.vm-connected) #welcome{display:none}
+body:not(.vm-connected) #connect{max-width:850px;margin:25px auto}
+body:not(.vm-connected) details.connect:has(#approval-form){display:none}
+@media(max-width:700px){main{padding:23px 14px 60px}.heading h1{font-size:28px}.topbar{padding:0 14px}.vm-tabs{top:58px}.vm-tabs button{padding:10px 12px}.vm-account-entry{align-items:stretch;flex-direction:column}.vm-account-entry a{width:100%}.vm-quick-actions>*{flex:1 1 160px}.workspace-return{padding:10px 14px;flex-wrap:wrap}}
