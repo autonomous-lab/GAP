@@ -22,10 +22,13 @@ def quarters(value):
 
 
 def apply_quota(peer, request, expected_container):
-    if not {'pid', 'vm_id', 'vcpus'} <= set(request) <= {'pid', 'vm_id', 'vcpus', 'egress_policy'}:
+    if not {'pid', 'vm_id', 'vcpus'} <= set(request) <= {'pid', 'vm_id', 'vcpus', 'egress_policy', 'quota_only'}:
         raise ValueError('invalid_request')
     pid = request['pid']; vm = request['vm_id']; q = quarters(request['vcpus'])
+    quota_only = request.get('quota_only', False)
+    if type(quota_only) is not bool: raise ValueError('invalid_request')
     egress = request.get('egress_policy')
+    if quota_only and egress is not None: raise ValueError('invalid_request')
     if egress not in (None, 'free_web_v1', 'standard'):
         raise ValueError('invalid_egress_policy')
     if type(pid) is not int or pid <= 1 or not isinstance(vm, str) or not re.fullmatch(r'vm_[0-9a-f]{32}', vm):
@@ -54,10 +57,11 @@ def apply_quota(peer, request, expected_container):
     if target is None: raise ValueError('not_worker_child')
     exe = os.readlink(f'/proc/{target}/exe')
     args = Path(f'/proc/{target}/cmdline').read_bytes().split(b'\0')
-    if not exe.endswith('/qemu-system-x86_64') or b'-name' not in args or args[args.index(b'-name')+1] != vm.encode():
+    if not exe.endswith(('/qemu-system-x86_64', '/qemu-system-x86_64-fast')) or b'-name' not in args or args[args.index(b'-name')+1] != vm.encode():
         raise ValueError('not_owned_qemu')
     target_group = Path(f'/proc/{target}/cgroup').read_text().strip().split('0::')[-1]
     if target_group not in (base, base+'/controller', base+'/'+vm): raise ValueError('wrong_cgroup')
+    if quota_only and target_group != base+'/'+vm: raise ValueError('quota_only_requires_existing_vm_cgroup')
     root = Path('/sys/fs/cgroup'+base)
     controller = root/'controller'; controller.mkdir(exist_ok=True)
     # cgroup v2 requires no processes in a parent distributing CPU bandwidth.
@@ -65,7 +69,9 @@ def apply_quota(peer, request, expected_container):
         try: (controller/'cgroup.procs').write_text(process)
         except ProcessLookupError: pass
     (root/'cgroup.subtree_control').write_text('+cpu')
-    leaf = root/vm; leaf.mkdir(exist_ok=True)
+    leaf = root/vm
+    if quota_only and not leaf.is_dir(): raise ValueError('quota_only_requires_existing_vm_cgroup')
+    leaf.mkdir(exist_ok=True)
     (leaf/'cpu.max').write_text(f'{q*25000} 100000')
     if egress is not None:
         from egress_policy import install, release

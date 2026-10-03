@@ -1,0 +1,2 @@
+# Allow the unprivileged GAP compose worker to use user-mode page faults.
+KERNEL=="userfaultfd", GROUP="10001", MODE="0660"

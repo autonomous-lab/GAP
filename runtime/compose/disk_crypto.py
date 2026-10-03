@@ -10,7 +10,10 @@ import subprocess
 
 from microvm import VMError
 
-OPTIONS = 'encrypt.format=luks,encrypt.cipher-alg=aes-256,encrypt.cipher-mode=xts,encrypt.key-secret=gapdisk'
+# The passphrase is an HMAC of a random 256-bit host key and per-VM binding,
+# not a human password. A 2-second PBKDF adds boot latency without preventing
+# offline guessing of an already high-entropy secret.
+OPTIONS = 'encrypt.format=luks,encrypt.cipher-alg=aes-256,encrypt.cipher-mode=xts,encrypt.key-secret=gapdisk,encrypt.iter-time=50'
 
 class DiskCrypto:
     def __init__(self, path=None):

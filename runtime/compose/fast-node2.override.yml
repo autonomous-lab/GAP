@@ -1,0 +1,8 @@
+name: gap-compose
+services:
+  compose-runner:
+    image: gap-compose-fast-snapshot:node2
+    devices:
+      - /dev/userfaultfd:/dev/userfaultfd
+    environment:
+      GAP_FAST_SNAPSHOT_VM_IDS: vm_1cb37fe074134f9c8bf94b4479275c30

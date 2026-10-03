@@ -10,6 +10,7 @@ FILES = ["docker-compose.yml", "docker-compose.scale.yml", ".env.example",
          "runtime/realtime/entrypoint.sh", "runtime/edge/Dockerfile",
          "runtime/edge/nginx.conf", "runtime/edge/entrypoint.sh", "runtime/compose/Dockerfile",
          "runtime/compose/image/Dockerfile", "runtime/compose/deploy.yml",
+         "runtime/compose/Dockerfile.fast-snapshot", "runtime/compose/fast-node2.override.yml",
          "runtime/compose/caddy-bootstrap.json", "runtime/compose/runner.example.json",
          "runtime/compose/gap-compose-ports.service", "runtime/control/Dockerfile",
          "runtime/control/deploy.yml", "runtime/compose/Dockerfile.fleet-test"]

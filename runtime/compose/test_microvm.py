@@ -40,6 +40,15 @@ class MicroVMTests(unittest.TestCase):
         self.assertNotIn(self.meta['ssh_port'],self.manager.reserved_ports())
         self.assertEqual(self.manager.read(PROJECT,OWNER,VM)['state'],'migrated')
 
+    def test_fast_snapshot_is_per_vm_and_keeps_legacy_snapshot_compatible(self):
+        with patch.dict('os.environ', {'GAP_FAST_SNAPSHOT_VM_IDS': VM}):
+            self.assertTrue(self.manager.fast_snapshot(self.meta))
+            self.assertFalse(self.manager.fast_snapshot(dict(self.meta,snapshot_format='gapmem1')))
+            self.assertTrue(self.manager.fast_snapshot(dict(self.meta,snapshot_format='gapfast1')))
+        with patch.dict('os.environ', {'GAP_FAST_SNAPSHOT_VM_IDS': ''}):
+            self.assertFalse(self.manager.fast_snapshot(self.meta))
+            self.assertTrue(self.manager.fast_snapshot(dict(self.meta,snapshot_format='gapfast1')))
+
     def test_migration_fence_survives_failed_shutdown_and_controller_restart(self):
         transfer = 'move_' + 'd' * 32
         with patch.object(self.manager, 'stop', side_effect=VMError('shutdown_failed')):

@@ -119,6 +119,28 @@ SQLite backups; copying a WAL database file directly while the worker is active
 is not a valid backup. The exact command and restore requirements are documented
 in the encryption guide.
 
+### Fast hibernation experiment (node 2 only)
+
+`Dockerfile.fast-snapshot` builds pinned QEMU 11.1.50 alongside the normal
+QEMU 10 binary. `fast-node2.override.yml` selects only the listed VM ID;
+all other VMs keep their existing encrypted snapshot path. The host must
+install `99-gap-userfaultfd.rules` under `/etc/udev/rules.d/`, reload udev,
+and expose `/dev/userfaultfd` to the worker. The worker remains unprivileged
+with Docker's default seccomp policy. Build the normal worker image first,
+then the fast image, and deploy with both `deploy.yml` and the node-2 override.
+Stop or hibernate running VMs before recreating the worker. Do not switch a
+hibernated QEMU 10 snapshot to QEMU 11: start its original snapshot with the
+original binary, then stop and restart under the new binary before taking a
+fast checkpoint. Rollback requires keeping the fast binary available until all
+`gapfast1` checkpoints have resumed or been explicitly abandoned.
+
+The fast RAM file is plaintext while hibernated and during postcopy; see
+[the encryption guide](./ENCRYPTION.md) before enabling it for additional VMs.
+The test VM's HTTP first byte improved from about 6.0 s to about 0.7 s when
+its LUKS disk was also converted from QEMU's 2000 ms KDF to 50 ms. The
+re-encoding script requires the VM to be stopped and keeps an original disk
+for rollback; it may increase physical disk usage by flattening the base.
+
 ### VM API
 
 All mutations return asynchronous jobs; poll `/vm/jobs/{job_id}` as for

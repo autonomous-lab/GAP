@@ -253,7 +253,7 @@ class MicroVMs:
         atomic_json(self.catalog(key), meta)
 
     def qmp(self, meta, command, arguments=None):
-        if command not in ('query-status', 'quit', 'human-monitor-command', 'stop', 'cont', 'migrate', 'query-migrate', 'migrate_cancel'):
+        if command not in ('query-status', 'quit', 'human-monitor-command', 'stop', 'cont', 'migrate', 'query-migrate', 'migrate_cancel', 'migrate-set-capabilities', 'migrate-incoming'):
             raise VMError('invalid_qmp_command')
         # QEMU's monitor accepts one connection at a time. Keep this mutex
         # separate from the lifecycle lock held by long guest deployments.
@@ -292,6 +292,7 @@ class MicroVMs:
                         response = read()
                         if response.get('id') == identity:
                             if 'error' in response:
+                                print('GAP_QMP_ERROR '+json.dumps({'command':name,'error':response['error']}),flush=True)
                                 raise VMError('qmp_command_failed')
                             return response['return']
                     raise VMError('qmp_event_overflow')
@@ -492,6 +493,21 @@ class MicroVMs:
             self.save(meta)
         self.seed_crypto.rebuild(meta, folder)
 
+    def fast_snapshot(self, meta):
+        selected = set(filter(None, os.environ.get('GAP_FAST_SNAPSHOT_VM_IDS', '').split(',')))
+        return (meta.get('snapshot_format') == 'gapfast1' or
+                (meta['vm_id'] in selected and meta.get('snapshot_format') != 'gapmem1'))
+
+    def qemu_binary(self, meta):
+        if self.fast_snapshot(meta):
+            binary = '/usr/local/bin/qemu-system-x86_64-fast'
+            if not os.path.isfile(binary): raise VMError('fast_snapshot_qemu_unavailable')
+            return binary
+        return 'qemu-system-x86_64'
+
+    def qemu_version(self, meta):
+        return subprocess.check_output([self.qemu_binary(meta), '--version'], text=True).splitlines()[0]
+
     def command(self, meta, seed_path=None):
         folder = self.folder(meta)
         image_dir=self.image_dir(meta)
@@ -508,7 +524,8 @@ class MicroVMs:
             forwards.append(f'guestfwd=tcp:10.0.2.100:3128-cmd:/usr/bin/nc 127.0.0.1 {meta["proxy_port"]}')
         if self.direct_free_egress(meta) and meta.get('network_restricted') and not self.cpu_quota_socket:
             raise VMError('free_vm_host_egress_policy_unavailable')
-        command = ['qemu-system-x86_64', '-machine', 'microvm,accel=kvm', '-cpu', 'host',
+        command = [self.qemu_binary(meta)] + (['-L', '/usr/share/qemu'] if self.fast_snapshot(meta) else []) + [
+                '-machine', 'microvm,accel=kvm', '-cpu', 'host',
                 '-name', meta['vm_id'], '-m', str(meta['memory_mib']), '-smp', str(math.ceil(meta['vcpus'])),
                 '-kernel', str(image_dir / 'vmlinuz'), '-initrd', str(image_dir / 'initramfs'),
                 '-append', 'console=ttyS0 root=/dev/vda rootfstype=ext4 modules=virtio_mmio,virtio_blk,ext4 rootwait rw reboot=t net.ifnames=0',
@@ -529,22 +546,24 @@ class MicroVMs:
                         '-object', f'filter-dump,id=meterout,netdev=net0,queue=rx,file={folder}/meter-out.fifo,maxlen=96']
         return command
 
-    def enforce_cpu(self, meta, process):
+    def enforce_cpu(self, meta, process, quota_vcpus=None, quota_only=False):
+        quota_vcpus = meta['vcpus'] if quota_vcpus is None else quota_vcpus
         if not self.cpu_quota_socket:
             if self.direct_free_egress(meta) and meta.get('network_restricted'):
                 raise VMError('free_vm_host_egress_policy_unavailable')
             if meta['vcpus'] != int(meta['vcpus']):
                 raise VMError('fractional_cpu_requires_quota_broker')
             return
-        request={'pid':process.pid,'vm_id':meta['vm_id'],'vcpus':meta['vcpus']}
-        if self.direct_free_egress(meta):
+        request={'pid':process.pid,'vm_id':meta['vm_id'],'vcpus':quota_vcpus}
+        if quota_only: request['quota_only']=True
+        elif self.direct_free_egress(meta):
             request['egress_policy']='free_web_v1' if meta.get('network_restricted') else 'standard'
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(5)
             sock.connect(self.cpu_quota_socket)
             sock.sendall((json.dumps(request)+'\n').encode())
             response = sock.makefile('rb').readline(2049)
-        expected = int(meta['vcpus']*100000)
+        expected = int(quota_vcpus*100000)
         result = json.loads(response)
         if result != {'ok':True,'quota_us':expected,'period_us':100000}:
             raise VMError('cpu_quota_unavailable')
@@ -573,7 +592,7 @@ class MicroVMs:
         if meta.get('image_identity') != current_identity:
             if self.image_version(meta)!=meta['image_version']: raise VMError('guest_base_image_changed')
             meta['image_identity']=current_identity
-        meta['snapshot_qemu_version']=subprocess.check_output(['qemu-system-x86_64','--version'],text=True).splitlines()[0]
+        meta['snapshot_qemu_version']=self.qemu_version(meta)
         tag='idle_' + uuid.uuid4().hex
         # Record which keys are already present in the memory image. The usual
         # wake can then skip an SSH round trip while still applying key changes
@@ -584,7 +603,12 @@ class MicroVMs:
         self.save(meta)
         try:
             self.qmp(meta,'stop')
-            if meta.get('disk_encryption'):
+            if self.fast_snapshot(meta):
+                from memory_fast import save
+                save(self,meta)
+                meta['snapshot_format']='gapfast1'
+                self.save(meta)
+            elif meta.get('disk_encryption'):
                 from memory_crypto import save
                 save(self,meta)
                 meta['snapshot_format']='gapmem1'
@@ -626,11 +650,14 @@ class MicroVMs:
             if self.image_version(meta)!=meta['image_version']: raise VMError('guest_base_image_changed')
             meta['image_identity']=current_identity
             self.save(meta)
-        if meta.get('snapshot_qemu_version')!=subprocess.check_output(['qemu-system-x86_64','--version'],text=True).splitlines()[0]:
+        if meta.get('snapshot_qemu_version')!=self.qemu_version(meta):
             raise VMError('snapshot_requires_original_qemu_version')
         self.ensure_free_vm_proxy(meta)
         meta['state']='resuming'; self.save(meta)
         self.capture_start(meta)
+        if meta.get('snapshot_format')=='gapfast1':
+            from memory_fast import restore
+            return restore(self,meta)
         if meta.get('disk_encryption'):
             print('GAP_RESUME_PREP_PROFILE '+json.dumps({'vm_id':meta['vm_id'],
                 'key_ms':round((key_ready-profile_started)*1000),
@@ -700,6 +727,7 @@ class MicroVMs:
             if not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
             checked=time.monotonic()
             meta['state']='running';self.save(meta)
+            catalog_saved=time.monotonic()
             self.qmp(meta,'cont')
             continued=time.monotonic()
             if self.runtime:self.runtime.execution_started(meta)
@@ -709,7 +737,8 @@ class MicroVMs:
                 'launch_ms':round((launched-profile_started)*1000),
                 'stream_ms':round((restored-launched)*1000),
                 'qmp_and_policy_ms':round((checked-restored)*1000),
-                'cont_ms':round((continued-checked)*1000),
+                'catalog_save_ms':round((catalog_saved-checked)*1000),
+                'cont_ms':round((continued-catalog_saved)*1000),
                 'cleanup_ms':round((time.monotonic()-continued)*1000)}),flush=True)
         except Exception as error:
             if process and process.poll() is None:process.terminate();process.wait(timeout=10)
@@ -754,7 +783,7 @@ class MicroVMs:
         meta['authorized_keys_sha256'] = self.authorized_keys_digest(meta, meta.get('ssh_keys', []))
         self.capture_start(meta)
         error_log = folder / 'hypervisor.log'
-        with (error_log.open('wb') if self.diagnostic_serial else open(os.devnull, 'wb')) as log, self.disk_crypto.secret(meta) as (secret, fds), self.seed_crypto.image(meta, folder) as (seed_path, seed_fds):
+        with (error_log.open('wb') if self.diagnostic_serial or self.fast_snapshot(meta) else open(os.devnull, 'wb')) as log, self.disk_crypto.secret(meta) as (secret, fds), self.seed_crypto.image(meta, folder) as (seed_path, seed_fds):
             process = subprocess.Popen(self.command(meta,seed_path)+[x.replace('--object','-object') for x in secret]+['-S'], pass_fds=fds+seed_fds, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=log, start_new_session=True,
                 env={'PATH': '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'})

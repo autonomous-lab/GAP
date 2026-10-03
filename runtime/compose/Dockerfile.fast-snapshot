@@ -1,0 +1,15 @@
+FROM alpine:3.23 AS qemu-build
+RUN apk add --no-cache build-base ca-certificates git ninja meson pkgconf python3 py3-pip \
+    glib-dev pixman-dev libslirp-dev zlib-dev zstd-dev gnutls-dev libgcrypt-dev libcap-ng-dev libseccomp-dev
+ARG QEMU_COMMIT=2a0ac9c8ac2d303ca515dc819043409aef18cab5
+RUN mkdir -p /src/qemu && git -C /src/qemu init && \
+    git -C /src/qemu fetch --depth 1 https://gitlab.com/qemu-project/qemu.git "$QEMU_COMMIT" && \
+    git -C /src/qemu checkout --detach FETCH_HEAD && \
+    test "$(git -C /src/qemu rev-parse HEAD)" = "$QEMU_COMMIT"
+WORKDIR /src/qemu
+RUN ./configure --target-list=x86_64-softmmu --enable-kvm --enable-slirp \
+    --disable-docs --disable-gtk --disable-sdl --disable-vnc --disable-spice --disable-werror \
+    && ninja -C build -j4 qemu-system-x86_64
+
+FROM gap-compose-compose-runner:latest
+COPY --from=qemu-build /src/qemu/build/qemu-system-x86_64 /usr/local/bin/qemu-system-x86_64-fast

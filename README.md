@@ -321,14 +321,19 @@ makes the project databases unrecoverable.
 
 ## MicroVM storage encryption
 
-**New microVMs on the Elestio fleet encrypt their disks and saved hibernation
-memory at rest.** This is built into the worker: applications do not need to
+**New microVMs on the Elestio fleet encrypt their disks.** The standard
+hibernation path also encrypts saved memory. The experimental fast-snapshot
+path on node 2 deliberately keeps its RAM checkpoint unencrypted to minimize
+resume latency. Applications do not need to
 manage disk passwords, and the host OS does not require a storage migration.
 Independent operators must explicitly enable encryption on their workers.
 
 - VM disk payloads use **AES-256-XTS through qcow2 LUKS**.
-- Saved hibernation memory uses **authenticated AES-256-GCM**; corrupted or
-  incomplete checkpoints are rejected before guest execution resumes.
+- Standard saved hibernation memory uses **authenticated AES-256-GCM**; corrupted
+  or incomplete checkpoints are rejected before guest execution resumes.
+- Fast-snapshot memory is a private plaintext host file until QEMU finishes
+  loading it; it is removed after postcopy completes. It is not covered by the
+  storage-encryption badge and must be protected by host access controls.
 - Seed images and guest SSH host private keys use **authenticated AES-256-GCM**.
   Plaintext seed images are supplied to QEMU from anonymous memory only.
 - Each VM has a distinct derived disk key. Keys are held outside the VM storage
@@ -341,7 +346,7 @@ Check `disk_encryption.enabled` in the VM API response. The dashboard shows the
 AES-256 storage badge only when that VM reports encryption enabled. Do not infer
 coverage from a provider name or assume every independent node enables it.
 
-This covers disk payloads, retained hibernation memory, seed images, guest SSH
+The standard mode covers disk payloads, retained hibernation memory, seed images, guest SSH
 host private keys, project databases, registration challenges, administrator
 state, browser VM sessions and the worker's job, credit and capacity databases.
 It does not cover qcow2 metadata, public seed metadata, Realtime routing/quota

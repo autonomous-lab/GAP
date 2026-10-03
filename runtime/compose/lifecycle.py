@@ -128,10 +128,14 @@ class Runtime:
                 import subprocess
                 try:
                     disk=json.loads(subprocess.check_output(['qemu-img','info','--output=json',str(self.manager.folder(meta)/'disk.qcow2')]))
-                    exists=(self.manager.folder(meta)/'memory.enc').is_file() if meta.get('snapshot_format')=='gapmem1' else any(s['name']==meta.get('snapshot_tag') for s in disk.get('snapshots',[]))
+                    exists=((self.manager.folder(meta)/'memory.enc').is_file() if meta.get('snapshot_format')=='gapmem1' else
+                            (self.manager.folder(meta)/'memory.fast').is_file() if meta.get('snapshot_format')=='gapfast1' else
+                            any(s['name']==meta.get('snapshot_tag') for s in disk.get('snapshots',[])))
                 except Exception: exists=False
                 meta['state']='hibernated' if exists else 'stopped'
             elif meta['state']=='running': meta['state']='stopped'
+            if meta['state']=='stopped' and meta.get('snapshot_format')!='gapfast1':
+                (self.manager.folder(meta)/'memory.fast').unlink(missing_ok=True)
             if meta['state']!='destroyed' and meta.get('public_ports') and not meta.get('public_targets'):
                 with self.manager.allocation_lock():
                     used={meta['ssh_port'],*(p['worker_port'] for p in meta.get('ports',[]))}

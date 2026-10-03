@@ -50,6 +50,26 @@ has authenticated, admission is valid and the consumed-state transition is durab
 The current disk remains unchanged while hibernated. The unencrypted legacy path
 continues to use internal snapshots.
 
+An opt-in node-2 experiment selects individual VM IDs with
+`GAP_FAST_SNAPSHOT_VM_IDS` and uses pinned QEMU 11.1.50. It saves RAM as a
+seekable `mapped-ram` file and resumes with `postcopy-ram`/`userfaultfd` so
+the guest can run before every page is loaded. This `memory.fast` file is
+**not encrypted or authenticated**. It is mode 0600 in the worker-only state
+directory and is removed only after postcopy finishes. Never enable this mode
+for a VM whose RAM may contain secrets without accepting that exposure.
+The VM disk, seed and host SSH private key remain encrypted. A lost or modified
+RAM checkpoint may prevent resume; there is no confidentiality or integrity
+claim for this experimental checkpoint.
+
+New qcow2 LUKS disks use `encrypt.iter-time=50` ms instead of QEMU's 2000 ms
+default. GAP's per-VM passphrase is already an HMAC-derived 256-bit random
+secret, not a human password; the shorter PBKDF improves startup without making
+practical offline guessing of that secret feasible. Existing disks retain
+their original KDF until they are converted offline. Conversion with
+`reencode_disk_kdf.py` preserves the original disk as
+`disk.kdf-original.qcow2` for rollback but flattens the backing image and can
+increase physical storage. Test and plan capacity before converting a fleet.
+
 Cold migration flattens directly to an encrypted standalone qcow2. It does not
 copy memory checkpoints, and retains the established cold-move semantics. Destination
 validation requires the key and rejects incompatible images before activation.
@@ -97,11 +117,12 @@ cannot be restored.
 
 ## Protection boundary
 
-This protects VM disk payloads, retained hibernation memory, seed images and guest
+The standard mode protects VM disk payloads, retained hibernation memory, seed images and guest
 SSH host private keys and worker SQLite contents against acquisition of those
 files without the keyring. qcow2 metadata, public seed metadata, SQLite filenames
 and sizes, serial logs (when enabled), host swap, host logs and a complete host
 image including the keyring are NOT covered.
+Fast-snapshot RAM files are plaintext and outside that protection boundary.
 Root on a running host can obtain keys or guest memory. No host-wide encryption
 badge is justified. Authenticated memory encryption does not add disk integrity to
 AES-XTS. Transfer transport authentication and existing archive digests still apply.
