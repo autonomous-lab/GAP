@@ -227,13 +227,88 @@ def claimed_banner(details,colored=False):
     memory=details['memory_mib']
     memory_label=f'{memory//1024} GiB' if memory%1024==0 else f'{memory} MiB'
     app_ports=', '.join(str(port) for port in details['app_ports']) or 'none configured'
+    public_url=details.get('public_url') or 'not configured'
+    if details.get('public_url') and not details.get('public_url_routed'):
+        public_url+=' (route pending)'
+    public_ports=details.get('public_ports') or []
+    mappings=[]
+    for port in public_ports:
+        if port.get('guest_port') is None:continue
+        label=(f'{details.get("public_hostname") or "host"}:{port["public_port"]}'
+               f' → {port["guest_port"]}/{port.get("protocol") or "tcp"}')
+        if not port.get('routed'):label+=' (pending)'
+        mappings.append(label)
+    mapping_lines=''.join(f'  PORT MAP    {label}\r\n' for label in mappings) or '  PORT MAP    no direct TCP/UDP ports\r\n'
+    http_port=details.get('http_guest_port')
+    https_line=(f'  HTTPS MAP   public HTTPS → {http_port}/tcp (inside VM)\r\n'
+                if type(http_port) is int and http_port>0 else '')
+    wallet=details.get('wallet_microcredits')
+    credits=(f'{format_credits(wallet)} remaining (shared account)'
+             if type(wallet) is int and wallet>=0 else 'unavailable; see dashboard')
+    budget=details.get('budget_remaining_microcredits')
+    budget_line=(f'  BUDGET LEFT {format_credits(budget)} credits (this project)\r\n'
+                 if type(budget) is int and budget>=0 else '')
     return (f'\r\n  {brand}GAP  /  YOUR MICROVM{reset}\r\n'
             f'  Reconnected. Your files are where you left them.\r\n'
             f'\r\n'
             f'  COMPUTE     {details["vcpus"]:g} vCPU  ·  {memory_label} RAM  ·  {details["disk_gib"]} GiB disk\r\n'
             f'  APP PORTS   {app_ports} (inside VM)\r\n'
+            f'  PUBLIC URL  {public_url}\r\n'
+            f'{https_line}'
+            f'{mapping_lines}'
             f'  SSH ENTRY   port 2121\r\n'
+            f'  CREDITS     {credits}\r\n'
+            f'{budget_line}'
             f'  MANAGE      {details["manage_url"]}\r\n\r\n')
+
+
+def format_credits(microcredits):
+    whole,fraction=divmod(microcredits,1_000_000)
+    return (f'{whole}.{fraction:06d}'.rstrip('0').rstrip('.') if fraction else str(whole))
+
+
+def claimed_status(runner,project,owner,meta):
+    """Read display-only network and funding state without delaying VM access."""
+    status={'public_url':None,'public_url_routed':False,'http_guest_port':None,'public_hostname':None,
+            'public_ports':[],'wallet_microcredits':None,'budget_remaining_microcredits':None}
+    try:
+        if runner.ingress:
+            ingress=runner.ingress.public(meta)
+            if isinstance(ingress,dict) and ingress.get('enabled'):
+                status['public_url']=ingress.get('url')
+                status['public_url_routed']=bool(ingress.get('routed'))
+                status['http_guest_port']=ingress.get('guest_port')
+    except Exception:
+        pass
+    try:
+        network=runner.hypervisor.network.public(meta)
+        if isinstance(network,dict):
+            status['public_hostname']=network.get('hostname')
+            status['public_ports']=network.get('ports',[])
+    except Exception:
+        pass
+    try:
+        code,account=runner.rpc({'project_id':project,'owner_did':owner,
+                                 'action':'credits','method':'GET','body':{}})
+        if code==200 and isinstance(account,dict):
+            limit=account.get('budget_microcredits')
+            spent=account.get('budget_spent_microcredits')
+            if type(limit) is int and type(spent) is int:
+                status['budget_remaining_microcredits']=max(0,limit-spent)
+    except Exception:
+        pass
+    try:
+        ledger=runner.runtime.ledger
+        if project in ledger.projects:
+            wallet=ledger.transport({'action':'wallet-status','project_id':project,'owner_did':owner})
+            amount=wallet.get('total_remaining_microcredits') if isinstance(wallet,dict) else None
+            if (isinstance(wallet,dict) and wallet.get('project_id')==project
+                    and wallet.get('microcredits_per_credit')==1_000_000
+                    and type(amount) is int and amount>=0):
+                status['wallet_microcredits']=amount
+    except Exception:
+        pass
+    return status
 
 
 def gateway_error_message(error):
@@ -293,6 +368,7 @@ def prepare(runner,key,ip):
             guest_key=str(key_file),guest_host_key=host_key,
             vcpus=meta['vcpus'],memory_mib=meta['memory_mib'],disk_gib=meta['disk_gib'],
             app_ports=sorted({port['guest_port'] for port in meta['ports']}),
+            **claimed_status(runner,project,owner,meta),
             manage_url='https://gap.geta.team/account')
     if admission.get('status') not in (None,'active'):
         raise GatewayError('invalid_admission')

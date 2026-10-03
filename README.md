@@ -649,6 +649,11 @@ lets owners add public keys and expose SSH on a free TCP slot, and includes
 an interactive browser terminal. The terminal uses internal, pinned SSH and
 requires no public port or private key upload. Hibernated VMs resume before
 connection. Terminal limits and API details are in [AGENTS.md](AGENTS.md#ssh-connection-details-and-browser-terminal).
+The port-2121 reconnect banner for a claimed free VM shows its assigned HTTPS
+application URL, configured public TCP/UDP-to-guest mappings, shared-account
+credits remaining and any project budget remaining. The credit amount comes
+from a project-scoped, read-only control-plane wallet lookup; if it is
+unavailable, the banner says so instead of showing the node's local reserve.
 
 The microVM console also displays public IP/hostname, all five port mappings,
 the HTTPS routing URL, mandatory visitor Basic Auth settings with owner-only password reveal/copy beside the URL, and native custom-domain

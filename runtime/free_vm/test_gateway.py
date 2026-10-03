@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
 from gateway import (FreeServer, GatewayError, admission_error, claimable_banner, claimed_banner,
-                     gateway_error_message, interactive_shell_command, prepare,
+                     claimed_status, format_credits, gateway_error_message, interactive_shell_command, prepare,
                      request_node, retry_mutation, rpc_wait, shell, stable_id, welcome_banner,
                      key_hash, verify_relay_ticket, _used_relay_nonces, credit_block_reason)
 
@@ -226,8 +226,60 @@ class GatewayTests(unittest.TestCase):
             self.assertIn('YOUR MICROVM',claimed_banner(result))
             self.assertIn('1.5 vCPU  ·  1536 MiB RAM  ·  12 GiB disk',claimed_banner(result))
             self.assertIn('APP PORTS   8080 (inside VM)',claimed_banner(result))
+            self.assertIn('PUBLIC URL  not configured',claimed_banner(result))
+            self.assertIn('PORT MAP    no direct TCP/UDP ports',claimed_banner(result))
+            self.assertIn('CREDITS     unavailable; see dashboard',claimed_banner(result))
             self.assertIn('SSH ENTRY   port 2121',claimed_banner(result))
             self.assertNotIn('CLAIM',claimed_banner(result))
+
+    def test_claimed_banner_uses_public_routes_and_shared_wallet_not_local_reserve(self):
+        project='prj_'+'a'*24
+        owner='did:gap:'+'b'*64
+        meta={'vm_id':'vm_'+'c'*32}
+        network=Mock()
+        network.public.return_value={'hostname':'vm.example.test','ports':[
+            {'public_port':23111,'guest_port':8080,'protocol':'tcp','routed':True},
+            {'public_port':23112,'guest_port':22,'protocol':'tcp','routed':False},
+            {'public_port':23113,'guest_port':None,'protocol':None,'routed':False}]}
+        ingress=Mock()
+        ingress.public.return_value={'enabled':True,'routed':True,'guest_port':8080,
+                                     'url':'https://vm.example.test/apps/demo/'}
+        ledger=Mock(projects={project})
+        ledger.transport.return_value={'project_id':project,
+            'total_remaining_microcredits':125_250_000,'microcredits_per_credit':1_000_000}
+        runner=types.SimpleNamespace(ingress=ingress,hypervisor=types.SimpleNamespace(network=network),
+                                     runtime=types.SimpleNamespace(ledger=ledger),
+                                     rpc=Mock(return_value=(200,{'budget_microcredits':20_000_000,
+                                                                  'budget_spent_microcredits':3_500_000,
+                                                                  'balance_microcredits':500_000})))
+        details=claimed_status(runner,project,owner,meta)
+        self.assertEqual(details['wallet_microcredits'],125_250_000)
+        ledger.transport.assert_called_once_with({'action':'wallet-status',
+            'project_id':project,'owner_did':owner})
+        panel=claimed_banner(dict(details,vcpus=1,memory_mib=1024,disk_gib=8,
+                                  app_ports=[8080],manage_url='https://gap.geta.team/account'))
+        self.assertIn('PUBLIC URL  https://vm.example.test/apps/demo/',panel)
+        self.assertIn('HTTPS MAP   public HTTPS → 8080/tcp (inside VM)',panel)
+        self.assertIn('PORT MAP    vm.example.test:23111 → 8080/tcp',panel)
+        self.assertIn('PORT MAP    vm.example.test:23112 → 22/tcp (pending)',panel)
+        self.assertNotIn('23113',panel)
+        self.assertIn('CREDITS     125.25 remaining (shared account)',panel)
+        self.assertIn('BUDGET LEFT 16.5 credits (this project)',panel)
+        self.assertNotIn('0.5 remaining',panel)
+        self.assertEqual(format_credits(1), '0.000001')
+
+    def test_claimed_status_wallet_outage_never_looks_like_zero(self):
+        ledger=Mock(projects={'prj_'+'a'*24})
+        ledger.transport.side_effect=RuntimeError('offline')
+        runner=types.SimpleNamespace(ingress=None,hypervisor=types.SimpleNamespace(network=None),
+                                     runtime=types.SimpleNamespace(ledger=ledger),
+                                     rpc=Mock(side_effect=RuntimeError('offline')))
+        details=claimed_status(runner,'prj_'+'a'*24,'did:gap:'+'b'*64,{})
+        self.assertIsNone(details['wallet_microcredits'])
+        panel=claimed_banner(dict(details,vcpus=1,memory_mib=1024,disk_gib=8,
+                                  app_ports=[],manage_url='https://gap.geta.team/account'))
+        self.assertIn('CREDITS     unavailable; see dashboard',panel)
+        self.assertNotIn('BUDGET LEFT',panel)
 
     def test_admission_errors_do_not_pretend_every_failure_is_capacity(self):
         self.assertEqual(admission_error('anonymous trial capacity reached'),'capacity_reached')

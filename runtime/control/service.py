@@ -245,6 +245,16 @@ class Application:
                 with a.db() as db:
                     placement = dict(a.node_project(db, actor, body['project_id']))
                 return {'operator_id': a.operator, **placement}
+            if body.get('action') == 'wallet-status':
+                with a.db() as db:
+                    placement = a.node_project(db, actor, body['project_id'])
+                    if placement['owner'] != body.get('owner_did'):
+                        raise Failure('project_owner_mismatch', 403)
+                    customer = placement['customer']
+                wallet = a.wallet(customer)
+                return {'operator_id': a.operator, 'project_id': body['project_id'],
+                        'total_remaining_microcredits': wallet['total_remaining_microcredits'],
+                        'microcredits_per_credit': wallet['microcredits_per_credit']}
             if body.get('action') == 'debit':
                 if not self.allow_debits:
                     raise Failure('online_debits_disabled', 409)

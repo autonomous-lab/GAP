@@ -74,6 +74,21 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.call('/node', 'node-two-test', dict(action='project', project_id=PROJECT))[0], 403)
         self.assertEqual(self.call('/node', 'admin-test', dict(action='project', project_id=PROJECT))[0], 403)
 
+    def test_node_wallet_status_is_read_only_and_scoped_to_its_project_owner(self):
+        customer = self.customer()
+        self.operator('topup', 'wallet-status-fund', customer_id=customer,
+                      amount_microcredits=1_250_000, source='promotional')
+        status, wallet = self.call('/node', 'node-one-test', dict(
+            action='wallet-status', project_id=PROJECT, owner_did=OWNER))
+        self.assertEqual(status, 200)
+        self.assertEqual(wallet['total_remaining_microcredits'], 1_250_000)
+        self.assertEqual(wallet['microcredits_per_credit'], 1_000_000)
+        self.assertNotIn('customer_id', wallet)
+        self.assertEqual(self.call('/node', 'node-two-test', dict(
+            action='wallet-status', project_id=PROJECT, owner_did=OWNER))[0], 403)
+        self.assertEqual(self.call('/node', 'node-one-test', dict(
+            action='wallet-status', project_id=PROJECT, owner_did=AGENT))[0], 403)
+
     def test_readiness_uses_node_identity_and_live_feature_flags(self):
         status,data=self.call('/node','node-one-test',dict(action='readiness'))
         self.assertEqual(status,200);self.assertEqual(data['node_id'],'node-one')
