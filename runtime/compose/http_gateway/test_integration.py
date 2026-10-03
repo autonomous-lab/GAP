@@ -32,7 +32,17 @@ class Control(BaseHTTPRequestHandler):
         if self.path!='/hot-http' or self.headers.get('Authorization')!='Bearer '+TOKEN:
             self.send_error(403);return
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        payload={'port':self.server.backend_port,'ticket':'e'*32,'cold':False} if body['action']=='begin' else {'ok':True}
+        with self.server.count_lock:
+            if body['action']=='begin':
+                self.server.begin_count+=1
+                ticket=f'{self.server.begin_count:032x}'
+            elif body['action']=='end':
+                self.server.end_count+=1
+        if body['action']=='begin' and self.server.deny_begin:
+            data=b'{"error":{"code":"policy_revoked"}}'
+            self.send_response(403);self.send_header('Content-Length',str(len(data)))
+            self.end_headers();self.wfile.write(data);return
+        payload={'port':self.server.backend_port,'ticket':ticket,'cold':False} if body['action']=='begin' else {'ok':True}
         data=json.dumps(payload).encode()
         self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
 
@@ -61,6 +71,7 @@ class Integration(unittest.TestCase):
         backend.headers_seen=[]
         control=ThreadingHTTPServer(('127.0.0.1',port()),Control)
         control.backend_port=backend.server_port
+        control.begin_count=0;control.end_count=0;control.count_lock=threading.Lock();control.deny_begin=False
         gateway_port=port()
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp,'service.token').write_text(TOKEN)
@@ -94,6 +105,15 @@ class Integration(unittest.TestCase):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=16) as workers:
                     results=list(workers.map(lambda _:request(),range(100)))
                 self.assertTrue(all(result==(200,b'gateway-ok') for result in results))
+                self.assertLess(control.begin_count,10,'warm HTTP must not ask Python on each request')
+                time.sleep(2.75)
+                self.assertEqual(request(),(200,b'gateway-ok'))
+                self.assertGreaterEqual(control.begin_count,2,'warm admission must refresh in background')
+                control.deny_begin=True
+                time.sleep(5.25)
+                self.assertEqual(request()[0],403,'revocation must apply within the five-second cache TTL')
+                control.deny_begin=False
+                self.assertEqual(request(),(200,b'gateway-ok'))
                 self.assertTrue(all('X-Gap-Vm-Admission' not in headers and
                                     'X-Gap-Project' not in headers and 'X-Gap-Vm' not in headers
                                     for headers in backend.headers_seen))

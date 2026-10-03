@@ -1,6 +1,44 @@
 //! Public VM access policy is checked before nginx opens any upstream stream.
 use super::*;
 
+const SITE_AUTH_CACHE_TTL:std::time::Duration=std::time::Duration::from_secs(30);
+const SITE_AUTH_CACHE_CAP:usize=4096;
+struct SiteAuthCache {
+    key:[u8;32],
+    verified:std::sync::RwLock<std::collections::HashMap<[u8;32],std::time::Instant>>,
+}
+static SITE_AUTH_CACHE:std::sync::OnceLock<SiteAuthCache>=std::sync::OnceLock::new();
+
+fn site_auth_cache()->&'static SiteAuthCache {
+    SITE_AUTH_CACHE.get_or_init(|| {
+        use rand::RngCore;
+        let mut key=[0;32];rand::rngs::OsRng.fill_bytes(&mut key);
+        SiteAuthCache{key,verified:std::sync::RwLock::new(std::collections::HashMap::new())}
+    })
+}
+fn site_auth_digest(record:&Record,username:&str,password:&str,encoded:&str)->[u8;32] {
+    use hmac::Mac;
+    let mut mac=<hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(&site_auth_cache().key)
+        .expect("fixed HMAC key");
+    for value in [record.vm_id.as_bytes(),username.as_bytes(),password.as_bytes(),encoded.as_bytes()] {
+        mac.update(&(value.len() as u64).to_be_bytes());mac.update(value);
+    }
+    mac.finalize().into_bytes().into()
+}
+fn site_auth_cached(digest:&[u8;32])->bool {
+    site_auth_cache().verified.read().is_ok_and(|entries|
+        entries.get(digest).is_some_and(|until|std::time::Instant::now()<*until))
+}
+fn site_auth_remember(digest:[u8;32]) {
+    if let Ok(mut entries)=site_auth_cache().verified.write() {
+        if entries.len()>=SITE_AUTH_CACHE_CAP {
+            let now=std::time::Instant::now();entries.retain(|_,until|*until>now);
+            if entries.len()>=SITE_AUTH_CACHE_CAP {entries.clear();}
+        }
+        entries.insert(digest,std::time::Instant::now()+SITE_AUTH_CACHE_TTL);
+    }
+}
+
 #[derive(Clone,serde::Serialize,serde::Deserialize)]
 pub(super) struct Record {
     pub vm_id:String, pub project_id:String, pub owner_did:String, pub route_key:String,
@@ -207,9 +245,11 @@ fn admit_vm_http_with_expected(state:&Arc<Mutex<NodeState>>,expected:&str,secret
     if !g.active_cloud_project(&record.project_id) {return answer(403)}
     if !g.microvm_project_allowed(&record.project_id,&record.owner_did){return answer(403)}
     if g.private_node.as_ref().is_none_or(|p|p.runner.is_none()){return answer(503)}
-    if g.check_rate_limit(None,ip).is_err(){return answer(403)}
     if let Some(trial)=g.free_vm_trials.get(&record.project_id).filter(|trial|trial.claimed_at.is_none()) {
         if trial.phase(now_unix())!=super::free_vm::Phase::Active || domain.is_some() {return answer(403)}
+        // Anonymous trials keep the API's per-IP abuse ceiling. A claimed or
+        // paid application's traffic is not an API invocation.
+        if g.check_rate_limit(None,ip).is_err(){return answer(403)}
     }
     let ip_mode=g.free_vm_trials.contains_key(&record.project_id) && domain.is_none();
     drop(g);
@@ -221,9 +261,17 @@ fn admit_vm_http_with_expected(state:&Arc<Mutex<NodeState>>,expected:&str,secret
         });
         if !allowed{return answer(403)}
     } else if domain.is_none() {
-        let credentials=authorization.and_then(parse_basic_credentials);
-        let allowed=credentials.is_some_and(|(u,p)|record.username.as_deref()==Some(&u) && record.password_hash.as_deref().is_some_and(|h|crate::cloud::verify_site_password(&p,h).unwrap_or(false)));
-        if !allowed{return answer(401)}
+        let Some((username,password))=authorization.and_then(parse_basic_credentials) else {return answer(401)};
+        if record.username.as_deref()!=Some(&username) {return answer(401)}
+        let Some(encoded)=record.password_hash.as_deref() else {return answer(401)};
+        let digest=site_auth_digest(&record,&username,&password,encoded);
+        if !site_auth_cached(&digest) {
+            // Only cache misses pay for Argon2. Continue rate-limiting invalid
+            // or first-time credentials so guesses cannot become a CPU flood.
+            if state.lock().map_or(true,|mut g|g.check_rate_limit(None,ip).is_err()){return answer(403)}
+            if !crate::cloud::verify_site_password(&password,encoded).unwrap_or(false){return answer(401)}
+            site_auth_remember(digest);
+        }
     }
     // The private Caddy route independently matches both the edge secret and
     // this exact VM generation. Disabled/deleted/replaced routes fail closed.
@@ -239,6 +287,69 @@ fn admit_vm_http_with_expected(state:&Arc<Mutex<NodeState>>,expected:&str,secret
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claimed_preview_is_not_limited_as_api_traffic() {
+        let project=format!("prj_{}","a".repeat(24));
+        let owner=format!("did:gap:{}","b".repeat(64));
+        let vm=format!("vm_{}","c".repeat(32));
+        let mut node=NodeState::with_rate_limits(Box::new(crate::storage::sqlite::SqliteStorage::open(":memory:").unwrap()),None,1,1);
+        node.cloud_projects.insert(project.clone(),crate::cloud::ProjectRecord {
+            project_id:project.clone(),owner_did:owner.clone(),status:"active".into(),
+            plan:"free".into(),created_at:now_unix(),updated_at:now_unix(),
+        });
+        node.private_node=Some(crate::private_node::PrivateNode {
+            private:false,approvals:std::path::PathBuf::new(),compose_approvals:None,
+            runner:Some(("http://127.0.0.1:8092".into(),"test-token".into())),
+        });
+        node.vm_http.insert(vm.clone(),Record {vm_id:vm,project_id:project.clone(),owner_did:owner.clone(),
+            route_key:project.clone(),username:None,password_hash:None,password_sealed:None,
+            ssh_ip:Some("203.0.113.10".into()),browser_ip:None,additional_ips:Vec::new()});
+        node.free_vm_trials.insert(project.clone(),super::super::free_vm::Trial {
+            project_id:project.clone(),owner_did:owner,created_at:now_unix(),claimed_at:Some(now_unix()),
+            ssh_key_hash:"d".repeat(64),source_hash:super::super::free_vm::source_fingerprint(
+                "203.0.113.10",b"0123456789abcdef0123456789abcdef").unwrap(),
+            additional_source_hashes:Vec::new(),claim_hash:String::new(),claim_sealed:String::new(),
+        });
+        let state=Arc::new(Mutex::new(node));
+        let edge="e".repeat(32);let path=format!("/apps/{project}/");
+        let admit=||admit_vm_http_with_expected(&state,&edge,&edge,"example.test",&path,&path,None,Some("203.0.113.10"));
+        assert_eq!(admit().status,200);
+        assert_eq!(admit().status,200);
+        state.lock().unwrap().free_vm_trials.get_mut(&project).unwrap().claimed_at=None;
+        assert_eq!(admit().status,200);
+        assert_eq!(admit().status,403);
+    }
+    #[test]
+    fn cached_basic_auth_tracks_password_hash_rotation() {
+        use base64::Engine;
+        let project=format!("prj_{}","a".repeat(24));
+        let owner=format!("did:gap:{}","b".repeat(64));
+        let vm=format!("vm_{}","c".repeat(32));
+        let mut node=NodeState::new(Box::new(crate::storage::sqlite::SqliteStorage::open(":memory:").unwrap()));
+        node.cloud_projects.insert(project.clone(),crate::cloud::ProjectRecord {
+            project_id:project.clone(),owner_did:owner.clone(),status:"active".into(),
+            plan:"free".into(),created_at:now_unix(),updated_at:now_unix(),
+        });
+        node.cloud_fleet_projects.insert(project.clone());
+        node.private_node=Some(crate::private_node::PrivateNode {
+            private:false,approvals:std::path::PathBuf::new(),compose_approvals:None,
+            runner:Some(("http://127.0.0.1:8092".into(),"test-token".into())),
+        });
+        node.vm_http.insert(vm.clone(),Record {vm_id:vm.clone(),project_id:project.clone(),owner_did:owner,
+            route_key:project.clone(),username:Some("visitor".into()),
+            password_hash:Some(crate::cloud::hash_site_password("first-password-123").unwrap()),
+            password_sealed:None,ssh_ip:None,browser_ip:None,additional_ips:Vec::new()});
+        let state=Arc::new(Mutex::new(node));
+        let edge="e".repeat(32);let path=format!("/apps/{project}/");
+        let basic=|password:&str|format!("Basic {}",base64::engine::general_purpose::STANDARD.encode(format!("visitor:{password}")));
+        let admit=|auth:&str|admit_vm_http_with_expected(&state,&edge,&edge,"example.test",&path,&path,Some(auth),None);
+        let first=basic("first-password-123");
+        assert_eq!(admit(&first).status,200);
+        assert_eq!(admit(&first).status,200);
+        state.lock().unwrap().vm_http.get_mut(&vm).unwrap().password_hash=Some(crate::cloud::hash_site_password("second-password-123").unwrap());
+        assert_eq!(admit(&first).status,401);
+        assert_eq!(admit(&basic("second-password-123")).status,200);
+    }
     #[test]
     fn anonymous_preview_accepts_only_registered_ips_while_active() {
         use base64::Engine;

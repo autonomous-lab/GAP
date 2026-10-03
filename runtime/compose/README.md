@@ -147,21 +147,32 @@ for rollback; it may increase physical disk usage by flattening the base.
 
 The existing Python wake gateway remains the default and still handles raw
 TCP/UDP. `http_gateway/` contains an opt-in Tokio/Hyper HTTP and WebSocket
-proxy. Each request obtains an authenticated, short-lived admission ticket from
-the Python runner before reaching the guest. The control connection is pooled
-so the SQLCipher key derivation is not repeated in a new Python thread for
-every HTTP request. The proxy strips all GAP-private headers before forwarding,
-and a dropped response or WebSocket releases the activity ticket. Cold wake
-waits for the guest application port to become reachable.
+proxy. A route shares an authenticated admission ticket for at most five
+seconds; requests do not call the Python runner individually. The gateway
+refreshes the ticket in the background before expiry, while an expired ticket
+forces a fresh admission before forwarding. This bounds a revoked route's
+stale-access window to five seconds. Active responses and WebSockets keep the
+ticket alive until they finish, then the runner releases it. The control
+connection is pooled, both TCP legs disable Nagle's algorithm, and the proxy
+strips all GAP-private headers before forwarding. Cold wake waits for the
+guest application port to become reachable.
 Warm requests use the maintenance loop's 15-second billing cache instead of a
 SQLCipher transaction per request; the fleet lease is still checked on every
 admission. Cold wake forces a fresh metering sample and credit/lease check. The independent
 policy watchdog and metering loop continue to enforce their own deadlines.
+The public edge still checks each request's route and visitor policy. Claimed
+and paid application traffic does not consume the general API's per-IP rate
+limit; anonymous trial traffic does. Successful Basic Auth verifications are
+cached for 30 seconds under a keyed digest that includes the current password
+hash, so password rotation invalidates them immediately. Cache misses remain
+rate-limited before Argon2 verification.
 
 Build `Dockerfile.fast-snapshot` to produce the `gap-compose-fast-snapshot:rust`
 image and deploy with `deploy.yml` plus `fast-rust.override.yml`. On a node
 that already has the fleet fast-snapshot image, `Dockerfile.rust-overlay` can
 build the same canary more quickly after building the `rust-http-build` stage.
+Set `BASE_IMAGE=gap-compose-fast-snapshot:rust` when layering onto an existing
+Rust worker image rather than the fleet base.
 Use `--project-directory .` with Compose so `/config` and `/data` mount from
 the repository checkout. Do not recreate the worker while any VM is running.
 The old image and `fast-fleet.override.yml` are the rollback. The proxy must

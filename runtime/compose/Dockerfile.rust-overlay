@@ -1,5 +1,6 @@
 # Fast canary rebuild on a node that already has the fleet fast-snapshot image.
 # The regular Dockerfile.fast-snapshot remains the reproducible full build.
-FROM gap-compose-fast-snapshot:fleet
+ARG BASE_IMAGE=gap-compose-fast-snapshot:fleet
+FROM ${BASE_IMAGE}
 COPY runtime/compose/*.py /opt/runner/
 COPY --from=gap-rust-http-build:test /src/http-gateway/target/release/gap-vm-http-gateway /usr/local/bin/gap-vm-http-gateway

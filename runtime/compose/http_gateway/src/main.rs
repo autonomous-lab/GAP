@@ -10,6 +10,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::error::Error;
 use std::net::SocketAddr;
@@ -20,7 +21,8 @@ use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio::time::Instant;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type ClientBody = Full<Bytes>;
@@ -28,6 +30,22 @@ type HttpClient = Client<HttpConnector, ClientBody>;
 type InnerBody = UnsyncBoxBody<Bytes, BoxError>;
 const MAX_BODY: usize = 16 * 1024 * 1024;
 const MAX_ACTIVE: usize = 256;
+const ADMISSION_CACHE_TTL: Duration = Duration::from_secs(5);
+const ADMISSION_REFRESH_LEAD: Duration = Duration::from_secs(3);
+type RouteKey = (String, String);
+type RouteEntry = Arc<RouteState>;
+type AdmissionCache = Arc<Mutex<HashMap<RouteKey, RouteEntry>>>;
+
+struct RouteState {
+    current: RwLock<Option<Arc<Admission>>>,
+    refresh: Arc<Mutex<()>>,
+}
+
+impl RouteState {
+    fn new() -> Self {
+        Self { current: RwLock::new(None), refresh: Arc::new(Mutex::new(())) }
+    }
+}
 
 #[derive(Clone)]
 struct Config {
@@ -40,12 +58,19 @@ struct Config {
 }
 
 struct Lease {
-    ticket: String,
-    config: Config,
+    admission: Arc<Admission>,
     _permit: OwnedSemaphorePermit,
 }
 
-impl Drop for Lease {
+struct Admission {
+    ticket: String,
+    port: u16,
+    cold: bool,
+    expires: Instant,
+    config: Config,
+}
+
+impl Drop for Admission {
     fn drop(&mut self) {
         let config = self.config.clone();
         let ticket = self.ticket.clone();
@@ -54,6 +79,75 @@ impl Drop for Lease {
                 let _ = control(&config, json!({"action":"end","ticket":ticket}), Duration::from_secs(5)).await;
             });
         }
+    }
+}
+
+async fn fetch_admission(config: &Config, project: &str, vm: &str, deadline: Duration)
+    -> Result<Arc<Admission>, (StatusCode, String)> {
+    let admitted = control(config,json!({"action":"begin","project_id":project,"vm_id":vm}),deadline).await?;
+    let port = admitted["port"].as_u64().and_then(|p| u16::try_from(p).ok()).filter(|p| *p > 0)
+        .ok_or((StatusCode::BAD_GATEWAY,"control_port_invalid".to_owned()))?;
+    let ticket = admitted["ticket"].as_str().filter(|s| identity(s,"",32))
+        .ok_or((StatusCode::BAD_GATEWAY,"control_ticket_invalid".to_owned()))?;
+    let admission = Arc::new(Admission { ticket:ticket.to_owned(), port,
+        cold:admitted["cold"].as_bool()==Some(true),
+        expires:Instant::now()+ADMISSION_CACHE_TTL, config:config.clone() });
+    Ok(admission)
+}
+
+async fn admit(config: &Config, cache: &AdmissionCache, project: String, vm: String)
+    -> Result<Arc<Admission>, (StatusCode, String)> {
+    let entry = {
+        let mut routes = cache.lock().await;
+        routes.entry((project.clone(), vm.clone()))
+            .or_insert_with(|| Arc::new(RouteState::new())).clone()
+    };
+    if let Some(admission) = entry.current.read().await.as_ref() {
+        if Instant::now() < admission.expires { return Ok(admission.clone()); }
+    }
+    // Only one cold/expired request per route reaches Python. Other VMs and
+    // still-valid warm requests never wait for this route's refresh.
+    let _refresh = entry.refresh.lock().await;
+    if let Some(admission) = entry.current.read().await.as_ref() {
+        if Instant::now() < admission.expires { return Ok(admission.clone()); }
+    }
+    *entry.current.write().await = None;
+    let admission=fetch_admission(config,&project,&vm,Duration::from_secs(180)).await?;
+    *entry.current.write().await = Some(admission.clone());
+    Ok(admission)
+}
+
+async fn expire_admissions(cache: AdmissionCache, config: Config) {
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    loop {
+        interval.tick().await;
+        let routes: Vec<_> = cache.lock().await.iter().map(|(key,entry)|(key.clone(),entry.clone())).collect();
+        for ((project,vm),entry) in routes {
+            let current=entry.current.read().await.clone();
+            if let Some(admission)=current {
+                let now=Instant::now();
+                if now>=admission.expires {
+                    let mut slot=entry.current.write().await;
+                    if slot.as_ref().is_some_and(|latest| now>=latest.expires) {*slot=None;}
+                } else if admission.expires-now<=ADMISSION_REFRESH_LEAD {
+                    if let Ok(_refresh)=entry.refresh.clone().try_lock_owned() {
+                        let entry=entry.clone();
+                        let config=config.clone();
+                        tokio::spawn(async move {
+                            let result=fetch_admission(&config,&project,&vm,Duration::from_secs(3)).await;
+                            *entry.current.write().await=result.ok();
+                            drop(_refresh);
+                        });
+                    }
+                }
+            }
+        }
+        // Expired/denied routes must not accumulate without bound.
+        cache.lock().await.retain(|_,entry| {
+            if let Ok(current)=entry.current.try_read() {
+                current.is_some() || Arc::strong_count(entry)>1 || entry.refresh.clone().try_lock_owned().is_err()
+            } else { true }
+        });
     }
 }
 
@@ -144,7 +238,7 @@ async fn read_body(mut body: Incoming) -> Result<Bytes, StatusCode> {
     Ok(bytes.freeze())
 }
 
-async fn proxy(mut request: Request<Incoming>, config: Config) -> Response<TrackedBody> {
+async fn proxy(mut request: Request<Incoming>, config: Config, cache: AdmissionCache) -> Response<TrackedBody> {
     let permit = match config.slots.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => return error_response(StatusCode::SERVICE_UNAVAILABLE,"http_gateway_busy"),
@@ -170,20 +264,13 @@ async fn proxy(mut request: Request<Incoming>, config: Config) -> Response<Track
             .and_then(|v| v.parse::<usize>().ok()).is_some_and(|n| n > MAX_BODY) {
         return error_response(StatusCode::PAYLOAD_TOO_LARGE,"request_body_too_large");
     }
-    let admitted = match control(&config,json!({"action":"begin","project_id":project,"vm_id":vm}),Duration::from_secs(180)).await {
+    let admission = match admit(&config,&cache,project,vm).await {
         Ok(value) => value,
         Err((status,code)) => return error_response(status,&code),
     };
-    let port = match admitted["port"].as_u64().and_then(|p| u16::try_from(p).ok()).filter(|p| *p > 0) {
-        Some(port) => port,
-        None => return error_response(StatusCode::BAD_GATEWAY,"control_port_invalid"),
-    };
-    let ticket = match admitted["ticket"].as_str().filter(|s| identity(s,"",32)) {
-        Some(ticket) => ticket.to_owned(),
-        None => return error_response(StatusCode::BAD_GATEWAY,"control_ticket_invalid"),
-    };
-    let lease = Lease {ticket, config: config.clone(), _permit: permit};
-    if admitted["cold"].as_bool()==Some(true) {
+    let port = admission.port;
+    let lease = Lease {admission, _permit: permit};
+    if lease.admission.cold {
         let target=SocketAddr::from(([127,0,0,1],port));
         let deadline=tokio::time::Instant::now()+Duration::from_secs(90);
         loop {
@@ -241,7 +328,7 @@ async fn proxy(mut request: Request<Incoming>, config: Config) -> Response<Track
                     tokio::select! {
                         _=&mut transfer => break,
                         _=heartbeat.tick() => {
-                            let _=control(&lease.config,json!({"action":"touch","ticket":lease.ticket}),Duration::from_secs(5)).await;
+                            let _=control(&lease.admission.config,json!({"action":"touch","ticket":lease.admission.ticket}),Duration::from_secs(5)).await;
                         }
                     }
                 }
@@ -269,17 +356,23 @@ async fn main() -> Result<(), BoxError> {
     if token.len() < 32 || edge_token.len() < 32 { return Err("gateway token unavailable".into()); }
     let mut connector = HttpConnector::new();
     connector.enforce_http(true);
+    connector.set_nodelay(true);
     let client = Client::builder(TokioExecutor::new()).build(connector);
     let config = Config {bind,control,token:token.into(),edge_token:edge_token.into(),client,
                          slots:Arc::new(Semaphore::new(MAX_ACTIVE))};
+    let cache: AdmissionCache = Arc::new(Mutex::new(HashMap::new()));
+    tokio::spawn(expire_admissions(cache.clone(),config.clone()));
     let listener = TcpListener::bind(config.bind).await?;
     loop {
         let (stream,_) = listener.accept().await?;
+        stream.set_nodelay(true)?;
         let config=config.clone();
+        let cache=cache.clone();
         tokio::spawn(async move {
             let service=service_fn(move |request| {
                 let config=config.clone();
-                async move { Ok::<_,Infallible>(proxy(request,config).await) }
+                let cache=cache.clone();
+                async move { Ok::<_,Infallible>(proxy(request,config,cache).await) }
             });
             if let Err(error)=http1::Builder::new().serve_connection(TokioIo::new(stream),service).with_upgrades().await {
                 eprintln!("http gateway connection: {error}");
