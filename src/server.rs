@@ -7594,7 +7594,7 @@ pub fn route_with_ip(
 
     if let Some(result)=crate::fleet_finance::node_report(state,method,raw_path,auth) {return result}
     if let Some(result)=crate::fleet_migration::worker(state,method,raw_path,auth,&body) {return result}
-    if let Some(result)=vm_http::manage(state,method,raw_path,&body,auth) {return result}
+    if let Some(result)=vm_http::manage(state,method,raw_path,&body,auth,client_ip) {return result}
     if let Some(result)=free_vm::claim_route(state,method,path,&body,client_ip) {return result}
 
     let mut guard = match state.lock() {
@@ -7817,7 +7817,8 @@ pub fn route_with_ip(
         let Some(project)=body["project_id"].as_str() else {return (400,json!({"error":{"code":"project_id_required"}}))};
         let Some(owner)=body["owner_did"].as_str() else {return (400,json!({"error":{"code":"owner_did_required"}}))};
         let Some(vm)=body["vm_id"].as_str() else {return (400,json!({"error":{"code":"vm_id_required"}}))};
-        return match vm_http::trial_access(&mut guard,project,owner,vm) {
+        let Some(source_ip)=body["source_ip"].as_str() else {return (400,json!({"error":{"code":"source_ip_required"}}))};
+        return match vm_http::trial_access(&mut guard,project,owner,vm,source_ip) {
             Ok(value)=>(200,value),Err(error)=>error_response(&error),
         };
     }
@@ -10346,6 +10347,9 @@ mod tests {
             username: Some("visitor".into()),
             password_hash: Some("hash".into()),
             password_sealed: Some("enc:v1:x".into()),
+            ssh_ip: None,
+            browser_ip: None,
+            additional_ips: Vec::new(),
         };
         state.vm_http.insert(vm.into(), record(vm, owner));
         state.vm_http.insert(other.into(), record(other, owner));

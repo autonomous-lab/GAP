@@ -264,7 +264,8 @@ class Access:
                 db.execute('INSERT INTO verified_emails VALUES(?,?)',(email.lower(),customer))
                 db.execute("INSERT INTO principals VALUES('human',?,?,1)",('email:'+hashlib.sha256(email.lower().encode()).hexdigest(),customer))
             self.ensure_trial(db,customer,trial_ip)
-        return self.a.issue(customer,None)
+        from authority import HUMAN_SESSION_SECONDS
+        return self.a.issue(customer,None,ttl=HUMAN_SESSION_SECONDS)
 
     def members(self, actor):
         if actor['agent'] is not None:raise Failure('human_account_required',403)

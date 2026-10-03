@@ -240,8 +240,11 @@ pub(super) fn reserve(g: &mut NodeState, ssh_key: &str, source_ip: &str,
     }
     if let Some(previous) = g.free_vm_trials.values().find(|trial|
         trial.ssh_key_hash == key_hash && trial.phase(now) == Phase::Claimed) {
-        return Ok(json!({"status":"claimed","project_id":previous.project_id,
-            "owner_did":previous.owner_did}));
+        let project_id=previous.project_id.clone();
+        let owner_did=previous.owner_did.clone();
+        super::vm_http::update_ssh_ip(g,&project_id,source_ip)?;
+        return Ok(json!({"status":"claimed","project_id":project_id,
+            "owner_did":owner_did}));
     }
     if g.free_vm_trials.values().any(|trial| trial.phase(now).holds_ip_reservation()
         && (trial.ssh_key_hash == key_hash || trial.occupies_ip(&source_hash))) {

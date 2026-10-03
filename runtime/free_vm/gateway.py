@@ -195,7 +195,7 @@ def welcome_banner(details,remaining,colored=False,ready_seconds=None):
             f'\r\n'
             f'  {muted}• Claim:{reset}       {details["claim_url"]}\r\n'
             f'  {muted}• Preview:{reset}     {details["preview"]["preview_url"]}\r\n'
-            f'  {muted}• Basic Auth:{reset}  {details["preview"]["username"]} / {details["preview"]["password"]}\r\n'
+            f'  {muted}• Access:{reset}      Your SSH IP is allowed automatically.\r\n'
             f'\r\n'
             f'  ┌────────────────────────────────────────────────────────┐\r\n'
             f'{feature}'
@@ -393,7 +393,7 @@ def prepare(runner,key,ip):
             {'vm_id':meta['vm_id'],'enabled':True,'guest_port':8080})
     retry_mutation(runner,project,owner,'terminal/prepare','POST',{'vm_id':meta['vm_id']})
     preview=request_node(runner,'/internal/free-vm/preview',{'project_id':project,
-        'owner_did':owner,'vm_id':meta['vm_id']})
+        'owner_did':owner,'vm_id':meta['vm_id'],'source_ip':ip})
     folder=manager.folder(meta)
     key_file=folder/'terminal_key'
     host_key=(folder/'seed'/'ssh_host_ed25519_key.pub').read_text().strip()

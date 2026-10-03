@@ -14,6 +14,7 @@ import sqlite3
 import time
 
 MAX_CREDITS = 10**15
+HUMAN_SESSION_SECONDS = 48 * 60 * 60
 DEFAULT_QUOTAS = dict(max_vms=1, cpu_quarters=2, memory_mib=512)
 MAX_QUOTAS = dict(max_vms=1000000, cpu_quarters=4000000, memory_mib=2**40)
 
@@ -621,7 +622,8 @@ class Authority:
             return dict(projects=[dict(r) for r in rows[:100]], next_cursor=rows[99]['id'] if len(rows) > 100 else None)
 
     def issue(self, customer, agent, ttl=3600):
-        if type(ttl) is not int or not 60 <= ttl <= 3600:
+        maximum = HUMAN_SESSION_SECONDS if agent is None else 3600
+        if type(ttl) is not int or not 60 <= ttl <= maximum:
             raise Failure('invalid_token_lifetime')
         token = 'gapc_' + secrets.token_urlsafe(32)
         expires = int(self.clock()) + ttl

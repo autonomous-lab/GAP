@@ -6,23 +6,37 @@ pub(super) struct Record {
     pub vm_id:String, pub project_id:String, pub owner_did:String, pub route_key:String,
     pub username:Option<String>, pub password_hash:Option<String>,
     #[serde(default)] pub password_sealed:Option<String>,
+    #[serde(default)] pub ssh_ip:Option<String>,
+    #[serde(default)] pub browser_ip:Option<String>,
+    #[serde(default)] pub additional_ips:Vec<String>,
 }
 impl Record {
-    fn public(&self)->Value {json!({"vm_id":self.vm_id,"basic_auth_required":true,"configured":self.password_hash.is_some(),"username":self.username,"password_recoverable":self.password_sealed.is_some()})}
+    fn public(&self,ip_mode:bool)->Value {json!({"vm_id":self.vm_id,"basic_auth_required":!ip_mode,"ip_mode":ip_mode,"configured":if ip_mode {self.ssh_ip.is_some()||self.browser_ip.is_some()||!self.additional_ips.is_empty()} else {self.password_hash.is_some()},"username":self.username,"password_recoverable":self.password_sealed.is_some(),"ssh_ip":self.ssh_ip,"browser_ip":self.browser_ip,"additional_ips":self.additional_ips,"additional_ip_limit":3})}
+}
+fn canonical_ip(value:&str)->Result<String> {
+    value.parse::<std::net::IpAddr>().map(|ip|ip.to_string()).map_err(|_|denied("a valid IP address is required"))
+}
+pub(super) fn update_ssh_ip(g:&mut NodeState,project:&str,source_ip:&str)->Result<()> {
+    let ip=canonical_ip(source_ip)?;
+    if !g.free_vm_trials.contains_key(project){return Err(denied("unknown free VM"))}
+    let Some(mut record)=g.vm_http.values().find(|r|r.project_id==project).cloned() else {return Ok(())};
+    if record.ssh_ip.as_deref()!=Some(ip.as_str()){record.ssh_ip=Some(ip);save_record(g,&record)?}
+    Ok(())
 }
 /// Combine worker routing state with the node-owned visitor access policy.
 pub(super) fn describe_ingress(g:&NodeState, project:&str, owner:&str, value:&mut Value) {
     let Some(vm) = value["vm_id"].as_str() else {return};
+    let ip_mode=g.free_vm_trials.contains_key(project);
     let configured = g.vm_http.get(vm).is_some_and(|r|
-        r.project_id==project && r.owner_did==owner && r.password_hash.is_some() && r.username.is_some()
+        r.project_id==project && r.owner_did==owner && (if ip_mode {r.ssh_ip.is_some()||r.browser_ip.is_some()||!r.additional_ips.is_empty()} else {r.password_hash.is_some() && r.username.is_some()})
         && value["base_path"].as_str()==Some(format!("/apps/{}/",r.route_key).as_str()));
     let routed = value["routed"].as_bool()==Some(true);
-    value["http_access"] = json!({"basic_auth_required":true,"configured":configured,
+    value["http_access"] = json!({"basic_auth_required":!ip_mode,"ip_mode":ip_mode,"configured":configured,
         "configuration_endpoint":format!("/v1/cloud/projects/{project}/vm/http-access")});
     value["access_ready"] = json!(routed && configured);
     value["application_health"] = json!("not_checked");
     value["blocking_reasons"] = json!(
-        [(!routed).then_some("ingress_not_routed"), (!configured).then_some("visitor_credentials_not_configured")]
+        [(!routed).then_some("ingress_not_routed"), (!configured).then_some(if ip_mode {"visitor_ip_not_registered"} else {"visitor_credentials_not_configured"})]
             .into_iter().flatten().collect::<Vec<_>>());
 }
 
@@ -36,40 +50,30 @@ fn save_record(g:&mut NodeState,r:&Record)->Result<()> {
     g.storage.upsert_state(&crate::storage::StateRecord{scope:"cloud_vm_http".into(),key:r.vm_id.clone(),value:serde_json::to_string(r).map_err(|e|Error::Other(e.to_string()))?,updated_at:now_unix()})?;
     g.vm_http.insert(r.vm_id.clone(),r.clone());Ok(())
 }
-pub(super) fn trial_access(g:&mut NodeState,project:&str,owner:&str,vm:&str)->Result<Value> {
+pub(super) fn trial_access(g:&mut NodeState,project:&str,owner:&str,vm:&str,source_ip:&str)->Result<Value> {
+    let source_ip=canonical_ip(source_ip)?;
     if !valid_vm(vm) {return Err(denied("invalid trial VM identity"))}
     let trial=g.free_vm_trials.get(project).ok_or_else(||denied("unknown trial"))?;
     if trial.owner_did!=owner || trial.phase(now_unix())!=super::free_vm::Phase::Active {
         return Err(denied("trial not active"));
     }
-    if let Some(old)=g.vm_http.get(vm) {
+    if let Some(old)=g.vm_http.get(vm).cloned() {
         if old.project_id!=project || old.owner_did!=owner {return Err(denied("VM access conflict"))}
-        if let Some(sealed)=&old.password_sealed {
-            let vault=g.vault.as_ref().ok_or_else(||denied("credential vault unavailable"))?;
-            let stored:Value=serde_json::from_str(&vault.open(sealed)?)?;
-            return Ok(json!({"vm_id":vm,"username":old.username,"password":stored["password"],
-                "preview_url":format!("{}/apps/{project}/",std::env::var("GAP_PUBLIC_URL").unwrap_or_default().trim_end_matches('/'))}));
-        }
+        update_ssh_ip(g,project,&source_ip)?;
+        return Ok(json!({"vm_id":vm,
+            "preview_url":format!("{}/apps/{project}/",std::env::var("GAP_PUBLIC_URL").unwrap_or_default().trim_end_matches('/'))}));
     }
-    use rand::RngCore;
-    let mut random=[0u8;24];rand::rngs::OsRng.fill_bytes(&mut random);
-    let password=hex::encode(random);
-    let username="free";
-    let hash=crate::cloud::hash_site_password(&password)?;
-    let vault=g.vault.as_ref().ok_or_else(||denied("credential vault unavailable"))?;
-    let sealed=vault.seal(&json!({"purpose":"vm-http-password-v1","vm_id":vm,
-        "project_id":project,"username":username,"password":password}).to_string());
     save_record(g,&Record{vm_id:vm.into(),project_id:project.into(),owner_did:owner.into(),
-        route_key:project.into(),username:Some(username.into()),password_hash:Some(hash),password_sealed:Some(sealed)})?;
-    Ok(json!({"vm_id":vm,"username":username,"password":password,
+        route_key:project.into(),username:None,password_hash:None,password_sealed:None,ssh_ip:Some(source_ip),browser_ip:None,additional_ips:Vec::new()})?;
+    Ok(json!({"vm_id":vm,
         "preview_url":format!("{}/apps/{project}/",std::env::var("GAP_PUBLIC_URL").unwrap_or_default().trim_end_matches('/'))}))
 }
 fn denied(message:&str)->Error {Error::Other(message.into())}
 
-pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Value,auth:Option<&str>)->Option<(u16,Value)> {
+pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Value,auth:Option<&str>,client_ip:Option<&str>)->Option<(u16,Value)> {
     let path=raw.split('?').next()?;
     let (project,tail)=path.strip_prefix("/v1/cloud/projects/")?.split_once("/vm/")?;
-    if tail!="http-access" && tail!="http-access/reveal" && tail!="domains" && !tail.starts_with("domains/") {return None}
+    if tail!="http-access" && tail!="http-access/reveal" && tail!="ip-access/current" && tail!="ip-access" && tail!="domains" && !tail.starts_with("domains/") {return None}
     let result=(|| -> Result<Value> {
         let params=parse_url_params(raw);
         let vm=body["vm_id"].as_str().or_else(||params.get("vm_id").map(String::as_str)).unwrap_or("");
@@ -78,6 +82,27 @@ pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Val
         let mut g=state.lock().map_err(|_|denied("state unavailable"))?;
         let owner=g.cloud_owned_project(token,project)?.owner_did;
         if !g.microvm_project_allowed(project,&owner) {return Err(denied("microVM access is not approved"))}
+        let ip_mode=g.free_vm_trials.contains_key(project);
+        if ip_mode && (tail=="http-access/reveal" || tail=="http-access" && method=="PUT") {
+            return Err(denied("free VM previews use IP access, not visitor credentials"))
+        }
+        if tail=="ip-access" || tail=="ip-access/current" {
+            if !ip_mode {return Err(denied("IP access applies to free VM claims only"))}
+            let mut record=g.vm_http.get(vm).filter(|r|r.project_id==project && r.owner_did==owner).cloned().ok_or_else(||denied("VM access unavailable"))?;
+            if method=="POST" && tail=="ip-access/current" {
+                let ip=canonical_ip(client_ip.ok_or_else(||denied("verified browser IP unavailable"))?)?;
+                if record.browser_ip.as_deref()!=Some(ip.as_str()){record.browser_ip=Some(ip);save_record(&mut g,&record)?}
+            } else if method=="PUT" && tail=="ip-access" {
+                let ips=body["additional_ips"].as_array().ok_or_else(||denied("additional_ips must be an array"))?;
+                if ips.len()>3 {return Err(denied("at most three additional IP addresses"))}
+                let mut unique=std::collections::HashSet::new();
+                let mut checked=Vec::new();
+                for value in ips {let ip=canonical_ip(value.as_str().ok_or_else(||denied("invalid IP address"))?)?;
+                    if !unique.insert(ip.clone()){return Err(denied("duplicate IP address"))}checked.push(ip)}
+                record.additional_ips=checked;save_record(&mut g,&record)?;
+            } else if method!="GET" || tail!="ip-access" {return Err(denied("unsupported IP access operation"))}
+            return Ok(record.public(true))
+        }
         let runner=g.private_node.as_ref().and_then(|p|p.runner.clone()).ok_or_else(||denied("microVM hosting not configured"))?;
         if method=="POST" && tail=="http-access/reveal" {
             let r=g.vm_http.get(vm).filter(|r|r.project_id==project && r.owner_did==owner).ok_or_else(||denied("visitor credentials not configured"))?;
@@ -88,8 +113,8 @@ pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Val
             return Ok(json!({"vm_id":vm,"username":r.username,"password":data["password"]}))
         }
         if method=="GET" && tail=="http-access" {
-            return Ok(g.vm_http.get(vm).filter(|r|r.project_id==project && r.owner_did==owner).map(Record::public)
-                .unwrap_or(json!({"vm_id":vm,"basic_auth_required":true,"configured":false,"username":null})))
+            return Ok(g.vm_http.get(vm).filter(|r|r.project_id==project && r.owner_did==owner).map(|r|r.public(ip_mode))
+                .unwrap_or(json!({"vm_id":vm,"basic_auth_required":!ip_mode,"ip_mode":ip_mode,"configured":false,"username":null})))
         }
         if method=="GET" && tail=="domains" {
             let domains:Vec<_>=g.custom_domains.values().filter(|d|d.project_id==project && d.vm_id.as_deref()==Some(vm)).cloned().collect();
@@ -108,7 +133,7 @@ pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Val
             if route!=vm && route!=project {return Err(denied("VM route identity mismatch"))}
             g=state.lock().map_err(|_|denied("state unavailable"))?;
             g.cloud_owned_project(token,project)?;if !g.microvm_project_allowed(project,&owner){return Err(denied("microVM access is not approved"))}
-            let mut record=g.vm_http.get(vm).cloned().unwrap_or(Record{vm_id:vm.into(),project_id:project.into(),owner_did:owner.clone(),route_key:route.into(),username:None,password_hash:None,password_sealed:None});
+            let mut record=g.vm_http.get(vm).cloned().unwrap_or(Record{vm_id:vm.into(),project_id:project.into(),owner_did:owner.clone(),route_key:route.into(),username:None,password_hash:None,password_sealed:None,ssh_ip:None,browser_ip:None,additional_ips:Vec::new()});
             if record.project_id!=project || record.owner_did!=owner {return Err(denied("VM owner mismatch"))}
             record.route_key=route.into();
             if let Some(hash)=hash {record.username=body["username"].as_str().map(str::to_owned);record.password_hash=Some(hash);
@@ -116,7 +141,7 @@ pub(super) fn manage(state:&Arc<Mutex<NodeState>>,method:&str,raw:&str,body:&Val
                 record.password_sealed=Some(vault.seal(&json!({"purpose":"vm-http-password-v1","vm_id":vm,"project_id":project,"username":record.username,"password":body["password"]}).to_string()));
             }
             save_record(&mut g,&record)?;
-            if tail=="http-access" {return Ok(record.public())}
+            if tail=="http-access" {return Ok(record.public(ip_mode))}
             let hostname=body["hostname"].as_str().unwrap_or("");
             for env in ["GAP_PUBLIC_URL","GAP_ADMIN_ORIGIN"] {
                 if std::env::var(env).ok().is_some_and(|v|v.trim_end_matches('/').split("://").nth(1).is_some_and(|h|h.eq_ignore_ascii_case(hostname.trim_end_matches('.')))) {return Err(denied("reserved node hostname"))}
@@ -186,8 +211,16 @@ fn admit_vm_http_with_expected(state:&Arc<Mutex<NodeState>>,expected:&str,secret
     if let Some(trial)=g.free_vm_trials.get(&record.project_id).filter(|trial|trial.claimed_at.is_none()) {
         if trial.phase(now_unix())!=super::free_vm::Phase::Active || domain.is_some() {return answer(403)}
     }
+    let ip_mode=g.free_vm_trials.contains_key(&record.project_id) && domain.is_none();
     drop(g);
-    if domain.is_none() {
+    if ip_mode {
+        let allowed=ip.and_then(|s|s.parse::<std::net::IpAddr>().ok()).is_some_and(|addr| {
+            let value=addr.to_string();record.ssh_ip.as_deref()==Some(value.as_str())
+                || record.browser_ip.as_deref()==Some(value.as_str())
+                || record.additional_ips.iter().any(|item|item==&value)
+        });
+        if !allowed{return answer(403)}
+    } else if domain.is_none() {
         let credentials=authorization.and_then(parse_basic_credentials);
         let allowed=credentials.is_some_and(|(u,p)|record.username.as_deref()==Some(&u) && record.password_hash.as_deref().is_some_and(|h|crate::cloud::verify_site_password(&p,h).unwrap_or(false)));
         if !allowed{return answer(401)}
@@ -207,7 +240,7 @@ fn admit_vm_http_with_expected(state:&Arc<Mutex<NodeState>>,expected:&str,secret
 mod tests {
     use super::*;
     #[test]
-    fn anonymous_preview_accepts_other_ips_only_with_basic_auth_while_active() {
+    fn anonymous_preview_accepts_only_registered_ips_while_active() {
         use base64::Engine;
         let project=format!("prj_{}","a".repeat(24));
         let owner=format!("did:gap:{}","b".repeat(64));
@@ -225,7 +258,7 @@ mod tests {
         node.vm_http.insert(vm.clone(),Record {
             vm_id:vm.clone(),project_id:project.clone(),owner_did:owner.clone(),route_key:project.clone(),
             username:Some("free".into()),password_hash:Some(crate::cloud::hash_site_password(password).unwrap()),
-            password_sealed:None,
+            password_sealed:None,ssh_ip:Some("203.0.113.10".into()),browser_ip:Some("198.51.100.77".into()),additional_ips:vec!["192.0.2.5".into()],
         });
         node.free_vm_trials.insert(project.clone(),super::super::free_vm::Trial {
             project_id:project.clone(),owner_did:owner,created_at:now_unix(),claimed_at:None,
@@ -237,15 +270,16 @@ mod tests {
         let edge="e".repeat(32);
         let path=format!("/apps/{project}/");
         let basic=format!("Basic {}",base64::engine::general_purpose::STANDARD.encode(format!("free:{password}")));
-        let admit=|auth|admit_vm_http_with_expected(&state,&edge,&edge,"example.test",&path,&path,auth,Some("198.51.100.77"));
-        assert_eq!(admit(None).status,401);
-        assert_eq!(admit(Some("Basic Zm9vOmJhcg==")).status,401);
-        let allowed=admit(Some(&basic));
+        let admit=|ip,auth|admit_vm_http_with_expected(&state,&edge,&edge,"example.test",&path,&path,auth,ip);
+        assert_eq!(admit(Some("198.51.100.90"),Some(&basic)).status,403);
+        assert_eq!(admit(Some("203.0.113.10"),None).status,200);
+        assert_eq!(admit(Some("192.0.2.5"),None).status,200);
+        let allowed=admit(Some("198.51.100.77"),None);
         assert_eq!(allowed.status,200);
         assert_eq!(allowed.vm_id.as_deref(),Some(vm.as_str()));
         assert!(allowed.strip_authorization);
         state.lock().unwrap().free_vm_trials.get_mut(&project).unwrap().created_at=now_unix()-3601;
-        assert_eq!(admit(Some(&basic)).status,403);
+        assert_eq!(admit(Some("198.51.100.77"),None).status,403);
     }
     #[test]
     fn ingress_reports_missing_credentials_and_never_claims_health() {
@@ -254,7 +288,7 @@ mod tests {
         describe_ingress(&state,"prj_test","owner",&mut value);
         assert_eq!(value["access_ready"],false);
         assert_eq!(value["blocking_reasons"],json!(["visitor_credentials_not_configured"]));
-        let record=Record{vm_id:"vm_test".into(),project_id:"prj_test".into(),owner_did:"owner".into(),route_key:"prj_test".into(),username:Some("visitor".into()),password_hash:Some("sensitive".into()),password_sealed:None};
+        let record=Record{vm_id:"vm_test".into(),project_id:"prj_test".into(),owner_did:"owner".into(),route_key:"prj_test".into(),username:Some("visitor".into()),password_hash:Some("sensitive".into()),password_sealed:None,ssh_ip:None,browser_ip:None,additional_ips:Vec::new()};
         state.vm_http.insert("vm_test".into(),record);
         describe_ingress(&state,"prj_test","owner",&mut value);
         assert_eq!(value["access_ready"],true);
@@ -273,14 +307,14 @@ mod tests {
     }
     #[test]
     fn visitor_passwords_never_appear_in_public_settings() {
-        let record=Record{vm_id:"vm_test".into(),project_id:"prj_test".into(),owner_did:"owner".into(),route_key:"prj_test".into(),username:Some("visitor".into()),password_hash:Some("sensitive-hash".into()),password_sealed:Some("sensitive-ciphertext".into())};
-        assert_eq!(record.public()["configured"],true);
-        assert!(!record.public().to_string().contains("sensitive"));
+        let record=Record{vm_id:"vm_test".into(),project_id:"prj_test".into(),owner_did:"owner".into(),route_key:"prj_test".into(),username:Some("visitor".into()),password_hash:Some("sensitive-hash".into()),password_sealed:Some("sensitive-ciphertext".into()),ssh_ip:None,browser_ip:None,additional_ips:Vec::new()};
+        assert_eq!(record.public(false)["configured"],true);
+        assert!(!record.public(false).to_string().contains("sensitive"));
     }
     #[test]
     fn replaced_legacy_routes_are_removed_and_cross_owner_collisions_rejected() {
         let mut state=NodeState::new(Box::new(crate::storage::sqlite::SqliteStorage::open(":memory:").unwrap()));
-        let original=Record{vm_id:"vm_old".into(),project_id:"prj_test".into(),owner_did:"owner".into(),route_key:"prj_test".into(),username:None,password_hash:None,password_sealed:None};
+        let original=Record{vm_id:"vm_old".into(),project_id:"prj_test".into(),owner_did:"owner".into(),route_key:"prj_test".into(),username:None,password_hash:None,password_sealed:None,ssh_ip:None,browser_ip:None,additional_ips:Vec::new()};
         save_record(&mut state,&original).unwrap();
         let mut replacement=original.clone();replacement.vm_id="vm_new".into();replacement.owner_did="intruder".into();
         assert!(save_record(&mut state,&replacement).is_err());

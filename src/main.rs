@@ -282,19 +282,17 @@ fn main() -> Result<()> {
                 .as_deref()
                 .and_then(|project_id| gap::server::custom_function_alias(project_id, &original_path))
                 .unwrap_or_else(|| original_path.clone());
-            // The node is reached through the compose edge, so the TCP peer is
-            // otherwise the same container for every visitor. Prefer the
-            // address forwarded by Cloudflare/nginx for per-client limits.
+            // The compose edge hides the visitor's TCP peer. Accept its
+            // Caddy-verified IP only with nginx's internal edge credential.
+            let edge_secret=env::var("GAP_VM_EDGE_TOKEN").unwrap_or_default();
+            let verified_edge=edge_secret.len()>=32 && request.headers().iter()
+                .find(|h| h.field.equiv("X-GAP-Client-IP-Token"))
+                .is_some_and(|h| h.value.as_str()==edge_secret.as_str());
             let client_ip = request
                 .headers()
                 .iter()
-                .find(|h| h.field.equiv("CF-Connecting-IP"))
-                .or_else(|| {
-                    request
-                        .headers()
-                        .iter()
-                        .find(|h| h.field.equiv("X-Forwarded-For"))
-                })
+                .find(|h| h.field.equiv("X-GAP-Verified-Client-IP"))
+                .filter(|_| verified_edge)
                 .and_then(|h| h.value.as_str().split(',').next())
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -546,7 +544,11 @@ fn main() -> Result<()> {
                         let bearer=auth.as_deref().and_then(|v|v.strip_prefix("Bearer ")).filter(|v|!v.is_empty() && v.len()<=4096 && v.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)));
                         if let Some(bearer)=bearer {
                             let (status,result)=route_with_ip(&state,"GET","/v1/fleet/account",&[],auth.as_deref(),client_ip.as_deref());
-                            if status==200 {set_cookie=Some(format!("__Host-gap-account={bearer}; Path=/; Secure; HttpOnly; SameSite=Strict"));(200,serde_json::json!({"connected":true}))} else {(status,result)}
+                            if status==200 {
+                                let persistence=if result["agent_did"].is_null() {"; Max-Age=172800"} else {""};
+                                set_cookie=Some(format!("__Host-gap-account={bearer}; Path=/; Secure; HttpOnly; SameSite=Strict{persistence}"));
+                                (200,serde_json::json!({"connected":true}))
+                            } else {(status,result)}
                         } else {(401,serde_json::json!({"error":{"code":"unauthorized"}}))}
                     } else if session_endpoint {
                         (405,serde_json::json!({"error":{"code":"method_not_allowed"}}))

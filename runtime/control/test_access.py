@@ -330,6 +330,18 @@ class AccessTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM wallet_entries WHERE source='promotional'").fetchone()[0],1)
         self.assertEqual(self.app.handle('GET','/v1/projects',first['token'],{})['projects'],[])
 
+    def test_human_session_persists_for_two_days_but_agent_tokens_do_not(self):
+        human=self.access.human_login('owner@example.com','203.0.113.10')
+        self.assertEqual(human['expires_at'],100+48*60*60)
+        self.connect()
+        with self.assertRaisesRegex(Failure,'invalid_token_lifetime'):
+            self.a.issue(human['customer_id'],OWNER,ttl=48*60*60)
+        self.a.clock=lambda:100+48*60*60-1
+        self.assertEqual(self.a.authenticate(human['token'])['customer'],human['customer_id'])
+        self.a.clock=lambda:100+48*60*60
+        with self.assertRaisesRegex(Failure,'invalid_control_credentials'):
+            self.a.authenticate(human['token'])
+
     def test_ipv6_64_can_receive_only_one_trial(self):
         first=self.connect(trial_ip='2001:db8:1::10')
         second=self.connect('node-two',AGENT,SECOND,request='second',email='second@example.com',trial_ip='2001:db8:1::20')

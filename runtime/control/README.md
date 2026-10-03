@@ -649,9 +649,12 @@ email identity receives a $1 promotional trial grant when both the customer and 
 public network are still eligible, including an existing verified customer on
 their next login. A duplicate network signs in normally without promotional
 credit. Operator-provided human control
-credentials can also be entered without sending an email. Credentials stay in
-page memory, expire within one hour, and logout revokes them. Refreshing the
-page requires reconnecting; no credential is stored in browser storage.
+credentials can also be entered without sending an email. Human login
+credentials expire after 48 hours. The management origin keeps them in a
+`Secure`, `HttpOnly`, `SameSite=Strict` cookie with a matching 48-hour
+`Max-Age`; it does not put bearer credentials in `localStorage`. Page reloads
+reuse the cookie until expiry, and logout revokes the credential immediately.
+Agent credentials continue to expire within one hour.
 
 The page displays the common wallet, global quotas, projects and memberships.
 Human-only `GET/POST /v1/fleet/members` lists members/grants and supports `attach`,
