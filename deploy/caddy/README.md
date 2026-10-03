@@ -34,7 +34,12 @@ because it encrypts the Cloudflare-to-origin hop; DNS-only domains receive
 automatic Let's Encrypt certificates directly from Caddy.
 
 When Cloudflare changes its published ranges, update the two `remote_ip` lists
-in `Caddyfile` from `https://www.cloudflare.com/ips/`, validate, and reload.
+and the global `trusted_proxies static` list in `Caddyfile` from
+`https://www.cloudflare.com/ips/`, validate, and reload. `trusted_proxies_strict`
+selects the rightmost untrusted address in `X-Forwarded-For`. Every proxy block
+must overwrite `X-GAP-Verified-Client-IP` with Caddy's `{client_ip}`; the GAP
+node accepts it only with nginx's internal edge credential. See
+`runtime/edge/CLIENT_IP.md` for the full MicroVM access-policy boundary.
 
 ## Migration and rollback
 
@@ -80,6 +85,7 @@ gap-node-02-u3.vm.elestio.app, gap-node-01-u3.vm.elestio.app {
     respond @internal 404
     reverse_proxy 172.17.0.1:8080 {
         header_up Host {host}
+        header_up X-GAP-Verified-Client-IP {client_ip}
         header_up -X-GAP-Custom-Domain
     }
 }
@@ -94,6 +100,7 @@ gap-node-03-u3.vm.elestio.app, gap-node-01-u3.vm.elestio.app {
     respond @internal 404
     reverse_proxy 172.17.0.1:8080 {
         header_up Host {host}
+        header_up X-GAP-Verified-Client-IP {client_ip}
         header_up -X-GAP-Custom-Domain
     }
 }
@@ -101,4 +108,8 @@ gap-node-03-u3.vm.elestio.app, gap-node-01-u3.vm.elestio.app {
 
 Keep the central hostname isolated by the existing GAP admin-origin boundary;
 do not remove tenant marking from the catch-all or forward arbitrary headers
-as trusted host identities. No public DNS change is needed.
+as trusted host identities. On these secondary nodes, append only
+`159.195.122.180/32` (the node-1 administration proxy) to their own global
+`trusted_proxies static` list. Node 1 nginx sends its verified browser IP as
+the sole `X-Forwarded-For` value for fleet-proxied requests. No public DNS
+change is needed.
