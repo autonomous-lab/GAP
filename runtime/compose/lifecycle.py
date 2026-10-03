@@ -52,6 +52,7 @@ class Runtime:
                 or type(self.min_available_memory_mib) is not int or self.min_available_memory_mib<256):
             raise ValueError('invalid_host_capacity_policy')
         self.gateway=None; self.closed=False; self.last_error=None
+        self.http_sessions={};self.http_sessions_guard=threading.Lock()
         self.recover()
 
     def lock(self,project):
@@ -194,6 +195,7 @@ class Runtime:
         self.ledger.sample(dict(meta,meter_stop_ms=state.get('meter_stop_ms')),int(time.time()*1000),self.manager.alive(meta) and not state.get('policy_preempted',False),
                            self.metered_storage_bytes(meta),incoming,outgoing,self.incarnation)
         state['last_sample']=time.monotonic()
+        state.pop('billing_checked_at',None)
 
     def view(self,meta,include_entries=True):
         if not meta: return {}
@@ -274,13 +276,20 @@ class Runtime:
                     if child.poll() is None:child.terminate()
             time.sleep(WATCHDOG_INTERVAL_SECONDS)
 
-    def check_credit(self,meta):
+    def check_credit(self,meta,cached=False):
         if meta.get('tier')=='anonymous':
             if time.time()>=meta.get('anonymous_until',0):
                 raise VMError('anonymous_trial_expired')
             return
-        if hasattr(self.ledger,'sync'):self.ledger.sync(meta['project_id'],meta['owner_did'])
-        view=self.ledger.view(meta['project_id'],meta['owner_did'],include_entries=False)
+        if cached:
+            # The maintenance loop renews the lease and rechecks billing.
+            # Warm HTTP requests must not decrypt the ledger each time.
+            view=self.billing_view(meta)
+            if hasattr(self.ledger,'lease_allowed') and not self.ledger.lease_allowed(meta['project_id']):
+                raise VMError('fleet_allowance_or_lease_unavailable')
+        else:
+            if hasattr(self.ledger,'sync'):self.ledger.sync(meta['project_id'],meta['owner_did'])
+            view=self.ledger.view(meta['project_id'],meta['owner_did'],include_entries=False)
         if view.get('fleet') and not view['fleet']['lease_valid']:
             if not view['fleet']['authority_error'] and view['fleet']['funding_status']=='exhausted':
                 raise VMError('microvm_credits_or_budget_exhausted')
@@ -339,7 +348,8 @@ class Runtime:
         if meta['state'] not in ('running','hibernated') and not automatic_cold_start:
             raise VMError('vm_not_available_for_automatic_wake')
         if not self.check_policy(meta):raise VMError('microvm_suspended_or_policy_unavailable')
-        self.sample(meta,force=meta['state'] in ('hibernated','stopped')); self.check_credit(meta)
+        cold=meta['state'] in ('hibernated','stopped')
+        self.sample(meta,force=cold); self.check_credit(meta,cached=not cold)
         checks_done=time.monotonic()
         if meta['state'] in ('hibernated','stopped'):
             was_hibernated=meta['state']=='hibernated'
@@ -388,6 +398,52 @@ class Runtime:
         finally:
             with self.lock(project):
                 state['active_http']-=1; state['last_incoming']=time.time()
+
+    def http_begin(self,project,vm_id=None):
+        """Authorize one Rust-proxied request without sharing a database handle."""
+        with self.lock(project):
+            path=self.manager.catalog(vm_id or project)
+            if vm_id and not path.exists():path=self.manager.catalog(project)
+            if not path.exists():raise VMError('unknown_application')
+            initial=json.loads(path.read_text())
+            if initial['project_id']!=project or (vm_id and initial['vm_id']!=vm_id) or not initial.get('ingress',{}).get('enabled'):
+                raise VMError('unknown_application')
+            cold=initial['state']!='running'
+            meta=self.ensure_awake(project,vm_id)
+            current=self.manager.read(project,meta['owner_did'],meta['vm_id'])
+            if not current or current['state']!='running' or not current.get('ingress',{}).get('enabled'):
+                raise VMError('application_changed_retry_request')
+            port=next((p['worker_port'] for p in current['ports'] if p['guest_port']==current['ingress']['guest_port']),None)
+            if port is None:raise VMError('application_port_not_forwarded')
+            ticket=uuid.uuid4().hex
+            state=self.state(meta);state['active_http']+=1
+            with self.http_sessions_guard:self.http_sessions[ticket]=(project,meta['vm_id'],time.monotonic()+300)
+            return {'ticket':ticket,'port':port,'cold':cold}
+
+    def http_touch(self,ticket):
+        with self.http_sessions_guard:
+            current=self.http_sessions.get(ticket)
+            if current:self.http_sessions[ticket]=(current[0],current[1],time.monotonic()+300)
+        if not current:return False
+        with self.lock(current[0]):
+            state=self.states.get(current[1])
+            if state:state['last_incoming']=time.time()
+        return True
+
+    def http_end(self,ticket):
+        with self.http_sessions_guard:current=self.http_sessions.pop(ticket,None)
+        if not current:return False
+        with self.lock(current[0]):
+            state=self.states.get(current[1])
+            if state:
+                state['active_http']=max(0,state['active_http']-1)
+                state['last_incoming']=time.time()
+        return True
+
+    def prune_http_sessions(self):
+        now=time.monotonic()
+        with self.http_sessions_guard:expired=[ticket for ticket,item in self.http_sessions.items() if item[2]<=now]
+        for ticket in expired:self.http_end(ticket)
 
     def disconnect(self,meta):
         terminals=getattr(self.runner,"terminals",None)
@@ -544,6 +600,7 @@ class Runtime:
         return errors
 
     def tick(self):
+        self.prune_http_sessions()
         errors=self.reconcile_capacity()
         for path in (self.manager.root/'catalog').glob('*.json'):
             with self.lock(json.loads(path.read_text())['project_id']):

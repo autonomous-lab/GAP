@@ -60,6 +60,15 @@ class ReservationTests(unittest.TestCase):
         self.fails('reservation_binding_mismatch',lambda:self.checkpoint(node='node-two',project=SECOND,consumed=0))
         self.fails('project_node_mismatch',lambda:self.checkpoint(node='node-two',project=PROJECT))
 
+    def test_reservation_status_is_scoped_and_read_only(self):
+        self.a.topup('operator','fund',self.customer,100,'promotional')
+        self.checkpoint()
+        status=self.a.reservation_status('node-one',PROJECT,OWNER,'reservation-one')
+        self.assertEqual((status['allocated_microcredits'],status['consumed_microcredits']),(60,0))
+        self.assertFalse(status['closed'])
+        self.fails('project_node_mismatch',lambda:self.a.reservation_status('node-two',PROJECT,OWNER,'reservation-one'))
+        self.fails('reservation_owner_mismatch',lambda:self.a.reservation_status('node-one',PROJECT,'wrong','reservation-one'))
+
     def test_unpaid_close_is_rolled_back_including_the_debit(self):
         self.a.topup('operator','fund',self.customer,60,'promotional')
         self.checkpoint()

@@ -1,0 +1,4 @@
+# Fast worker canary against an already deployed fast-snapshot image.
+FROM gap-compose-fast-snapshot:fleet
+COPY runtime/compose/billing.py runtime/compose/fleet_billing.py \
+     runtime/compose/repair_fleet_reservation.py /opt/runner/

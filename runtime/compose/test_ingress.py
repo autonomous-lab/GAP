@@ -135,6 +135,14 @@ class IngressTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'invalid_http_admission_token'):
             Ingress(self.config, self.manager)
 
+    def test_rust_proxy_receives_admission_token_for_its_own_check(self):
+        self.ingress.perform(PROJECT, OWNER, {'vm_id': VM, 'enabled': True, 'guest_port': 8000})
+        with patch.dict('os.environ',{'GAP_RUST_HTTP_GATEWAY':'1'}):
+            config,_=self.ingress.configuration()
+        route=config['apps']['http']['servers']['compose']['routes'][1]
+        self.assertNotIn('X-GAP-VM-Admission',route['handle'][1]['headers']['request']['delete'])
+        self.assertIn('X-GAP-VM-Identity',route['handle'][1]['headers']['request']['delete'])
+
     def test_owner_and_vm_generation_are_enforced(self):
         for owner, vm in (('wrong-owner', VM), (OWNER, 'vm_' + 'd' * 32)):
             with self.assertRaises(VMError):

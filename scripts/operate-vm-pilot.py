@@ -14,7 +14,7 @@ def main(root,project,vm,action):
         raise ValueError('invalid_vm_identity')
     root=Path(root).resolve()
     meta=json.loads((root/'data/gap-compose/worker/vm/catalog'/f'{project}.json').read_text())
-    expected={'start':'stopped','resume':'hibernated','stop':'running'}[action]
+    expected={'start':'stopped','resume':'hibernated','stop':'running','hibernate':'running'}[action]
     if meta.get('project_id')!=project or meta.get('vm_id')!=vm or meta.get('state')!=expected:
         raise ValueError('vm_not_'+expected)
     token=(root/'data/gap-compose/config/service.token').read_text().strip()
@@ -35,7 +35,7 @@ def main(root,project,vm,action):
     while time.monotonic()<deadline:
         status=rpc('jobs/'+job['job_id'],'GET',{})
         if status.get('status')=='succeeded':
-            verb={'start':'started','resume':'resumed','stop':'gracefully stopped'}[action]
+            verb={'start':'started','resume':'resumed','stop':'gracefully stopped','hibernate':'hibernated'}[action]
             print('VM '+verb+' through normal worker policy')
             return
         if status.get('status') in ('failed','interrupted'):
@@ -49,6 +49,6 @@ if __name__=='__main__':
     parser.add_argument('--root',required=True)
     parser.add_argument('--project',required=True)
     parser.add_argument('--vm',required=True)
-    parser.add_argument('--action',choices=('start','resume','stop'),required=True)
+    parser.add_argument('--action',choices=('start','resume','stop','hibernate'),required=True)
     args=parser.parse_args()
     main(args.root,args.project,args.vm,args.action)

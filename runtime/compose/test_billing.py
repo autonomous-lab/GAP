@@ -18,6 +18,18 @@ class LedgerTests(unittest.TestCase):
         self.price={'version':'test-1','vcpu_hour':3600,'gib_ram_hour':3600,
                     'gib_disk_hour':3600,'gib_in':100,'gib_out':200}
 
+    def test_ledger_uses_rollback_journal_and_discards_failed_connection(self):
+        with self.ledger.db() as db:
+            self.assertEqual(db.execute('PRAGMA journal_mode').fetchone()[0], 'delete')
+            original = db
+        with self.assertRaises(Exception):
+            with self.ledger.db() as db:
+                db.execute('SELECT * FROM nonexistent_billing_table')
+        self.assertIsNone(self.ledger.connections.db)
+        with self.ledger.db() as db:
+            self.assertIsNot(db, original)
+            self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+
     def test_fractional_cpu_keeps_submillisecond_carry(self):
         self.meta['vcpus'] = .25
         self.sample(0, disk=0)
@@ -206,7 +218,8 @@ class LedgerTests(unittest.TestCase):
         self.sample(1000,on=False)
         runner=Runner.__new__(Runner)
         runner.authorize=lambda *_: {}
-        runner.hypervisor=SimpleNamespace(read=lambda *_:self.meta,list=lambda *_:[self.meta])
+        runner.hypervisor=SimpleNamespace(read=lambda *_:self.meta,list=lambda *_:[self.meta],
+                                          folder=lambda _:Path(self.temp.name))
         runner.runtime=SimpleNamespace(ledger=self.ledger,lock=lambda _:nullcontext(),sample=lambda _:self.sample(6000,on=False))
         runner.operator({'action':'topup','project_id':P,'owner_did':O,'amount_microcredits':100,'request_id':'paid'})
         self.assertEqual(self.ledger.view(P,O)['balance_microcredits'],100)
@@ -221,7 +234,8 @@ class LedgerTests(unittest.TestCase):
         self.sample(1000)
         runner=Runner.__new__(Runner)
         runner.authorize=lambda *_:{}
-        runner.hypervisor=SimpleNamespace(read=lambda *_:self.meta,list=lambda *_:[self.meta])
+        runner.hypervisor=SimpleNamespace(read=lambda *_:self.meta,list=lambda *_:[self.meta],
+                                          folder=lambda _:Path(self.temp.name))
         runner.runtime=SimpleNamespace(ledger=self.ledger,lock=lambda _:nullcontext(),sample=lambda _:self.sample(2000))
         runner.rpc({'project_id':P,'owner_did':O,'action':'budget','method':'PUT','body':{'request_id':'new-period','budget_microcredits':10}})
         self.assertEqual(self.ledger.view(P,O)['budget_spent_microcredits'],0)

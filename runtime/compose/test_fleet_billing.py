@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0,os.environ.get('GAP_TEST_CONTROL',str(Path(__file__).resolve().parents[1]/'control')))
-from authority import Authority
+from authority import Authority, Failure
 from placement import Directory
 from service import Application
 from billing import Ledger,BillingError,UNITS,RETENTION_SECONDS
@@ -177,6 +177,79 @@ class FleetTests(unittest.TestCase):
         self.ledger.sync(P,O,True)
         self.assertEqual(self.ledger.view(P,O)['balance_microcredits'],100)
         self.assertEqual(self.authority.wallet(self.customer)['spent_microcredits'],50)
+
+    def test_expired_central_high_water_repairs_a_rolled_back_worker_without_double_debit(self):
+        self.ledger.sync(P,O,True)
+        self.charge(20,'first');self.ledger.sync(P,O,True)
+        with self.ledger.db() as db:
+            earlier=dict(db.execute('SELECT allocated,pending FROM fleet_bindings WHERE project=?',(P,)).fetchone())
+            account=dict(db.execute('SELECT balance,spent,estimated,budget_spent FROM accounts WHERE project=?',(P,)).fetchone())
+        self.charge(30,'second');self.ledger.sync(P,O,True)
+        self.assertEqual(self.authority.wallet(self.customer)['spent_microcredits'],50)
+        with self.ledger.db() as db:
+            db.execute('UPDATE accounts SET balance=?,spent=?,estimated=?,budget_spent=? WHERE project=?',
+                       (account['balance'],account['spent'],account['estimated'],account['budget_spent'],P))
+            old=dict(action='checkpoint',request_id='stale-checkpoint',project_id=P,owner_did=O,
+                     reservation_id=db.execute('SELECT reservation FROM fleet_bindings WHERE project=?',(P,)).fetchone()[0],
+                     consumed_microcredits=account['spent'],unpaid_microcredits=0,target_microcredits=100,lease_seconds=10)
+            db.execute('UPDATE fleet_bindings SET allocated=?,pending=? WHERE project=?',
+                       (earlier['allocated'],json.dumps(old,sort_keys=True),P))
+            db.execute("DELETE FROM entries WHERE project=? AND operation='second'",(P,))
+        def transport(body):
+            if body['action']=='reservation-status':
+                return self.authority.reservation_status('node',P,O,body['reservation_id'])
+            try:return self.transport(body)
+            except Failure as error:
+                if error.code=='invalid_consumption_checkpoint':
+                    raise BillingError('fleet_checkpoint_behind_authority') from None
+                raise
+        self.ledger=self.open()
+        self.ledger.transport=transport
+        self.ledger.sync(P,O,True)
+        self.assertFalse(self.ledger.lease_allowed(P))
+        self.assertEqual(self.ledger.view(P,O)['fleet']['authority_error'],'fleet_reconciliation_wait_for_lease_expiry')
+        self.advance(11)
+        self.ledger.sync(P,O,True)
+        self.assertTrue(self.ledger.lease_allowed(P))
+        self.assertEqual(self.ledger.view(P,O)['balance_microcredits'],100)
+        self.assertEqual(self.authority.wallet(self.customer)['spent_microcredits'],50)
+        with self.ledger.db() as db:
+            entry=db.execute("SELECT payload FROM entries WHERE operation LIKE 'fleet-authority-repair:%'").fetchone()
+            self.assertEqual(json.loads(entry[0])['already_paid_consumption_microcredits'],30)
+
+    def test_stale_checkpoint_recovers_when_local_storage_has_advanced_past_authority(self):
+        self.ledger.sync(P,O,True)
+        self.charge(20,'first');self.ledger.sync(P,O,True)
+        with self.ledger.db() as db:
+            binding=dict(db.execute('SELECT reservation,allocated FROM fleet_bindings WHERE project=?',(P,)).fetchone())
+        self.charge(30,'second');self.ledger.sync(P,O,True)
+        with self.ledger.db() as db:
+            db.execute('UPDATE accounts SET balance=100,spent=20,estimated=20,budget_spent=20 WHERE project=?',(P,))
+            pending=dict(action='checkpoint',request_id='stale-local-ahead',project_id=P,owner_did=O,
+                reservation_id=binding['reservation'],consumed_microcredits=20,unpaid_microcredits=0,
+                target_microcredits=100,lease_seconds=10)
+            db.execute('UPDATE fleet_bindings SET allocated=?,pending=? WHERE project=?',
+                       (binding['allocated'],json.dumps(pending,sort_keys=True),P))
+            db.execute("DELETE FROM entries WHERE project=? AND operation='second'",(P,))
+        self.ledger=self.open()
+        self.charge(40,'storage-after-stale')
+        self.advance(11)
+        def transport(body):
+            if body['action']=='reservation-status':
+                return self.authority.reservation_status('node',P,O,body['reservation_id'])
+            try:return self.transport(body)
+            except Failure as error:
+                if error.code=='invalid_consumption_checkpoint':
+                    raise BillingError('fleet_checkpoint_behind_authority') from None
+                raise
+        self.ledger.transport=transport
+        self.ledger.sync(P,O,True)
+        self.assertTrue(self.ledger.lease_allowed(P))
+        self.assertEqual(self.authority.wallet(self.customer)['spent_microcredits'],60)
+        self.assertEqual(self.ledger.view(P,O)['balance_microcredits'],100)
+        with self.ledger.db() as db:
+            entry=db.execute("SELECT payload FROM entries WHERE operation LIKE 'fleet-authority-repair:%'").fetchone()
+            self.assertEqual(json.loads(entry[0])['already_paid_consumption_microcredits'],0)
 
     def test_unpaid_storage_is_repaid_before_new_execution_and_finance_conserves_debits(self):
         self.ledger.sync(P,O,True)

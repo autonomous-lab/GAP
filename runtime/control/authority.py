@@ -533,6 +533,20 @@ class Authority:
                         staged_legacy_microcredits=sum(json.loads(r['payload'])['balance'] for r in pending),
                         staged_legacy_spendable=False)
 
+    def reservation_status(self,node,project,owner,reservation):
+        """Read-only cumulative high-water mark for a node's own reservation."""
+        identifier(reservation)
+        with self.db() as db:
+            placement=self.node_project(db,node,project)
+            if placement['owner']!=owner:raise Failure('reservation_owner_mismatch',403)
+            row=db.execute('SELECT * FROM reservations WHERE id=?',(reservation,)).fetchone()
+            if not row or (row['node'],row['project'],row['customer'])!=(node,project,placement['customer']):
+                raise Failure('reservation_not_found',404)
+            return dict(operator_id=self.operator,node_id=node,project_id=project,owner_did=owner,
+                reservation_id=reservation,allocated_microcredits=row['allocated'],
+                consumed_microcredits=row['consumed'],unpaid_microcredits=row['unpaid'],
+                lease_expires_at=row['expires'],closed=bool(row['closed']),authority_now=int(self.clock()))
+
     def checkpoint(self, node, request, project, owner, reservation, consumed, unpaid, target, lease_seconds, close=False):
         """Settle a durable cumulative checkpoint, then reserve/renew atomically.
 

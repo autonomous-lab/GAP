@@ -37,10 +37,8 @@ def integer(value, minimum=0, maximum=10**15):
 class Ledger:
     def __init__(self, path, clock=time.time):
         self.path, self.clock = str(path), clock
-        # SQLCipher key setup is deliberately expensive. Long-lived runtime
-        # loops used to pay that cost for every short transaction. Keep one
-        # unlocked connection per thread while retaining an explicit durable
-        # transaction around every operation.
+        # SQLCipher key setup is deliberately expensive. Keep one unlocked
+        # connection per thread, but never reuse it after a database error.
         self.connections = threading.local()
         with self.db() as db:
             db.executescript('''
@@ -127,16 +125,32 @@ class Ledger:
         db = getattr(self.connections, 'db', None)
         if db is None:
             db = connect(self.path, 'microvm-credits', timeout=30, isolation_level=None)
-            db.row_factory = sqlite3.Row
-            db.execute('PRAGMA journal_mode=WAL')
-            db.execute('PRAGMA synchronous=FULL')
-            self.connections.db = db
-        db.execute('BEGIN IMMEDIATE')
+            try:
+                db.row_factory = sqlite3.Row
+                # The prepaid ledger has one writer at a time. Rollback
+                # journaling avoids retaining a WAL/SHM pair across worker
+                # threads and out-of-process maintenance operations.
+                if db.execute('PRAGMA journal_mode=DELETE').fetchone()[0].lower() != 'delete':
+                    raise RuntimeError('billing_journal_mode_unavailable')
+                db.execute('PRAGMA synchronous=FULL')
+                self.connections.db = db
+            except BaseException:
+                db.close()
+                raise
         try:
+            db.execute('BEGIN IMMEDIATE')
             yield db
             if db.in_transaction: db.execute('COMMIT')
-        except BaseException:
-            if db.in_transaction: db.execute('ROLLBACK')
+        except BaseException as error:
+            try:
+                if db.in_transaction: db.execute('ROLLBACK')
+            except sqlite3.DatabaseError:
+                pass
+            # A SQLCipher HMAC or I/O error poisons the connection. Even if
+            # SQLite reports a successful rollback, its page cache is unsafe.
+            if isinstance(error, sqlite3.DatabaseError):
+                self.connections.db = None
+                db.close()
             raise
 
     def ensure(self, db, project, owner):

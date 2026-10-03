@@ -47,6 +47,11 @@ class Client:
             return result
         except urllib.error.HTTPError as error:
             code='fleet_authority_rate_limited' if error.code==429 else 'fleet_authority_denied' if error.code in (401,403) else 'fleet_reconciliation_required' if error.code==409 else 'fleet_authority_unavailable'
+            if error.code==409:
+                try:
+                    if json.loads(error.read(4096)).get('error',{}).get('code')=='invalid_consumption_checkpoint':
+                        code='fleet_checkpoint_behind_authority'
+                except (ValueError,TypeError,AttributeError):pass
             if str(body.get('action','')).startswith('capacity-'):
                 try:
                     value=json.loads(error.read(65537)).get('error',{}).get('code')
@@ -206,7 +211,33 @@ class FleetLedger(Ledger):
             self.deadlines.pop(project,None)
         return result
 
-    def sync(self,project,owner,force=False):
+    def recover_checkpoint(self,project,owner,pending):
+        """Recover only a bound, expired authority high-water mark; never mint funds."""
+        from repair_fleet_reservation import reconcile_record
+        status=self.transport(dict(action='reservation-status',project_id=project,
+                                   owner_did=owner,reservation_id=pending['reservation_id']))
+        expected=dict(operator_id=self.config['operator_id'],node_id=self.config['node_id'],
+                      project_id=project,owner_did=owner,reservation_id=pending['reservation_id'],closed=False)
+        if any(status.get(k)!=v for k,v in expected.items()):raise BillingError('fleet_reconciliation_required')
+        for key in ('allocated_microcredits','consumed_microcredits','lease_expires_at','authority_now'):
+            if type(status.get(key)) is not int or status[key]<0:raise BillingError('fleet_reconciliation_required')
+        if status['lease_expires_at']>status['authority_now']:
+            raise BillingError('fleet_reconciliation_wait_for_lease_expiry')
+        with self.db() as db:
+            row=db.execute('SELECT allocated,pending,legacy_spent FROM fleet_bindings WHERE project=?',(project,)).fetchone()
+            account=db.execute('SELECT spent FROM accounts WHERE project=?',(project,)).fetchone()
+            if not row or not account or row['legacy_spent']!=0 or not row['pending'] or json.loads(row['pending'])!=pending:
+                raise BillingError('fleet_reconciliation_requires_operator')
+            if status['allocated_microcredits']<row['allocated'] or status['allocated_microcredits']<account['spent']:
+                raise BillingError('fleet_reconciliation_requires_operator')
+            try:
+                reconcile_record(db,project,pending['reservation_id'],row['allocated'],account['spent'],
+                                 status['allocated_microcredits'],status['consumed_microcredits'])
+            except (ValueError,RuntimeError):
+                raise BillingError('fleet_reconciliation_requires_operator') from None
+        return True
+
+    def sync(self,project,owner,force=False,_recovered=False):
         if project not in self.projects:return
         with self.locks[project]:
             started=self.monotonic()
@@ -260,7 +291,15 @@ class FleetLedger(Ledger):
                 self.retention[project]=reply.get('retention',{})
                 self.errors.pop(project,None)
             except BillingError as error:
-                self.errors[project]=str(error) if str(error) in ('fleet_authority_unavailable','fleet_authority_denied','fleet_reconciliation_required') else 'fleet_authority_unavailable'
+                if str(error)=='fleet_checkpoint_behind_authority' and not _recovered:
+                    try:
+                        if self.recover_checkpoint(project,owner,pending):
+                            return self.sync(project,owner,force=True,_recovered=True)
+                    except BillingError as recovery_error:
+                        error=recovery_error
+                self.errors[project]=str(error) if str(error) in ('fleet_authority_unavailable','fleet_authority_denied',
+                    'fleet_reconciliation_required','fleet_checkpoint_behind_authority',
+                    'fleet_reconciliation_wait_for_lease_expiry','fleet_reconciliation_requires_operator') else 'fleet_authority_unavailable'
                 # Keep only the original, unextended, in-process deadline.
             except (ValueError,KeyError,TypeError):
                 self.errors[project]='fleet_authority_invalid_response'

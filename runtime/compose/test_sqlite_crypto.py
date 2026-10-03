@@ -40,5 +40,19 @@ class SQLiteCryptoTest(unittest.TestCase):
         restored.close()
         self.assertEqual(snapshot.stat().st_mode & 0o777,0o600)
 
+    def test_billing_ledger_backup_does_not_split_live_journal(self):
+        from billing import Ledger
+        path=self.root/'microvm-credits.sqlite'
+        ledger=Ledger(path)
+        project='prj_'+'a'*24
+        owner='did:gap:'+'b'*64
+        ledger.topup(project,owner,100,'first')
+        snapshot=self.root/'backups'/'billing.sqlite'
+        self.crypto.backup(path,snapshot,'microvm-credits')
+        ledger.topup(project,owner,50,'second')
+        self.assertEqual(ledger.view(project,owner)['balance_microcredits'],150)
+        self.assertFalse(Path(str(path)+'-wal').exists())
+        self.assertEqual(self.crypto.connect(path,'microvm-credits').execute('PRAGMA cipher_integrity_check').fetchall(),[])
+
 
 if __name__=='__main__':unittest.main()

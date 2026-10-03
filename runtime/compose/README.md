@@ -142,6 +142,32 @@ The test VM's HTTP first byte improved from about 6.0 s to about 0.5 s when
 its LUKS disk was also converted from QEMU's 2000 ms KDF to 50 ms. The
 re-encoding script requires the VM to be stopped and keeps an original disk
 for rollback; it may increase physical disk usage by flattening the base.
+
+### Rust HTTP wake proxy (canary)
+
+The existing Python wake gateway remains the default and still handles raw
+TCP/UDP. `http_gateway/` contains an opt-in Tokio/Hyper HTTP and WebSocket
+proxy. Each request obtains an authenticated, short-lived admission ticket from
+the Python runner before reaching the guest. The control connection is pooled
+so the SQLCipher key derivation is not repeated in a new Python thread for
+every HTTP request. The proxy strips all GAP-private headers before forwarding,
+and a dropped response or WebSocket releases the activity ticket. Cold wake
+waits for the guest application port to become reachable.
+Warm requests use the maintenance loop's 15-second billing cache instead of a
+SQLCipher transaction per request; the fleet lease is still checked on every
+admission. Cold wake forces a fresh metering sample and credit/lease check. The independent
+policy watchdog and metering loop continue to enforce their own deadlines.
+
+Build `Dockerfile.fast-snapshot` to produce the `gap-compose-fast-snapshot:rust`
+image and deploy with `deploy.yml` plus `fast-rust.override.yml`. On a node
+that already has the fleet fast-snapshot image, `Dockerfile.rust-overlay` can
+build the same canary more quickly after building the `rust-http-build` stage.
+Use `--project-directory .` with Compose so `/config` and `/data` mount from
+the repository checkout. Do not recreate the worker while any VM is running.
+The old image and `fast-fleet.override.yml` are the rollback. The proxy must
+pass a real guest wake, warm concurrency, and WebSocket test before fleet
+rollout; isolated mock tests alone do not establish a production throughput
+figure. A billing or policy refusal is not a proxy benchmark.
 Existing disks that have not been re-keyed still incur the older PBKDF cost.
 
 ### VM API
@@ -810,14 +836,31 @@ future intervals. Switching back to shadow pauses automatic unpaid deletion;
 a deletion already claimed must complete and cannot be reversed by a mode change.
 
 Back up `microvm-credits.sqlite` using SQLite's online backup API, alongside the
-catalog and disks; copying the live main DB alone can omit WAL transactions.
-The ledger uses WAL/FULL transactions, atomic checkpoints, integer fractional
+catalog and disks; never copy or remove SQLite journal files while a connection
+is open. The ledger uses DELETE/FULL transactions, atomic checkpoints, integer fractional
 carry and unique operation IDs. It retains usage records; monitor ledger growth
 and free disk. The API returns the latest 100 entries plus cumulative totals.
 Network counters are atomically persisted each second, usage each five seconds
 and lifecycle edge. A crash can lose the most recent unflushed counters; it does
 not fabricate CPU/RAM time for an unknown outage interval. This is an operational
 meter, not a claim of lossless accounting across arbitrary host failures.
+
+Fleet reservation consumption is a monotonic, cumulative counter held by the
+central authority. If a worker restarts from an older ledger, the authority
+rejects its stale checkpoint; never delete the reservation or grant local
+credits to bypass this fence. The node-scoped `reservation-status` action exposes
+the authority high-water mark without changing the wallet. After the old lease
+expires, the worker may reconcile only a matching project, owner, node and
+reservation with valid local balance arithmetic and no unpaid usage. It records
+any consumption already paid centrally as an explicit local audit adjustment,
+then retries a fresh checkpoint; it does not debit the customer twice. All
+other cases remain blocked for operator review. For manual recovery, take
+transactionally consistent backups of both databases, stop the worker, verify
+the central reservation and use `repair_fleet_reservation.py` with exact expected
+local and central counters. The script refuses a running worker or changed
+preconditions. `Dockerfile.billing-recovery` and
+`billing-recovery.override.yml` are a canary overlay for nodes already using
+the fast-snapshot image.
 
 Metering observes IP packet sizes at the QEMU network backend, including control
 SSH and both incoming/outgoing traffic. A FIFO exposes only packet headers to the

@@ -1,0 +1,9 @@
+name: gap-compose
+services:
+  compose-runner:
+    image: gap-compose-fast-snapshot:rust
+    devices:
+      - /dev/userfaultfd:/dev/userfaultfd
+    environment:
+      GAP_FAST_SNAPSHOT_ENABLED: "1"
+      GAP_RUST_HTTP_GATEWAY: "1"

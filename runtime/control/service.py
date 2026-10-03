@@ -267,6 +267,10 @@ class Application:
                     body['target_microcredits'],body['lease_seconds'],body.get('close',False))
                 import retention
                 return dict(result,authority_now=math.ceil(a.clock()),retention=retention.status(a,actor,body['project_id'],body['owner_did']))
+            if body.get('action') == 'reservation-status':
+                if not self.allow_reservations:
+                    raise Failure('reservations_disabled', 409)
+                return a.reservation_status(actor,body['project_id'],body['owner_did'],body['reservation_id'])
             raise Failure('unknown_node_action', 404)
         if kind != 'client':
             raise Failure('client_credentials_required', 403)

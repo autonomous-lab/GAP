@@ -89,6 +89,21 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.call('/node', 'node-one-test', dict(
             action='wallet-status', project_id=PROJECT, owner_did=AGENT))[0], 403)
 
+    def test_node_reservation_status_is_scoped(self):
+        customer=self.customer()
+        self.operator('topup','reservation-fund',customer_id=customer,amount_microcredits=100,source='promotional')
+        self.app.allow_reservations=True
+        checkpoint=dict(action='checkpoint',request_id='reservation',project_id=PROJECT,owner_did=OWNER,
+                        reservation_id='reservation-one',consumed_microcredits=0,unpaid_microcredits=0,
+                        target_microcredits=60,lease_seconds=10)
+        self.assertEqual(self.call('/node','node-one-test',checkpoint)[0],200)
+        query=dict(action='reservation-status',project_id=PROJECT,owner_did=OWNER,reservation_id='reservation-one')
+        status,body=self.call('/node','node-one-test',query)
+        self.assertEqual(status,200)
+        self.assertEqual(body['allocated_microcredits'],60)
+        self.assertEqual(self.call('/node','node-two-test',query)[0],403)
+        self.assertEqual(self.call('/node','admin-test',query)[0],403)
+
     def test_readiness_uses_node_identity_and_live_feature_flags(self):
         status,data=self.call('/node','node-one-test',dict(action='readiness'))
         self.assertEqual(status,200);self.assertEqual(data['node_id'],'node-one')

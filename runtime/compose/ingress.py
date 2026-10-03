@@ -1,6 +1,7 @@
 """Dedicated Caddy ingress for managed guests; never configures the shared edge."""
 import json
 import base64
+import os
 from pathlib import Path
 import re
 import threading
@@ -139,7 +140,8 @@ class Ingress:
                  'headers': {'request': {'set': {
                      **({'X-GAP-Project': [meta['project_id']], 'X-GAP-VM': [meta['vm_id']]} if self.manager.runtime else {}),
                      'X-Forwarded-Proto': [urlsplit(self.public_url).scheme]
-                 }, 'delete': ['X-GAP-VM-Admission', 'X-GAP-VM-Identity', 'X-GAP-Origin-Authorization', 'X-GAP-Origin-Host']}, 'response': {'delete': ['Service-Worker-Allowed']}}}
+                 }, 'delete': ([] if os.environ.get('GAP_RUST_HTTP_GATEWAY')=='1' else ['X-GAP-VM-Admission'])+
+                              ['X-GAP-VM-Identity', 'X-GAP-Origin-Authorization', 'X-GAP-Origin-Host']}, 'response': {'delete': ['Service-Worker-Allowed']}}}
             ], 'terminal': True})
             applied.add(meta['vm_id'])
         remote_file=self.manager.root/'migration-routes.json'

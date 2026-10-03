@@ -11,5 +11,13 @@ RUN ./configure --target-list=x86_64-softmmu --enable-kvm --enable-slirp \
     --disable-docs --disable-gtk --disable-sdl --disable-vnc --disable-spice --disable-werror \
     && ninja -C build -j4 qemu-system-x86_64
 
+FROM rust:1.97-alpine AS rust-http-build
+RUN apk add --no-cache build-base
+WORKDIR /src/http-gateway
+COPY runtime/compose/http_gateway/Cargo.toml runtime/compose/http_gateway/Cargo.lock ./
+COPY runtime/compose/http_gateway/src ./src
+RUN cargo build --locked --release
+
 FROM gap-compose-compose-runner:latest
 COPY --from=qemu-build /src/qemu/build/qemu-system-x86_64 /usr/local/bin/qemu-system-x86_64-fast
+COPY --from=rust-http-build /src/http-gateway/target/release/gap-vm-http-gateway /usr/local/bin/gap-vm-http-gateway

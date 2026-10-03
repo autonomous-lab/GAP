@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import socket
 from sqlite_crypto import connect, prepare, sqlite3
 import subprocess
 import tempfile
@@ -20,6 +21,7 @@ import time
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from microvm import VMError
 
 MAX_BODY = 5 * 1024 * 1024  # HTTP framing budget, not a guest storage quota
 MAX_OUTPUT = 1024 * 1024
@@ -192,7 +194,9 @@ class Runner:
             from lifecycle import Runtime
             from gateway import Gateway
             self.runtime=Runtime(self,config)
-            Gateway(self.runtime,config.get('wake_gateway_port',8094))
+            rust_http=os.environ.get('GAP_RUST_HTTP_GATEWAY')=='1'
+            Gateway(self.runtime,8095 if rust_http else config.get('wake_gateway_port',8094))
+            if rust_http:self.runtime.gateway.port=config.get('wake_gateway_port',8094)
         from metrics import Metrics
         self.metrics = Metrics(self)
         self.terminals = None
@@ -698,6 +702,20 @@ class Runner:
                 if restored.get('ok') is not True:raise Failure(502,'guest_agent_update_key_cleanup_failed')
             if failure:raise failure
 
+    def hot_http(self,body):
+        if not self.runtime or os.environ.get('GAP_RUST_HTTP_GATEWAY')!='1' or not isinstance(body,dict):
+            raise Failure(503,'rust_http_unavailable')
+        action=body.get('action')
+        if action=='begin':
+            if set(body)!={'action','project_id','vm_id'} or not PROJECT.fullmatch(str(body['project_id'])) or not re.fullmatch(r'vm_[0-9a-f]{32}',str(body['vm_id'])):
+                raise Failure(400,'invalid_http_begin')
+            return self.runtime.http_begin(body['project_id'],body['vm_id'])
+        if action in ('end','touch'):
+            if set(body)!={'action','ticket'} or not REQUEST.fullmatch(str(body['ticket'])):
+                raise Failure(400,'invalid_http_ticket')
+            return {'ok':self.runtime.http_end(body['ticket']) if action=='end' else self.runtime.http_touch(body['ticket'])}
+        raise Failure(400,'invalid_http_action')
+
     def operator(self,body):
         if not self.runtime: raise Failure(409,'serverless_not_configured')
         ledger=self.runtime.ledger
@@ -731,18 +749,20 @@ class Runner:
 def handler_for(runner):
     from billing import BillingError
     class Handler(BaseHTTPRequestHandler):
+        protocol_version='HTTP/1.1'
         def log_message(self, *args):
             pass  # Never put manifests, bearer tokens or guest logs in host logs.
 
-        def reply(self, status, value):
+        def reply(self, status, value, keepalive=False):
             body = json.dumps(value).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
+            self.send_header("Connection", "keep-alive" if keepalive else "close")
             self.end_headers()
             self.wfile.write(body)
+            self.close_connection=not keepalive
 
         def do_GET(self):
             from ttyd_terminal import proxy
@@ -752,8 +772,9 @@ def handler_for(runner):
 
         def do_POST(self):
             self.connection.settimeout(10)
+            keepalive=self.path=='/hot-http'
             try:
-                if self.path not in ("/rpc","/operator"):
+                if self.path not in ("/rpc","/operator","/hot-http"):
                     raise Failure(404, "unknown_route")
                 supplied = self.headers.get("Authorization", "").encode()
                 secret=runner.operator_token if self.path=="/operator" else runner.token
@@ -770,18 +791,23 @@ def handler_for(runner):
                 rpc = json.loads(raw)
                 if not isinstance(rpc, dict):
                     raise Failure(400, "invalid_request")
-                status, value = (200,runner.operator(rpc)) if self.path=="/operator" else runner.rpc(rpc)
+                status, value = ((200,runner.operator(rpc)) if self.path=="/operator" else
+                                 (200,runner.hot_http(rpc)) if self.path=="/hot-http" else runner.rpc(rpc))
             except Failure as error:
                 status, value = error.status, {"error": {"code": error.code}}
             except BillingError as error:
                 code=str(error)
                 status=409 if code in ('immutable_tariff_version','tariff_version_changed_refresh_before_retry','billing_operation_conflict','immutable_cost_version','cost_version_changed_refresh_before_retry','immutable_funding_classification') else 400
                 value={"error":{"code":code}}
+            except VMError as error:
+                code=str(error)
+                status=402 if code=='microvm_credits_or_budget_exhausted' else 404 if code=='unknown_application' else 503
+                value={"error":{"code":code}}
             except (ValueError, UnicodeError, TimeoutError, RecursionError):
                 status, value = 400, {"error": {"code": "invalid_request"}}
             except Exception:
                 status, value = 503, {"error": {"code": "runner_unavailable"}}
-            self.reply(status, value)
+            self.reply(status, value, keepalive=keepalive and status==200)
     return Handler
 
 
@@ -801,4 +827,22 @@ if __name__ == "__main__":
     with (state_dir / "runner.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         runner = Runner(args.config)
+        if os.environ.get('GAP_RUST_HTTP_GATEWAY')=='1':
+            bind_port=load_config(args.config).get('wake_gateway_port',8094)
+            if bind_port==8095 or not Path('/usr/local/bin/gap-vm-http-gateway').is_file():
+                raise SystemExit('rust_http_gateway_unavailable')
+            rust_gateway=subprocess.Popen(['/usr/local/bin/gap-vm-http-gateway',
+                '--bind',f'127.0.0.1:{bind_port}',
+                '--control',f'http://127.0.0.1:{args.port}/hot-http',
+                '--token-file','/config/service.token',
+                '--edge-token-file','/config/http-edge.token'],
+                stdin=subprocess.DEVNULL,start_new_session=False)
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                if rust_gateway.poll() is not None:raise SystemExit('rust_http_gateway_exited')
+                try:
+                    with socket.create_connection(('127.0.0.1',bind_port),timeout=.2):break
+                except OSError:time.sleep(.05)
+            else:raise SystemExit('rust_http_gateway_start_timeout')
+            threading.Thread(target=lambda: (rust_gateway.wait(),os._exit(1)),daemon=True).start()
         ThreadingHTTPServer((args.bind, args.port), handler_for(runner)).serve_forever()
