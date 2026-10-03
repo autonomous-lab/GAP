@@ -322,8 +322,8 @@ makes the project databases unrecoverable.
 ## MicroVM storage encryption
 
 **New microVMs on the Elestio fleet encrypt their disks.** The standard
-hibernation path also encrypts saved memory. The experimental fast-snapshot
-path on node 2 deliberately keeps its RAM checkpoint unencrypted to minimize
+hibernation path also encrypts saved memory. The fleet fast-snapshot
+path deliberately keeps its RAM checkpoint unencrypted to minimize
 resume latency. Applications do not need to
 manage disk passwords, and the host OS does not require a storage migration.
 Independent operators must explicitly enable encryption on their workers.

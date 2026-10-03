@@ -50,8 +50,9 @@ has authenticated, admission is valid and the consumed-state transition is durab
 The current disk remains unchanged while hibernated. The unencrypted legacy path
 continues to use internal snapshots.
 
-An opt-in node-2 experiment selects individual VM IDs with
-`GAP_FAST_SNAPSHOT_VM_IDS` and uses pinned QEMU 11.1.50. It saves RAM as a
+The fleet fast-snapshot mode uses `GAP_FAST_SNAPSHOT_ENABLED=1` and pinned
+QEMU 11.1.50; `GAP_FAST_SNAPSHOT_VM_IDS` remains available for single-VM tests.
+It saves RAM as a
 seekable `mapped-ram` file and resumes with `postcopy-ram`/`userfaultfd` so
 the guest can run before every page is loaded. This `memory.fast` file is
 **not encrypted or authenticated**. It is mode 0600 in the worker-only state

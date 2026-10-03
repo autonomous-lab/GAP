@@ -1,0 +1,8 @@
+name: gap-compose
+services:
+  compose-runner:
+    image: gap-compose-fast-snapshot:fleet
+    devices:
+      - /dev/userfaultfd:/dev/userfaultfd
+    environment:
+      GAP_FAST_SNAPSHOT_ENABLED: "1"

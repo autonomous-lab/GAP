@@ -119,15 +119,17 @@ SQLite backups; copying a WAL database file directly while the worker is active
 is not a valid backup. The exact command and restore requirements are documented
 in the encryption guide.
 
-### Fast hibernation experiment (node 2 only)
+### Fast hibernation (fleet opt-in)
 
 `Dockerfile.fast-snapshot` builds pinned QEMU 11.1.50 alongside the normal
-QEMU 10 binary. `fast-node2.override.yml` selects only the listed VM ID;
-all other VMs keep their existing encrypted snapshot path. The host must
+QEMU 10 binary. `fast-node2.override.yml` remains a single-VM test override;
+`fast-fleet.override.yml` enables fast snapshots for new starts on a node.
+Existing QEMU 10 RAM snapshots continue to use QEMU 10 until cold restarted.
+The host must
 install `99-gap-userfaultfd.rules` under `/etc/udev/rules.d/`, reload udev,
 and expose `/dev/userfaultfd` to the worker. The worker remains unprivileged
 with Docker's default seccomp policy. Build the normal worker image first,
-then the fast image, and deploy with both `deploy.yml` and the node-2 override.
+then the fast image, and deploy with both `deploy.yml` and the fleet override.
 Stop or hibernate running VMs before recreating the worker. Do not switch a
 hibernated QEMU 10 snapshot to QEMU 11: start its original snapshot with the
 original binary, then stop and restart under the new binary before taking a
@@ -136,10 +138,11 @@ fast checkpoint. Rollback requires keeping the fast binary available until all
 
 The fast RAM file is plaintext while hibernated and during postcopy; see
 [the encryption guide](./ENCRYPTION.md) before enabling it for additional VMs.
-The test VM's HTTP first byte improved from about 6.0 s to about 0.7 s when
+The test VM's HTTP first byte improved from about 6.0 s to about 0.5 s when
 its LUKS disk was also converted from QEMU's 2000 ms KDF to 50 ms. The
 re-encoding script requires the VM to be stopped and keeps an original disk
 for rollback; it may increase physical disk usage by flattening the base.
+Existing disks that have not been re-keyed still incur the older PBKDF cost.
 
 ### VM API
 

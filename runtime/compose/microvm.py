@@ -494,9 +494,12 @@ class MicroVMs:
         self.seed_crypto.rebuild(meta, folder)
 
     def fast_snapshot(self, meta):
+        if meta.get('snapshot_format') == 'gapmem1': return False
+        if meta.get('snapshot_format') == 'gapfast1': return True
+        if meta.get('state') in ('running', 'paused', 'hibernating') and 'running_fast_snapshot' in meta:
+            return meta['running_fast_snapshot'] is True
         selected = set(filter(None, os.environ.get('GAP_FAST_SNAPSHOT_VM_IDS', '').split(',')))
-        return (meta.get('snapshot_format') == 'gapfast1' or
-                (meta['vm_id'] in selected and meta.get('snapshot_format') != 'gapmem1'))
+        return os.environ.get('GAP_FAST_SNAPSHOT_ENABLED') == '1' or meta['vm_id'] in selected
 
     def qemu_binary(self, meta):
         if self.fast_snapshot(meta):
@@ -653,6 +656,7 @@ class MicroVMs:
         if meta.get('snapshot_qemu_version')!=self.qemu_version(meta):
             raise VMError('snapshot_requires_original_qemu_version')
         self.ensure_free_vm_proxy(meta)
+        meta['running_fast_snapshot'] = meta.get('snapshot_format') == 'gapfast1'
         meta['state']='resuming'; self.save(meta)
         self.capture_start(meta)
         if meta.get('snapshot_format')=='gapfast1':
@@ -780,6 +784,7 @@ class MicroVMs:
             raise VMError('guest_base_image_changed')
         folder = self.folder(meta)
         self.refresh_seed(meta)
+        meta['running_fast_snapshot'] = self.fast_snapshot(meta)
         meta['authorized_keys_sha256'] = self.authorized_keys_digest(meta, meta.get('ssh_keys', []))
         self.capture_start(meta)
         error_log = folder / 'hypervisor.log'

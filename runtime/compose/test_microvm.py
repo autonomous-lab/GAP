@@ -49,6 +49,13 @@ class MicroVMTests(unittest.TestCase):
             self.assertFalse(self.manager.fast_snapshot(self.meta))
             self.assertTrue(self.manager.fast_snapshot(dict(self.meta,snapshot_format='gapfast1')))
 
+    def test_fleet_fast_snapshot_keeps_running_hypervisor_format(self):
+        with patch.dict('os.environ', {'GAP_FAST_SNAPSHOT_ENABLED': '1', 'GAP_FAST_SNAPSHOT_VM_IDS': ''}):
+            self.assertTrue(self.manager.fast_snapshot(self.meta))
+            self.assertFalse(self.manager.fast_snapshot(dict(self.meta,state='hibernated',snapshot_format='gapmem1')))
+            self.assertFalse(self.manager.fast_snapshot(dict(self.meta,state='running',running_fast_snapshot=False)))
+            self.assertTrue(self.manager.fast_snapshot(dict(self.meta,state='hibernating',running_fast_snapshot=True)))
+
     def test_migration_fence_survives_failed_shutdown_and_controller_restart(self):
         transfer = 'move_' + 'd' * 32
         with patch.object(self.manager, 'stop', side_effect=VMError('shutdown_failed')):
