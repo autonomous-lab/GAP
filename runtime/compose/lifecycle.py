@@ -325,6 +325,7 @@ class Runtime:
     def ensure_awake(self,project,vm_id=None):
         # Caller holds project lifecycle lock; concurrent first requests share
         # one restore. Recheck owner approval and quotas on every wake.
+        wake_started=time.monotonic()
         path=self.manager.catalog(vm_id or project)
         if vm_id and not path.exists(): path=self.manager.catalog(project)
         if not path.exists(): raise VMError('vm_not_found')
@@ -335,12 +336,17 @@ class Runtime:
             raise VMError('vm_not_available_for_automatic_wake')
         if not self.check_policy(meta):raise VMError('microvm_suspended_or_policy_unavailable')
         self.sample(meta,force=meta['state'] in ('hibernated','stopped')); self.check_credit(meta)
+        checks_done=time.monotonic()
         if meta['state'] in ('hibernated','stopped'):
             was_hibernated=meta['state']=='hibernated'
             self.runner.authorize(project,meta['owner_did'])
+            authorization_done=time.monotonic()
             with self.admission(project,meta['vcpus'],meta['memory_mib'],meta['vm_id']):
+                admitted=time.monotonic()
                 action='vm/resume' if was_hibernated else 'vm/start'
                 self.manager.perform(project,meta['owner_did'],action,{'vm_id':meta['vm_id']})
+                performed=time.monotonic()
+            resumed=time.monotonic()
             meta=self.manager.read(project,meta['owner_did'],meta['vm_id'])
             meta['manual_stop']=False; meta.pop('runtime_error',None); self.manager.save(meta)
             # Most snapshots already contain the current keys. Avoid adding an
@@ -358,6 +364,14 @@ class Runtime:
                             if str(error)!='ssh_keys_update_failed' or time.monotonic()>=deadline:raise
                             time.sleep(.25)
             self.sample(meta)
+            if was_hibernated:
+                print('GAP_WAKE_PROFILE '+json.dumps({'vm_id':meta['vm_id'],
+                    'checks_ms':round((checks_done-wake_started)*1000),
+                    'authorize_ms':round((authorization_done-checks_done)*1000),
+                    'admission_ms':round((admitted-authorization_done)*1000),
+                    'perform_ms':round((performed-admitted)*1000),
+                    'admission_exit_ms':round((resumed-performed)*1000),
+                    'post_resume_ms':round((time.monotonic()-resumed)*1000)}),flush=True)
         self.touch(meta)
         return meta
 

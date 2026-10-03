@@ -1,5 +1,7 @@
 import io,unittest
+from unittest.mock import patch
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import memory_crypto
 from memory_crypto import seal,unseal,CHUNK
 class Memory(unittest.TestCase):
  def test_authentication_truncation_and_boundaries(self):
@@ -12,4 +14,12 @@ class Memory(unittest.TestCase):
    with self.assertRaises(Exception):unseal(io.BytesIO(bad),io.BytesIO(),a,len(plain))
   with self.assertRaises(Exception):unseal(io.BytesIO(blob),io.BytesIO(),AESGCM(b'b'*32),len(plain))
   with self.assertRaises(Exception):unseal(io.BytesIO(blob),io.BytesIO(),a,1)
+ def test_reads_experimental_four_mib_frames(self):
+  plain=b'x'*(2*CHUNK)
+  encrypted=io.BytesIO()
+  with patch.object(memory_crypto,'CHUNK',4*CHUNK):
+   seal(io.BytesIO(plain),encrypted,AESGCM(b'a'*32),len(plain))
+  output=io.BytesIO()
+  unseal(io.BytesIO(encrypted.getvalue()),output,AESGCM(b'a'*32),len(plain))
+  self.assertEqual(output.getvalue(),plain)
 if __name__=='__main__':unittest.main()

@@ -223,6 +223,7 @@ class Gateway:
 
     def http(self,h):
         sent=False; upstream=None
+        request_started=time.monotonic()
         try:
             h.connection.settimeout(GATEWAY_REQUEST_TIMEOUT)
             project=h.headers.get('X-GAP-Project','')
@@ -237,6 +238,7 @@ class Gateway:
             if not initial.get('ingress',{}).get('enabled'): raise VMError('unknown_application')
             upgrade=h.headers.get('Upgrade','').lower()=='websocket'
             with self.runtime.http_request(project,vm_id) as meta:
+                awake_at=time.monotonic()
                 with self.runtime.lock(project):
                     current=self.manager.read(project,meta['owner_did'],meta['vm_id'])
                     if not current or current['vm_id']!=meta['vm_id'] or current['state']!='running' or not current.get('ingress',{}).get('enabled'):
@@ -244,6 +246,7 @@ class Gateway:
                     port=next((p['worker_port'] for p in current['ports'] if p['guest_port']==current['ingress']['guest_port']),None)
                     if port is None: raise VMError('application_port_not_forwarded')
                     upstream=self.connect(port,meta)
+                connected_at=time.monotonic()
                 upstream.settimeout(120)
                 if upgrade:
                     header=f'{h.command} {h.path} HTTP/1.1\r\n'
@@ -266,6 +269,11 @@ class Gateway:
                     try:
                         conn.request(h.command,h.path,body=body,headers=headers)
                         response=conn.getresponse()
+                        if initial['state']=='hibernated':
+                            print('GAP_HTTP_WAKE_PROFILE '+json.dumps({'vm_id':meta['vm_id'],
+                                'wake_ms':round((awake_at-request_started)*1000),
+                                'connect_ms':round((connected_at-awake_at)*1000),
+                                'response_ms':round((time.monotonic()-connected_at)*1000)}),flush=True)
                         h.send_response_only(response.status,response.reason)
                         for key,value in response.getheaders():
                             if key.lower() not in HOP|{'content-length'}: h.send_header(key,value)

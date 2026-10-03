@@ -1,10 +1,11 @@
 """Authenticated streaming hibernation; plaintext never written to a host file."""
-import hashlib,hmac,os,socket,struct,threading,time
+import hashlib,hmac,json,os,socket,struct,threading,time
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from microvm import VMError
 MAGIC=b'GAPMEM1\0'
 CHUNK=1024*1024
+MAX_READ_CHUNK=4*1024*1024  # Read snapshots from the measured 4 MiB experiment.
 
 def exact(stream,size):
  data=bytearray()
@@ -32,7 +33,7 @@ def unseal(source,target,aead,limit):
  prefix=exact(source,8);index=total=0
  while True:
   size=exact(source,4);length=struct.unpack('>I',size)[0];total+=length
-  if length>CHUNK or total>limit:raise VMError('snapshot_too_large')
+  if length>MAX_READ_CHUNK or total>limit:raise VMError('snapshot_too_large')
   try:raw=aead.decrypt(prefix+struct.pack('>I',index),exact(source,length+16),MAGIC+size)
   except Exception:raise VMError('snapshot_authentication_failed') from None
   if not length:
@@ -41,6 +42,7 @@ def unseal(source,target,aead,limit):
   target.write(raw);index+=1
 
 def save(manager,meta):
+ started=time.monotonic();profile={}
  folder=manager.folder(meta);path=folder/'memory.enc';pending=folder/'memory.next';sockpath=folder/'memory.sock'
  sockpath.unlink(missing_ok=True)
  aead=cipher(manager,meta);errors=[];stopping=threading.Event();connections=[]
@@ -57,7 +59,10 @@ def save(manager,meta):
      conn.settimeout(120)
      fd=os.open(pending,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
      with conn.makefile('rb') as src,os.fdopen(fd,'wb') as dst:
-      seal(src,dst,aead,(meta['memory_mib']+256)*1024**2);dst.flush();os.fsync(dst.fileno())
+      seal(src,dst,aead,(meta['memory_mib']+256)*1024**2);dst.flush()
+      profile['stream_ms']=round((time.monotonic()-started)*1000)
+      os.fsync(dst.fileno())
+      profile['file_sync_ms']=round((time.monotonic()-started)*1000)-profile['stream_ms']
    except Exception as e:errors.append(e)
   thread=threading.Thread(target=receive,daemon=True);thread.start()
   try:
@@ -75,6 +80,9 @@ def save(manager,meta):
    fd=os.open(folder,os.O_RDONLY|os.O_DIRECTORY)
    try:os.fsync(fd)
    finally:os.close(fd)
+   profile['total_ms']=round((time.monotonic()-started)*1000)
+   profile['size_mib']=round(path.stat().st_size/1024**2,1)
+   print('GAP_HIBERNATE_STREAM_PROFILE '+json.dumps({'vm_id':meta['vm_id'],**profile}),flush=True)
   except Exception:
    try:manager.qmp(meta,'migrate_cancel')
    except Exception:pass

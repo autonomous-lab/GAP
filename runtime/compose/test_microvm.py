@@ -76,6 +76,7 @@ class MicroVMTests(unittest.TestCase):
             validate(action,dict(base,disk_gib=8))
 
     def test_hibernated_free_vm_restores_its_proxy_before_resume(self):
+        self.manager.free_images=self.images
         self.meta.update(state='hibernated',guest_image='free-vm-v2',proxy_port=57267,
                          snapshot_tag='idle_'+'d'*32,snapshot_qemu_version='QEMU test',
                          disk_encryption={'format':'luks'})
@@ -90,6 +91,7 @@ class MicroVMTests(unittest.TestCase):
         restore.assert_called_once_with(self.meta)
 
     def test_failed_proxy_restore_does_not_change_hibernated_state(self):
+        self.manager.free_images=self.images
         self.meta.update(state='hibernated',guest_image='free-vm-v2',proxy_port=57267,
                          snapshot_tag='idle_'+'d'*32,snapshot_qemu_version='QEMU test',
                          image_version='image-v1')
@@ -108,6 +110,8 @@ class MicroVMTests(unittest.TestCase):
         self.assertIn('user,id=net0,restrict=on,hostfwd=',command[command.index('-netdev')+1])
 
         self.manager.image_version()
+        with patch('microvm.hashlib.sha256',side_effect=AssertionError('unchanged image rehashed')):
+            self.manager.image_version()
         manifest = self.images / 'SHA256SUMS'
         original = manifest.read_text()
         manifest.write_text(original.splitlines()[0] + '\n' + original.splitlines()[0] + '\n' + original.splitlines()[2] + '\n')
@@ -117,6 +121,24 @@ class MicroVMTests(unittest.TestCase):
         (self.images / 'vmlinuz').write_bytes(b'changed')
         with self.assertRaises(VMError):
             self.manager.image_version()
+
+    def test_image_identity_survives_worker_restart_and_detects_changes(self):
+        version=self.manager.image_version(self.meta)
+        identity=self.manager.image_identity(self.meta)
+        self.meta.update(state='hibernated',snapshot_tag='idle_'+'d'*32,
+                         snapshot_qemu_version='QEMU test',image_version=version,
+                         image_identity=identity)
+        self.manager.save(self.meta)
+        restarted=MicroVMs({'state_dir':str(self.root/'state'),'image_dir':str(self.images)},None)
+        with (patch.object(restarted.disk_crypto,'key'),
+              patch.object(restarted,'image_version',side_effect=AssertionError('SHA on resume')),
+              patch('microvm.subprocess.check_output',return_value='QEMU test\n'),
+              patch.object(restarted,'resume_encrypted') as restore):
+            self.meta['disk_encryption']={'format':'luks'}
+            restarted.resume(self.meta)
+            restore.assert_called_once()
+        (self.images/'vmlinuz').write_bytes(b'changed')
+        self.assertNotEqual(restarted.image_identity(self.meta),identity)
 
     def test_direct_free_image_requires_host_broker_and_allows_slirp_egress(self):
         self.meta.update(guest_image='free-vm-v3', network_restricted=True)

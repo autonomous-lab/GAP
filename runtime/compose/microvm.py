@@ -141,6 +141,10 @@ class MicroVMs:
         self.children = {}
         self.qmp_locks = {}
         self.qmp_locks_guard = threading.Lock()
+        # Guest base images are mounted read-only in the worker. Hash each
+        # version once per worker lifetime, then invalidate on any file change.
+        self.image_verify_lock = threading.Lock()
+        self.verified_images = {}
         self.ingress_origin = ''
         self.quota_provider = lambda project, owner: {"vcpus": 2, "memory_mib": 4096, "max_vms": 1}
         self.approval_provider = lambda project, owner: {'quota':self.quota_provider(project,owner),
@@ -375,30 +379,52 @@ class MicroVMs:
         # v3 network path while preserving its original backing image.
         return meta.get('guest_image')=='free-vm-v3' or (meta.get('guest_image')=='free-vm-v2' and meta.get('direct_egress') is True)
 
-    def image_version(self,meta=None):
+    def image_identity(self,meta=None):
         image_dir=self.image_dir(meta or {})
         manifest = (image_dir / 'SHA256SUMS').read_text()
         seen = set()
+        assets=[]
         for line in manifest.splitlines():
-            digest, name = line.split()
+            parts=line.split()
+            if len(parts)!=2: raise VMError('invalid_guest_image_manifest')
+            digest, name = parts
             if name not in ('vmlinuz', 'initramfs', 'rootfs.ext4') or name in seen:
                 raise VMError('invalid_guest_image_manifest')
             seen.add(name)
-            hasher = hashlib.sha256()
-            with (image_dir / name).open('rb') as source:
-                for chunk in iter(lambda: source.read(1024 * 1024), b''):
-                    hasher.update(chunk)
-            if hasher.hexdigest() != digest:
-                raise VMError('guest_image_checksum_mismatch')
-        if len(manifest.splitlines()) != 3:
+            path=image_dir / name
+            stat=path.stat()
+            assets.append([name,stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns])
+        if seen != {'vmlinuz', 'initramfs', 'rootfs.ext4'}:
             raise VMError('invalid_guest_image_manifest')
-        return hashlib.sha256(manifest.encode()).hexdigest()
+        return {'manifest':manifest,'assets':assets}
+
+    def image_version(self,meta=None):
+        image_dir=self.image_dir(meta or {})
+        identity=self.image_identity(meta)
+        manifest=identity['manifest']
+        fingerprint=json.dumps(identity,sort_keys=True)
+        with self.image_verify_lock:
+            cached=self.verified_images.get(str(image_dir))
+            if cached and cached[0]==fingerprint:return cached[1]
+            for line in manifest.splitlines():
+                digest,name=line.split()
+                path=image_dir/name
+                hasher=hashlib.sha256()
+                with path.open('rb') as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                        hasher.update(chunk)
+                if hasher.hexdigest()!=digest:
+                    raise VMError('guest_image_checksum_mismatch')
+            version=hashlib.sha256(manifest.encode()).hexdigest()
+            self.verified_images[str(image_dir)]=(fingerprint,version)
+            return version
 
     def prepare(self, meta):
         folder = self.folder(meta)
         folder.mkdir(mode=0o700)
         image_dir=self.image_dir(meta)
         meta['image_version'] = self.image_version(meta)
+        meta['image_identity'] = self.image_identity(meta)
         self.disk_crypto.initialize(meta)
         if self.disk_crypto.path:
             self.disk_crypto.execute(meta, 'create', folder / 'disk.qcow2', size=str(meta['disk_gib'])+'G', base=image_dir / 'rootfs.ext4')
@@ -543,6 +569,10 @@ class MicroVMs:
             raise VMError('hibernate_requires_running_vm')
         if shutil.disk_usage(self.folder(meta)).free < meta['memory_mib']*1024**2+512*1024**2:
             raise VMError('insufficient_disk_for_hibernation')
+        current_identity=self.image_identity(meta)
+        if meta.get('image_identity') != current_identity:
+            if self.image_version(meta)!=meta['image_version']: raise VMError('guest_base_image_changed')
+            meta['image_identity']=current_identity
         meta['snapshot_qemu_version']=subprocess.check_output(['qemu-system-x86_64','--version'],text=True).splitlines()[0]
         tag='idle_' + uuid.uuid4().hex
         # Record which keys are already present in the memory image. The usual
@@ -582,18 +612,29 @@ class MicroVMs:
             raise
 
     def resume(self, meta):
+        profile_started=time.monotonic()
         self.disk_crypto.key(meta)
+        key_ready=time.monotonic()
         if meta['state'] != 'hibernated':
             return self.start(meta)
         tag=meta.get('snapshot_tag','')
         if not re.fullmatch(r'idle_[0-9a-f]{32}',tag): raise VMError('invalid_snapshot_identity')
-        if self.image_version(meta)!=meta['image_version']: raise VMError('guest_base_image_changed')
+        current_identity=self.image_identity(meta)
+        if meta.get('image_identity') != current_identity:
+            # Legacy snapshots get one full verification; subsequent wakes use
+            # the persisted identity even after the worker restarts.
+            if self.image_version(meta)!=meta['image_version']: raise VMError('guest_base_image_changed')
+            meta['image_identity']=current_identity
+            self.save(meta)
         if meta.get('snapshot_qemu_version')!=subprocess.check_output(['qemu-system-x86_64','--version'],text=True).splitlines()[0]:
             raise VMError('snapshot_requires_original_qemu_version')
         self.ensure_free_vm_proxy(meta)
         meta['state']='resuming'; self.save(meta)
         self.capture_start(meta)
         if meta.get('disk_encryption'):
+            print('GAP_RESUME_PREP_PROFILE '+json.dumps({'vm_id':meta['vm_id'],
+                'key_ms':round((key_ready-profile_started)*1000),
+                'other_ms':round((time.monotonic()-key_ready)*1000)}),flush=True)
             return self.resume_encrypted(meta)
         folder=self.folder(meta);log=folder/'restore.log'
         with log.open('wb') as error, self.disk_crypto.secret(meta) as (secret, fds), self.seed_crypto.image(meta, folder) as (seed_path, seed_fds):
@@ -631,6 +672,7 @@ class MicroVMs:
 
     def resume_encrypted(self,meta):
         from memory_crypto import restore
+        profile_started=time.monotonic()
         folder=self.folder(meta)
         if meta.get('snapshot_format')!='gapmem1':
             meta['state']='hibernated';self.save(meta)
@@ -644,7 +686,9 @@ class MicroVMs:
                     env={'PATH':'/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'})
             self.children[meta['vm_id']]=process
             self.enforce_cpu(meta,process)
+            launched=time.monotonic()
             restore(self,meta,process)
+            restored=time.monotonic()
             deadline=time.monotonic()+90
             while time.monotonic()<deadline:
                 if process.poll() is not None:raise VMError('snapshot_restore_failed')
@@ -654,11 +698,19 @@ class MicroVMs:
                 time.sleep(.02)
             else:raise VMError('snapshot_restore_timeout')
             if not self.execution_allowed(meta):raise VMError('microvm_suspended_or_policy_unavailable')
+            checked=time.monotonic()
             meta['state']='running';self.save(meta)
             self.qmp(meta,'cont')
+            continued=time.monotonic()
             if self.runtime:self.runtime.execution_started(meta)
             (folder/'memory.enc').unlink()
             meta.pop('snapshot_tag',None);meta.pop('snapshot_format',None);meta.pop('resume_error',None);self.save(meta)
+            print('GAP_RESTORE_PROFILE '+json.dumps({'vm_id':meta['vm_id'],
+                'launch_ms':round((launched-profile_started)*1000),
+                'stream_ms':round((restored-launched)*1000),
+                'qmp_and_policy_ms':round((checked-restored)*1000),
+                'cont_ms':round((continued-checked)*1000),
+                'cleanup_ms':round((time.monotonic()-continued)*1000)}),flush=True)
         except Exception as error:
             if process and process.poll() is None:process.terminate();process.wait(timeout=10)
             self.capture_stop(meta)
