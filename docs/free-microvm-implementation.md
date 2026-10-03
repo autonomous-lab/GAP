@@ -135,3 +135,21 @@ Remaining observations before increasing the cap: a live one-hour stop and
 25-hour unclaimed deletion, sustained concurrent VM/package-proxy load,
 and measured guest memory, image cache, disk I/O and swap pressure alongside
 paying workloads. The automated deadline and deletion-retry tests already pass.
+# Fleet-wide SSH reconnection
+
+The SSH gateway on port 2121 now asks the node-01 fleet authority for the home
+node of every authenticated public key before reserving a new trial. An existing
+key is routed to its original node (including after claim); an unknown key
+starts a trial on the ingress node. Relay hops use a separate worker-generated
+Ed25519 key, pinned destination SSH host keys, and a 45-second, single-use
+authority ticket bound to the user key, relay key, source IP, project, home,
+and ingress. If the directory is unavailable, admission fails closed.
+On resume, the worker resets the serverless idle clock before the guest SSH
+connection starts; otherwise a stale pre-hibernation timestamp can make a
+reclaimed VM hibernate again during reconnection.
+
+Each worker's `free_vm` runner configuration needs `node_id`,
+`fleet_public_key`, and `peers` (the two other nodes, with public hostname and
+SSH host key). `scripts/configure-free-vm-relay.py` installs only this public
+metadata into the existing protected runner config. Restart the worker after
+the corresponding Rust API and central authority are updated.

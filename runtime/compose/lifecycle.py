@@ -66,6 +66,10 @@ class Runtime:
 
     def execution_started(self,meta,cold=False):
         state=self.state(meta)
+        # A resumed VM must get a fresh idle window. Otherwise its persisted
+        # pre-hibernation activity timestamp can trigger an immediate second
+        # hibernation before SSH or HTTP has a chance to reach the guest.
+        state['last_incoming']=time.time()
         state['policy_preempted']=False;state.pop('fleet_preempted',None)
         state.pop('meter_stop_ms',None)
         if cold:

@@ -56,6 +56,36 @@ class AccessTests(unittest.TestCase):
         restored = Access(Authority(self.a.path, 'one', clock=lambda: 100), b'k'*32)
         self.assertTrue(restored.reserve_free_vm('node-one', PROJECT, OWNER, key, '8.8.8.10')['reused'])
 
+    def test_free_vm_route_is_read_only_and_signed_for_the_home_node(self):
+        key='a'*64
+        request=dict(action='route-free-vm',ssh_key_hash=key,
+                     relay_key_hash='c'*64,source_ip='8.8.8.10')
+        self.assertEqual(self.app.handle('POST','/identity','identity2',request),{'found':False})
+        for token in ('worker2','admin'):
+            with self.assertRaisesRegex(Failure,'identity_gateway_credentials_required'):
+                self.app.handle('POST','/identity',token,request)
+        self.app.handle('POST','/identity','identity1',dict(action='reserve-free-vm',
+            project_id=PROJECT,agent_did=OWNER,ssh_key_hash=key,source_ip='8.8.8.11'))
+        routed=self.app.handle('POST','/identity','identity2',request)
+        self.assertEqual((routed['found'],routed['node_id']),(True,'node-one'))
+        prefix,encoded,signature=routed['ticket'].split('.')
+        self.assertEqual(prefix,'gapr1')
+        payload=base64.urlsafe_b64decode(encoded+'='*(-len(encoded)%4))
+        self.access.key.public_key().verify(
+            base64.urlsafe_b64decode(signature+'='*(-len(signature)%4)),
+            ('gapr1.'+encoded).encode())
+        claims=json.loads(payload)
+        self.assertEqual((claims['home'],claims['ingress'],claims['project']),
+                         ('node-one','node-two',PROJECT))
+        self.assertEqual((claims['ssh'],claims['relay'],claims['ip']),
+                         (key,'c'*64,'8.8.8.10'))
+        self.assertEqual(claims['exp']-claims['iat'],45)
+        with self.a.db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM free_vm_trial_ips WHERE project=?',
+                                        (PROJECT,)).fetchone()[0],1)
+        with self.assertRaisesRegex(Failure,'invalid_source_ip'):
+            self.app.handle('POST','/identity','identity2',dict(request,source_ip='127.0.0.1'))
+
     def test_free_vm_concurrent_nodes_cannot_reserve_one_ip(self):
         bodies = [dict(action='reserve-free-vm', project_id=project, agent_did=agent,
                        ssh_key_hash=letter*64, source_ip='8.8.8.20')

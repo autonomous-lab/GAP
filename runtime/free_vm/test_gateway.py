@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -7,15 +9,97 @@ import types
 import unittest
 from unittest.mock import Mock, patch
 import urllib.error
+import time
 
 import asyncssh
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
 
 from gateway import (FreeServer, GatewayError, admission_error, claimable_banner, claimed_banner,
                      gateway_error_message, interactive_shell_command, prepare,
-                     request_node, retry_mutation, rpc_wait, shell, stable_id, welcome_banner)
+                     request_node, retry_mutation, rpc_wait, shell, stable_id, welcome_banner,
+                     key_hash, verify_relay_ticket, _used_relay_nonces)
 
 
 class GatewayTests(unittest.TestCase):
+    def test_known_rsa_key_relays_to_same_claimed_guest(self):
+        async def run():
+            home_host=asyncssh.generate_private_key('ssh-ed25519')
+            ingress_host=asyncssh.generate_private_key('ssh-ed25519')
+            guest_host=asyncssh.generate_private_key('ssh-ed25519')
+            relay_key=asyncssh.generate_private_key('ssh-ed25519')
+            guest_key=asyncssh.generate_private_key('ssh-ed25519')
+            user_key=asyncssh.generate_private_key('ssh-rsa',key_size=2048)
+            async def guest_handler(process):
+                process.stdout.write(b'same-home-vm\n')
+                process.exit(0)
+            guest=await asyncssh.listen('127.0.0.1',0,server_host_keys=[guest_host],
+                authorized_client_keys=asyncssh.import_authorized_keys(guest_key.export_public_key().decode()),
+                process_factory=guest_handler,encoding=None)
+            with tempfile.TemporaryDirectory() as directory:
+                guest_path=Path(directory)/'guest-key'
+                relay_path=Path(directory)/'relay-key'
+                guest_path.write_bytes(guest_key.export_private_key())
+                relay_path.write_bytes(relay_key.export_private_key())
+                details={'status':'claimed','project_id':'prj_'+'a'*24,
+                         'ssh_port':guest.get_port(),'guest_key':str(guest_path),
+                         'guest_host_key':guest_host.export_public_key().decode().strip(),
+                         'manage_url':'https://gap.geta.team/account',
+                         'vcpus':1,'memory_mib':1024,'disk_gib':8,'app_ports':[8080]}
+                home_settings={'node_id':'node-02','peers':{'node-01':{}},'fleet_public_key':'0'*64}
+                with (patch('gateway.prepare',return_value=details) as prepare,
+                      patch('gateway.verify_relay_ticket',return_value={'project':details['project_id']})):
+                    home=await asyncssh.listen('127.0.0.1',0,server_factory=FreeServer,
+                        server_host_keys=[home_host],
+                        process_factory=lambda process:shell(None,process,home_settings),encoding=None)
+                    ingress_settings={'node_id':'node-01','relay_key_file':relay_path,
+                        'relay_public_key':relay_key.export_public_key().decode().strip(),
+                        'peers':{'node-02':{'host':'127.0.0.1','port':home.get_port(),
+                            'host_key':home_host.export_public_key().decode().strip()}}}
+                    with patch('gateway.request_node',return_value={'found':True,'node_id':'node-02','ticket':'test'}):
+                        ingress=await asyncssh.listen('127.0.0.1',0,server_factory=FreeServer,
+                            server_host_keys=[ingress_host],
+                            process_factory=lambda process:shell(None,process,ingress_settings),encoding=None)
+                        try:
+                            async with asyncssh.connect('127.0.0.1',port=ingress.get_port(),username='free',
+                                    client_keys=[user_key],known_hosts=None,encoding=None) as connection:
+                                result=await connection.run('true',check=False)
+                            self.assertEqual(result.exit_status,0,repr((result.stdout,result.stderr)))
+                            self.assertIn(b'YOUR MICROVM',result.stdout)
+                            self.assertIn(b'same-home-vm',result.stdout)
+                            prepare.assert_called_once()
+                            self.assertEqual(prepare.call_args.args[1],user_key.export_public_key().decode().strip())
+                        finally:
+                            ingress.close();await ingress.wait_closed()
+                    home.close();await home.wait_closed()
+            guest.close();await guest.wait_closed()
+        asyncio.run(run())
+
+    def test_fleet_relay_ticket_is_signed_scoped_and_one_use(self):
+        signer=Ed25519PrivateKey.generate()
+        public=signer.public_key().public_bytes(serialization.Encoding.Raw,
+                                                serialization.PublicFormat.Raw).hex()
+        user=asyncssh.generate_private_key('ssh-rsa',key_size=2048).export_public_key().decode().strip()
+        relay=asyncssh.generate_private_key('ssh-ed25519').export_public_key().decode().strip()
+        settings={'node_id':'node-02','peers':{'node-01':{}},'fleet_public_key':public}
+        claims={'v':1,'home':'node-02','ingress':'node-01',
+                'ssh':key_hash(user),'relay':key_hash(relay),'ip':'8.8.8.8',
+                'project':'prj_'+'a'*24,'iat':int(time.time()),
+                'exp':int(time.time())+45,'nonce':'a'*32}
+        encoded=base64.urlsafe_b64encode(json.dumps(claims,sort_keys=True,
+                        separators=(',',':')).encode()).decode().rstrip('=')
+        signed='gapr1.'+encoded
+        ticket=signed+'.'+base64.urlsafe_b64encode(signer.sign(signed.encode())).decode().rstrip('=')
+        _used_relay_nonces.clear()
+        self.assertEqual(verify_relay_ticket(ticket,user,relay,'8.8.8.8',settings)['project'],claims['project'])
+        with self.assertRaisesRegex(GatewayError,'relay_ticket_invalid'):
+            verify_relay_ticket(ticket,user,relay,'8.8.8.8',settings)
+        _used_relay_nonces.clear()
+        with self.assertRaisesRegex(GatewayError,'relay_ticket_invalid'):
+            verify_relay_ticket(ticket,user,relay,'8.8.8.9',settings)
+        with self.assertRaisesRegex(GatewayError,'relay_ticket_invalid'):
+            verify_relay_ticket(ticket,user,relay,'8.8.8.8',dict(settings,node_id='node-03'))
+
     def test_authentication_does_not_clutter_successful_terminal_sessions(self):
         server=FreeServer()
         connection=Mock()

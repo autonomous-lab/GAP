@@ -13,6 +13,7 @@ pub fn allowed_api(path: &str) -> bool {
                 | "/internal/workload-policy"
                 | "/internal/compose/authorize"
                 | "/internal/free-vm/reserve"
+                | "/internal/free-vm/route"
                 | "/internal/free-vm/preview"
                 | "/internal/free-vm/finish"
                 | "/internal/functions/capability"
@@ -288,6 +289,7 @@ mod tests {
             "/v1/cloud/projects",
             "/v1/cloud/projects/prj_a/realtime/tokens",
             "/functions/prj_a/api",
+            "/internal/free-vm/route",
         ] {
             assert!(allowed_api(path), "{path}");
         }

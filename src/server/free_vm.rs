@@ -74,7 +74,7 @@ impl Trial {
     }
 }
 
-fn ssh_fingerprint(input: &str) -> Result<String> {
+pub(super) fn ssh_fingerprint(input: &str) -> Result<String> {
     let parts: Vec<_> = input.split_whitespace().collect();
     if parts.len() != 2 || !matches!(parts[0], "ssh-ed25519" | "ssh-rsa") || parts[1].len() > 2048 {
         return Err(Error::Other("an Ed25519 or RSA SSH public key is required".into()));
@@ -115,6 +115,26 @@ fn ssh_fingerprint(input: &str) -> Result<String> {
         return Err(Error::Other("invalid SSH public key".into()));
     }
     Ok(crate::sha256_hex(&decoded))
+}
+
+/// Read-only fleet directory lookup. An unknown key can start a trial locally;
+/// a known key must always be sent to its original node.
+pub(super) fn route(g: &NodeState, ssh_key: &str, relay_key: &str, source_ip: &str) -> Result<Value> {
+    let access = g.fleet_access.as_ref()
+        .ok_or_else(|| Error::Other("fleet route authority is unavailable".into()))?;
+    let ssh_hash = ssh_fingerprint(ssh_key)?;
+    let relay_hash = ssh_fingerprint(relay_key)?;
+    let (status, response) = access.connect(&json!({"action":"route-free-vm",
+        "ssh_key_hash":ssh_hash,"relay_key_hash":relay_hash,"source_ip":source_ip}));
+    if status != 200 || !response["found"].is_boolean() {
+        return Err(Error::Other("fleet route authority is unavailable".into()));
+    }
+    if response["found"] == true && (response["node_id"].as_str().is_none()
+        || response["ticket"].as_str().is_none_or(|ticket| ticket.len() > 4096
+            || !ticket.starts_with("gapr1."))) {
+        return Err(Error::Other("invalid fleet route response".into()));
+    }
+    Ok(response)
 }
 
 pub(super) fn source_fingerprint(ip: &str, secret: &[u8]) -> Result<String> {

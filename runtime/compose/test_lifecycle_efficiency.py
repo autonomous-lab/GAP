@@ -14,6 +14,13 @@ from microvm import VMError
 
 
 class LifecycleEfficiencyTests(unittest.TestCase):
+    def test_resume_resets_stale_idle_clock_before_guest_connection(self):
+        runtime=self.runtime(Path('/unused'))
+        meta=dict(self.meta('running'),last_incoming_at=10)
+        with patch('lifecycle.time.time',return_value=1000), patch('lifecycle.time.monotonic',return_value=500):
+            runtime.execution_started(meta)
+        self.assertEqual(runtime.state(meta)['last_incoming'],1000)
+
     def meta(self, state):
         return dict(vm_id='vm_'+'a'*32, project_id='prj_'+'b'*24,
                     owner_did='did:gap:'+'c'*64, state=state)

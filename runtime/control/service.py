@@ -92,6 +92,9 @@ class Application:
             if body.get('action') == 'reserve-free-vm':
                 return self.access.reserve_free_vm(actor, body['project_id'], body['agent_did'],
                                                    body['ssh_key_hash'], body['source_ip'])
+            if body.get('action') == 'route-free-vm':
+                return self.access.route_free_vm(actor, body['ssh_key_hash'],
+                                                 body['relay_key_hash'], body['source_ip'])
             if body.get('action') == 'finish-free-vm':
                 return self.access.finish_free_vm(actor, body['project_id'], body['agent_did'])
             if body.get('action') == 'claim-free-vm':

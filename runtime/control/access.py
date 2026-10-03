@@ -7,6 +7,7 @@ import base64
 import hashlib
 import hmac
 import ipaddress
+import json
 import re
 import secrets
 
@@ -40,6 +41,37 @@ class Access:
                 created INTEGER NOT NULL,claimed INTEGER)''')
             db.execute('''CREATE TABLE IF NOT EXISTS free_vm_trial_ips(ip_key TEXT PRIMARY KEY,
                 project TEXT NOT NULL REFERENCES free_vm_trials(project))''')
+
+    def route_free_vm(self, ingress, ssh_key, relay_key, source_ip):
+        """Locate a key fleet-wide and authorize one short SSH relay to its home."""
+        identifier(ingress)
+        if not isinstance(ssh_key, str) or not re.fullmatch(r'[0-9a-f]{64}', ssh_key):
+            raise Failure('invalid_ssh_key_hash')
+        if not isinstance(relay_key, str) or not re.fullmatch(r'[0-9a-f]{64}', relay_key):
+            raise Failure('invalid_relay_key_hash')
+        try:
+            address = ipaddress.ip_address(source_ip)
+            if address.version == 6 and address.ipv4_mapped:
+                address = address.ipv4_mapped
+            if not address.is_global:
+                raise ValueError()
+        except (TypeError, ValueError):
+            raise Failure('invalid_source_ip') from None
+        with self.a.db() as db:
+            row = db.execute('SELECT project,node FROM free_vm_trials WHERE ssh_key=?',
+                             (ssh_key,)).fetchone()
+        if row is None:
+            return {'found': False}
+        now = int(self.a.clock())
+        payload = {'v': 1, 'home': row['node'], 'ingress': ingress,
+                   'ssh': ssh_key, 'relay': relay_key, 'ip': str(address),
+                   'project': row['project'], 'iat': now, 'exp': now + 45,
+                   'nonce': secrets.token_hex(16)}
+        encoded = base64.urlsafe_b64encode(json.dumps(payload, sort_keys=True,
+                    separators=(',', ':')).encode()).decode().rstrip('=')
+        signed = 'gapr1.' + encoded
+        signature = base64.urlsafe_b64encode(self.key.sign(signed.encode())).decode().rstrip('=')
+        return {'found': True, 'node_id': row['node'], 'ticket': signed + '.' + signature}
 
     def reserve_free_vm(self, node, project, agent, ssh_key, source_ip):
         """Single-writer fleet admission; identity gateway token pins the node."""

@@ -4,7 +4,10 @@ Provisioning happens only after AsyncSSH has verified possession of the private
 key. Merely offering a public key during authentication allocates nothing.
 """
 import asyncio
+import base64
+import binascii
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -17,10 +20,66 @@ import urllib.error
 import urllib.request
 
 import asyncssh
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
 class GatewayError(Exception):
     pass
+
+
+_used_relay_nonces = {}
+
+
+def key_hash(public_key):
+    parts=public_key.split()
+    if len(parts)!=2 or parts[0] not in ('ssh-ed25519','ssh-rsa'):
+        raise GatewayError('invalid_relay_key')
+    try:
+        wire=base64.b64decode(parts[1],validate=True)
+    except (ValueError,TypeError,binascii.Error):
+        raise GatewayError('invalid_relay_key') from None
+    return hashlib.sha256(wire).hexdigest()
+
+
+def verify_relay_ticket(ticket,ssh_key,relay_key,source_ip,settings):
+    """Accept only a short, one-use authority grant for this exact SSH hop."""
+    try:
+        prefix,encoded,signature=ticket.split('.')
+        if prefix!='gapr1' or len(ticket)>4096:
+            raise ValueError()
+        signed=(prefix+'.'+encoded).encode()
+        payload=base64.urlsafe_b64decode(encoded+'='*(-len(encoded)%4))
+        signature=base64.urlsafe_b64decode(signature+'='*(-len(signature)%4))
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(settings['fleet_public_key'])).verify(signature,signed)
+        claims=json.loads(payload)
+        if set(claims)!={'v','home','ingress','ssh','relay','ip','project','iat','exp','nonce'}:
+            raise ValueError()
+        now=int(time.time())
+        address=ipaddress.ip_address(source_ip)
+        if address.version==6 and address.ipv4_mapped:
+            address=address.ipv4_mapped
+        if (claims['v']!=1 or claims['home']!=settings['node_id']
+                or claims['ingress'] not in settings['peers']
+                or claims['ssh']!=key_hash(ssh_key)
+                or claims['relay']!=key_hash(relay_key)
+                or claims['ip']!=str(address) or not address.is_global
+                or not re.fullmatch(r'prj_[0-9a-f]{24}',claims['project'])
+                or type(claims['iat']) is not int or type(claims['exp']) is not int
+                or claims['iat']>now+5 or not now<claims['exp']<=claims['iat']+60
+                or not isinstance(claims['nonce'],str)
+                or not re.fullmatch(r'[0-9a-f]{32}',claims['nonce'])):
+            raise ValueError()
+        for nonce,expiry in list(_used_relay_nonces.items()):
+            if expiry<=now:
+                del _used_relay_nonces[nonce]
+        if claims['nonce'] in _used_relay_nonces or len(_used_relay_nonces)>=10000:
+            raise ValueError()
+        _used_relay_nonces[claims['nonce']]=claims['exp']
+        return claims
+    except (ValueError,TypeError,KeyError,IndexError,UnicodeError):
+        raise GatewayError('relay_ticket_invalid') from None
+    except Exception:
+        raise GatewayError('relay_ticket_invalid') from None
 
 
 def admission_error(message):
@@ -260,11 +319,15 @@ class FreeServer(asyncssh.SSHServer):
         return True
 
     def validate_public_key(self,username,key):
-        if username!='free' or key.get_algorithm() not in ('ssh-ed25519','ssh-rsa'):return False
+        if username not in ('free','relay') or key.get_algorithm() not in ('ssh-ed25519','ssh-rsa'):return False
+        if username=='relay' and key.get_algorithm()!='ssh-ed25519':return False
         if key.get_algorithm()=='ssh-rsa' and not 2048<=key.pyca_key.key_size<=8192:return False
         exported=key.export_public_key().decode().strip()
         if not re.fullmatch(r'(ssh-ed25519|ssh-rsa) [A-Za-z0-9+/=]{60,2048}',exported):return False
-        self.conn.set_extra_info(free_vm_public_key=exported)
+        if username=='relay':
+            self.conn.set_extra_info(free_vm_relay_key=exported)
+        else:
+            self.conn.set_extra_info(free_vm_public_key=exported)
         return True
 
     def connection_requested(self,*args):
@@ -284,25 +347,20 @@ async def bridge(source,destination,close_on_eof=False):
         destination.write_eof()
 
 
-async def shell(runner,process):
+async def local_shell(runner,process,key,ip,user_command,expected_project=None):
     started=time.monotonic()
-    conn=process.get_extra_info('connection')
-    key=conn.get_extra_info('free_vm_public_key') if conn else None
-    peer=process.get_extra_info('peername')
-    if not key or not peer or not isinstance(peer[0],str):
-        process.stderr.write(b'Invalid authentication.\r\n');process.exit(1);return
-    if process.subsystem is not None:
-        process.stderr.write(b'SSH subsystems are disabled.\r\n');process.exit(1);return
     try:
-        details=await asyncio.to_thread(prepare,runner,key,peer[0])
+        details=await asyncio.to_thread(prepare,runner,key,ip)
     except Exception as error:
         print('free_vm_provision_error:',type(error).__name__,str(error)[:160],flush=True)
         process.stderr.write((gateway_error_message(error)+'\r\n').encode())
         process.exit(1);return
+    if expected_project and details.get('project_id',expected_project)!=expected_project:
+        process.stderr.write(b'Fleet route identity mismatch.\r\n');process.exit(1);return
     if details.get('status')=='claimable':
         process.stdout.write(claimable_banner(details,int(time.time()),process.term_type is not None).encode())
         await process.stdout.drain()
-        process.exit(1 if process.command is not None else 0)
+        process.exit(1 if user_command is not None else 0)
         return
     claimed=details.get('status')=='claimed'
     if not claimed and time.time()>=details['active_until']:
@@ -313,7 +371,7 @@ async def shell(runner,process):
                 client_keys=[details['guest_key']],known_hosts=known,encoding=None,
                 agent_path=None,connect_timeout=10) as guest:
             persistent=details.get('guest_image')=='free-vm-v3' and process.term_type is not None
-            command=process.command if process.command is not None else (
+            command=user_command if user_command is not None else (
                 ('tmux new-session -A -s gap -c /app '+shlex.quote('bash --login -i') if persistent else 'bash --login -i')
                 if claimed else interactive_shell_command(details['active_until'],persistent))
             remote=await guest.create_process(command,term_type=process.term_type,
@@ -345,9 +403,86 @@ async def shell(runner,process):
         process.exit(1)
 
 
-async def serve(runner,port,host_key):
+async def relay_shell(process,key,ip,user_command,routing,settings):
+    target=routing.get('node_id')
+    peer=settings['peers'].get(target)
+    if not peer or not isinstance(routing.get('ticket'),str):
+        raise GatewayError('fleet_route_unavailable')
+    payload={'ticket':routing['ticket'],'ssh_key':key,'source_ip':ip,
+             'command':user_command}
+    encoded=base64.urlsafe_b64encode(json.dumps(payload,separators=(',',':')).encode()).decode().rstrip('=')
+    if len(encoded)>8192:
+        raise GatewayError('fleet_route_unavailable')
+    host=peer['host']
+    port=peer.get('port',2121)
+    known=asyncssh.import_known_hosts(f'[{host}]:{port} {peer["host_key"]}\n')
+    try:
+        async with asyncssh.connect(host,port=port,username='relay',
+                client_keys=[str(settings['relay_key_file'])],known_hosts=known,
+                agent_path=None,encoding=None,connect_timeout=10) as relay:
+            remote=await relay.create_process('gap-relay-v1 '+encoded,
+                term_type=process.term_type,term_size=process.term_size,encoding=None)
+            tasks=[asyncio.create_task(bridge(process.stdin,remote.stdin,True)),
+                   asyncio.create_task(bridge(remote.stdout,process.stdout)),
+                   asyncio.create_task(bridge(remote.stderr,process.stderr))]
+            try:
+                await remote.wait()
+                await asyncio.wait_for(asyncio.gather(*tasks[1:]),timeout=5)
+            finally:
+                for task in tasks:task.cancel()
+                await asyncio.gather(*tasks,return_exceptions=True)
+            process.exit(remote.exit_status if remote.exit_status is not None else 0)
+    except (asyncssh.Error,OSError,asyncio.TimeoutError):
+        raise GatewayError('fleet_route_unavailable') from None
+
+
+async def shell(runner,process,settings=None):
+    conn=process.get_extra_info('connection')
+    key=conn.get_extra_info('free_vm_public_key') if conn else None
+    relay_key=conn.get_extra_info('free_vm_relay_key') if conn else None
+    peer=process.get_extra_info('peername')
+    if not peer or not isinstance(peer[0],str) or process.subsystem is not None:
+        process.stderr.write(b'Invalid authentication.\r\n');process.exit(1);return
+    if relay_key:
+        try:
+            if not settings or not isinstance(process.command,str) or not process.command.startswith('gap-relay-v1 '):
+                raise GatewayError('relay_ticket_invalid')
+            encoded=process.command[len('gap-relay-v1 '):]
+            if len(encoded)>8192:
+                raise GatewayError('relay_ticket_invalid')
+            payload=json.loads(base64.urlsafe_b64decode(encoded+'='*(-len(encoded)%4)))
+            if set(payload)!={'ticket','ssh_key','source_ip','command'} or not isinstance(payload['ssh_key'],str):
+                raise GatewayError('relay_ticket_invalid')
+            if payload['command'] is not None and (not isinstance(payload['command'],str) or len(payload['command'])>8192):
+                raise GatewayError('relay_ticket_invalid')
+            claims=verify_relay_ticket(payload['ticket'],payload['ssh_key'],relay_key,
+                                       payload['source_ip'],settings)
+        except Exception:
+            process.stderr.write(b'Invalid fleet relay authorization.\r\n');process.exit(1);return
+        await local_shell(runner,process,payload['ssh_key'],payload['source_ip'],
+                          payload['command'],claims['project'])
+        return
+    if not key:
+        process.stderr.write(b'Invalid authentication.\r\n');process.exit(1);return
+    if settings:
+        try:
+            routing=await asyncio.to_thread(request_node,runner,'/internal/free-vm/route',
+                {'ssh_key':key,'relay_key':settings['relay_public_key'],'source_ip':peer[0]})
+            if routing.get('found') is True and routing.get('node_id')!=settings['node_id']:
+                await relay_shell(process,key,peer[0],process.command,routing,settings)
+                return
+            if routing.get('found') not in (True,False):
+                raise GatewayError('fleet_route_unavailable')
+        except Exception as error:
+            print('free_vm_route_error:',type(error).__name__,str(error)[:160],flush=True)
+            process.stderr.write(b'Your VM route is temporarily unavailable. Please try again.\r\n')
+            process.exit(1);return
+    await local_shell(runner,process,key,peer[0],process.command)
+
+
+async def serve(runner,port,host_key,settings=None):
     server=await asyncssh.listen('0.0.0.0',port,server_factory=FreeServer,
-        server_host_keys=[str(host_key)],process_factory=lambda process:shell(runner,process),
+        server_host_keys=[str(host_key)],process_factory=lambda process:shell(runner,process,settings),
         encoding=None,agent_forwarding=False,x11_forwarding=False,
         signature_algs=['ssh-ed25519','rsa-sha2-512','rsa-sha2-256'])
     await server.wait_closed()
@@ -366,6 +501,30 @@ def start(runner,config):
         os.chmod(pending,0o600);pending.replace(key)
     elif key.stat().st_mode & 0o077:
         raise ValueError('insecure_free_vm_host_key')
-    thread=threading.Thread(target=lambda:asyncio.run(serve(runner,port,key)),daemon=True)
+    node_id=settings.get('node_id')
+    peers=settings.get('peers')
+    public=settings.get('fleet_public_key')
+    if (not isinstance(node_id,str) or not re.fullmatch(r'node-0[1-3]',node_id)
+            or not isinstance(peers,dict) or set(peers)!={'node-01','node-02','node-03'}-{node_id}
+            or not isinstance(public,str) or not re.fullmatch(r'[0-9a-f]{64}',public)):
+        raise ValueError('invalid_free_vm_fleet_route_configuration')
+    for peer in peers.values():
+        if (not isinstance(peer,dict) or not {'host','host_key'}<=set(peer)<={'host','host_key','port'}
+                or not isinstance(peer['host'],str)
+                or not re.fullmatch(r'[a-z0-9.-]{1,253}',peer['host'])
+                or not isinstance(peer['host_key'],str)
+                or not re.fullmatch(r'ssh-ed25519 [A-Za-z0-9+/=]{60,128}',peer['host_key'])
+                or type(peer.get('port',2121)) is not int or not 1<=peer.get('port',2121)<=65535):
+            raise ValueError('invalid_free_vm_fleet_peer')
+    relay_key=Path(config['state_dir'])/'free-vm-relay-key'
+    if not relay_key.exists():
+        pending=relay_key.with_suffix('.new')
+        pending.write_bytes(asyncssh.generate_private_key('ssh-ed25519').export_private_key())
+        os.chmod(pending,0o600);pending.replace(relay_key)
+    elif relay_key.stat().st_mode & 0o077:
+        raise ValueError('insecure_free_vm_relay_key')
+    relay_public=asyncssh.read_private_key(str(relay_key)).export_public_key().decode().strip()
+    route_settings=dict(settings,relay_key_file=relay_key,relay_public_key=relay_public)
+    thread=threading.Thread(target=lambda:asyncio.run(serve(runner,port,key,route_settings)),daemon=True)
     thread.start()
     return thread

@@ -7785,6 +7785,17 @@ pub fn route_with_ip(
             _=>(405,json!({"error":{"code":"method_not_allowed"}})),
         };
     }
+    if method=="POST" && path=="/internal/free-vm/route" {
+        let authorized=guard.private_node.as_ref().and_then(|p|p.runner.as_ref())
+            .is_some_and(|(_,secret)|token==Some(secret.as_str()));
+        if !authorized {return error_response(&Error::Unauthorized("service credential required".into()))}
+        let Some(key)=body["ssh_key"].as_str() else {return (400,json!({"error":{"code":"ssh_key_required"}}))};
+        let Some(relay)=body["relay_key"].as_str() else {return (400,json!({"error":{"code":"relay_key_required"}}))};
+        let Some(ip)=body["source_ip"].as_str() else {return (400,json!({"error":{"code":"source_ip_required"}}))};
+        return match free_vm::route(&guard,key,relay,ip) {
+            Ok(value)=>(200,value),Err(error)=>error_response(&error),
+        };
+    }
     if method=="POST" && path=="/internal/free-vm/reserve" {
         let authorized=guard.private_node.as_ref().and_then(|p|p.runner.as_ref())
             .is_some_and(|(_,secret)|token==Some(secret.as_str()));
