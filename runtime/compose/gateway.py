@@ -121,6 +121,7 @@ class Gateway:
         finally:
             with self.runtime.lock(meta['project_id']):
                 state['connections'].discard(client); state['connections'].discard(upstream)
+                state['last_incoming']=time.time()
             upstream.close()
 
     def tcp_handler(self,project,slot,vm_id=None):

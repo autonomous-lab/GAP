@@ -566,9 +566,16 @@ start check the live quota; jobs report `agent_quota_exceeded_vcpus` or
 `agent_quota_exceeded_memory_mib` when blocked. Lowering a quota does not kill
 existing workloads; reductions, stop and destroy remain available. CPU/RAM
 quotas are allocations per agent, not a host-wide capacity reservation.
+An anonymously created VM keeps its 1 vCPU / 1 GiB trial limit while unclaimed.
+After claim, an explicit operator approval for its exact owner DID overrides
+that trial limit and removes the trial egress restriction. Without explicit
+approval, the claimed VM retains its original trial allocation.
 
 CPU/RAM resize and disk growth require **stop → PATCH /vm → start**. There is no
 hot resource resize. Public port mappings and SSH keys can change while running.
+The dashboard performs this sequence with an interruption confirmation and
+restarts a previously running or hibernated VM. An authenticated SSH session
+through port 2121 keeps its VM awake; its idle countdown restarts on disconnect.
 
 On the operator host, use `python3 scripts/microvm-access.py set-quota <DID>
 --vcpus 2 --memory-mib 4096` (one shell command). Either flag may be omitted to

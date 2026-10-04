@@ -490,6 +490,12 @@ mod tests {
         assert_eq!(claimed["project_id"],project);
         assert_eq!(claimed["owner_did"],did);
         assert!(claimed["claim_token"].is_null());
+        let approval_file=root.join("compose-agents.json");
+        std::fs::write(&approval_file,serde_json::json!({"agents":[did],"quotas":{&did:{"vcpus":8,"memory_mib":16384,"max_vms":8}}}).to_string()).unwrap();
+        state.private_node.as_mut().unwrap().compose_approvals=Some(approval_file);
+        let (quota,_,restricted,tier)=state.microvm_approval(did).unwrap();
+        assert_eq!((quota.vcpus,quota.memory_mib,quota.max_vms),(8.0,16384,8));
+        assert!(!restricted && tier=="approved","explicit quota must override claimed free-VM trial defaults");
         assert_eq!(state.free_vm_trials.len(),2,"claimed reconnect must not create another trial");
         let mut next_wire=Vec::from(&b"\0\0\0\x0bssh-ed25519\0\0\0\x20"[..]);
         next_wire.extend([10u8;32]);

@@ -2615,8 +2615,10 @@ the content inline"
             return match trial.phase(now_unix()) {
                 free_vm::Phase::Active=>policy.runner.is_some().then_some((crate::private_node::MicroVMQuota{vcpus:1.0,memory_mib:1024,max_vms:1,disk_gib:Some(8)},
                     false,true,"anonymous")),
-                free_vm::Phase::Claimed=>policy.runner.is_some().then_some((crate::private_node::MicroVMQuota{vcpus:1.0,memory_mib:1024,max_vms:1,disk_gib:Some(8)},
-                    false,true,"trial")),
+                free_vm::Phase::Claimed=>policy.runner.is_some().then(||policy.microvm_quota(did)
+                    .map(|quota|(quota,policy.always_on_allowed(did),false,"approved"))
+                    .unwrap_or((crate::private_node::MicroVMQuota{vcpus:1.0,memory_mib:1024,max_vms:1,disk_gib:Some(8)},
+                        false,true,"trial"))),
                 _=>None,
             };
         }

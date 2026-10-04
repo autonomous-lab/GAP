@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -30,6 +31,21 @@ class LifecycleEfficiencyTests(unittest.TestCase):
         with patch('lifecycle.time.time',return_value=1000), patch('lifecycle.time.monotonic',return_value=500):
             runtime.execution_started(meta)
         self.assertEqual(runtime.state(meta)['last_incoming'],1000)
+
+    def test_authenticated_ssh_session_prevents_idle_hibernation(self):
+        runtime=self.runtime(Path('/unused'))
+        runtime.guard=threading.RLock();runtime.locks={}
+        meta=dict(self.meta('running'),idle_timeout_seconds=120)
+        state=runtime.state(meta);state['last_incoming']=100
+        self.assertTrue(runtime.idle_candidate(meta,state,500))
+        with patch('lifecycle.time.time',return_value=500):
+            runtime.ssh_begin(meta)
+            self.assertFalse(runtime.idle_candidate(meta,state,1000))
+            runtime.ssh_end(meta)
+        self.assertEqual(state['active_ssh'],0)
+        self.assertEqual(state['last_incoming'],500)
+        self.assertFalse(runtime.idle_candidate(meta,state,619))
+        self.assertTrue(runtime.idle_candidate(meta,state,1000))
 
     def meta(self, state):
         return dict(vm_id='vm_'+'a'*32, project_id='prj_'+'b'*24,

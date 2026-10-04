@@ -450,6 +450,18 @@ async def bridge(source,destination,close_on_eof=False):
         destination.write_eof()
 
 
+async def finish_shell(process,status,notice=None):
+    # tmux and full-screen applications can leave the caller's terminal in
+    # mouse-reporting or alternate-screen mode when the guest disconnects.
+    if process.term_type is not None:
+        process.stdout.write(b'\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?2004l\x1b[?1049l\x1b[0m')
+        await process.stdout.drain()
+    if notice:
+        process.stderr.write(notice)
+        await process.stderr.drain()
+    process.exit(status)
+
+
 async def local_shell(runner,process,key,ip,user_command,expected_project=None):
     started=time.monotonic()
     try:
@@ -469,6 +481,8 @@ async def local_shell(runner,process,key,ip,user_command,expected_project=None):
     if not claimed and time.time()>=details['active_until']:
         process.stderr.write(b'The active trial has ended.\r\n');process.exit(1);return
     known=asyncssh.import_known_hosts(f"[127.0.0.1]:{details['ssh_port']} {details['guest_host_key']}\n")
+    runtime=getattr(runner,'runtime',None)
+    tracked=False
     try:
         async with asyncssh.connect('127.0.0.1',port=details['ssh_port'],username='root',
                 client_keys=[details['guest_key']],known_hosts=known,encoding=None,
@@ -479,6 +493,9 @@ async def local_shell(runner,process,key,ip,user_command,expected_project=None):
                 if claimed else interactive_shell_command(details['active_until'],persistent))
             remote=await guest.create_process(command,term_type=process.term_type,
                 term_size=process.term_size,encoding=None)
+            if runtime:
+                runtime.ssh_begin(details)
+                tracked=True
             if claimed:
                 panel=claimed_banner(details,process.term_type is not None)
             else:
@@ -500,10 +517,12 @@ async def local_shell(runner,process,key,ip,user_command,expected_project=None):
                 input_task.cancel()
                 for task in output_tasks:task.cancel()
                 await asyncio.gather(input_task,*output_tasks,return_exceptions=True)
-            process.exit(remote.exit_status if remote.exit_status is not None else 0)
+            await finish_shell(process,remote.exit_status if remote.exit_status is not None else 0)
     except (asyncssh.Error,OSError,asyncio.TimeoutError):
-        process.stderr.write(b'VM connection interrupted.\r\n')
-        process.exit(1)
+        await finish_shell(process,1,b'VM connection interrupted.\r\n')
+    finally:
+        if tracked:
+            runtime.ssh_end(details)
 
 
 async def relay_shell(process,key,ip,user_command,routing,settings):
@@ -534,7 +553,7 @@ async def relay_shell(process,key,ip,user_command,routing,settings):
             finally:
                 for task in tasks:task.cancel()
                 await asyncio.gather(*tasks,return_exceptions=True)
-            process.exit(remote.exit_status if remote.exit_status is not None else 0)
+            await finish_shell(process,remote.exit_status if remote.exit_status is not None else 0)
     except (asyncssh.Error,OSError,asyncio.TimeoutError):
         raise GatewayError('fleet_route_unavailable') from None
 
@@ -578,8 +597,8 @@ async def shell(runner,process,settings=None):
                 raise GatewayError('fleet_route_unavailable')
         except Exception as error:
             print('free_vm_route_error:',type(error).__name__,str(error)[:160],flush=True)
-            process.stderr.write(b'Your VM route is temporarily unavailable. Please try again.\r\n')
-            process.exit(1);return
+            await finish_shell(process,1,b'Your VM route is temporarily unavailable. Please try again.\r\n')
+            return
     await local_shell(runner,process,key,peer[0],process.command)
 
 

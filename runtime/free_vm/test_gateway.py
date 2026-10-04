@@ -3,11 +3,12 @@ import base64
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import urllib.error
 import time
 
@@ -22,6 +23,17 @@ from gateway import (FreeServer, GatewayError, admission_error, claimable_banner
 
 
 class GatewayTests(unittest.TestCase):
+    def test_terminal_modes_are_restored_before_interrupt_message(self):
+        from gateway import finish_shell
+        process=SimpleNamespace(term_type='xterm-256color',stdout=Mock(drain=AsyncMock()),
+                                stderr=Mock(drain=AsyncMock()),exit=Mock())
+        asyncio.run(finish_shell(process,1,b'VM connection interrupted.\r\n'))
+        reset=process.stdout.write.call_args.args[0]
+        self.assertIn(b'\x1b[?1006l',reset)
+        self.assertIn(b'\x1b[?2004l',reset)
+        process.stderr.write.assert_called_once_with(b'VM connection interrupted.\r\n')
+        process.exit.assert_called_once_with(1)
+
     def test_known_rsa_key_relays_to_same_claimed_guest(self):
         async def run():
             home_host=asyncssh.generate_private_key('ssh-ed25519')
@@ -47,11 +59,12 @@ class GatewayTests(unittest.TestCase):
                          'manage_url':'https://gap.geta.team/account',
                          'vcpus':1,'memory_mib':1024,'disk_gib':8,'app_ports':[8080]}
                 home_settings={'node_id':'node-02','peers':{'node-01':{}},'fleet_public_key':'0'*64}
+                home_runner=SimpleNamespace(runtime=Mock())
                 with (patch('gateway.prepare',return_value=details) as prepare,
                       patch('gateway.verify_relay_ticket',return_value={'project':details['project_id']})):
                     home=await asyncssh.listen('127.0.0.1',0,server_factory=FreeServer,
                         server_host_keys=[home_host],
-                        process_factory=lambda process:shell(None,process,home_settings),encoding=None)
+                        process_factory=lambda process:shell(home_runner,process,home_settings),encoding=None)
                     ingress_settings={'node_id':'node-01','relay_key_file':relay_path,
                         'relay_public_key':relay_key.export_public_key().decode().strip(),
                         'peers':{'node-02':{'host':'127.0.0.1','port':home.get_port(),
@@ -69,6 +82,8 @@ class GatewayTests(unittest.TestCase):
                             self.assertIn(b'same-home-vm',result.stdout)
                             prepare.assert_called_once()
                             self.assertEqual(prepare.call_args.args[1],user_key.export_public_key().decode().strip())
+                            home_runner.runtime.ssh_begin.assert_called_once_with(details)
+                            home_runner.runtime.ssh_end.assert_called_once_with(details)
                         finally:
                             ingress.close();await ingress.wait_closed()
                     home.close();await home.wait_closed()

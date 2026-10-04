@@ -121,7 +121,8 @@ class Handler(socketserver.StreamRequestHandler):
             request = json.loads(line)
             result = (release_egress(peer, request, container) if request.get('action') == 'release_egress'
                       else apply_quota(peer, request, container))
-        except Exception:
+        except Exception as error:
+            print('cpu_quota_broker_error:', type(error).__name__, str(error), flush=True)
             result = {'ok': False, 'error': 'cpu_quota_unavailable'}
         self.wfile.write(json.dumps(result).encode()+b'\n')
 

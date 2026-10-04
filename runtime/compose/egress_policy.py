@@ -8,6 +8,7 @@ NET_ADMIN capability and cannot change these rules.
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 
 
@@ -52,6 +53,29 @@ def ensure_chain(edge_pid, family, name):
     required(edge_pid, family, '-F', name)
 
 
+def remove_output_references(edge_pid, family, name, vm_id):
+    """Remove this VM's stale jumps, including those from old worker cgroups."""
+    listing = run(edge_pid, family, '-S', 'OUTPUT')
+    if listing.returncode:
+        raise RuntimeError('egress_firewall_unavailable')
+    for line in listing.stdout.splitlines():
+        try:
+            rule = shlex.split(line)
+        except ValueError:
+            raise RuntimeError('egress_firewall_unavailable') from None
+        if len(rule) < 4 or rule[:2] != ['-A', 'OUTPUT'] or rule[-2:] != ['-j', name]:
+            continue
+        if '--path' not in rule or '-m' not in rule or rule[rule.index('-m')+1] != 'cgroup':
+            raise RuntimeError('unexpected_egress_firewall_rule')
+        group = rule[rule.index('--path')+1]
+        if not re.fullmatch(r'/system\.slice/docker-[0-9a-f]{64}\.scope/' + re.escape(vm_id), group):
+            raise RuntimeError('unexpected_egress_firewall_rule')
+        members = Path('/sys/fs/cgroup' + group) / 'cgroup.procs'
+        if members.exists() and members.read_text().strip():
+            raise RuntimeError('vm_still_running')
+        required(edge_pid, family, '-D', 'OUTPUT', *rule[2:])
+
+
 def install(vm_id, group, target_pid, edge_container='gap-compose-compose-edge-1'):
     """Install policy before a QEMU child can send any guest packet."""
     main, public, ipv6 = chains(vm_id)
@@ -69,6 +93,9 @@ def install(vm_id, group, target_pid, edge_container='gap-compose-compose-edge-1
     edge_pid = int(result.stdout.strip())
     if edge_pid <= 1 or os.stat(f'/proc/{edge_pid}/ns/net').st_ino != os.stat(f'/proc/{target_pid}/ns/net').st_ino:
         raise RuntimeError('egress_namespace_mismatch')
+
+    for family, name in ((4, main), (6, ipv6)):
+        remove_output_references(edge_pid, family, name, vm_id)
 
     ensure_chain(edge_pid, 4, main)
     ensure_chain(edge_pid, 4, public)
@@ -122,8 +149,7 @@ def release(vm_id, group, edge_container='gap-compose-compose-edge-1'):
         return
     edge_pid = int(result.stdout.strip())
     for family, name in ((4, main), (6, ipv6)):
-        if not run(edge_pid, family, '-C', 'OUTPUT', '-m', 'cgroup', '--path', group, '-j', name).returncode:
-            required(edge_pid, family, '-D', 'OUTPUT', '-m', 'cgroup', '--path', group, '-j', name)
+        remove_output_references(edge_pid, family, name, vm_id)
     for family, name in ((4, main), (4, public), (6, ipv6)):
         if not run(edge_pid, family, '-S', name).returncode:
             required(edge_pid, family, '-F', name)

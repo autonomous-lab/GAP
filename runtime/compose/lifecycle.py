@@ -60,10 +60,27 @@ class Runtime:
 
     def state(self,meta):
         return self.states.setdefault(meta['vm_id'],{'last_incoming':meta.get('last_incoming_at',time.time()),
-            'active_http':0,'last_sample':0,'connections':set(),
+            'active_http':0,'active_ssh':0,'last_sample':0,'connections':set(),
             'guest_clock':meta.get('guest_clock_seconds',0),'running_since':None,
             'tcp_ports':dict(meta.get('tcp_recent_ports',{})),
             'tcp_port_order':deque(sorted(meta.get('tcp_recent_ports',{}).items(),key=lambda item:item[1]))})
+
+    def ssh_begin(self,meta):
+        with self.lock(meta['project_id']):
+            state=self.state(meta)
+            state['active_ssh']+=1
+            state['last_incoming']=time.time()
+
+    def ssh_end(self,meta):
+        with self.lock(meta['project_id']):
+            state=self.state(meta)
+            state['active_ssh']=max(0,state['active_ssh']-1)
+            state['last_incoming']=time.time()
+
+    def idle_candidate(self,meta,state,now):
+        return (meta.get('execution_mode','serverless')=='serverless'
+                and now-state['last_incoming']>=meta.get('idle_timeout_seconds',300)
+                and not state['active_http'] and not state['active_ssh'])
 
     def execution_started(self,meta,cold=False):
         state=self.state(meta)
@@ -572,8 +589,7 @@ class Runtime:
         # A watchdog-paused process still has catalog state running. Finish
         # hibernation before the normal authorized wake/restart path can run.
         blocked=blocked or (meta['state']=='running' and state.get('policy_preempted',False))
-        idle=(meta.get('execution_mode','serverless')=='serverless'
-              and time.time()-state['last_incoming']>=meta.get('idle_timeout_seconds',300) and not state['active_http'])
+        idle=self.idle_candidate(meta,state,time.time())
         busy=False
         needs_busy_check=(meta['state']=='running' and idle) or (
             meta.get('execution_mode')=='always_on' and meta['state'] in ('hibernated','stopped'))
