@@ -18,6 +18,20 @@ def capabilities(manager, meta, names, disabled=()):
                          [{'capability': name, 'state': True} for name in names])})
 
 
+def restore_capabilities(manager, meta):
+    try:
+        capabilities(manager, meta, ('mapped-ram', 'postcopy-ram'))
+        return 'postcopy'
+    except VMError as error:
+        if str(error) != 'qmp_command_failed':
+            raise
+        # Postcopy can be rejected when the host/container denies userfaultfd.
+        # Retry without it; any other QMP problem still fails on this attempt.
+        capabilities(manager, meta, ('mapped-ram',), disabled=('postcopy-ram',))
+        print('GAP_FAST_RESTORE_FALLBACK '+json.dumps({'vm_id':meta['vm_id'],'mode':'preload'}),flush=True)
+        return 'preload'
+
+
 def save(manager, meta):
     started = time.monotonic()
     folder = manager.folder(meta)
@@ -81,6 +95,7 @@ def restore(manager, meta):
     path = folder / 'memory.fast'
     if not path.is_file(): raise VMError('fast_snapshot_missing')
     process = None
+    guest_started = False
     try:
         with (folder / 'restore.log').open('wb') as log, manager.disk_crypto.secret(meta) as (secret, fds), manager.seed_crypto.image(meta, folder) as (seed_path, seed_fds):
             process = subprocess.Popen(manager.command(meta, seed_path) + [x.replace('--object', '-object') for x in secret] + ['-incoming', 'defer'],
@@ -101,7 +116,7 @@ def restore(manager, meta):
                 time.sleep(.01)
         else: raise VMError('fast_snapshot_qmp_timeout')
         ready = time.monotonic()
-        capabilities(manager, meta, ('mapped-ram', 'postcopy-ram'))
+        restore_mode = restore_capabilities(manager, meta)
         if not manager.execution_allowed(meta): raise VMError('microvm_suspended_or_policy_unavailable')
         # Never replay a memory image after guest instructions can become visible.
         meta['state'] = 'running'
@@ -113,7 +128,9 @@ def restore(manager, meta):
         while time.monotonic() < deadline:
             if process.poll() is not None: raise VMError('fast_snapshot_restore_failed')
             status = manager.qmp(meta, 'query-status').get('status')
-            if status == 'running': break
+            if status == 'running':
+                guest_started = True
+                break
             time.sleep(.01)
         else: raise VMError('fast_snapshot_restore_timeout')
         loaded = time.monotonic()
@@ -138,6 +155,7 @@ def restore(manager, meta):
             'guest_start_ms': round((resumed - loaded) * 1000),
             'quota_restore_ms': round((quota_restored - resumed) * 1000),
             'total_ms': round((time.monotonic() - started) * 1000),
+            'restore_mode': restore_mode,
             'incoming_migration_status': incoming_migration_status,
             'migration_status': manager.qmp(meta, 'query-migrate').get('status')}), flush=True)
     except Exception as error:
@@ -146,6 +164,8 @@ def restore(manager, meta):
             process.wait(timeout=10)
         manager.capture_stop(meta)
         meta['resume_error'] = str(error) if isinstance(error, VMError) else type(error).__name__
-        meta['state'] = 'hibernated' if meta['state'] == 'resuming' else 'stopped'
+        # The catalog is marked running before migration only to fence replay.
+        # If no guest instruction ran, the intact snapshot remains retryable.
+        meta['state'] = 'stopped' if guest_started else 'hibernated'
         manager.save(meta)
         raise
