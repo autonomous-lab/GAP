@@ -1,5 +1,6 @@
 """Isolated Rust gateway smoke test; no production VM or billing state."""
 import concurrent.futures
+import contextlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -82,6 +83,10 @@ class Integration(unittest.TestCase):
                   '--bind',f'127.0.0.1:{gateway_port}',
                   '--control',f'http://127.0.0.1:{control.server_port}/hot-http',
                   '--token-file','/secrets/service.token','--edge-token-file','/secrets/edge.token']
+            test_binary=os.environ.get('GAP_RUST_TEST_BINARY')
+            if test_binary:
+                args[args.index('--entrypoint'):args.index('--entrypoint')]=[
+                    '-v',test_binary+':/usr/local/bin/gap-vm-http-gateway:ro']
             process=subprocess.Popen(args,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
             try:
                 for server in (backend,control):
@@ -92,8 +97,8 @@ class Integration(unittest.TestCase):
                     except OSError:time.sleep(.05)
                 else:self.fail('Rust gateway did not start: '+str(process.poll())+' '+
                                (process.stderr.read(1000).decode() if process.poll() is not None else ''))
-                def request(admission=EDGE):
-                    headers={'X-GAP-VM-Admission':admission,'X-GAP-Project':PROJECT,'X-GAP-VM':VM}
+                def request(admission=EDGE,vm=VM):
+                    headers={'X-GAP-VM-Admission':admission,'X-GAP-Project':PROJECT,'X-GAP-VM':vm}
                     try:
                         with urllib.request.urlopen(urllib.request.Request(
                             f'http://127.0.0.1:{gateway_port}/',headers=headers),timeout=15) as response:
@@ -128,6 +133,20 @@ class Integration(unittest.TestCase):
                     self.assertIn(b'101',response.split(b'\r\n',1)[0])
                     ws.sendall(b'PING')
                     self.assertEqual(ws.recv(4),b'PONG')
+                with contextlib.ExitStack() as held:
+                    for _ in range(64):
+                        ws=held.enter_context(socket.create_connection(('127.0.0.1',gateway_port),5))
+                        ws.settimeout(5)
+                        ws.sendall((f'GET / HTTP/1.1\r\nHost: localhost\r\n'
+                            f'Connection: Upgrade\r\nUpgrade: websocket\r\n'
+                            f'X-GAP-VM-Admission: {EDGE}\r\nX-GAP-Project: {PROJECT}\r\n'
+                            f'X-GAP-VM: {VM}\r\n\r\n').encode())
+                        response=b''
+                        while b'\r\n\r\n' not in response:response+=ws.recv(4096)
+                        self.assertIn(b'101',response.split(b'\r\n',1)[0])
+                    self.assertEqual(request()[0],429,'one VM must not occupy all gateway slots')
+                    self.assertEqual(request(vm='vm_'+'e'*32),(200,b'gateway-ok'),
+                                     'another VM must retain capacity')
             finally:
                 process.terminate()
                 try:process.communicate(timeout=5)

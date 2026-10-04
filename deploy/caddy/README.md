@@ -4,6 +4,14 @@ Caddy terminates GAP's own HTTPS traffic and issues customer-domain
 certificates on demand. It runs separately from the application Compose stack
 because it owns host ports 80 and 443.
 
+The public Caddy container is capped at 2 vCPUs / 2 GiB. The shared nginx
+edge is capped at 1 vCPU / 256 MiB and enforces an early per-preview limit:
+1,500 requests/s (burst 300) and 64 concurrent requests. The Rust HTTP gateway
+allows 512 active requests per node worker, but at most 64 per VM. These
+limits protect tenants from one noisy VM; they do not absorb a network-level
+flood or TLS handshakes before nginx. Keep origin bandwidth and Caddy CPU
+monitored, and arrange upstream network-level mitigation with the hoster.
+
 ## Install
 
 ```bash

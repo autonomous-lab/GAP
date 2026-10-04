@@ -178,9 +178,9 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    mem_limit: 64m
-    memswap_limit: 64m
-    cpus: 0.25
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 1.00
     pids_limit: 32
     restart: always
 

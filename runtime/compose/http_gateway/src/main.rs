@@ -29,7 +29,8 @@ type ClientBody = Full<Bytes>;
 type HttpClient = Client<HttpConnector, ClientBody>;
 type InnerBody = UnsyncBoxBody<Bytes, BoxError>;
 const MAX_BODY: usize = 16 * 1024 * 1024;
-const MAX_ACTIVE: usize = 256;
+const MAX_ACTIVE: usize = 512;
+const MAX_ACTIVE_PER_VM: usize = 64;
 const ADMISSION_CACHE_TTL: Duration = Duration::from_secs(5);
 const ADMISSION_REFRESH_LEAD: Duration = Duration::from_secs(3);
 type RouteKey = (String, String);
@@ -39,11 +40,13 @@ type AdmissionCache = Arc<Mutex<HashMap<RouteKey, RouteEntry>>>;
 struct RouteState {
     current: RwLock<Option<Arc<Admission>>>,
     refresh: Arc<Mutex<()>>,
+    slots: Arc<Semaphore>,
 }
 
 impl RouteState {
     fn new() -> Self {
-        Self { current: RwLock::new(None), refresh: Arc::new(Mutex::new(())) }
+        Self { current: RwLock::new(None), refresh: Arc::new(Mutex::new(())),
+            slots: Arc::new(Semaphore::new(MAX_ACTIVE_PER_VM)) }
     }
 }
 
@@ -60,6 +63,8 @@ struct Config {
 struct Lease {
     admission: Arc<Admission>,
     _permit: OwnedSemaphorePermit,
+    _route_permit: OwnedSemaphorePermit,
+    _route: RouteEntry,
 }
 
 struct Admission {
@@ -95,13 +100,14 @@ async fn fetch_admission(config: &Config, project: &str, vm: &str, deadline: Dur
     Ok(admission)
 }
 
-async fn admit(config: &Config, cache: &AdmissionCache, project: String, vm: String)
+async fn route_entry(cache: &AdmissionCache, project: &str, vm: &str) -> RouteEntry {
+    let mut routes = cache.lock().await;
+    routes.entry((project.to_owned(), vm.to_owned()))
+        .or_insert_with(|| Arc::new(RouteState::new())).clone()
+}
+
+async fn admit(config: &Config, entry: &RouteEntry, project: String, vm: String)
     -> Result<Arc<Admission>, (StatusCode, String)> {
-    let entry = {
-        let mut routes = cache.lock().await;
-        routes.entry((project.clone(), vm.clone()))
-            .or_insert_with(|| Arc::new(RouteState::new())).clone()
-    };
     if let Some(admission) = entry.current.read().await.as_ref() {
         if Instant::now() < admission.expires { return Ok(admission.clone()); }
     }
@@ -239,10 +245,6 @@ async fn read_body(mut body: Incoming) -> Result<Bytes, StatusCode> {
 }
 
 async fn proxy(mut request: Request<Incoming>, config: Config, cache: AdmissionCache) -> Response<TrackedBody> {
-    let permit = match config.slots.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => return error_response(StatusCode::SERVICE_UNAVAILABLE,"http_gateway_busy"),
-    };
     let headers = request.headers();
     let supplied = headers.get("x-gap-vm-admission").map(HeaderValue::as_bytes).unwrap_or_default();
     if supplied.len() != config.edge_token.len() || supplied.ct_eq(config.edge_token.as_bytes()).unwrap_u8() != 1 {
@@ -264,12 +266,21 @@ async fn proxy(mut request: Request<Incoming>, config: Config, cache: AdmissionC
             .and_then(|v| v.parse::<usize>().ok()).is_some_and(|n| n > MAX_BODY) {
         return error_response(StatusCode::PAYLOAD_TOO_LARGE,"request_body_too_large");
     }
-    let admission = match admit(&config,&cache,project,vm).await {
+    let route = route_entry(&cache,&project,&vm).await;
+    let route_permit = match route.slots.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return error_response(StatusCode::TOO_MANY_REQUESTS,"vm_http_gateway_busy"),
+    };
+    let permit = match config.slots.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return error_response(StatusCode::SERVICE_UNAVAILABLE,"http_gateway_busy"),
+    };
+    let admission = match admit(&config,&route,project,vm).await {
         Ok(value) => value,
         Err((status,code)) => return error_response(status,&code),
     };
     let port = admission.port;
-    let lease = Lease {admission, _permit: permit};
+    let lease = Lease {admission, _permit: permit, _route_permit: route_permit, _route: route};
     if lease.admission.cold {
         let target=SocketAddr::from(([127,0,0,1],port));
         let deadline=tokio::time::Instant::now()+Duration::from_secs(90);

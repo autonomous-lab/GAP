@@ -50,8 +50,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--edge-image',default='gap-http-edge');parser.add_argument('--caddy-image',default='caddy:2.10.2-alpine');args=parser.parse_args()
-    repo=Path(__file__).resolve().parent.parent
+    parser=argparse.ArgumentParser();parser.add_argument('--edge-image',default='gap-http-edge');parser.add_argument('--caddy-image',default='caddy:2.10.2-alpine');parser.add_argument('--repo',type=Path);parser.add_argument('--nginx-config',type=Path);args=parser.parse_args()
+    repo=args.repo or Path(__file__).resolve().parent.parent
     import sys
     sys.path.insert(0,str(repo/'runtime/compose'))
     from ingress import Ingress
@@ -67,7 +67,7 @@ def main():
         edge_port,caddy_port=port(),port()
         def run(image,config,binary):
             name='gap-http-test-'+uuid.uuid4().hex[:10];names.append(name)
-            command=['docker','run','-d','--rm','--network','host','--name',name,'-v',str(config)+':/tmp/test.conf:ro','--entrypoint',binary,image]
+            command=['docker','run','-d','--network','host','--name',name,'-v',str(config)+':/tmp/test.conf:ro','--entrypoint',binary,image]
             command+=['-c','/tmp/test.conf','-g','daemon off;'] if binary=='nginx' else ['run','--config','/tmp/test.conf']
             subprocess.run(command,check=True,stdout=subprocess.DEVNULL)
             return name
@@ -94,7 +94,7 @@ def main():
                 config,_=ingress.configuration();config['admin']={'disabled':True}
             cp=tmp/'caddy.json';cp.write_text(json.dumps(config));cp.chmod(0o644)
             run(args.caddy_image,cp,'caddy');ready(caddy_port)
-            template=(repo/'runtime/edge/nginx.conf').read_text().replace('${GAP_ADMIN_HOST}','admin.test').replace('${GAP_VM_EDGE_TOKEN}',SECRET).replace('gap-node:8080','127.0.0.1:'+str(node)).replace('gap-realtime:8091','127.0.0.1:'+str(realtime)).replace('172.17.0.1:8093','127.0.0.1:'+str(caddy_port)).replace('listen 8080','listen '+str(edge_port))
+            template=(args.nginx_config or repo/'runtime/edge/nginx.conf').read_text().replace('${GAP_ADMIN_HOST}','admin.test').replace('${GAP_VM_EDGE_TOKEN}',SECRET).replace('${GAP_FLEET_NODE02_HOST}','').replace('${GAP_FLEET_NODE03_HOST}','').replace('gap-node:8080','127.0.0.1:'+str(node)).replace('gap-realtime:8091','127.0.0.1:'+str(realtime)).replace('172.17.0.1:8093','127.0.0.1:'+str(caddy_port)).replace('listen 8080','listen '+str(edge_port))
             nc=tmp/'nginx.conf';nc.write_text(template);nc.chmod(0o644);run(args.edge_image,nc,'nginx');ready(edge_port)
             app='/apps/'+PROJECT+'/'
             for path in [app,app[:-1],'/apps%2f'+PROJECT+'/',app+'ws','/other/../apps/'+PROJECT+'/']:
@@ -110,13 +110,29 @@ def main():
             status,data,_=req('/api/data?q=1',host='app.customer.test',auth='Bearer application-token')
             assert status==200 and data['kind']=='guest',data;assert data['headers'].get('Authorization')=='Bearer application-token';assert data['path']=='/api/data?q=1';assert SECRET not in json.dumps(data);assert not data['headers'].get('X-Forwarded-Prefix')
             status,data,_=req('/v1/example',auth='Bearer owner-token',extra={'X-GAP-VM-Admission':'spoof'})
-            assert status==200 and data['kind']=='node';assert data['headers']['Authorization']=='Bearer owner-token';assert SECRET not in json.dumps(data);assert 'spoof' not in json.dumps(data)
+            assert status==200 and data['kind']=='node';assert data['headers']['Authorization']=='Bearer owner-token'
+            assert data['headers'].pop('X-GAP-Client-IP-Token',None)==SECRET
+            assert SECRET not in json.dumps(data);assert 'spoof' not in json.dumps(data)
             assert req('/v1/realtime')[1]['kind']=='realtime'
             data=req('/_gap/realtime?q=1',host='site.customer.test')[1];assert data['kind']=='realtime' and data['path']=='/v1/realtime?q=1',data
             assert req(app,host='admin.test')[1]['kind']=='node'
             assert req(app+'ws',extra={'Upgrade':'websocket','Connection':'Upgrade'})[0]==401
             assert req(app+'ws',auth=BASIC,extra={'Upgrade':'websocket','Connection':'Upgrade'})[0]==101
             assert req('/ws',host='app.customer.test',extra={'Upgrade':'websocket','Connection':'Upgrade'})[0]==101
+            # A low-rate isolated instance proves that the key is per project,
+            # not per node, and that nginx rejects before shared admission.
+            limited_port=port()
+            limited=template.replace('listen '+str(edge_port),'listen '+str(limited_port))
+            limited=limited.replace('rate=1500r/s','rate=2r/s').replace('burst=300','burst=1')
+            limited_conf=tmp/'limited-nginx.conf';limited_conf.write_text(limited);limited_conf.chmod(0o644)
+            run(args.edge_image,limited_conf,'nginx');ready(limited_port)
+            statuses=[req(app,auth=BASIC,target=limited_port)[0] for _ in range(12)]
+            assert 429 in statuses,statuses
+            second='/apps/prj_'+'b'*24+'/'
+            assert req(second,auth=BASIC,target=limited_port)[0]!=429
+            custom_statuses=[req('/test',host='app.customer.test',target=limited_port)[0] for _ in range(12)]
+            assert 429 in custom_statuses,custom_statuses
+            assert req('/test',host='site.customer.test',target=limited_port)[0]!=429
             print('PASS real nginx + Caddy: shared Basic, direct proxy rejection, headers, custom domains, URI encoding, realtime, admin isolation, WebSocket handshake')
         except BaseException:
             for name in names:subprocess.run(['docker','logs','--tail','15',name],check=False)
