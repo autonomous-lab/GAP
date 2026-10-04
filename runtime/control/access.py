@@ -73,6 +73,44 @@ class Access:
         signature = base64.urlsafe_b64encode(self.key.sign(signed.encode())).decode().rstrip('=')
         return {'found': True, 'node_id': row['node'], 'ticket': signed + '.' + signature}
 
+    def claimed_free_vm_quota(self, node, project, agent):
+        """Resolve a claimed SSH identity through its customer, not a node DID list."""
+        with self.a.db() as db:
+            binding=self.a.node_project(db,node,project)
+            trial=db.execute('SELECT agent,claimed FROM free_vm_trials WHERE project=? AND node=?',
+                             (project,node)).fetchone()
+            if binding['owner']!=agent or not trial or trial['agent']!=agent or trial['claimed'] is None:
+                raise Failure('claimed_free_vm_binding_required',403)
+            customer=binding['customer']
+            quota=self.a.quota_state(db,customer)
+            tier=db.execute('SELECT tier FROM customer_tiers WHERE customer=?',(customer,)).fetchone()
+        return dict(operator_id=self.a.operator,project_id=project,owner_did=agent,
+                    customer_id=customer,tier=tier['tier'] if tier else 'trial',
+                    quota=quota['limits'],revision=quota['revision'])
+
+    def adopt_claimed_free_vm_capacity(self,node,request,project,agent,vm,evidence):
+        """Account for an existing, locally stopped claimed VM without CPU/RAM."""
+        identifier(evidence)
+        body=dict(action='adopt_claimed_free_vm_capacity',project=project,agent=agent,vm=vm,evidence=evidence)
+        def apply(db):
+            binding=self.a.node_project(db,node,project)
+            trial=db.execute('SELECT agent,claimed FROM free_vm_trials WHERE project=? AND node=?',
+                             (project,node)).fetchone()
+            if binding['owner']!=agent or not trial or trial['agent']!=agent or trial['claimed'] is None:
+                raise Failure('claimed_free_vm_binding_required',403)
+            row=self.a.capacity_row(db,node,project,vm)
+            if row:
+                if row['state']!='idle':raise Failure('claimed_free_vm_capacity_conflict',409)
+            else:
+                quota=self.a.quota_state(db,binding['customer'])
+                if quota['allocated']['max_vms']>=quota['limits']['max_vms']:
+                    raise Failure('customer_quota_exceeded_max_vms',409)
+                db.execute("INSERT INTO capacity VALUES(?,?,?,?,'idle',1,0,0,0,0,NULL)",
+                           (vm,node,project,binding['customer']))
+            return dict(operator_id=self.a.operator,evidence_id=evidence,
+                        **self.a.capacity_view(self.a.capacity_row(db,node,project,vm)))
+        return self.a.mutation('node:'+node,request,body,apply)
+
     def reserve_free_vm(self, node, project, agent, ssh_key, source_ip):
         """Single-writer fleet admission; identity gateway token pins the node."""
         identifier(node)

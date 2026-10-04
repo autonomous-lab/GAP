@@ -41,6 +41,8 @@ class FleetAcceptance(integration_test.Integration):
         self.customer=a.create_customer('operator','customer','Isolated KVM')['customer_id']
         a.attach_principal('operator','agent',self.customer,'agent',owner)
         a.attach_project('operator','project',self.customer,project,'test-node',owner)
+        a.set_quotas('operator','kvm-quota',self.customer,
+                     dict(max_vms=1,cpu_quarters=4,memory_mib=1024),0)
         a.topup('operator','test-funding',self.customer,1000000,'promotional')
         token=root/'control-node.token';token.write_text(self.control_node_token);token.chmod(0o600)
         config['fleet_billing']=dict(url=f'http://127.0.0.1:{self.control_port}',token_file=str(token),
@@ -112,7 +114,9 @@ class FleetAcceptance(integration_test.Integration):
                     self.assertGreater(self.authority.wallet(self.customer)['spent_microcredits'],before)
                     self.assertTrue(runtime.ledger.lease_allowed(project))
                     self.stop_controller()
-                    deadline=time.monotonic()+20
+                    # The independent watchdog wakes every 15 seconds; a
+                    # 15-second lease can expire just after its previous pass.
+                    deadline=time.monotonic()+45
                     while time.monotonic()<deadline:
                         if manager.public(meta)['state']=='paused':break
                         time.sleep(.1)
@@ -151,9 +155,12 @@ class FleetAcceptance(integration_test.Integration):
             meta=manager.read(project,owner)
             self.assertEqual(ssh('cat /root/fleet-preserved'),'preserved')
             op('POST','/stop',{'vm_id':meta['vm_id']})
+            self.assertEqual(self.authority.quotas(self.customer)['allocated']['memory_mib'],0)
             op('PATCH','',{'vm_id':meta['vm_id'],'memory_mib':512})
-            self.assertEqual(self.authority.quotas(self.customer)['allocated']['memory_mib'],512)
-            op('PATCH','',{'vm_id':meta['vm_id'],'memory_mib':1280},expected_error='customer_quota_exceeded_memory_mib')
+            self.assertEqual(self.authority.quotas(self.customer)['allocated']['memory_mib'],0)
+            op('PATCH','',{'vm_id':meta['vm_id'],'memory_mib':1280})
+            op('POST','/start',{'vm_id':meta['vm_id']},expected_error='customer_quota_exceeded_memory_mib')
+            op('PATCH','',{'vm_id':meta['vm_id'],'memory_mib':512})
             op('POST','/start',{'vm_id':meta['vm_id']})
             meta=manager.read(project,owner)
             for _ in range(45):
@@ -162,7 +169,8 @@ class FleetAcceptance(integration_test.Integration):
                 except subprocess.SubprocessError:time.sleep(.5)
             else:self.fail('resized VM SSH timeout')
             runtime.closed=True;time.sleep(1.5)
-            manager.hibernate(meta);runtime.sample(meta)
+            manager.perform(project,owner,'vm/hibernate',{'vm_id':meta['vm_id']})
+            meta=manager.read(project,owner,meta['vm_id']);runtime.sample(meta)
             runtime.ledger.sync(project,owner,True)
             self.assertEqual(self.authority.wallet(self.customer)['spent_microcredits'],runtime.ledger.view(project,owner)['spent_microcredits'])
             from billing import BillingError

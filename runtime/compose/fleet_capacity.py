@@ -10,6 +10,7 @@ import os
 import re
 from sqlite_crypto import connect, sqlite3
 import threading
+import urllib.request
 import uuid
 
 from billing import BillingError
@@ -47,6 +48,16 @@ class Capacity:
             raise
 
     def configure(self, config, transport=None):
+        # The local control service exposes /health. Remote workers use the
+        # narrow /v1/fleet relay, which deliberately does not expose it.
+        if config and transport is None and not config['url'].rstrip('/').endswith('/v1/fleet'):
+            client=Client(config)
+            try:
+                with urllib.request.urlopen(client.url.removesuffix('/node')+'/health',timeout=3) as response:
+                    health=json.load(response)
+                if health.get('capacity_protocol')!=3 or health.get('capacity_enabled') is not True:
+                    raise ValueError('capacity protocol 3 required')
+            except Exception:raise VMError('fleet_capacity_protocol_3_required') from None
         self.config=config;self.projects=set(config['projects']) if config else set();self.ready.clear()
         self.transport=(transport or Client(config)) if config else None
         with self.db() as db:
@@ -58,7 +69,7 @@ class Capacity:
 
     def adopt_migrated_vm(self,project,owner,vm):
         reply=self.transport(dict(action='capacity-get',project_id=project,vm_id=vm))
-        if (reply.get('operator_id'),reply.get('node_id'),reply.get('project_id'),reply.get('vm_id'),reply.get('state'))!=(self.config['operator_id'],self.config['node_id'],project,vm,'active'):
+        if (reply.get('operator_id'),reply.get('node_id'),reply.get('project_id'),reply.get('vm_id'))!=(self.config['operator_id'],self.config['node_id'],project,vm) or reply.get('state') not in ('active','idle'):
             raise VMError('fleet_capacity_binding_mismatch')
         existing=project in self.projects
         self.projects.add(project)
@@ -85,8 +96,61 @@ class Capacity:
         with self.db() as db:
             db.execute('INSERT OR IGNORE INTO migration_projects VALUES(?,?,?)',(project,self.config['operator_id'],self.config['node_id']))
 
+    def adopt_claimed_free_vm(self,meta):
+        """Bind a verified claim as an idle VM after its QEMU process has stopped."""
+        if meta.get('guest_image') not in ('free-vm-v2','free-vm-v3','free-vm-v4'):
+            raise VMError('claimed_free_vm_image_required')
+        return self.adopt_idle_vm(meta,'capacity-adopt-claimed-free-vm')
+
+    def adopt_idle_vm(self,meta,action='capacity-adopt-idle-vm'):
+        """Adopt an existing offline catalog generation with a central VM slot."""
+        if not self.config:raise VMError('fleet_capacity_configuration_required')
+        project,owner,vm=meta['project_id'],meta['owner_did'],meta['vm_id']
+        if meta['state'] not in ('stopped','hibernated') or self.manager.alive(meta):
+            raise VMError('vm_must_be_offline_for_capacity_adoption')
+        request=dict(action=action,request_id='adopt-'+vm,
+            project_id=project,owner_did=owner,vm_id=vm,evidence_id='local-'+vm)
+        try:remote=self.transport(request)
+        except BillingError as error:raise VMError(str(error)) from None
+        if (remote.get('operator_id'),remote.get('node_id'),remote.get('project_id'),remote.get('vm_id'),remote.get('state'),remote.get('committed')) != (
+                self.config['operator_id'],self.config['node_id'],project,vm,'idle',
+                {'cpu_quarters':0,'memory_mib':0}):
+            raise VMError('claimed_free_vm_capacity_invalid_response')
+        self.projects.add(project)
+        with self.db() as db:
+            old=db.execute('SELECT * FROM bindings WHERE project=?',(project,)).fetchone()
+            if old and (old['owner'],old['operator'],old['node'])!=(owner,self.config['operator_id'],self.config['node_id']):
+                raise VMError('fleet_capacity_binding_mismatch')
+            db.execute('INSERT OR IGNORE INTO bindings VALUES(?,?,?,?)',
+                (project,owner,self.config['operator_id'],self.config['node_id']))
+            db.execute('INSERT OR IGNORE INTO migration_projects VALUES(?,?,?)',
+                (project,self.config['operator_id'],self.config['node_id']))
+        self.bound.add(project)
+        record=next((r for r in self.records(project) if r['vm']==vm),None)
+        if record and record['owner']!=owner:raise VMError('fleet_capacity_owner_mismatch')
+        if not record:
+            record=dict(vm=vm,project=project,owner=owner,kind='adopt',phase='active',remote=remote)
+            self.put(record)
+        self.ready.add(vm)
+        return remote
+
     def managed(self, project):
         return project in self.projects or project in self.bound
+
+    def account_quota(self,project,owner):
+        self.require(project)
+        try:reply=self.transport(dict(action='capacity-quota',project_id=project,owner_did=owner))
+        except BillingError as error:raise VMError(str(error)) from None
+        if reply.get('operator_id')!=self.config['operator_id'] or not isinstance(reply.get('limits'),dict) or not isinstance(reply.get('allocated'),dict):
+            raise VMError('fleet_capacity_invalid_quota')
+        limits,allocated=reply['limits'],reply['allocated']
+        if (set(limits)!={'max_vms','cpu_quarters','memory_mib'} or set(allocated)!=set(limits)
+                or any(type(value) is not int or value<0 for value in (*limits.values(),*allocated.values()))):
+            raise VMError('fleet_capacity_invalid_quota')
+        return {'limits':{'max_vms':limits['max_vms'],'vcpus':limits['cpu_quarters']/4,
+                          'memory_mib':limits['memory_mib']},
+                'allocated':{'max_vms':allocated['max_vms'],'vcpus':allocated['cpu_quarters']/4,
+                             'memory_mib':allocated['memory_mib']}}
 
     def require(self, project):
         if project not in self.projects:raise VMError('fleet_capacity_configuration_required')
@@ -141,7 +205,7 @@ class Capacity:
         if (reply.get('operator_id'),reply.get('node_id'),reply.get('project_id'),reply.get('vm_id')) != (
             self.config['operator_id'],self.config['node_id'],record['project'],record['vm']):
             raise VMError('fleet_capacity_invalid_response')
-        if type(reply.get('revision')) is not int or reply['revision']<1 or reply.get('state') not in ('pending','active','released'):
+        if type(reply.get('revision')) is not int or reply['revision']<1 or reply.get('state') not in ('pending','active','idle','released'):
             raise VMError('fleet_capacity_invalid_response')
         for key in ('committed','target'):
             value=reply.get(key)
@@ -160,6 +224,28 @@ class Capacity:
             transition_id=remote['transition_id'],outcome=outcome,evidence_id='local-'+uuid.uuid4().hex)
         record['phase']='finishing';self.put(record)
         self.call(record,record['finish'])
+
+    def allocation(self,record,target):
+        """Change compute reservation while retaining this VM's central slot."""
+        remote=self.current(record)
+        if remote['state'] not in ('active','idle'):
+            raise VMError('fleet_capacity_reconciliation_required')
+        if remote['committed']==target:return remote
+        record.update(kind='allocation',phase='preparing',prepare=dict(action='capacity-prepare',
+            request_id=uuid.uuid4().hex,project_id=record['project'],owner_did=record['owner'],
+            vm_id=record['vm'],expected_revision=remote['revision'],**target))
+        self.ready.discard(record['vm']);self.put(record)
+        self.call(record,record['prepare'])
+        remote=self.current(record)
+        if remote['state']!='pending' or remote['target']!=target:
+            raise VMError('fleet_capacity_stale_prepare')
+        self.finish(record,remote,'commit')
+        remote=self.current(record)
+        if remote['committed']!=target or remote['state']!=('active' if target['cpu_quarters'] else 'idle'):
+            raise VMError('fleet_capacity_resource_mismatch')
+        record.update(kind='steady',phase='active',remote=remote)
+        record.pop('finish',None);self.put(record);self.ready.add(record['vm'])
+        return remote
 
     def reconcile(self, record):
         self.require(record['project']);self.ready.discard(record['vm'])
@@ -200,18 +286,28 @@ class Capacity:
                 # A partially created VM can be destroyed after its creation
                 # was reconciled; pending resize must first settle from catalog.
                 raise VMError('fleet_capacity_pending_destruction')
-            if remote['state']=='active':
+            if remote['state'] in ('active','idle'):
                 self.finish(record,remote,'release');remote=self.current(record)
             if remote['state']!='released':raise VMError('fleet_capacity_reconciliation_required')
             record.update(phase='closed',remote=remote);self.put(record);return
         resources=self.resources(meta)
+        idle={'cpu_quarters':0,'memory_mib':0}
+        expected=resources if self.manager.alive(meta) else idle
+        prestart_create=record['kind']=='create' and record['phase']=='applying'
         if remote['state']=='pending':
             if self.manager.alive(meta):raise VMError('fleet_capacity_pending_process_alive')
-            if resources==remote['target']:outcome='commit'
-            elif record['kind']=='resize' and resources==remote['committed']:outcome='abort'
+            if prestart_create:outcome='commit'
+            elif remote['target']==expected:outcome='commit'
+            elif remote['committed']==expected:outcome='abort'
             else:raise VMError('fleet_capacity_resource_mismatch')
             self.finish(record,remote,outcome);remote=self.current(record)
-        if remote['state']!='active' or remote['committed']!=resources:
+        if (not self.manager.alive(meta) and remote['state']=='active'
+                and not prestart_create):
+            self.allocation(record,idle)
+            remote=self.current(record)
+        if prestart_create and remote['state']=='active':
+            expected=resources
+        if remote['state'] not in ('active','idle') or remote['committed']!=expected:
             raise VMError('fleet_capacity_resource_mismatch')
         record.update(phase='active',remote=remote);record.pop('finish',None);self.put(record)
         self.ready.add(record['vm'])
@@ -227,7 +323,8 @@ class Capacity:
         if not self.managed(meta['project_id']):return True
         if meta['project_id'] not in self.projects or meta['vm_id'] not in self.ready:return False
         record=next((r for r in self.records(meta['project_id']) if r['vm']==meta['vm_id']),None)
-        return bool(record and record['phase']=='active' and record['remote']['committed']==self.resources(meta))
+        return bool(record and record['phase']=='active' and record['remote']['state']=='active'
+                    and record['remote']['committed']==self.resources(meta))
 
     def execute(self, project, owner, action, body, approval=None):
         """Called under MicroVMs.perform's owner lock and caller's lifecycle lock."""
@@ -247,6 +344,21 @@ class Capacity:
             if not meta or meta['state']=='destroyed':raise VMError('vm_not_found')
             record=next((r for r in self.records(project) if r['vm']==meta['vm_id']),None)
             if not record or record['phase']!='active':raise VMError('fleet_capacity_reservation_required')
+            if action in ('vm/start','vm/resume'):
+                if not manager.alive(meta):self.allocation(record,self.resources(meta))
+                try:return manager._perform(project,owner,action,body)
+                except Exception:
+                    current=self.meta(record)
+                    if current and not manager.alive(current):
+                        try:self.allocation(record,{'cpu_quarters':0,'memory_mib':0})
+                        except Exception:pass  # Keep the reservation until durable reconciliation.
+                    raise
+            if action in ('vm/stop','vm/hibernate'):
+                result=manager._perform(project,owner,action,body)
+                current=self.meta(record)
+                if not current or manager.alive(current):raise VMError('fleet_capacity_pending_process_alive')
+                self.allocation(record,{'cpu_quarters':0,'memory_mib':0})
+                return result
             if action not in ('vm/update','vm/destroy'):
                 return manager._perform(project,owner,action,body)
             if manager.alive(meta):raise VMError('stop_vm_before_reconfiguration_or_destruction')
@@ -260,8 +372,12 @@ class Capacity:
             record.pop('abort',None)
             record.update(kind='resize',phase='preparing',previous=self.resources(meta));target=dict(meta,**{k:body[k] for k in ('vcpus','memory_mib') if k in body})
             revision=record['remote']['revision']
+        if action=='vm/create':
+            reserve=bool(body.get('start',True) or body.get('placement_id'))
+        else:reserve=manager.alive(meta)
         record['prepare']=dict(action='capacity-prepare',request_id=uuid.uuid4().hex,
-            project_id=project,owner_did=owner,vm_id=record['vm'],expected_revision=revision,**self.resources(target))
+            project_id=project,owner_did=owner,vm_id=record['vm'],expected_revision=revision,
+            **(self.resources(target) if reserve else {'cpu_quarters':0,'memory_mib':0}))
         if record.get('placement_id'):
             record['prepare'].update(placement_id=record['placement_id'],disk_gib=body.get('disk_gib',8))
         self.ready.discard(record['vm']);self.put(record)
@@ -279,6 +395,9 @@ class Capacity:
             if action=='vm/create' and body.get('start',True):
                 with manager.lock(project):
                     meta=self.meta(record);manager.start(meta);result={'ok':True,'vm':manager.public(meta)}
+                record.update(kind='steady',phase='active');self.put(record)
+            elif action=='vm/create' and reserve:
+                self.allocation(record,{'cpu_quarters':0,'memory_mib':0})
             return result
         except Exception:
             try:self.reconcile(record)

@@ -491,11 +491,31 @@ mod tests {
         assert_eq!(claimed["owner_did"],did);
         assert!(claimed["claim_token"].is_null());
         let approval_file=root.join("compose-agents.json");
-        std::fs::write(&approval_file,serde_json::json!({"agents":[did],"quotas":{&did:{"vcpus":8,"memory_mib":16384,"max_vms":8}}}).to_string()).unwrap();
+        std::fs::write(&approval_file,serde_json::json!({"agents":[did],"quotas":{did:{"vcpus":8,"memory_mib":16384,"max_vms":8}}}).to_string()).unwrap();
         state.private_node.as_mut().unwrap().compose_approvals=Some(approval_file);
         let (quota,_,restricted,tier)=state.microvm_approval(did).unwrap();
         assert_eq!((quota.vcpus,quota.memory_mib,quota.max_vms),(8.0,16384,8));
         assert!(!restricted && tier=="approved","explicit quota must override claimed free-VM trial defaults");
+        // With fleet identity available, the account quota wins over a stale
+        // per-DID node approval; new SSH identities need no manual sync.
+        use std::io::{Read,Write};
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address=listener.local_addr().unwrap();
+        let response=serde_json::json!({"project_id":project,"owner_did":did,
+            "tier":"approved","quota":{"cpu_quarters":24,"memory_mib":12288,"max_vms":7}}).to_string();
+        let server=std::thread::spawn(move || {
+            let (mut socket,_)=listener.accept().unwrap();
+            let mut request=[0u8;4096];let _=socket.read(&mut request).unwrap();
+            write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).unwrap();
+        });
+        state.fleet_access=Some(crate::fleet_access::Access{operator:"test".into(),node:"node-02".into(),
+            key:ed25519_dalek::SigningKey::from_bytes(&[4u8;32]).verifying_key(),
+            identity_url:format!("http://{address}/identity"),identity_token:"t".repeat(64)});
+        let (quota,_,restricted,tier)=state.microvm_approval(did).unwrap();
+        assert_eq!((quota.vcpus,quota.memory_mib,quota.max_vms),(6.0,12288,7));
+        assert!(!restricted && tier=="approved");
+        server.join().unwrap();
+        state.fleet_access=None;
         assert_eq!(state.free_vm_trials.len(),2,"claimed reconnect must not create another trial");
         let mut next_wire=Vec::from(&b"\0\0\0\x0bssh-ed25519\0\0\0\x20"[..]);
         next_wire.extend([10u8;32]);

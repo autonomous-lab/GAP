@@ -303,6 +303,32 @@ class Authority:
                 raise Failure('capacity_not_found', 404)
             return dict(operator_id=self.operator, **self.capacity_view(row))
 
+    def capacity_project_quota(self,node,project,owner):
+        with self.db() as db:
+            binding=self.node_project(db,node,project)
+            if binding['owner']!=owner:raise Failure('project_owner_mismatch',403)
+            return self.quota_state(db,binding['customer'])
+
+    def capacity_adopt_idle(self,node,request,project,owner,vm,evidence):
+        """Migrate a stopped legacy VM into account-wide capacity accounting."""
+        identifier(evidence)
+        body=dict(action='capacity_adopt_idle',project=project,owner=owner,vm=vm,evidence=evidence)
+        def apply(db):
+            binding=self.node_project(db,node,project)
+            if binding['owner']!=owner:raise Failure('project_owner_mismatch',403)
+            row=self.capacity_row(db,node,project,vm)
+            if row:
+                if row['state']!='idle':raise Failure('capacity_adoption_conflict',409)
+            else:
+                quota=self.quota_state(db,binding['customer'])
+                if quota['allocated']['max_vms']>=quota['limits']['max_vms']:
+                    raise Failure('customer_quota_exceeded_max_vms',409)
+                db.execute("INSERT INTO capacity VALUES(?,?,?,?,'idle',1,0,0,0,0,NULL)",
+                           (vm,node,project,binding['customer']))
+            return dict(operator_id=self.operator,evidence_id=evidence,
+                        **self.capacity_view(self.capacity_row(db,node,project,vm)))
+        return self.mutation('node:'+node,request,body,apply)
+
     def capacity_list(self, customer, after=''):
         if not isinstance(after, str) or len(after) > 128:
             raise Failure('invalid_capacity_cursor')
@@ -316,8 +342,12 @@ class Authority:
 
     def capacity_prepare(self, node, request, project, owner, vm, cpu, memory, expected_revision,
                          placement_id=None, disk=0):
-        self.capacity_number(cpu, MAX_QUOTAS['cpu_quarters'], 1)
-        self.capacity_number(memory, MAX_QUOTAS['memory_mib'], 256)
+        # An idle VM keeps its VM slot and disk, but reserves no CPU or RAM.
+        # Both values must be zero together; a half-reserved VM is invalid.
+        self.capacity_number(cpu, MAX_QUOTAS['cpu_quarters'], 0)
+        self.capacity_number(memory, MAX_QUOTAS['memory_mib'], 0)
+        if (cpu == 0) != (memory == 0) or (memory and memory % 256):
+            raise Failure('invalid_capacity_resources')
         self.capacity_number(expected_revision, 2**53-1)
         if placement_id is not None:
             import placement
@@ -341,7 +371,7 @@ class Authority:
                 raise Failure('capacity_released', 409)
             if (row['revision'] if row else 0) != expected_revision:
                 raise Failure('capacity_revision_conflict', 409)
-            if row and row['state'] != 'active':
+            if row and row['state'] not in ('active','idle'):
                 raise Failure('capacity_transition_pending', 409)
             current = self.quota_state(db, project_binding['customer'])
             growth = dict(max_vms=0 if row else 1,
@@ -387,18 +417,20 @@ class Authority:
             import migration_journal
             migration_journal.guard_capacity(db, vm)
             if outcome == 'release':
-                if row['state'] != 'active':
+                if row['state'] not in ('active','idle'):
                     raise Failure('capacity_transition_pending', 409)
                 cpu, memory, state = 0, 0, 'released'
             else:
                 if row['state'] != 'pending' or row['pending'] != transition:
                     raise Failure('capacity_transition_mismatch', 409)
                 cpu, memory = (row['target_cpu'], row['target_memory']) if outcome == 'commit' else (row['cpu'],row['memory'])
-                state = 'active' if cpu else 'released'
+                state = ('released' if outcome=='abort' and row['revision']==1 and row['cpu']==0
+                         else 'active' if cpu else 'idle')
             db.execute('''UPDATE capacity SET state=?,revision=revision+1,cpu=?,memory=?,
                 target_cpu=?,target_memory=?,pending=NULL WHERE vm=?''', (state,cpu,memory,cpu,memory,vm))
-            import placement
-            placement.finish_vm(db, self, vm, outcome)
+            if outcome!='abort' or row['revision']==1:
+                import placement
+                placement.finish_vm(db, self, vm, outcome)
             return dict(operator_id=self.operator, evidence_id=evidence, outcome=outcome,
                         **self.capacity_view(self.capacity_row(db,node,project,vm)))
         return self.mutation('node:'+node, request, body, apply)
@@ -411,7 +443,7 @@ class Authority:
             placement=self.node_project(db,node,project)
             if placement['owner']!=owner: raise Failure('project_owner_mismatch',403)
             row=self.capacity_row(db,node,project,vm)
-            if row and row['state']=='active': raise Failure('capacity_already_committed',409)
+            if row and row['state'] in ('active','idle'): raise Failure('capacity_already_committed',409)
             if row and row['cpu']: raise Failure('capacity_resize_cannot_cancel_creation',409)
             if row:
                 if row['state']!='released':
@@ -431,10 +463,10 @@ class Authority:
         def apply(db):
             row=self.capacity_row(db,node,project,vm)
             if not row:raise Failure('capacity_not_found',404)
-            unreceived=row['state']=='active' and row['revision']==revision
-            pending=row['state']=='pending' and row['revision']==revision+1 and row['pending']==transition and row['cpu']>0
+            unreceived=row['state'] in ('active','idle') and row['revision']==revision
+            pending=row['state']=='pending' and row['revision']==revision+1 and row['pending']==transition
             if not (unreceived or pending):raise Failure('capacity_revision_conflict',409)
-            db.execute("UPDATE capacity SET state='active',revision=revision+1,target_cpu=cpu,target_memory=memory,pending=NULL WHERE vm=?",(vm,))
+            db.execute("UPDATE capacity SET state=CASE WHEN cpu=0 THEN 'idle' ELSE 'active' END,revision=revision+1,target_cpu=cpu,target_memory=memory,pending=NULL WHERE vm=?",(vm,))
             return dict(operator_id=self.operator,evidence_id=evidence,**self.capacity_view(self.capacity_row(db,node,project,vm)))
         return self.mutation('node:'+node,request,body,apply)
 

@@ -268,17 +268,14 @@ class MicroVMTests(unittest.TestCase):
         self.assertFalse(any(call.args[1]=='block_resize' for call in retry_qmp.call_args_list))
         self.assertNotIn('disk_resize_pending_gib',result['vm'])
 
-    def test_cumulative_quota_counts_stopped_vms_and_releases_destroyed(self):
+    def test_stopped_vm_keeps_slot_and_disk_but_releases_compute_quota(self):
         self.manager.quota_provider = lambda *_: {'vcpus':2,'memory_mib':4096,'max_vms':2}
         other = 'prj_' + 'd' * 24
         with patch.object(self.manager, '_perform') as execute:
-            with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_vcpus'):
-                self.manager.perform(other, OWNER, 'vm/create', {'vcpus': 2})
-            with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_memory_mib'):
-                self.manager.perform(other, OWNER, 'vm/create', {'memory_mib': 4096})
-            execute.assert_not_called()
-            self.manager.perform(other, OWNER, 'vm/create', {'vcpus': 1, 'memory_mib': 3072})
+            self.manager.perform(other, OWNER, 'vm/create', {'vcpus': 2,'memory_mib':4096})
             self.manager.perform(other, 'did:gap:' + 'e'*64, 'vm/create', {'vcpus': 2})
+            self.assertEqual(execute.call_count,2)
+        self.assertEqual(self.manager.quota_usage(OWNER), {'vcpus': 0, 'memory_mib': 0})
         self.manager.perform(PROJECT, OWNER, 'vm/destroy', {'vm_id': VM})
         self.assertEqual(self.manager.quota_usage(OWNER), {'vcpus': 0, 'memory_mib': 0})
 
@@ -288,10 +285,14 @@ class MicroVMTests(unittest.TestCase):
         with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_memory_mib'):
             self.manager.perform(PROJECT, OWNER, 'vm/start', {'vm_id': VM})
         self.manager.perform(PROJECT, OWNER, 'vm/update', {'vm_id': VM, 'memory_mib': 512})
-        with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_vcpus'):
-            self.manager.perform(PROJECT, OWNER, 'vm/update', {'vm_id': VM, 'vcpus': 2})
-        limit['vcpus'] = 2
         self.manager.perform(PROJECT, OWNER, 'vm/update', {'vm_id': VM, 'vcpus': 2})
+        with self.assertRaisesRegex(VMError, 'agent_quota_exceeded_vcpus'):
+            self.manager.perform(PROJECT, OWNER, 'vm/start', {'vm_id': VM})
+        limit['vcpus'] = 2
+        with patch.object(self.manager,'_perform'):
+            self.manager.perform(PROJECT, OWNER, 'vm/start', {'vm_id': VM})
+        self.meta=self.manager.read(PROJECT,OWNER,VM)
+        self.meta['state']='running';self.manager.save(self.meta)
         self.assertEqual(self.manager.quota_usage(OWNER), {'vcpus': 2, 'memory_mib': 512})
         self.manager.quota_provider = lambda project, owner: None
         with self.assertRaisesRegex(VMError, 'invalid_agent_quota'):
@@ -384,13 +385,13 @@ class MicroVMTests(unittest.TestCase):
         self.assertTrue(self.manager.direct_free_egress(new))
 
     def test_parallel_projects_cannot_overallocate_one_owner(self):
-        self.manager.quota_provider = lambda *_: {'vcpus':2,'memory_mib':4096,'max_vms':3}
+        self.manager.quota_provider = lambda *_: {'vcpus':1,'memory_mib':4096,'max_vms':3}
         import concurrent.futures
         import threading
         barrier = threading.Barrier(2)
-        # One CPU is already allocated. Both contenders request the last CPU.
+        # The stopped VM holds a slot but no CPU; contenders race for one CPU.
         def reserve(project, owner, action, body, **_):
-            self.manager.save(dict(self.meta, project_id=project))
+            self.manager.save(dict(self.meta, project_id=project,state='running'))
             return True
         def attempt(project):
             barrier.wait(timeout=5)
@@ -402,7 +403,7 @@ class MicroVMTests(unittest.TestCase):
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(attempt, ['prj_'+'d'*24, 'prj_'+'e'*24]))
         self.assertCountEqual(results, [True, 'agent_quota_exceeded_vcpus'])
-        self.assertEqual(self.manager.quota_usage(OWNER)['vcpus'], 2)
+        self.assertEqual(self.manager.quota_usage(OWNER)['vcpus'], 1)
 
     def test_vm_count_limit_includes_hibernated_and_stopped(self):
         other = 'prj_' + 'd' * 24

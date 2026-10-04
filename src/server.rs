@@ -2615,10 +2615,33 @@ the content inline"
             return match trial.phase(now_unix()) {
                 free_vm::Phase::Active=>policy.runner.is_some().then_some((crate::private_node::MicroVMQuota{vcpus:1.0,memory_mib:1024,max_vms:1,disk_gib:Some(8)},
                     false,true,"anonymous")),
-                free_vm::Phase::Claimed=>policy.runner.is_some().then(||policy.microvm_quota(did)
-                    .map(|quota|(quota,policy.always_on_allowed(did),false,"approved"))
-                    .unwrap_or((crate::private_node::MicroVMQuota{vcpus:1.0,memory_mib:1024,max_vms:1,disk_gib:Some(8)},
-                        false,true,"trial"))),
+                free_vm::Phase::Claimed=>{
+                    if policy.runner.is_none(){return None}
+                    if let Some(access)=self.fleet_access.as_ref(){
+                        let (status,value)=access.connect(&json!({"action":"claimed-free-vm-quota",
+                            "project_id":trial.project_id,"agent_did":did}));
+                        if status!=200 || value["owner_did"]!=did || value["project_id"]!=trial.project_id {
+                            return None; // A missing account binding must fail closed, not become a trial.
+                        }
+                        if value["tier"]=="approved" {
+                            let limits=&value["quota"];
+                            let cpu=limits["cpu_quarters"].as_u64()?;
+                            let memory=u32::try_from(limits["memory_mib"].as_u64()?).ok()?;
+                            let max_vms=u32::try_from(limits["max_vms"].as_u64()?).ok()?;
+                            if cpu==0 || memory==0 || max_vms==0{return None}
+                            let quota=crate::private_node::MicroVMQuota{vcpus:cpu as f64/4.0,
+                                memory_mib:memory,max_vms,disk_gib:None};
+                            return Some((quota,false,false,"approved"));
+                        }
+                        if value["tier"]!="trial" {return None}
+                        return Some((crate::private_node::MicroVMQuota{vcpus:1.0,memory_mib:1024,
+                            max_vms:1,disk_gib:Some(8)},false,true,"trial"));
+                    }
+                    Some(policy.microvm_quota(did)
+                        .map(|quota|(quota,policy.always_on_allowed(did),false,"approved"))
+                        .unwrap_or((crate::private_node::MicroVMQuota{vcpus:1.0,memory_mib:1024,max_vms:1,disk_gib:Some(8)},
+                            false,true,"trial")))
+                },
                 _=>None,
             };
         }

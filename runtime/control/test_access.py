@@ -138,6 +138,29 @@ class AccessTests(unittest.TestCase):
         self.assertEqual(result['free_vm_claimed_at'],100)
         self.assertFalse(result['trial_credit_granted'])
         self.assertEqual(result['project_id'], PROJECT)
+        approved=self.app.handle('POST','/identity','identity1',dict(action='claimed-free-vm-quota',
+            project_id=PROJECT,agent_did=OWNER))
+        self.assertEqual(approved['customer_id'],result['customer_id'])
+        self.assertEqual(approved['tier'],'trial')
+        self.a.set_quotas('operator','higher-free-vm-quota',result['customer_id'],
+                          dict(max_vms=8,cpu_quarters=32,memory_mib=16384),0)
+        updated=self.app.handle('POST','/identity','identity1',dict(action='claimed-free-vm-quota',
+            project_id=PROJECT,agent_did=OWNER))
+        self.assertEqual(updated['tier'],'approved')
+        self.assertEqual(updated['quota'],dict(max_vms=8,cpu_quarters=32,memory_mib=16384))
+        self.app.allow_capacity=True
+        vm='vm_'+'c'*32
+        adopted=self.app.handle('POST','/node','worker1',dict(action='capacity-adopt-claimed-free-vm',
+            request_id='adopt-claimed',project_id=PROJECT,owner_did=OWNER,vm_id=vm,evidence_id='local-stopped'))
+        self.assertEqual((adopted['state'],adopted['committed']),('idle',
+            dict(cpu_quarters=0,memory_mib=0)))
+        self.assertEqual(self.a.quotas(result['customer_id'])['allocated'],
+            dict(max_vms=1,cpu_quarters=0,memory_mib=0))
+        self.assertEqual(self.app.handle('POST','/node','worker1',dict(action='capacity-adopt-claimed-free-vm',
+            request_id='adopt-claimed',project_id=PROJECT,owner_did=OWNER,vm_id=vm,evidence_id='local-stopped')),adopted)
+        with self.assertRaisesRegex(Failure,'claimed_free_vm_binding_required'):
+            self.app.handle('POST','/identity','identity1',dict(action='claimed-free-vm-quota',
+                project_id=PROJECT,agent_did=AGENT))
         self.assertEqual(self.app.handle('POST', '/identity', 'identity1', claim)['customer_id'],result['customer_id'])
         with self.assertRaisesRegex(Failure, 'free_vm_already_claimed'):
             self.app.handle('POST', '/identity', 'identity1', reservation)

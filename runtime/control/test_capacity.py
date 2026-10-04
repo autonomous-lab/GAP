@@ -63,7 +63,35 @@ class CapacityTests(unittest.TestCase):
                            lambda:self.prepare(OTHER,'node-two',SECOND,cpu=2,memory=512))
                 self.assertEqual(self.used()['max_vms'],1)
 
+    def test_idle_vm_keeps_slot_but_releases_compute_for_another_node(self):
+        self.limits(count=2,cpu=4,memory=1024)
+        running=self.finish(self.prepare())
+        pause=self.prepare(request='pause',cpu=0,memory=0,revision=running['revision'])
+        # Do not lend capacity until the node confirms that QEMU is stopped.
+        self.assertEqual(self.used(),dict(max_vms=1,cpu_quarters=4,memory_mib=1024))
+        idle=self.finish(pause,request='paused')
+        self.assertEqual(idle['state'],'idle')
+        self.assertEqual(self.used(),dict(max_vms=1,cpu_quarters=0,memory_mib=0))
+        other=self.finish(self.prepare(OTHER,'node-two',SECOND,request='other'),request='other-running',node='node-two')
+        self.fails('customer_quota_exceeded_cpu_quarters',
+                   lambda:self.prepare(request='wake',revision=idle['revision']))
+        self.finish(other,'release','other-destroyed',node='node-two')
+        wake=self.prepare(request='wake-again',revision=idle['revision'])
+        self.assertEqual(self.used(),dict(max_vms=1,cpu_quarters=4,memory_mib=1024))
+        self.assertEqual(self.finish(wake,request='woken')['state'],'active')
+        self.fails('invalid_capacity_resources',
+                   lambda:self.prepare(request='half-idle',cpu=0,memory=1024,revision=4))
+
+    def test_existing_offline_vm_adopts_one_slot_without_compute(self):
+        adopted=self.a.capacity_adopt_idle('node-one','adopt',PROJECT,OWNER,VM,'local-offline')
+        self.assertEqual(adopted['state'],'idle')
+        self.assertEqual(self.used(),dict(max_vms=1,cpu_quarters=0,memory_mib=0))
+        self.assertEqual(self.a.capacity_adopt_idle('node-one','adopt',PROJECT,OWNER,VM,'local-offline'),adopted)
+        self.fails('customer_quota_exceeded_max_vms',
+                   lambda:self.a.capacity_adopt_idle('node-two','second',SECOND,OWNER,OTHER,'local-offline'))
+
     def test_lost_response_restart_expiry_and_replay_never_free_or_duplicate_capacity(self):
+        self.limits(count=1,cpu=4,memory=1024)
         initial=self.prepare()
         self.now+=10000000
         self.a=Authority(self.path,'operator-one',lambda:self.now)
@@ -98,6 +126,7 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(self.used(),dict(max_vms=2,cpu_quarters=7,memory_mib=1792))
 
     def test_abort_requires_receipt_and_reconciles_initial_creation_or_resize(self):
+        self.limits(count=1,cpu=4,memory=1024)
         pending=self.prepare()
         self.fails('invalid_identifier',lambda:self.finish(pending,'abort',evidence=''))
         self.fails('capacity_transition_pending',lambda:self.finish(pending,'release',transition=None))
@@ -105,7 +134,7 @@ class CapacityTests(unittest.TestCase):
         aborted=self.finish(pending,'abort','abort-create')
         self.assertEqual(aborted['state'],'released')
         self.assertEqual(self.used()['max_vms'],0)
-        self.limits()
+        self.limits(request='larger-after-abort',revision=1)
         active=self.finish(self.prepare(OTHER,request='other'),request='other-created')
         resize=self.prepare(OTHER,request='grow',cpu=8,memory=2048,revision=active['revision'])
         restored=self.finish(resize,'abort','resize-rollback')
@@ -126,6 +155,7 @@ class CapacityTests(unittest.TestCase):
         self.fails('quota_revision_conflict',lambda:self.limits(revision=1,request='lost-admin-update'))
 
     def test_scoping_immutable_vm_identity_and_other_customer_isolation(self):
+        self.limits(count=1,cpu=4,memory=1024)
         initial=self.prepare()
         self.fails('project_node_mismatch',lambda:self.prepare(node='node-two'))
         self.fails('capacity_binding_mismatch',lambda:self.prepare(node='node-two',project=SECOND))
@@ -138,16 +168,19 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(self.a.capacity_list(self.customer)['allocations'][0]['vm_id'],initial['vm_id'])
 
     def test_invalid_values_are_rejected_before_any_reservation(self):
-        for cpu in (True,0,1.5,-1,4000001):
+        for cpu in (True,1.5,-1,4000001):
             self.fails('invalid_capacity_value',lambda:self.prepare(cpu=cpu))
-        for memory in (True,0,255,256.0,2**40+1):
+        for memory in (True,256.0,2**40+1):
             self.fails('invalid_capacity_value',lambda:self.prepare(memory=memory))
+        for cpu,memory in ((0,1024),(4,0),(4,255)):
+            self.fails('invalid_capacity_resources',lambda:self.prepare(cpu=cpu,memory=memory))
         for revision in (True,-1,1.5,2**53):
             self.fails('invalid_capacity_value',lambda:self.prepare(revision=revision))
         self.fails('invalid_vm_id',lambda:self.prepare(vm='vm_../secret'))
         self.assertEqual(self.used()['max_vms'],0)
 
     def test_backup_restore_preserves_pending_hold_tombstone_and_audit_receipts(self):
+        self.limits(count=1,cpu=4,memory=1024)
         first=self.finish(self.prepare())
         self.finish(first,'release','deleted')
         self.prepare(OTHER,request='pending-after-delete')
@@ -180,6 +213,7 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(self.used()['max_vms'],102)
 
     def test_racing_commit_and_abort_cannot_both_acknowledge_the_same_transition(self):
+        self.limits(count=1,cpu=4,memory=1024)
         pending=self.prepare()
         def finish(outcome):
             try:
@@ -193,6 +227,7 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(self.used()['max_vms'],int(current['state']=='active'))
 
     def test_cancel_before_prepare_and_abort_before_resize_fence_late_requests(self):
+        self.limits(count=1,cpu=4,memory=1024)
         cancelled=self.a.capacity_cancel_create('node-one','cancel',PROJECT,OWNER,VM,'local-fence')
         self.assertEqual(cancelled['state'],'released')
         self.fails('capacity_released',lambda:self.prepare())

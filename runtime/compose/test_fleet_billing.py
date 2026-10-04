@@ -1,20 +1,37 @@
 import json
+import io
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+import urllib.error
 
 sys.path.insert(0,os.environ.get('GAP_TEST_CONTROL',str(Path(__file__).resolve().parents[1]/'control')))
 from authority import Authority, Failure
 from placement import Directory
 from service import Application
 from billing import Ledger,BillingError,UNITS,RETENTION_SECONDS
-from fleet_billing import FleetLedger
+from fleet_billing import Client,FleetLedger
 
 P='prj_'+'a'*24
 O='did:gap:'+'b'*64
 PRICE={'version':'fleet-test','vcpu_hour':3600000,'gib_ram_hour':0,'gib_disk_hour':0,'gib_in':0,'gib_out':0}
+
+
+class ClientErrorTests(unittest.TestCase):
+    def test_capacity_quota_conflict_preserves_code_after_single_response_read(self):
+        with tempfile.TemporaryDirectory() as root:
+            token=Path(root)/'token';token.write_text('n'*64)
+            client=Client({'url':'http://127.0.0.1','token_file':str(token)})
+            body=json.dumps({'error':{'code':'customer_quota_exceeded_max_vms'}}).encode()
+            class Opener:
+                def open(self,*args,**kwargs):
+                    raise urllib.error.HTTPError(client.url,409,'conflict',{},io.BytesIO(body))
+            with patch('urllib.request.build_opener',return_value=Opener()):
+                with self.assertRaisesRegex(BillingError,'customer_quota_exceeded_max_vms'):
+                    client({'action':'capacity-prepare'})
 
 
 class FleetTests(unittest.TestCase):

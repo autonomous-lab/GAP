@@ -77,7 +77,7 @@ class Application:
             return {'ok': True, 'operator_id': self.authority.operator, 'phase': 'reservations',
                     'legacy_cutover': migrated > 0, 'wallet_migration_protocol': 1, 'worker_metering_mode': 'opt_in',
                     'reservation_protocol': 1, 'reservations_enabled': self.allow_reservations,
-                    'capacity_protocol': 2, 'capacity_enabled': self.allow_capacity,
+                    'capacity_protocol': 3, 'capacity_enabled': self.allow_capacity,
                     'placement_protocol': 1, 'placement_enabled': self.placement is not None,
                     'worker_capacity_enforcement': 'explicit_project_opt_in',
                     'project_access_enabled': self.access is not None,
@@ -100,6 +100,8 @@ class Application:
             if body.get('action') == 'claim-free-vm':
                 return self.access.connect(actor, body['request_id'], body['email'], body['agent_did'],
                                            body['project_id'], free_vm_claim=True)
+            if body.get('action') == 'claimed-free-vm-quota':
+                return self.access.claimed_free_vm_quota(actor,body['project_id'],body['agent_did'])
             if body.get('action') == 'reconnect':
                 return self.access.reconnect(actor,body['agent_did'],body['project_id'])
             if body.get('action') == 'human-login':
@@ -226,9 +228,18 @@ class Application:
             if body.get('action') == 'wallet-import':
                 from wallet_import import receive
                 return receive(a,actor,body['request_id'],body['project_id'],body['owner_did'],body['transfer_id'],body['snapshot_digest'])
-            if body.get('action') in ('capacity-get', 'capacity-prepare', 'capacity-finish', 'capacity-cancel-create', 'capacity-abort-resize'):
+            if body.get('action') in ('capacity-get', 'capacity-quota', 'capacity-prepare', 'capacity-finish', 'capacity-cancel-create', 'capacity-abort-resize', 'capacity-adopt-claimed-free-vm', 'capacity-adopt-idle-vm'):
                 if not self.allow_capacity:
                     raise Failure('capacity_disabled', 409)
+                if body['action'] == 'capacity-quota':
+                    return a.capacity_project_quota(actor,body['project_id'],body['owner_did'])
+                if body['action'] == 'capacity-adopt-idle-vm':
+                    return a.capacity_adopt_idle(actor,body['request_id'],body['project_id'],body['owner_did'],
+                        body['vm_id'],body['evidence_id'])
+                if body['action'] == 'capacity-adopt-claimed-free-vm':
+                    if not self.access:raise Failure('fleet_access_disabled',409)
+                    return self.access.adopt_claimed_free_vm_capacity(actor,body['request_id'],body['project_id'],
+                        body['owner_did'],body['vm_id'],body['evidence_id'])
                 if body['action'] == 'capacity-get':
                     return a.capacity_get(actor, body['project_id'], body['vm_id'])
                 if body['action'] == 'capacity-prepare':

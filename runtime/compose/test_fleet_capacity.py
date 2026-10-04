@@ -105,6 +105,64 @@ class CapacityWorkerTests(unittest.TestCase):
         self.assertEqual(other.capacity.records()[0]['phase'],'closed')
         self.assertEqual(self.a.quotas(self.customer)['allocated']['max_vms'],1)
 
+    def test_idle_vms_keep_slots_and_compete_for_compute_only_on_wake(self):
+        self.limits(count=2,cpu=2,ram=512)
+        other=self.make_manager('two',SECOND)
+        first_vm=self.create()
+        second_vm=self.create(other,SECOND)
+        self.assertEqual(self.a.quotas(self.customer)['allocated'],
+            dict(max_vms=2,cpu_quarters=0,memory_mib=0))
+        self.manager.perform(P,O,'vm/start',{'vm_id':first_vm['vm_id']})
+        self.assertEqual(self.a.quotas(self.customer)['allocated']['cpu_quarters'],2)
+        with self.assertRaisesRegex(VMError,'customer_quota_exceeded_cpu_quarters'):
+            other.perform(SECOND,O,'vm/start',{'vm_id':second_vm['vm_id']})
+        def hibernate(meta):
+            meta['state']='hibernated';self.manager.save(meta)
+        self.manager.hibernate=hibernate
+        self.manager.perform(P,O,'vm/hibernate',{'vm_id':first_vm['vm_id']})
+        self.assertEqual(self.a.quotas(self.customer)['allocated'],
+            dict(max_vms=2,cpu_quarters=0,memory_mib=0))
+        other.perform(SECOND,O,'vm/start',{'vm_id':second_vm['vm_id']})
+        view=self.manager.quota_view(P,O)
+        self.assertEqual(view['limits']['vcpus'],.5)
+        self.assertEqual(view['allocated']['vcpus'],.5)
+        with self.assertRaisesRegex(VMError,'customer_quota_exceeded_cpu_quarters'):
+            self.manager.perform(P,O,'vm/resume',{'vm_id':first_vm['vm_id']})
+
+    def test_legacy_stopped_vm_is_adopted_then_reserves_only_on_start(self):
+        self.manager.capacity.configure(None)
+        vm=self.create()
+        meta=self.manager.read(P,O,vm['vm_id'])
+        self.manager.capacity.configure(dict(projects=[],node_id='one',operator_id='operator'),
+                                        lambda b:self.transport('one',b))
+        self.manager.capacity.adopt_idle_vm(meta)
+        self.assertEqual(self.a.quotas(self.customer)['allocated'],
+            dict(max_vms=1,cpu_quarters=0,memory_mib=0))
+        self.manager.perform(P,O,'vm/start',{'vm_id':vm['vm_id']})
+        self.assertEqual(self.a.quotas(self.customer)['allocated'],
+            dict(max_vms=1,cpu_quarters=2,memory_mib=512))
+
+    def test_create_and_start_holds_compute_before_first_guest_instruction(self):
+        self.limits(count=1,cpu=4,ram=1024)
+        result=self.manager.perform(P,O,'vm/create',{'vcpus':1,'memory_mib':1024})
+        self.assertEqual(result['vm']['state'],'running')
+        self.assertEqual(self.a.quotas(self.customer)['allocated'],
+            dict(max_vms=1,cpu_quarters=4,memory_mib=1024))
+
+    def test_stop_during_authority_outage_releases_only_after_recovery(self):
+        vm=self.create()
+        self.manager.perform(P,O,'vm/start',{'vm_id':vm['vm_id']})
+        def stop(meta,force):
+            meta['state']='stopped';self.manager.save(meta)
+        self.manager.stop=stop
+        self.down=True
+        with self.assertRaisesRegex(VMError,'fleet_authority_unavailable'):
+            self.manager.perform(P,O,'vm/stop',{'vm_id':vm['vm_id'],'force':True})
+        self.assertEqual(self.a.quotas(self.customer)['allocated']['cpu_quarters'],2)
+        self.down=False;self.restart();self.recover()
+        self.assertEqual(self.a.quotas(self.customer)['allocated'],
+            dict(max_vms=1,cpu_quarters=0,memory_mib=0))
+
     def test_placement_is_forwarded_and_committed_by_the_real_worker_manager(self):
         token=self.a.issue(self.customer,O)['token']
         placed=self.app.handle('POST','/v1/placements',token,dict(request_id='place-worker',
@@ -158,6 +216,9 @@ class CapacityWorkerTests(unittest.TestCase):
 
     def test_funded_execution_still_requires_confirmed_capacity(self):
         vm=self.create();meta=self.manager.read(P,O)
+        self.assertFalse(self.manager.execution_allowed(meta))
+        self.manager.perform(P,O,'vm/start',dict(vm_id=vm['vm_id']))
+        meta=self.manager.read(P,O)
         self.assertTrue(self.manager.execution_allowed(meta))
         self.restart()
         self.assertFalse(self.manager.execution_allowed(meta))
@@ -203,7 +264,7 @@ class CapacityWorkerTests(unittest.TestCase):
                 vm=self.manager.read(P,O)['vm_id']
                 self.restart();self.recover()
                 self.assertEqual(self.manager.read(P,O)['vm_id'],vm)
-                self.assertEqual(self.a.capacity_get('one',P,vm)['state'],'active')
+                self.assertEqual(self.a.capacity_get('one',P,vm)['state'],'idle')
                 self.assertEqual(self.a.quotas(self.customer)['allocated']['max_vms'],1)
 
     def test_lost_commit_ack_is_replayed_without_recreating_disk(self):
@@ -212,7 +273,7 @@ class CapacityWorkerTests(unittest.TestCase):
         meta=self.manager.read(P,O);disk=self.manager.folder(meta)/'disk.qcow2';disk.write_text('preserved')
         self.restart();self.recover()
         self.assertEqual(disk.read_text(),'preserved')
-        self.assertEqual(self.a.capacity_get('one',P,meta['vm_id'])['state'],'active')
+        self.assertEqual(self.a.capacity_get('one',P,meta['vm_id'])['state'],'idle')
         self.assertEqual(self.a.quotas(self.customer)['allocated']['max_vms'],1)
 
     def test_resize_delayed_prepare_can_never_reopen_an_aborted_transition(self):
@@ -226,8 +287,8 @@ class CapacityWorkerTests(unittest.TestCase):
                 try:self.transport('one',delayed)
                 except BillingError as e:self.assertEqual(str(e),'capacity_revision_conflict')
                 current=self.a.capacity_get('one',P,vm['vm_id'])
-                self.assertEqual(current['state'],'active');self.assertEqual(current['committed']['cpu_quarters'],2)
-                self.assertTrue(self.manager.execution_allowed(self.manager.read(P,O)))
+                self.assertEqual(current['state'],'idle');self.assertEqual(current['committed']['cpu_quarters'],0)
+                self.assertFalse(self.manager.execution_allowed(self.manager.read(P,O)))
 
     def test_resize_catalog_ack_loss_commits_new_resources_exactly_once(self):
         self.limits();vm=self.create();save=self.manager.save
@@ -236,17 +297,18 @@ class CapacityWorkerTests(unittest.TestCase):
             if meta['vcpus']==2:raise Crash()
         with patch.object(self.manager,'save',side_effect=interrupted):
             with self.assertRaises(Crash):self.manager.perform(P,O,'vm/update',dict(vm_id=vm['vm_id'],vcpus=2))
-        self.assertEqual(self.a.quotas(self.customer)['allocated']['cpu_quarters'],8)
+        self.assertEqual(self.a.quotas(self.customer)['allocated']['cpu_quarters'],0)
         self.restart();self.recover()
-        self.assertEqual(self.a.capacity_get('one',P,vm['vm_id'])['committed']['cpu_quarters'],8)
-        self.assertTrue(self.manager.execution_allowed(self.manager.read(P,O)))
+        self.assertEqual(self.a.capacity_get('one',P,vm['vm_id'])['committed']['cpu_quarters'],0)
+        self.assertFalse(self.manager.execution_allowed(self.manager.read(P,O)))
 
     def test_failed_resize_quota_does_not_wedge_the_existing_vm(self):
         vm=self.create()
+        self.manager.perform(P,O,'vm/update',dict(vm_id=vm['vm_id'],vcpus=2))
         with self.assertRaisesRegex(VMError,'customer_quota_exceeded_cpu_quarters'):
-            self.manager.perform(P,O,'vm/update',dict(vm_id=vm['vm_id'],vcpus=2))
-        self.assertTrue(self.manager.execution_allowed(self.manager.read(P,O)))
-        self.assertEqual(self.a.quotas(self.customer)['allocated']['cpu_quarters'],2)
+            self.manager.perform(P,O,'vm/start',dict(vm_id=vm['vm_id']))
+        self.assertFalse(self.manager.execution_allowed(self.manager.read(P,O)))
+        self.assertEqual(self.a.quotas(self.customer)['allocated']['cpu_quarters'],0)
 
     def test_destruction_crashes_complete_only_the_recorded_generation_and_retention_choice(self):
         for delete in (False,True):

@@ -219,12 +219,13 @@ production projects before that migration/retention gate is complete.
 ## Global capacity admission protocol
 
 Set `allow_capacity: true` in the private control configuration to enable the
-node protocol. Deploy protocol version 2 before enabling worker opt-in. `/health`
-reports `capacity_protocol: 2` and
+node protocol. Deploy protocol version 3 before enabling worker opt-in. `/health`
+reports `capacity_protocol: 3` and
 `worker_capacity_enforcement: "explicit_project_opt_in"`.
-The authority neither scans nor adopts existing VM catalogs. Keep the existing local quota
-checks and physical-host admission checks; they solve different constraints.
-No client is migrated by enabling this flag.
+The worker adopts existing stopped VMs with an authenticated, durable idle
+capacity record. A running legacy VM must first stop; failed reconciliation
+blocks a new start. Keep physical-host admission checks: they solve a different
+constraint from the account quota.
 
 An eligible verified customer receives a one-time Free Trial: $1 (1,000,000 microcredits),
 one VM, 2 CPU quarters (0.5 vCPU) and
@@ -234,9 +235,11 @@ approvals carry `network_restricted: true` for enforcement by every worker.
 `set-quotas` replaces all three limits in one audited transaction and requires
 the current quota revision (`0` for defaults). Zero is allowed; increasing a
 limit requires operator credentials. Integer CPU quarters preserve fractional
-allocations without float arithmetic. These are provisioned allocations, counted
-across the customer's agents, projects and trusted nodes, including stopped and
-hibernated VMs. They are not measures of current CPU consumption or free host RAM.
+allocations without float arithmetic. VM count includes stopped and hibernated
+machines; CPU/RAM are reserved only for running or starting machines across
+the customer's agents, projects and trusted nodes. A wake atomically reserves
+compute before QEMU can run; an offline transition releases it only after the
+worker confirms the process has stopped.
 Disk remains a per-project/per-host limit. Central retention is a separate
 protocol. Scheduler reservations described below coordinate physical disk
 headroom, while global customer quota continues to cover VM count, CPU and RAM.
@@ -283,13 +286,16 @@ The protocol is deliberately conservative:
 
 1. **Prepare creation:** the node durably chooses a fresh `vm_` generation and
    stable request ID *before* sending `capacity-prepare`, with revision 0. The
-   authority reserves count, CPU and RAM atomically and returns `pending`.
+   authority reserves the VM slot and, if starting immediately, CPU and RAM
+   atomically and returns `pending`.
    Concurrent nodes cannot both consume the same last place.
 2. **Apply and confirm:** after durably applying the local allocation, send
    `capacity-finish`, outcome `commit`, using the returned revision and
-   `transition_id`. The state becomes `active` with a new revision.
-3. **Resize:** prepare with the current active revision and desired full CPU/RAM
-   allocation. Until confirmation, the reservation holds the componentwise
+   `transition_id`. The state becomes `active` for running compute or `idle`
+   for a stopped VM, with a new revision.
+3. **Resize:** a stopped VM can change its configured CPU/RAM without reserving
+   compute; a running VM must stop first. On activation, prepare the desired
+   CPU/RAM allocation. Until confirmation, the reservation holds the componentwise
    maximum of old and new resources. A pending CPU reduction cannot fund a new
    VM before the old allocation is actually reduced. Only one transition can be
    pending for a VM.
@@ -297,11 +303,14 @@ The protocol is deliberately conservative:
    executing, or restoring the previous resource configuration for a resize,
    finish with outcome `abort` and the pending transition/revision. Aborted
    creation leaves a permanent released tombstone; an aborted resize returns to
-   the previous active allocation. Do not abort merely because a job timed out.
-5. **Release:** after successful destruction and a durable fence preventing
-   restart, finish an active allocation with outcome `release`, its current
+   the previous active or idle allocation. Do not abort merely because a job timed out.
+5. **Idle:** after QEMU has stopped or hibernated, prepare zero CPU/RAM and
+   commit the `idle` state. This retains the VM slot. A later start or resume
+   prepares and commits the requested CPU/RAM before execution is permitted.
+6. **Release:** after successful destruction and a durable fence preventing
+   restart, finish an active or idle allocation with outcome `release`, its current
    revision and no `transition_id`. A pending transition must be reconciled first.
-   Stopping or hibernating a VM is never grounds for releasing its quota.
+   Destruction releases the VM slot; stopping or hibernating does not.
 
 `evidence_id` is a stable identifier of the trusted node's durable local result.
 The central service records that assertion; it does not independently inspect
@@ -315,7 +324,8 @@ Do not edit these records or issue manual capacity completions for live workers.
 
 Opting a project into `fleet_billing.projects` also requires capacity admission;
 there is no independent switch permitting credit-managed VMs to skip quotas.
-A project with existing non-destroyed VMs cannot be silently adopted. Financially
+An existing VM can be adopted only after the trusted worker verifies it is
+offline and records its exact project, owner and generation centrally. Financially
 used wallets still require the separate fenced migration. Removing the fleet
 configuration, including disabling serverless mode, does not remove persisted
 capacity fences: execution fails until the correct configuration and authority
@@ -325,7 +335,7 @@ A fresh generation and prepare request are durable before any local allocation.
 CPU execution waits for a confirmed active allocation plus credit and policy
 checks. Recovery reads the current central state before permitting execution;
 process-local admission is never restored from a cached response alone. Stopped
-and hibernated VMs continue consuming their full provisioned quotas.
+and hibernated VMs consume their VM slot, but no CPU/RAM reservation.
 
 Recovery never replays VM creation or resize. An absent creation is locally fenced
 before `capacity-cancel-create`, which writes a released tombstone even if prepare

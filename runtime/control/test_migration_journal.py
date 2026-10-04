@@ -12,6 +12,8 @@ DIGEST = 'b' * 64
 class MigrationJournalTests(unittest.TestCase):
     def setUp(self):
         test_authority.AuthorityTests.setUp(self)
+        self.a.set_quotas('operator','migration-fixture-quota',self.customer,
+                          dict(max_vms=1,cpu_quarters=4,memory_mib=1024),0)
         p = self.a.capacity_prepare('node-one', 'allocate', PROJECT, OWNER, VM, 4, 1024, 0)
         self.allocation = self.a.capacity_finish('node-one', 'allocated', PROJECT, VM,
             p['revision'], p['transition_id'], 'commit', 'created-locally')

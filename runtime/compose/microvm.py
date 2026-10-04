@@ -104,6 +104,8 @@ class MicroVMs:
 
     def execution_allowed(self,meta):
         if (self.folder(meta)/'.migration-fence').exists():return False
+        if (meta.get('tier')!='anonymous' and self.capacity.config
+                and not self.capacity.managed(meta['project_id'])):return False
         if not self.capacity.allows(meta):return False
         if not self.runtime:return True
         if meta.get('tier')=='anonymous':
@@ -914,6 +916,8 @@ class MicroVMs:
                 usage['disk_gib']+=meta['disk_gib']
             if meta['owner_did'] == owner and meta['state'] not in ('destroyed','migrated'):
                 for key in usage:
+                    if key!='disk_gib' and meta['state'] not in ('running','starting','resuming','hibernating'):
+                        continue
                     value = meta[key]
                     if key == 'vcpus':
                         from cpu_quota import quarters
@@ -932,7 +936,12 @@ class MicroVMs:
     def quota_view(self, project, owner):
         with self.owner_lock(owner):
             approval=self.approval_provider(project,owner);limits=approval.get('quota')
-            return {'limits': limits, 'allocated': dict(self.quota_usage(owner,include_disk=True), max_vms=self.vm_count(owner)),
+            allocated=dict(self.quota_usage(owner,include_disk=True), max_vms=self.vm_count(owner))
+            if self.capacity.managed(project):
+                account=self.capacity.account_quota(project,owner)
+                limits=dict(limits,**account['limits'])
+                allocated.update(account['allocated'])
+            return {'limits': limits, 'allocated': allocated,
                     'always_on_allowed': bool(self.runtime and self.runtime.runner.authorize(project,owner).get('always_on_allowed')),
                     'tier':approval.get('tier','approved'),'network_policy':('web_egress' if self.free_images_v4 or self.free_images_v3 else 'reverse_proxy_only') if approval.get('network_restricted') else 'standard',
                     'minimum_disk_gib': max(1,((self.free_images_v4 or self.free_images_v3 or self.free_images if approval.get('tier')=='anonymous' else self.debian_images_v2 or self.debian_images or self.images).joinpath('rootfs.ext4').stat().st_size+1024**3-1)//1024**3)}
@@ -959,6 +968,10 @@ class MicroVMs:
             if not valid_limits:
                 raise VMError('invalid_agent_quota')
             meta = None if action=='vm/create' and body.get('new_vm') else self.read(project, owner, body.get('vm_id'))
+            if (action in ('vm/start','vm/resume') and meta
+                    and meta.get('tier')!='anonymous' and self.capacity.config
+                    and not self.capacity.managed(project)):
+                raise VMError('vm_capacity_migration_pending')
             network_restricted=approval.get('network_restricted') is True
             default_vcpus=min(1,limits['vcpus']);default_memory_mib=min(1024,limits['memory_mib'])
             if meta and meta.get('network_restricted',False)!=network_restricted:
@@ -972,9 +985,13 @@ class MicroVMs:
                     if key not in limits:continue
                     if action == 'vm/create':
                         requested, previous = body.get(key, default), 0
+                        if key!='disk_gib' and body.get('start',True) is False:requested=0
                     elif meta and meta['state'] != 'destroyed':
                         previous = meta[key]
                         requested = body.get(key, previous) if action == 'vm/update' else previous
+                        if key!='disk_gib':
+                            if meta['state'] not in ('running','starting','resuming','hibernating'):previous=0
+                            if action=='vm/update' and previous==0:requested=0
                     else:
                         continue
                     total = usage[key] - previous + requested

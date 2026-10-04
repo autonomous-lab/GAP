@@ -553,11 +553,13 @@ five public port slots with TCP/UDP forwarding, configured independently of
 Compose. Shared-origin application path routing is available below. Guest
 Compose `ports:` does not automatically publish physical-host ports. Existing Cloud service quotas stay unchanged.
 
-## Live per-agent allocation quotas
+## Local and account-wide allocation quotas
 
-Each approved agent has a cumulative allocation quota of **2 vCPUs and 4096 MiB
-RAM by default**, shared across all its projects. Running, stopped and partially
-created VMs count; destroying a VM releases its CPU/RAM allocation. Disk capacity
+Each locally approved agent has a CPU/RAM ceiling of **2 vCPUs and 4096 MiB
+by default**. Centrally bound projects additionally share the customer's quota
+across all identities, projects and nodes. Stopped and hibernated VMs keep a
+VM slot but consume no CPU/RAM; stopping or hibernating releases CPU/RAM only after the guest
+process has exited, while destruction also releases its VM slot. Disk capacity
 has no agent quota in this version. Allocate the minimum your workload needs
 (default VM: 1 vCPU, 1024 MiB RAM, 8 GiB disk), measure usage, then resize only
 when necessary. Do not reserve the full quota for every project.
@@ -567,11 +569,14 @@ when necessary. Do not reserve the full quota for every project.
 start check the live quota; jobs report `agent_quota_exceeded_vcpus` or
 `agent_quota_exceeded_memory_mib` when blocked. Lowering a quota does not kill
 existing workloads; reductions, stop and destroy remain available. CPU/RAM
-quotas are allocations per agent, not a host-wide capacity reservation.
+quota usage includes only running and starting VMs. Stopped and hibernated
+VMs keep their VM-count and disk allocation. For centrally bound projects,
+the worker reports customer-wide quota usage across agents and nodes.
 An anonymously created VM keeps its 1 vCPU / 1 GiB trial limit while unclaimed.
-After claim, an explicit operator approval for its exact owner DID overrides
-that trial limit and removes the trial egress restriction. Without explicit
-approval, the claimed VM retains its original trial allocation.
+After claim, the node resolves the customer's approved central quota instead
+of requiring another manual grant for the SSH-generated DID. A trial customer
+keeps its trial network restrictions. The claimed VM and legacy offline VMs are
+adopted into central capacity accounting before they may start again.
 
 CPU/RAM resize requires **stop → PATCH /vm → start**, but disk-only growth on a
 running VM is online and preserves processes and SSH sessions. Public port

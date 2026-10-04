@@ -203,12 +203,24 @@ class Runtime:
             state['billing_checked_at']=now
         return state['billing_view']
 
+    def change_vm_state(self,meta,action,force=False):
+        """Stop QEMU first, then release its account compute reservation."""
+        if self.manager.capacity.managed(meta['project_id']):
+            body={'vm_id':meta['vm_id']}
+            if action=='vm/stop':body['force']=force
+            result=self.manager.capacity.execute(meta['project_id'],meta['owner_did'],action,body)
+            fresh=self.manager.read(meta['project_id'],meta['owner_did'],meta['vm_id'])
+            meta.clear();meta.update(fresh)
+            return result
+        if action=='vm/hibernate':return self.manager.hibernate(meta)
+        return self.manager.stop(meta,force)
+
     def sample(self,meta,force=True):
         if meta.get('tier')=='anonymous':
             return
         if (self.manager.folder(meta)/'.migration-meter-off').exists():
             if self.manager.alive(meta):
-                self.manager.stop(meta,True)
+                self.change_vm_state(meta,'vm/stop',force=True)
             return
         state=self.state(meta)
         if not force and time.monotonic()-state["last_sample"]<METER_INTERVAL_SECONDS:return
@@ -494,7 +506,7 @@ class Runtime:
             for current in self.manager.list(project,owner):
                 self.disconnect(current)
                 self.sample(current)
-                if self.manager.alive(current): self.manager.stop(current,True)
+                if self.manager.alive(current): self.change_vm_state(current,'vm/stop',force=True)
                 if current['state']!='destroyed':
                     destroy=self.manager.capacity.execute if self.manager.capacity.managed(project) else self.manager._perform
                     destroy(project,owner,'vm/destroy',{'vm_id':current['vm_id'],'delete_data':True,'confirm_data_loss':True})
@@ -527,12 +539,14 @@ class Runtime:
             # missing authority response into a paid ownership assertion.
             try:approval=self.runner.authorize(meta['project_id'],meta['owner_did'])
             except Exception:approval=None
-            if approval and approval.get('tier')=='trial':
+            if approval and approval.get('tier') in ('trial','approved'):
                 if self.manager.alive(meta):
                     self.disconnect(meta);self.manager.stop(meta,True)
-                meta['tier']='trial'
+                meta['tier']=approval['tier']
                 meta.pop('anonymous_until',None);meta.pop('claim_until',None)
                 self.manager.save(meta)
+                if self.manager.capacity.config:
+                    self.manager.capacity.adopt_claimed_free_vm(meta)
                 if self.runner.ingress:self.runner.ingress.sync()
                 return
             if now>=meta.get('anonymous_until',0) or not approval:
@@ -571,10 +585,16 @@ class Runtime:
             return
         if self.manager.network and meta['state']!='destroyed':self.manager.network.expire(meta)
         project=meta['project_id']
-        if (meta.get('guest_image') in ('free-vm-v2','free-vm-v3','free-vm-v4') and meta.get('tier')=='trial'
+        if (meta.get('guest_image') in ('free-vm-v2','free-vm-v3','free-vm-v4') and meta.get('tier') in ('trial','approved')
                 and hasattr(self.ledger,'adopt_claimed_free_vm') and project not in self.ledger.projects):
             try:self.runner.authorize(project,meta['owner_did'])
             except Exception:pass  # The claim is retried; never infer it during an authority outage.
+        if (meta['state'] not in ('destroyed','migrated') and self.manager.capacity.config
+                and not self.manager.capacity.managed(project)):
+            if self.manager.alive(meta):self.change_vm_state(meta,'vm/stop',force=True)
+            if meta.get('guest_image') in ('free-vm-v2','free-vm-v3','free-vm-v4'):
+                self.manager.capacity.adopt_claimed_free_vm(meta)
+            else:self.manager.capacity.adopt_idle_vm(meta)
         if meta['state']=='destroyed' and not self.metered_storage_bytes(meta):
             state=self.state(meta);now=time.monotonic()
             if now-state.get('destroyed_checked_at',-DESTROYED_RECHECK_SECONDS)<DESTROYED_RECHECK_SECONDS:return
@@ -607,7 +627,7 @@ class Runtime:
                 busy=bool(db.execute("SELECT 1 FROM jobs WHERE project=? AND status IN ('queued','running')",(project,)).fetchone())
         if meta['state']=='running' and (blocked or (idle and not busy)):
             self.disconnect(meta)
-            self.manager.hibernate(meta)
+            self.change_vm_state(meta,'vm/hibernate')
             self.sample(meta)
             state.pop('fleet_preempted',None)
         meta['last_incoming_at']=state['last_incoming']
@@ -648,8 +668,8 @@ class Runtime:
                     meta=json.loads(path.read_text())
                     self.disconnect(meta)
                     if self.manager.alive(meta):
-                        try: self.manager.hibernate(meta)
-                        except Exception: self.manager.stop(meta,True)
+                        try: self.change_vm_state(meta,'vm/hibernate')
+                        except Exception: self.change_vm_state(meta,'vm/stop',force=True)
                     meta['runtime_error']='runtime_policy_or_meter_unavailable'
                     self.manager.save(meta)
         self.last_error=';'.join(errors) if errors else None

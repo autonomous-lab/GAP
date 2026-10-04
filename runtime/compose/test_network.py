@@ -47,7 +47,7 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(other['public_ports'], list(range(53995, 54000)))
 
     def test_fractional_catalog_usage_across_projects(self):
-        self.meta['vcpus']=.25; self.manager.save(self.meta)
+        self.meta['vcpus']=.25;self.meta['state']='running';self.manager.save(self.meta)
         other=dict(self.meta,project_id='prj_'+'d'*24,vm_id='vm_'+'e'*32,vcpus=.5)
         self.manager.save(other)
         self.assertEqual(self.manager.quota_usage(O,True),{'vcpus':.75,'memory_mib':2048,'disk_gib':16})

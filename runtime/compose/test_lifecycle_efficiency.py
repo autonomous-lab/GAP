@@ -25,6 +25,18 @@ class LifecycleEfficiencyTests(unittest.TestCase):
         meta['idle_timeout_seconds']=3600
         self.assertEqual(runtime.view(meta)['idle_timeout_seconds'],3600)
 
+    def test_managed_hibernation_releases_capacity_through_worker(self):
+        runtime=self.runtime(Path('/unused'))
+        meta=self.meta('running')
+        offline=dict(meta,state='hibernated')
+        capacity=SimpleNamespace(managed=Mock(return_value=True),execute=Mock(return_value={'ok':True}))
+        runtime.manager=SimpleNamespace(capacity=capacity,read=Mock(return_value=offline),hibernate=Mock())
+        runtime.change_vm_state(meta,'vm/hibernate')
+        capacity.execute.assert_called_once_with(meta['project_id'],meta['owner_did'],'vm/hibernate',
+            {'vm_id':meta['vm_id']})
+        runtime.manager.hibernate.assert_not_called()
+        self.assertEqual(meta['state'],'hibernated')
+
     def test_resume_resets_stale_idle_clock_before_guest_connection(self):
         runtime=self.runtime(Path('/unused'))
         meta=dict(self.meta('running'),last_incoming_at=10)
