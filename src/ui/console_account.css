@@ -55,6 +55,27 @@ body{background:#f5f7f2;color:#182719}
 #billingHelp a{font-weight:750;text-decoration:underline;text-underline-offset:3px}
 #projectsSection{color:#526353}
 #projectsSection h2{color:#1c3020}
+#projectsSection>.eyebrow,#projectsSection>h2,#projectsSection>.table-scroll,#projectsSection>#more,#projectsSection>#capability{display:none!important}
+.project-intro{color:#637566;font-size:13px;max-width:650px;margin:0 0 18px}
+.project-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
+.project-card{border:1px solid #dce6d8;border-radius:12px;background:#f9fcf6;padding:20px}
+.project-card h3,.project-detail-head h3{font-size:18px;margin:0 0 6px;color:#1a2c1b}
+.project-card p,.project-detail-head p{font-size:12px;color:#607263;margin:0 0 18px}
+.project-card a,.project-back{font-size:12px;font-weight:750;color:#2f6133}
+.project-back{display:inline-block;margin-bottom:20px}
+.project-detail-head{display:flex;align-items:baseline;gap:15px;flex-wrap:wrap}
+.project-detail-actions{margin:2px 0 20px}
+.project-machine-list{display:grid;gap:9px}
+.project-machine{display:block;text-align:left;width:100%;border:1px solid #dce6d8;border-radius:9px;background:#f9fcf6;padding:14px 16px;font-weight:650;color:#213923}
+.project-machine:hover{background:#edf7e5}
+.project-technical{margin:24px 0 0;padding:18px 0 0;border-top:1px solid #e2e9dc}
+.project-technical summary{font-size:12px;font-weight:650;color:#617063}
+.project-technical code{display:block;margin:14px 0;font-size:11px;overflow-wrap:anywhere}
+.project-token-output{overflow-wrap:anywhere;font:11px/1.6 ui-monospace,monospace;margin:10px 0 0}
+.access-advanced{border-top:1px solid #e2e9dc;margin:20px 0 0;padding-top:15px}
+.access-advanced summary{font-size:13px;font-weight:700;color:#254b2b}
+.access-advanced form{margin-top:18px}
+#activitySection p{padding:11px 13px;margin:8px 0;background:#f7faf4;border:1px solid #e1e9dc;border-radius:8px;font-size:12px;color:#405441}
 #login{max-width:550px;margin:55px auto;border-radius:16px;padding:35px;background:#fff;border:1px solid #e1e9dc;box-shadow:0 25px 80px #172c1b12}
 body:not(.console-signed-in) .console-nav,body:not(.console-signed-in) .login-story,body:not(.console-signed-in) .console-stats{display:none}
 body:not(.console-signed-in) .shell{margin:0 auto;padding:35px 20px 70px;max-width:1100px}
