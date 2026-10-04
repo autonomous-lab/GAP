@@ -22,6 +22,18 @@ use std::io::Read;
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Response, Server};
 
+// The account console lives on a separate origin from tenant applications.
+// Its serverless controls still need the JSON management API, but never the
+// tenant-controlled /sites/, /apps/ or public function response surfaces.
+fn account_project_api_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/v1/cloud/projects/") else { return false };
+    let Some((project, action)) = rest.split_once('/') else { return false };
+    project.len() == 28
+        && project.starts_with("prj_")
+        && project[4..].bytes().all(|c| c.is_ascii_hexdigit())
+        && matches!(action.split('/').next(), Some("overview" | "functions" | "site" | "database" | "kv" | "objects" | "realtime"))
+}
+
 fn build_storage() -> Result<Box<dyn Storage>> {
     let kind = env::var("GAP_STORAGE").unwrap_or_else(|_| "sqlite".into());
     match kind.as_str() {
@@ -328,7 +340,7 @@ fn main() -> Result<()> {
             let admin_host=admin_origin.trim_end_matches('/').strip_prefix("https://").unwrap_or("");
             let on_admin_host=!admin_host.is_empty() && host.eq_ignore_ascii_case(admin_host);
             let admin_api=clean_path.starts_with("/v1/admin/console/");
-            let vm_console=on_admin_host && (gap::cloud_vm_session::console_path(clean_path) || clean_path=="/account" || clean_path.starts_with("/v1/fleet/"));
+            let vm_console=on_admin_host && (gap::cloud_vm_session::console_path(clean_path) || account_project_api_path(clean_path) || clean_path=="/account" || clean_path.starts_with("/v1/fleet/"));
             if clean_path=="/account" {
                 if let Ok(origin)=env::var("GAP_FLEET_ACCOUNT_ORIGIN") {
                     if origin.starts_with("https://") && !host.eq_ignore_ascii_case(origin.trim_start_matches("https://").trim_end_matches('/')) {
