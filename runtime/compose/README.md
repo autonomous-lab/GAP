@@ -39,8 +39,9 @@ then `chmod 755 data/gap-compose/free-guest-image-v3` and run
 `python3 scripts/configure-free-vm-v3-node.py --root <checkout>` before restarting
 the CPU broker and worker. The supplied `deploy.yml` mounts `/free-images-v3`
 read-only. Keep `/free-images` and `/free-images-v2` for existing qcow2 disks;
-never overwrite a backing image. The v3 guest includes OpenCode, common
-developer tools and a `tmux`-backed reconnectable terminal. OpenCode's free
+never overwrite a backing image. The v3 guest includes OpenCode and common
+developer tools. SSH opens a direct UTF-8 Bash shell by default;
+`tmux -u new -A -s gap` is optional for a reconnectable terminal. OpenCode's free
 models are upstream, rate-limited services, not a GAP inference guarantee.
 
 New anonymous guests use QEMU slirp with a default route. Before the paused

@@ -17,7 +17,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
 from gateway import (FreeServer, GatewayError, admission_error, claimable_banner, claimed_banner,
-                     claimed_status, format_credits, gateway_error_message, interactive_shell_command, prepare,
+                     claimed_status, direct_shell_command, format_credits, gateway_error_message,
+                     interactive_shell_command, prepare,
                      request_node, retry_mutation, rpc_wait, shell, stable_id, welcome_banner,
                      key_hash, verify_relay_ticket, _used_relay_nonces, credit_block_reason)
 
@@ -180,6 +181,12 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('left',command)
         self.assertNotIn('restantes',command)
 
+    def test_direct_shell_forces_utf8_without_starting_tmux(self):
+        command=direct_shell_command()
+        self.assertEqual(command,'env LANG=C.UTF-8 LC_CTYPE=C.UTF-8 bash --login -i')
+        self.assertIn(command,interactive_shell_command(1234567890))
+        self.assertNotIn('tmux',interactive_shell_command(1234567890))
+
     def test_welcome_panel_is_english_and_only_colored_for_terminals(self):
         details={'preview':{'preview_url':'https://example.invalid/apps/demo',
                             'username':'free','password':'unique-password'},
@@ -196,8 +203,10 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('\x1b[1;36m',colored)
         self.assertIn('59m 02s left',colored)
         ready=welcome_banner(dict(details,guest_image='free-vm-v3'),3542,ready_seconds=2)
+        self.assertIn('Bash runs directly',ready)
+        self.assertNotIn('Press Ctrl+B',ready)
         self.assertIn('Ready in 2s',ready)
-        self.assertIn('Ctrl+B, then D',ready)
+        self.assertIn('tmux -u new -A -s gap',ready)
         swap=welcome_banner(dict(details,guest_image='free-vm-v4'),3542)
         self.assertIn('8 GiB disk · 1 GiB swap',swap)
 

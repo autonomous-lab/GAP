@@ -170,15 +170,20 @@ def stable_id(project,operation):
     return hashlib.sha256((project+'\0'+operation).encode()).hexdigest()[:32]
 
 
-def interactive_shell_command(active_until,persistent=False):
+def direct_shell_command():
+    # SSH clients need not forward a locale. A UTF-8 guest shell lets full-
+    # screen programs draw Unicode directly without tmux translating to ACS.
+    return 'env LANG=C.UTF-8 LC_CTYPE=C.UTF-8 bash --login -i'
+
+
+def interactive_shell_command(active_until):
     """Keep the server-issued deadline visible without adding prompt noise."""
     deadline=int(active_until)
     prompt=(f'gap_left=$(({deadline} - $(date +%s))); '
             'if (( gap_left < 0 )); then gap_left=0; fi; '
             'printf -v gap_time "%dm %02ds" "$((gap_left / 60))" "$((gap_left % 60))"; '
             'PS1="GAP · ${gap_time} left · \\w ❯ "')
-    shell=('tmux new-session -A -s gap -c /app ' + shlex.quote('bash --login -i')) if persistent else 'bash --login -i'
-    return 'env PROMPT_COMMAND=' + shlex.quote(prompt) + ' ' + shell
+    return 'env PROMPT_COMMAND=' + shlex.quote(prompt) + ' ' + direct_shell_command()
 
 
 def welcome_banner(details,remaining,colored=False,ready_seconds=None):
@@ -188,9 +193,9 @@ def welcome_banner(details,remaining,colored=False,ready_seconds=None):
     muted='\x1b[2m' if colored else ''
     left=f'{remaining//60}m {remaining%60:02d}s'
     ready=(f'  {accent}✓ Ready in {ready_seconds}s{reset}\r\n\r\n' if ready_seconds is not None else '')
-    detach=('  Press Ctrl+B, then D to detach; reconnect with the same SSH key.\r\n'
-            if details.get('guest_image') in ('free-vm-v3','free-vm-v4') else
-            '  Type exit to disconnect; reconnect with the same SSH key.\r\n')
+    shell_hint=('  Bash runs directly. For a persistent shell: `tmux -u new -A -s gap`.\r\n'
+                if details.get('guest_image') in ('free-vm-v3','free-vm-v4') else
+                '  Type exit to disconnect; reconnect with the same SSH key.\r\n')
     feature=('  │  Run `opencode` to build with free AI models.         │\r\n'
              if details.get('guest_image') in ('free-vm-v3','free-vm-v4') else
              '  │  Docker, Python, Node, Go and PHP are ready to use.  │\r\n')
@@ -205,7 +210,7 @@ def welcome_banner(details,remaining,colored=False,ready_seconds=None):
             f'  ┌────────────────────────────────────────────────────────┐\r\n'
             f'{feature}'
             f'  └────────────────────────────────────────────────────────┘\r\n'
-            f'\r\n{detach}'
+            f'\r\n{shell_hint}'
             f'  After the hour, you have 24 hours to claim your files.\r\n\r\n')
 
 
@@ -265,7 +270,8 @@ def claimed_banner(details,colored=False):
             f'  SSH ENTRY   port 2121\r\n'
             f'  CREDITS     {credits}\r\n'
             f'{budget_line}'
-            f'  MANAGE      {details["manage_url"]}\r\n\r\n')
+            f'  MANAGE      {details["manage_url"]}\r\n'
+            f'  SHELL       Bash; optional persistence: tmux -u new -A -s gap\r\n\r\n')
 
 
 def format_credits(microcredits):
@@ -487,10 +493,8 @@ async def local_shell(runner,process,key,ip,user_command,expected_project=None):
         async with asyncssh.connect('127.0.0.1',port=details['ssh_port'],username='root',
                 client_keys=[details['guest_key']],known_hosts=known,encoding=None,
                 agent_path=None,connect_timeout=10) as guest:
-            persistent=details.get('guest_image') in ('free-vm-v3','free-vm-v4') and process.term_type is not None
             command=user_command if user_command is not None else (
-                ('tmux new-session -A -s gap -c /app '+shlex.quote('bash --login -i') if persistent else 'bash --login -i')
-                if claimed else interactive_shell_command(details['active_until'],persistent))
+                direct_shell_command() if claimed else interactive_shell_command(details['active_until']))
             remote=await guest.create_process(command,term_type=process.term_type,
                 term_size=process.term_size,encoding=None)
             if runtime:
