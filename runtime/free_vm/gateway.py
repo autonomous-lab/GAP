@@ -125,7 +125,9 @@ def rpc_wait(runner,project,owner,action,method,body,timeout=120):
     if status not in (200,202):raise GatewayError('vm_operation_rejected')
     if result.get('status') in ('succeeded','failed'):
         if result['status']=='failed':
-            if result.get('result',{}).get('error')=='microvm_credits_or_budget_exhausted':
+            reason=result.get('result',{}).get('error')
+            print('free_vm_job_failed:',project,action,str(reason)[:120],flush=True)
+            if reason=='microvm_credits_or_budget_exhausted':
                 raise GatewayError(credit_block_reason(runner,project,owner))
             raise GatewayError('vm_operation_failed')
         return result.get('result',{})
@@ -139,7 +141,9 @@ def rpc_wait(runner,project,owner,action,method,body,timeout=120):
         if status!=200:raise GatewayError('vm_job_unavailable')
         if value['status']=='succeeded':return value['result']
         if value['status'] in ('failed','interrupted'):
-            if value.get('result',{}).get('error')=='microvm_credits_or_budget_exhausted':
+            reason=value.get('result',{}).get('error')
+            print('free_vm_job_failed:',project,action,str(reason)[:120],flush=True)
+            if reason=='microvm_credits_or_budget_exhausted':
                 raise GatewayError(credit_block_reason(runner,project,owner))
             raise GatewayError('vm_operation_failed')
     raise GatewayError('vm_operation_timeout')
@@ -322,6 +326,7 @@ def gateway_error_message(error):
         'claimed_vm_no_credits':'Your VM is paused: account credits are exhausted. Open billing: https://gap.geta.team/account#billing',
         'claimed_vm_budget_exhausted':'Your VM is paused: the project spending budget is reached. Review your VM budget: https://gap.geta.team/account#machines',
         'claimed_vm_funding_blocked':'Your VM is paused by a funding limit. Review billing and your project budget: https://gap.geta.team/account#billing',
+        'vm_operation_failed':'Your MicroVM could not start or wake. Please retry; if this continues, check https://gap.geta.team/account#machines.',
     }.get(str(error),'Unable to start a free VM right now. Please try again later.')
 
 

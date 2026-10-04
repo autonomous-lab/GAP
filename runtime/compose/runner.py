@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import traceback
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -606,6 +607,9 @@ class Runner:
         except Exception as error:
             from microvm import VMError
             from billing import BillingError
+            if not isinstance(error,(VMError,BillingError)):
+                print('runner_unexpected_job_error:',row['project'],payload['action'],type(error).__name__,flush=True)
+                traceback.print_exc()
             status, result = "failed", {"error": str(error) if isinstance(error, (VMError,BillingError)) else "runner_failed_state_unknown"}
         with self.db() as db:
             db.execute("UPDATE jobs SET status=?,result=?,payload=NULL WHERE id=?", (status, json.dumps(result), job))

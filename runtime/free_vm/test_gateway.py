@@ -291,6 +291,7 @@ class GatewayTests(unittest.TestCase):
                          'cleanup_pending')
         self.assertIn('cleanup',gateway_error_message(GatewayError('cleanup_pending')))
         self.assertNotIn('capacity',gateway_error_message(GatewayError('admission_or_node_unavailable')))
+        self.assertIn('could not start or wake',gateway_error_message(GatewayError('vm_operation_failed')))
 
     def test_node_http_error_is_classified_without_exposing_internal_body(self):
         runner_module=types.ModuleType('runner')
