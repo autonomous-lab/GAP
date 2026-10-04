@@ -82,3 +82,15 @@ class DiskCrypto:
             else:raise VMError('invalid_disk_operation')
             result=subprocess.run(cmd,pass_fds=fds,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=900 if operation=='convert' else 120)
             if result.returncode:raise VMError('encrypted_disk_operation_failed:'+operation)
+
+    def virtual_size(self,meta,path):
+        with self.secret(meta) as (secret,fds):
+            result=subprocess.run(['qemu-img','info',*secret,'--output=json','--image-opts',self.drive(meta,path)],
+                                  pass_fds=fds,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL,timeout=30)
+        if result.returncode:raise VMError('disk_size_probe_failed')
+        try:
+            size=json.loads(result.stdout)['virtual-size']
+            if type(size) is not int or size<=0:raise ValueError()
+            return size
+        except (ValueError,TypeError,KeyError):raise VMError('disk_size_probe_failed') from None

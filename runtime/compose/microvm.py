@@ -259,7 +259,7 @@ class MicroVMs:
         atomic_json(self.catalog(key), meta)
 
     def qmp(self, meta, command, arguments=None):
-        if command not in ('query-status', 'quit', 'human-monitor-command', 'stop', 'cont', 'migrate', 'query-migrate', 'migrate_cancel', 'migrate-set-capabilities', 'migrate-incoming'):
+        if command not in ('query-status', 'quit', 'human-monitor-command', 'stop', 'cont', 'block_resize', 'migrate', 'query-migrate', 'migrate_cancel', 'migrate-set-capabilities', 'migrate-incoming'):
             raise VMError('invalid_qmp_command')
         # QEMU's monitor accepts one connection at a time. Keep this mutex
         # separate from the lifecycle lock held by long guest deployments.
@@ -326,6 +326,8 @@ class MicroVMs:
         if not meta:
             return {'state': 'absent'}
         result = {key: meta[key] for key in ('vm_id', 'project_id', 'state', 'vcpus', 'memory_mib', 'disk_gib', 'ports')}
+        if meta.get('disk_resize_pending_gib'):
+            result['disk_resize_pending_gib']=meta['disk_resize_pending_gib']
         result['tier']=meta.get('tier','approved')
         result['network_policy']=('web_egress' if self.direct_free_egress(meta) else 'reverse_proxy_only') if meta.get('network_restricted') else 'standard'
         if meta['state'] not in ('destroyed', 'creating', 'hibernated', 'hibernating', 'resuming', 'migrated'):
@@ -477,6 +479,7 @@ class MicroVMs:
         self.seed_crypto.rebuild(meta, folder)
 
     def authorized_keys(self, meta, keys):
+        from disk_hot import key_line
         terminal_key = self.folder(meta) / 'terminal_key.pub'
         terminal_options=('restrict,pty ' if meta.get('tier')=='anonymous'
                           else ('restrict,pty,command="/bin/bash --login -i" '
@@ -486,7 +489,7 @@ class MicroVMs:
         owner_options = 'restrict,pty ' if meta.get('network_restricted') else 'no-agent-forwarding,no-X11-forwarding '
         return ('restrict,command="python3 /usr/local/lib/gap-compose-guest.py" ' +
                 (self.folder(meta) / 'client_key.pub').read_text().strip() + '\n' +
-                terminal + ''.join(owner_options + key + '\n' for key in keys))
+                terminal + key_line(self.folder(meta)) + ''.join(owner_options + key + '\n' for key in keys))
 
     def authorized_keys_digest(self, meta, keys):
         return hashlib.sha256(self.authorized_keys(meta, keys).encode()).hexdigest()
@@ -504,6 +507,26 @@ class MicroVMs:
             meta['authorized_keys_sha256'] = hashlib.sha256(content.encode()).hexdigest()
             self.save(meta)
         self.seed_crypto.rebuild(meta, folder)
+
+    def grow_disk_online(self, meta, target_gib):
+        from disk_hot import ensure_key, grow_guest, GIB
+        if meta['state']!='running' or not self.alive(meta):
+            raise VMError('vm_not_running')
+        pending=meta.get('disk_resize_pending_gib')
+        if pending is not None and pending!=target_gib:
+            raise VMError('prior_disk_resize_pending')
+        folder=self.folder(meta)
+        ensure_key(folder)
+        self.write_keys(meta,meta.get('ssh_keys',[]))
+        if target_gib>meta['disk_gib']:
+            meta['disk_resize_pending_gib']=target_gib
+            self.save(meta)  # Reconcile an interrupted QMP resize on worker recovery.
+            self.qmp(meta,'block_resize',{'device':'root','size':target_gib*GIB})
+            meta['disk_gib']=target_gib
+            self.save(meta)
+        grow_guest(meta,folder,target_gib)
+        meta.pop('disk_resize_pending_gib',None)
+        self.save(meta)
 
     def fast_snapshot(self, meta):
         if meta.get('snapshot_format') == 'gapmem1': return False
@@ -1034,25 +1057,33 @@ class MicroVMs:
                     self.stop(meta, body.get('force', False))
                 elif action == 'vm/update':
                     if meta['state']=='hibernated': raise VMError('resume_then_stop_before_resize')
-                    if self.alive(meta):
-                        raise VMError('stop_vm_before_reconfiguration')
                     if body.get('disk_gib', meta['disk_gib']) < meta['disk_gib']:
                         raise VMError('disk_shrink_not_supported')
-                    if body.get('disk_gib', meta['disk_gib']) > meta['disk_gib']:
-                        self.disk_crypto.execute(meta,'resize',self.folder(meta)/'disk.qcow2',size=str(body['disk_gib'])+'G')
-                    for key in ('vcpus', 'memory_mib', 'disk_gib'):
-                        meta[key] = body.get(key, meta[key])
-                    with self.allocation_lock():
-                        if 'ports' in body:
-                            used = {meta['ssh_port']}
-                            meta['ports'] = []
-                            for port in body['ports']:
-                                candidate = self.reserved_port(used)
-                                while candidate in used:
+                    target_disk=body.get('disk_gib',meta['disk_gib'])
+                    if meta['state']=='running':
+                        if (not self.alive(meta) or 'ports' in body
+                                or any(key in body and body[key]!=meta[key] for key in ('vcpus','memory_mib'))):
+                            raise VMError('stop_vm_before_reconfiguration')
+                        if target_disk>meta['disk_gib'] or meta.get('disk_resize_pending_gib'):
+                            self.grow_disk_online(meta,target_disk)
+                    else:
+                        if self.alive(meta):raise VMError('stop_vm_before_reconfiguration')
+                        if target_disk>meta['disk_gib']:
+                            self.disk_crypto.execute(meta,'resize',self.folder(meta)/'disk.qcow2',size=str(target_disk)+'G')
+                        for key in ('vcpus', 'memory_mib', 'disk_gib'):
+                            meta[key] = body.get(key, meta[key])
+                        meta.pop('disk_resize_pending_gib',None)
+                        with self.allocation_lock():
+                            if 'ports' in body:
+                                used = {meta['ssh_port']}
+                                meta['ports'] = []
+                                for port in body['ports']:
                                     candidate = self.reserved_port(used)
-                                used.add(candidate)
-                                meta['ports'].append({'guest_port': port, 'worker_port': candidate})
-                        self.save(meta)
+                                    while candidate in used:
+                                        candidate = self.reserved_port(used)
+                                    used.add(candidate)
+                                    meta['ports'].append({'guest_port': port, 'worker_port': candidate})
+                            self.save(meta)
                 elif action == 'vm/destroy':
                     if self.alive(meta):
                         raise VMError('stop_vm_before_destruction')

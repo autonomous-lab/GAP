@@ -464,8 +464,12 @@ Cloud services remain open. Email-verified owners receive the Free Trial automat
 listed owners use their operator-assigned quota and standard network policy. Allocate the
 minimum needed; the operator can change limits live with `scripts/microvm-access.py
 set-quota <DID> --vcpus 2 --memory-mib 4096 --max-vms 1`. Optional per-agent disk quotas include retained volumes;
-existing Cloud service quotas are unchanged. CPU/RAM/disk resize requires stopping
-and starting the VM.
+existing Cloud service quotas are unchanged. Disk capacity can only grow, up to
+100 GiB per VM and within the owner's disk quota. A running VM grows its virtual
+disk and ext4 root filesystem online, without interrupting SSH or applications;
+CPU and RAM changes still require a stop and restart. A stopped VM's disk grows
+offline and its filesystem expands at the next boot. For a hibernated VM, the
+console resumes it, grows the disk, then hibernates it again.
 GAP creates, starts, stops, resizes and destroys microVMs through `/vm`.
 The `/microvms` WebUI also creates machines, with resource sizing, an optional
 SSH public key and a choice to start immediately (the default) or keep stopped.

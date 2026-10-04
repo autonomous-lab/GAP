@@ -152,6 +152,15 @@ class Runtime:
                 except Exception: exists=False
                 meta['state']='hibernated' if exists else 'stopped'
             elif meta['state']=='running': meta['state']='stopped'
+            if meta.get('disk_resize_pending_gib'):
+                target=meta['disk_resize_pending_gib']
+                actual=self.manager.disk_crypto.virtual_size(meta,self.manager.folder(meta)/'disk.qcow2')
+                if actual==target*1024**3:
+                    meta['disk_gib']=target
+                elif actual==meta['disk_gib']*1024**3:
+                    meta.pop('disk_resize_pending_gib',None)
+                else:
+                    raise VMError('disk_resize_reconciliation_required')
             if meta['state']=='stopped' and meta.get('snapshot_format')!='gapfast1':
                 (self.manager.folder(meta)/'memory.fast').unlink(missing_ok=True)
             if meta['state']!='destroyed' and meta.get('public_ports') and not meta.get('public_targets'):

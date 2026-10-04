@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 from microvm import MicroVMs, VMError, validate
+from disk_hot import key_line, grow_guest
 
 PROJECT = 'prj_' + 'a' * 24
 OWNER = 'did:gap:' + 'b' * 64
@@ -217,6 +218,55 @@ class MicroVMTests(unittest.TestCase):
         for body in ({'vcpus': True}, {'ports': [22]}, {'ports': [8000, 8000]}, {'kernel': '/host/kernel'}):
             with self.assertRaises(VMError):
                 validate('vm/create', body)
+
+    def test_running_disk_grows_without_stopping_cpu_or_memory(self):
+        self.meta['state']='running';self.manager.save(self.meta)
+        with (patch.object(self.manager,'alive',return_value=True),
+              patch('disk_hot.ensure_key'),patch.object(self.manager,'write_keys'),
+              patch.object(self.manager,'qmp',side_effect=lambda _,command,*args: {'status':'running'} if command=='query-status' else {}) as qmp,
+              patch('disk_hot.grow_guest') as grow):
+            result=self.manager.perform(PROJECT,OWNER,'vm/update',{'vm_id':VM,'disk_gib':5})
+        self.assertEqual(result['vm']['state'],'running')
+        self.assertEqual(result['vm']['disk_gib'],5)
+        self.assertNotIn('disk_resize_pending_gib',result['vm'])
+        self.assertTrue(any(call.args[1:3]==('block_resize',{'device':'root','size':5*1024**3}) for call in qmp.call_args_list))
+        grow.assert_called_once()
+        with patch.object(self.manager,'alive',return_value=True):
+            with self.assertRaisesRegex(VMError,'stop_vm_before_reconfiguration'):
+                self.manager.perform(PROJECT,OWNER,'vm/update',{'vm_id':VM,'vcpus':2,'disk_gib':6})
+
+    def test_disk_maintenance_key_is_forced_and_guest_size_is_verified(self):
+        folder=self.manager.folder(self.meta)
+        (folder/'disk_resize_key.pub').write_text('ssh-ed25519 AAAAtest disk-resize\n')
+        line=key_line(folder)
+        self.assertTrue(line.startswith('restrict,command="'))
+        self.assertIn('ssh-ed25519 AAAAtest disk-resize',line)
+        self.assertNotIn('resize2fs',line)  # Source is encoded inside the forced command.
+        with patch('disk_hot.subprocess.run',return_value=SimpleNamespace(returncode=0,
+                stdout=json.dumps({'device_bytes':5*1024**3,'filesystem_bytes':5*1024**3}).encode())) as call:
+            grow_guest(self.meta,folder,5)
+        self.assertIn('StrictHostKeyChecking=yes',call.call_args.args[0])
+        with patch('disk_hot.subprocess.run',return_value=SimpleNamespace(returncode=0,
+                stdout=json.dumps({'device_bytes':5*1024**3,'filesystem_bytes':4*1024**3}).encode())):
+            with self.assertRaisesRegex(VMError,'guest_disk_resize_pending'):
+                grow_guest(self.meta,folder,5)
+
+    def test_failed_guest_growth_is_durable_and_retryable(self):
+        self.meta['state']='running';self.manager.save(self.meta)
+        with (patch.object(self.manager,'alive',return_value=True),
+              patch('disk_hot.ensure_key'),patch.object(self.manager,'write_keys'),
+              patch.object(self.manager,'qmp',side_effect=lambda _,command,*args: {'status':'running'} if command=='query-status' else {}) as qmp,
+              patch('disk_hot.grow_guest',side_effect=VMError('guest_disk_resize_pending'))):
+            with self.assertRaisesRegex(VMError,'guest_disk_resize_pending'):
+                self.manager.perform(PROJECT,OWNER,'vm/update',{'vm_id':VM,'disk_gib':5})
+        self.assertEqual(self.manager.read(PROJECT,OWNER,VM)['disk_resize_pending_gib'],5)
+        with (patch.object(self.manager,'alive',return_value=True),
+              patch('disk_hot.ensure_key'),patch.object(self.manager,'write_keys'),
+              patch.object(self.manager,'qmp',side_effect=lambda _,command,*args: {'status':'running'} if command=='query-status' else {}) as retry_qmp,
+              patch('disk_hot.grow_guest')):
+            result=self.manager.perform(PROJECT,OWNER,'vm/update',{'vm_id':VM,'disk_gib':5})
+        self.assertFalse(any(call.args[1]=='block_resize' for call in retry_qmp.call_args_list))
+        self.assertNotIn('disk_resize_pending_gib',result['vm'])
 
     def test_cumulative_quota_counts_stopped_vms_and_releases_destroyed(self):
         self.manager.quota_provider = lambda *_: {'vcpus':2,'memory_mib':4096,'max_vms':2}

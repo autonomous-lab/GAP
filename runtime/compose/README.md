@@ -210,14 +210,15 @@ Compose. Every mutation requires a saved 32-lowercase-hex `request_id`.
 | GET `/vm` | none | Current hypervisor state or `absent` |
 | POST `/vm` | optional `vcpus`, `memory_mib`, `disk_gib`, `ports`, `start` | Create exclusive VM; start defaults to true |
 | POST `/vm/stop` | `vm_id`, optional `force` | Guest shutdown; explicit force uses verified QMP quit |
-| PATCH `/vm` | `vm_id`, selected resource fields or `ports` | Reconfigure a stopped VM; disk growth only |
+| PATCH `/vm` | `vm_id`, selected resource fields or `ports` | Grow disk online while running; other resource changes require a stopped VM |
 | POST `/vm/start` | `vm_id` | Start the existing VM |
 | DELETE `/vm` | `vm_id`, optional `delete_data`, `confirm_data_loss` | Destroy a stopped VM, retaining its files by default |
 
 Resource defaults follow the live authorization: Free Trial creates 0.5 vCPU and 512 MiB RAM;
 operator-approved access retains the 1 vCPU and 1024 MiB creation defaults. The virtual disk
-defaults to 8 GiB. Disk growth is applied to the guest filesystem at next
-boot. `ports` contains guest TCP port numbers other than 22; GAP allocates
+defaults to 8 GiB. Online growth also expands the guest ext4 filesystem; for
+a stopped VM, the filesystem expands at next boot. Shrinking is unsupported.
+`ports` contains guest TCP port numbers other than 22; GAP allocates
 loopback forwards in the **worker network namespace**, returned as `worker_port`.
 Optional ingress publishes this forward under the existing node /apps/ path;
 otherwise it remains worker-local.
@@ -571,10 +572,11 @@ After claim, an explicit operator approval for its exact owner DID overrides
 that trial limit and removes the trial egress restriction. Without explicit
 approval, the claimed VM retains its original trial allocation.
 
-CPU/RAM resize and disk growth require **stop → PATCH /vm → start**. There is no
-hot resource resize. Public port mappings and SSH keys can change while running.
-The dashboard performs this sequence with an interruption confirmation and
-restarts a previously running or hibernated VM. An authenticated SSH session
+CPU/RAM resize requires **stop → PATCH /vm → start**, but disk-only growth on a
+running VM is online and preserves processes and SSH sessions. Public port
+mappings and SSH keys can change while running. The dashboard confirms an
+interruption only for CPU/RAM changes; a hibernated VM is briefly resumed and
+re-hibernated for disk-only growth. An authenticated SSH session
 through port 2121 keeps its VM awake; its idle countdown restarts on disconnect.
 
 On the operator host, use `python3 scripts/microvm-access.py set-quota <DID>
