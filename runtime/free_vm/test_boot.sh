@@ -56,6 +56,16 @@ while [ "$attempt" -lt 90 ]; do
         root@127.0.0.1 'for tool in docker python3 node npm go php composer; do command -v "$tool" || exit 1; done; systemctl is-active ssh; docker info --format "{{.ServerVersion}}"' \
         > "$work_dir/result" 2> "$work_dir/ssh-error"; then
         cat "$work_dir/result"
+        if [ "${GAP_EXPECT_SWAP_GIB:-0}" = 1 ]; then
+            ssh -p 22121 -i "$work_dir/client_key" -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null -o BatchMode=yes root@127.0.0.1 \
+                'test "$(stat -c %s /swapfile)" = 1073741824 && test "$(stat -c %a /swapfile)" = 600 && grep -q "^/swapfile[[:space:]]" /proc/swaps && systemctl restart gap-guest-swap && free -m | grep -E "^Swap:[[:space:]]+102[0-9]"' \
+                > "$work_dir/swap-result" 2> "$work_dir/swap-error" || {
+                    cat "$work_dir/swap-error" >&2
+                    exit 1
+                }
+            cat "$work_dir/swap-result"
+        fi
         if [ "$proxy_mode" = on ]; then
             ssh -p 22121 -i "$work_dir/client_key" -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null -o BatchMode=yes root@127.0.0.1 \

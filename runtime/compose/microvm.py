@@ -114,8 +114,10 @@ class MicroVMs:
         self.root = Path(config['state_dir']).resolve()
         self.images = Path(config['image_dir']).resolve()
         self.debian_images = Path(config['debian_image_dir']).resolve() if config.get('debian_image_dir') else None
+        self.debian_images_v2 = Path(config['debian_image_v2_dir']).resolve() if config.get('debian_image_v2_dir') else None
         self.free_images = Path(config['free_image_dir']).resolve() if config.get('free_image_dir') else None
         self.free_images_v3 = Path(config['free_image_v3_dir']).resolve() if config.get('free_image_v3_dir') else None
+        self.free_images_v4 = Path(config['free_image_v4_dir']).resolve() if config.get('free_image_v4_dir') else None
         self.free_images_v1 = Path(config['free_image_v1_dir']).resolve() if config.get('free_image_v1_dir') else self.free_images
         from disk_crypto import DiskCrypto
         from seed_crypto import SeedCrypto
@@ -132,8 +134,12 @@ class MicroVMs:
             raise VMError('invalid_free_image_dir')
         if self.free_images_v3 and not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(self.free_images_v3)):
             raise VMError('invalid_free_image_v3_dir')
+        if self.free_images_v4 and not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(self.free_images_v4)):
+            raise VMError('invalid_free_image_v4_dir')
         if self.debian_images and not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(self.debian_images)):
             raise VMError('invalid_debian_image_dir')
+        if self.debian_images_v2 and not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(self.debian_images_v2)):
+            raise VMError('invalid_debian_image_v2_dir')
         if self.free_images_v1 and not re.fullmatch(r'/[A-Za-z0-9_./-]+',str(self.free_images_v1)):
             raise VMError('invalid_free_image_v1_dir')
         self.execute_guest = execute_guest
@@ -359,6 +365,9 @@ class MicroVMs:
             return dict(transfer_id=transfer_id,vm_id=vm_id,source_stopped=True)
 
     def image_dir(self,meta):
+        if meta.get('guest_image')=='debian-v2':
+            if not self.debian_images_v2:raise VMError('debian_guest_image_unavailable')
+            return self.debian_images_v2
         if meta.get('guest_image')=='debian-v1':
             if not self.debian_images:raise VMError('debian_guest_image_unavailable')
             return self.debian_images
@@ -371,6 +380,9 @@ class MicroVMs:
         if meta.get('guest_image')=='free-vm-v3':
             if not self.free_images_v3:raise VMError('free_guest_image_unavailable')
             return self.free_images_v3
+        if meta.get('guest_image')=='free-vm-v4':
+            if not self.free_images_v4:raise VMError('free_guest_image_unavailable')
+            return self.free_images_v4
         return self.images
 
     @staticmethod
@@ -378,7 +390,7 @@ class MicroVMs:
         # An existing encrypted v2 overlay cannot be switched to a different
         # backing file in place. Operators may opt one stopped VM into the
         # v3 network path while preserving its original backing image.
-        return meta.get('guest_image')=='free-vm-v3' or (meta.get('guest_image')=='free-vm-v2' and meta.get('direct_egress') is True)
+        return meta.get('guest_image') in ('free-vm-v3','free-vm-v4') or (meta.get('guest_image')=='free-vm-v2' and meta.get('direct_egress') is True)
 
     def image_identity(self,meta=None):
         image_dir=self.image_dir(meta or {})
@@ -468,7 +480,7 @@ class MicroVMs:
         terminal_key = self.folder(meta) / 'terminal_key.pub'
         terminal_options=('restrict,pty ' if meta.get('tier')=='anonymous'
                           else ('restrict,pty,command="/bin/bash --login -i" '
-                                if meta.get('guest_image') in ('free-vm-v2','free-vm-v3','debian-v1')
+                                if meta.get('guest_image') in ('free-vm-v2','free-vm-v3','free-vm-v4','debian-v1','debian-v2')
                                 else 'restrict,pty,command="/bin/sh -l" '))
         terminal = (terminal_options + terminal_key.read_text().strip() + '\n') if terminal_key.exists() else ''
         owner_options = 'restrict,pty ' if meta.get('network_restricted') else 'no-agent-forwarding,no-X11-forwarding '
@@ -899,8 +911,8 @@ class MicroVMs:
             approval=self.approval_provider(project,owner);limits=approval.get('quota')
             return {'limits': limits, 'allocated': dict(self.quota_usage(owner,include_disk=True), max_vms=self.vm_count(owner)),
                     'always_on_allowed': bool(self.runtime and self.runtime.runner.authorize(project,owner).get('always_on_allowed')),
-                    'tier':approval.get('tier','approved'),'network_policy':('web_egress' if self.free_images_v3 else 'reverse_proxy_only') if approval.get('network_restricted') else 'standard',
-                    'minimum_disk_gib': max(1,((self.free_images_v3 or self.free_images if approval.get('tier')=='anonymous' else self.debian_images or self.images).joinpath('rootfs.ext4').stat().st_size+1024**3-1)//1024**3)}
+                    'tier':approval.get('tier','approved'),'network_policy':('web_egress' if self.free_images_v4 or self.free_images_v3 else 'reverse_proxy_only') if approval.get('network_restricted') else 'standard',
+                    'minimum_disk_gib': max(1,((self.free_images_v4 or self.free_images_v3 or self.free_images if approval.get('tier')=='anonymous' else self.debian_images_v2 or self.debian_images or self.images).joinpath('rootfs.ext4').stat().st_size+1024**3-1)//1024**3)}
 
     def perform(self, project, owner, action, body):
         validate(action, body)
@@ -949,7 +961,7 @@ class MicroVMs:
             if action=='vm/create':
                 if body.get('execution_mode')=='always_on' and not (self.runtime and self.runtime.runner.authorize(project,owner).get('always_on_allowed')):
                     raise VMError('always_on_not_approved')
-                image_dir=(self.free_images_v3 or self.free_images) if approval.get('tier')=='anonymous' and (self.free_images_v3 or self.free_images) else self.debian_images or self.images
+                image_dir=(self.free_images_v4 or self.free_images_v3 or self.free_images) if approval.get('tier')=='anonymous' and (self.free_images_v4 or self.free_images_v3 or self.free_images) else self.debian_images_v2 or self.debian_images or self.images
                 minimum=max(1,((image_dir/'rootfs.ext4').stat().st_size+1024**3-1)//1024**3)
                 if body.get('disk_gib',8)<minimum:raise VMError('disk_smaller_than_guest_image')
             if (action == 'vm/create' and (not meta or meta['state'] == 'destroyed')
@@ -983,8 +995,8 @@ class MicroVMs:
                             'state': 'creating', 'vcpus': body.get('vcpus', default_vcpus),
                             'execution_mode': body.get('execution_mode','serverless'),
                             'network_restricted': network_restricted, 'tier': approval.get('tier','approved'),
-                            **({'guest_image':'free-vm-v3' if self.free_images_v3 else 'free-vm-v2'} if approval.get('tier')=='anonymous' else {}),
-                            **({'guest_image':'debian-v1'} if approval.get('tier')!='anonymous' and self.debian_images else {}),
+                            **({'guest_image':'free-vm-v4' if self.free_images_v4 else 'free-vm-v3' if self.free_images_v3 else 'free-vm-v2'} if approval.get('tier')=='anonymous' else {}),
+                            **({'guest_image':'debian-v2' if self.debian_images_v2 else 'debian-v1'} if approval.get('tier')!='anonymous' and (self.debian_images_v2 or self.debian_images) else {}),
                             **({'anonymous_until':approval['anonymous_until'],'claim_until':approval['claim_until']}
                                if approval.get('tier')=='anonymous' else {}),
                             'memory_mib': body.get('memory_mib', default_memory_mib), 'disk_gib': body.get('disk_gib', 8),

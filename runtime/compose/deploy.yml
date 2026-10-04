@@ -45,9 +45,11 @@ services:
       - ./data/gap-compose/admin:/run/caddy-admin
       - ./data/gap-compose/guest-image:/images:ro
       - ./data/gap-compose/debian-guest-image-v1:/debian-images:ro
+      - ./data/gap-compose/debian-guest-image-v2:/debian-images-v2:ro
       - ./data/gap-compose/free-guest-image:/free-images:ro
       - ./data/gap-compose/free-guest-image-v2:/free-images-v2:ro
       - ./data/gap-compose/free-guest-image-v3:/free-images-v3:ro
+      - ./data/gap-compose/free-guest-image-v4:/free-images-v4:ro
       - /run/gap-cpu:/run/gap-cpu:ro
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

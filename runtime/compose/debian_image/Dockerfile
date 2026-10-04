@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     systemd systemd-sysv dbus initramfs-tools linux-image-cloud-amd64 \
     openssh-server docker.io docker-cli docker-compose python3 python3-pip nodejs npm \
     golang-go php-cli php-curl composer git curl ca-certificates iproute2 iputils-ping \
-    procps bash vim-tiny make gcc e2fsprogs && \
+    procps bash vim-tiny make gcc e2fsprogs util-linux && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 COPY runtime/compose/environment.py /usr/local/lib/environment.py
 COPY runtime/compose/guest.py /usr/local/lib/gap-compose-guest.py

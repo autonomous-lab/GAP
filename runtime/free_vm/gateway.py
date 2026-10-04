@@ -189,13 +189,14 @@ def welcome_banner(details,remaining,colored=False,ready_seconds=None):
     left=f'{remaining//60}m {remaining%60:02d}s'
     ready=(f'  {accent}✓ Ready in {ready_seconds}s{reset}\r\n\r\n' if ready_seconds is not None else '')
     detach=('  Press Ctrl+B, then D to detach; reconnect with the same SSH key.\r\n'
-            if details.get('guest_image')=='free-vm-v3' else
+            if details.get('guest_image') in ('free-vm-v3','free-vm-v4') else
             '  Type exit to disconnect; reconnect with the same SSH key.\r\n')
     feature=('  │  Run `opencode` to build with free AI models.         │\r\n'
-             if details.get('guest_image')=='free-vm-v3' else
+             if details.get('guest_image') in ('free-vm-v3','free-vm-v4') else
              '  │  Docker, Python, Node, Go and PHP are ready to use.  │\r\n')
+    swap=' · 1 GiB swap' if details.get('guest_image')=='free-vm-v4' else ''
     return (f'\r\n{ready}  {brand}Welcome to your GAP MicroVM.{reset} You have {accent}{left} left{reset} to build.\r\n'
-            f'  1 vCPU · 1 GiB RAM · 8 GiB disk. Run your app on $PORT (8080).\r\n'
+            f'  1 vCPU · 1 GiB RAM · 8 GiB disk{swap}. Run your app on $PORT (8080).\r\n'
             f'\r\n'
             f'  {muted}• Claim:{reset}       {details["claim_url"]}\r\n'
             f'  {muted}• Preview:{reset}     {details["preview"]["preview_url"]}\r\n'
@@ -255,7 +256,8 @@ def claimed_banner(details,colored=False):
     return (f'\r\n  {brand}GAP  /  YOUR MICROVM{reset}\r\n'
             f'  Reconnected. Your files are where you left them.\r\n'
             f'\r\n'
-            f'  COMPUTE     {details["vcpus"]:g} vCPU  ·  {memory_label} RAM  ·  {details["disk_gib"]} GiB disk\r\n'
+            f'  COMPUTE     {details["vcpus"]:g} vCPU  ·  {memory_label} RAM  ·  {details["disk_gib"]} GiB disk'
+            f'{"  ·  1 GiB swap" if details.get("guest_image")=="free-vm-v4" else ""}\r\n'
             f'  APP PORTS   {app_ports} (inside VM)\r\n'
             f'  PUBLIC URL  {public_url}\r\n'
             f'{https_line}'
@@ -355,7 +357,7 @@ def prepare(runner,key,ip):
     if admission.get('status')=='claimed':
         manager=runner.hypervisor
         meta=manager.read(project,owner)
-        if not meta or meta.get('guest_image') not in ('free-vm-v2','free-vm-v3') or meta.get('state')=='destroyed':
+        if not meta or meta.get('guest_image') not in ('free-vm-v2','free-vm-v3','free-vm-v4') or meta.get('state')=='destroyed':
             raise GatewayError('claimed_vm_unavailable')
         if meta.get('state') in ('stopped','hibernated') or (meta.get('state')=='running' and not manager.alive(meta)):
             rpc_wait(runner,project,owner,'vm/resume' if meta['state']=='hibernated' else 'vm/start',
@@ -471,7 +473,7 @@ async def local_shell(runner,process,key,ip,user_command,expected_project=None):
         async with asyncssh.connect('127.0.0.1',port=details['ssh_port'],username='root',
                 client_keys=[details['guest_key']],known_hosts=known,encoding=None,
                 agent_path=None,connect_timeout=10) as guest:
-            persistent=details.get('guest_image')=='free-vm-v3' and process.term_type is not None
+            persistent=details.get('guest_image') in ('free-vm-v3','free-vm-v4') and process.term_type is not None
             command=user_command if user_command is not None else (
                 ('tmux new-session -A -s gap -c /app '+shlex.quote('bash --login -i') if persistent else 'bash --login -i')
                 if claimed else interactive_shell_command(details['active_until'],persistent))

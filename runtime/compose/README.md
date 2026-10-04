@@ -59,6 +59,13 @@ The preview requires its unique Basic Auth password from any visitor IP;
 the source-IP reservation still limits anonymous VM creation. See [the release checklist](../../docs/free-microvm-implementation.md)
 before expanding the pilot.
 
+The next immutable free image (`free-guest-image-v4`, worker path
+`/free-images-v4`) adds a 1 GiB guest swapfile on first boot, after the root
+filesystem has expanded. Build it from `Dockerfile.direct` into the new
+directory and configure the node with
+`python3 scripts/configure-swap-images-node.py --root <checkout>`.
+Retain the v3 directory for existing qcow2 overlays; never overwrite it.
+
 Build the guest assets and worker from the repository root:
 
 ```bash
@@ -81,6 +88,11 @@ existing VMs. Keep the exported image directory
 read-only to the worker. Each VM has its own qcow2 overlay and SSH seed disk;
 checksums are verified at creation/start. Do not replace base assets used by
 existing overlays: use a separate image directory and worker for a new version.
+The next immutable Debian image (`debian-guest-image-v2`, worker path
+`/debian-images-v2`) adds the same 1 GiB guest swapfile. Configure it with the
+same `configure-swap-images-node.py` script after exporting the image to the
+versioned directory. Guest swap occupies up to 1 GiB of the VM's 8 GiB disk;
+it does not increase physical RAM or promise equivalent application capacity.
 Build inputs track Alpine package updates; the checksum manifest identifies the
 actual exported assets, not a reproducible package lock.
 

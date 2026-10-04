@@ -44,6 +44,20 @@ fi
 umount /run/gap-seed
 resize2fs /dev/vda
 ''',0o755)
+write('/usr/local/bin/gap-guest-swap','''#!/bin/sh
+set -eu
+swap=/swapfile
+if [ ! -f "$swap" ]; then
+    umask 077
+    fallocate -l 1G "$swap.new"
+    mkswap "$swap.new" >/dev/null
+    mv "$swap.new" "$swap"
+fi
+chmod 600 "$swap"
+if ! grep -q '^/swapfile[[:space:]]' /proc/swaps; then
+    swapon "$swap"
+fi
+''',0o755)
 write('/etc/systemd/system/gap-free-seed.service','''[Unit]
 Description=Install per-VM GAP identity
 DefaultDependencies=no
@@ -52,6 +66,18 @@ Before=ssh.service docker.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/gap-free-seed
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+''')
+write('/etc/systemd/system/gap-guest-swap.service','''[Unit]
+Description=Enable 1 GiB GAP guest swap
+Requires=gap-free-seed.service
+After=gap-free-seed.service
+Before=ssh.service docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gap-guest-swap
 RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
@@ -68,7 +94,7 @@ export GOPROXY=https://proxy.golang.org
 write('/etc/apt/apt.conf.d/90gap-free-proxy','Acquire::http::Proxy "http://10.0.2.100:3128";\nAcquire::https::Proxy "http://10.0.2.100:3128";\n')
 write('/etc/docker/daemon.json','{"log-driver":"local"}\n')
 Path('/etc/systemd/system/multi-user.target.wants').mkdir(parents=True,exist_ok=True)
-for service in ('gap-free-seed.service','systemd-networkd.service','ssh.service','docker.service'):
+for service in ('gap-free-seed.service','gap-guest-swap.service','systemd-networkd.service','ssh.service','docker.service'):
     target=Path('/etc/systemd/system/multi-user.target.wants')/service
     if not target.exists():
         source=Path('/etc/systemd/system')/service

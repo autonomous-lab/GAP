@@ -312,6 +312,27 @@ class MicroVMTests(unittest.TestCase):
         self.assertEqual(created['guest_image'],'debian-v1')
         self.assertEqual(self.manager.image_dir(created),debian)
 
+    def test_swap_enabled_images_are_selected_only_for_new_vms(self):
+        free=self.root/'free-images-v4';free.mkdir()
+        paid=self.root/'debian-images-v2';paid.mkdir()
+        for image in (free,paid):
+            for name in ('vmlinuz','initramfs','rootfs.ext4','SHA256SUMS'):
+                (image/name).write_bytes((self.images/name).read_bytes())
+        self.manager.free_images_v4=free
+        self.manager.debian_images_v2=paid
+        self.assertEqual(self.manager.image_dir(self.meta),self.images)
+        self.manager.quota_provider=lambda *_:{'vcpus':3,'memory_mib':4096,'max_vms':3,'disk_gib':24}
+        with patch.object(self.manager,'prepare'):
+            paid_vm=self.manager.perform(PROJECT,OWNER,'vm/create',{'new_vm':True,'start':False})
+            self.assertEqual(self.manager.read(PROJECT,OWNER,paid_vm['vm']['vm_id'])['guest_image'],'debian-v2')
+            self.manager.approval_provider=lambda *_:{'quota':self.manager.quota_provider(PROJECT,OWNER),
+                'tier':'anonymous','network_restricted':True,'anonymous_until':3600,'claim_until':90000}
+            free_vm=self.manager.perform(PROJECT,OWNER,'vm/create',{'new_vm':True,'start':False})
+        new=self.manager.read(PROJECT,OWNER,free_vm['vm']['vm_id'])
+        self.assertEqual(new['guest_image'],'free-vm-v4')
+        self.assertEqual(self.manager.image_dir(new),free)
+        self.assertTrue(self.manager.direct_free_egress(new))
+
     def test_parallel_projects_cannot_overallocate_one_owner(self):
         self.manager.quota_provider = lambda *_: {'vcpus':2,'memory_mib':4096,'max_vms':3}
         import concurrent.futures

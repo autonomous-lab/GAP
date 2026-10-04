@@ -183,6 +183,8 @@ class GatewayTests(unittest.TestCase):
         ready=welcome_banner(dict(details,guest_image='free-vm-v3'),3542,ready_seconds=2)
         self.assertIn('Ready in 2s',ready)
         self.assertIn('Ctrl+B, then D',ready)
+        swap=welcome_banner(dict(details,guest_image='free-vm-v4'),3542)
+        self.assertIn('8 GiB disk · 1 GiB swap',swap)
 
     def test_claimable_key_recovers_link_without_provisioning_a_guest(self):
         details={'status':'claimable','claim_url':'https://example.invalid/claim#private-token',
