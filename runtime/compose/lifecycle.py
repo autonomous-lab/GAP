@@ -205,7 +205,7 @@ class Runtime:
         state=self.state(meta)
         account=self.ledger.view(meta['project_id'],meta['owner_did'],include_entries=include_entries)
         tariff=account['tariff']
-        return {'mode':meta.get('execution_mode','serverless'),'idle_timeout_seconds':meta.get('idle_timeout_seconds',900),
+        return {'mode':meta.get('execution_mode','serverless'),'idle_timeout_seconds':meta.get('idle_timeout_seconds',300),
                 'last_incoming_at':state['last_incoming'],'active_http_requests':state['active_http'],'runtime_error':meta.get('runtime_error'),
                 'policy_blocked':meta.get('policy_blocked',False),'operator_suspended':meta.get('operator_suspended',False),
                 'estimated_on_hour_microcredits':(meta['vcpus']*tariff['vcpu_hour']+
@@ -545,7 +545,7 @@ class Runtime:
             return
         if self.manager.network and meta['state']!='destroyed':self.manager.network.expire(meta)
         project=meta['project_id']
-        if (meta.get('guest_image') in ('free-vm-v2','free-vm-v3') and meta.get('tier')=='trial'
+        if (meta.get('guest_image') in ('free-vm-v2','free-vm-v3','free-vm-v4') and meta.get('tier')=='trial'
                 and hasattr(self.ledger,'adopt_claimed_free_vm') and project not in self.ledger.projects):
             try:self.runner.authorize(project,meta['owner_did'])
             except Exception:pass  # The claim is retried; never infer it during an authority outage.
@@ -573,7 +573,7 @@ class Runtime:
         # hibernation before the normal authorized wake/restart path can run.
         blocked=blocked or (meta['state']=='running' and state.get('policy_preempted',False))
         idle=(meta.get('execution_mode','serverless')=='serverless'
-              and time.time()-state['last_incoming']>=meta.get('idle_timeout_seconds',900) and not state['active_http'])
+              and time.time()-state['last_incoming']>=meta.get('idle_timeout_seconds',300) and not state['active_http'])
         busy=False
         needs_busy_check=(meta['state']=='running' and idle) or (
             meta.get('execution_mode')=='always_on' and meta['state'] in ('hibernated','stopped'))

@@ -72,10 +72,50 @@
   quick.append(title, description, actions, note);
   byId('alerts').after(quick);
 
+  const hibernation = document.createElement('section');
+  hibernation.className = 'panel vm-hibernation';
+  hibernation.dataset.vmSection = 'overview';
+  const hibernationTitle = document.createElement('h2');
+  hibernationTitle.textContent = 'Automatic hibernation';
+  const hibernationHelp = document.createElement('p');
+  hibernationHelp.textContent = 'Your MicroVM pauses after this many minutes without incoming activity. It wakes on the next request.';
+  const hibernationForm = document.createElement('div');
+  hibernationForm.className = 'vm-hibernation-form';
+  const hibernationLabel = document.createElement('label');
+  hibernationLabel.htmlFor = 'overview-idle';
+  hibernationLabel.textContent = 'Idle time (minutes)';
+  const hibernationInput = document.createElement('input');
+  hibernationInput.id = 'overview-idle';
+  hibernationInput.type = 'number';
+  hibernationInput.min = '1';
+  hibernationInput.max = '60';
+  hibernationInput.step = '1';
+  hibernationInput.value = '5';
+  const hibernationSave = document.createElement('button');
+  hibernationSave.type = 'button';
+  hibernationSave.className = 'btn primary';
+  hibernationSave.textContent = 'Save';
+  hibernationSave.onclick = () => {
+    const minutes = Number(hibernationInput.value);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 60) {
+      hibernationInput.setCustomValidity('Choose 1 to 60 minutes.');
+      hibernationInput.reportValidity();
+      return;
+    }
+    hibernationInput.setCustomValidity('');
+    byId('idle').value = String(minutes);
+    byId('idle').dispatchEvent(new Event('input'));
+    byId('save-mode').click();
+  };
+  hibernationInput.oninput = () => hibernationInput.setCustomValidity('');
+  hibernationForm.append(hibernationLabel, hibernationInput, hibernationSave);
+  hibernation.append(hibernationTitle, hibernationHelp, hibernationForm);
+  quick.after(hibernation);
+
   const children = [...workspace.children];
   const pricing = workspace.lastElementChild;
   for (const element of children) {
-    if (element === tabs || element === funding || element === quick) continue;
+    if (element === tabs || element === funding || element === quick || element === hibernation) continue;
     let group = 'overview';
     if (element.id === 'ssh-panel' || element.id === 'terminal-panel') group = 'connect';
     else if (element.id === 'network-panel') group = 'network';
@@ -149,6 +189,16 @@
     originalRender(machine, account);
     fundingNotice(account);
     syncQuick();
+    const hasVM = !!machine.vm_id && machine.state !== 'destroyed';
+    hibernation.hidden = !hasVM;
+    hibernationInput.disabled = !hasVM || machine.runtime?.mode === 'always_on';
+    hibernationSave.disabled = hibernationInput.disabled;
+    if (document.activeElement !== hibernationInput) {
+      hibernationInput.value = String((machine.runtime?.idle_timeout_seconds ?? 300) / 60);
+    }
+    hibernationHelp.textContent = machine.runtime?.mode === 'always_on'
+      ? 'Always-on mode does not automatically hibernate. Change execution mode in Settings to use this timer.'
+      : 'Your MicroVM pauses after this many minutes without incoming activity. It wakes on the next request.';
   };
   const originalRefresh = refresh;
   refresh = async function (...args) { await originalRefresh(...args); syncQuick(); };

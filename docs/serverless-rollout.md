@@ -1,6 +1,7 @@
 # Serverless microVM rollout
 
-The worker adds disk hibernation after 900 seconds of inbound inactivity,
+The worker adds disk hibernation after 300 seconds of inbound inactivity by
+default, configurable per VM from 60 to 3600 seconds,
 automatic protocol wake, per-agent always-on permission, prepaid resource metering
 and 72-hour unpaid storage retention. Native programs and optional Compose use
 the same VM, network and billing paths.

@@ -14,6 +14,16 @@ from microvm import VMError
 
 
 class LifecycleEfficiencyTests(unittest.TestCase):
+    def test_idle_hibernation_defaults_to_five_minutes(self):
+        runtime=self.runtime(Path('/unused'))
+        runtime.ledger=SimpleNamespace(view=Mock(return_value={'tariff':None}))
+        meta=dict(self.meta('running'),vcpus=1,memory_mib=1024)
+        self.assertEqual(runtime.view(meta)['idle_timeout_seconds'],300)
+        meta['idle_timeout_seconds']=60
+        self.assertEqual(runtime.view(meta)['idle_timeout_seconds'],60)
+        meta['idle_timeout_seconds']=3600
+        self.assertEqual(runtime.view(meta)['idle_timeout_seconds'],3600)
+
     def test_resume_resets_stale_idle_clock_before_guest_connection(self):
         runtime=self.runtime(Path('/unused'))
         meta=dict(self.meta('running'),last_incoming_at=10)

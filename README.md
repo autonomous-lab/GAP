@@ -375,8 +375,8 @@ Operator configuration and recovery: [MicroVM encryption](./runtime/compose/ENCR
 
 ## Serverless microVMs and prepaid credits
 
-Serverless workers hibernate idle VMs to disk after **15 minutes of incoming
-inactivity**, releasing CPU/RAM. HTTP/API/WebSocket, TCP/SSH and UDP traffic can
+Serverless workers hibernate idle VMs to disk after **5 minutes of incoming
+inactivity by default** (configurable per VM from 1 to 60 minutes), releasing CPU/RAM. HTTP/API/WebSocket, TCP/SSH and UDP traffic can
 wake them automatically without per-VM DNS. Outbound traffic is billed but does
 not keep a VM awake. Always-on is an additional live permission per agent.
 
