@@ -173,6 +173,13 @@ that already has the fleet fast-snapshot image, `Dockerfile.rust-overlay` can
 build the same canary more quickly after building the `rust-http-build` stage.
 Set `BASE_IMAGE=gap-compose-fast-snapshot:rust` when layering onto an existing
 Rust worker image rather than the fleet base.
+The GAP three-node fleet uses `deploy.yml` plus `fast-rust.override.yml` on each
+node. Node 02 layers onto its existing `gap-compose-fast-snapshot:rust` image;
+nodes 01 and 03 can layer onto their existing
+`gap-compose-fast-snapshot:billing-recovery` image, then tag the result as
+`gap-compose-fast-snapshot:rust`. The overlay also copies the current runner
+and free-VM gateway Python code, so SSH errors and worker diagnostics are not
+left on an older image. Preserve the old `billing-recovery` image for rollback.
 Use `--project-directory .` with Compose so `/config` and `/data` mount from
 the repository checkout. Do not recreate the worker while any VM is running.
 The old image and `fast-fleet.override.yml` are the rollback. The proxy must
