@@ -7663,6 +7663,21 @@ pub fn route_with_ip(
                 Some(_) => return (400,json!({"error":{"code":"invalid_cursor"}})),
                 None=>String::new(),
             }
+        } else if path=="/v1/fleet/usage" {
+            let params=parse_url_params(raw_path);
+            if params.keys().any(|key| key!="days" && key!="project_id") {
+                return (400,json!({"error":{"code":"invalid_usage_filter"}}));
+            }
+            let days=params.get("days").map(String::as_str).unwrap_or("7");
+            if !matches!(days,"1"|"7"|"30") {return (400,json!({"error":{"code":"invalid_usage_period"}}))}
+            let mut query=format!("?days={days}");
+            if let Some(project)=params.get("project_id") {
+                if project.len()!=28 || !project.starts_with("prj_") || !project[4..].bytes().all(|b|b.is_ascii_hexdigit()) {
+                    return (400,json!({"error":{"code":"invalid_project"}}));
+                }
+                query.push_str("&project_id=");query.push_str(project);
+            }
+            query
         } else if path=="/v1/fleet/migrations" {
             let params=parse_url_params(raw_path);
             match params.get("migration_id") {
@@ -8292,6 +8307,24 @@ pub fn route_with_ip(
                 .cloud_list_projects(t)
                 .map(|projects| json!({ "projects": projects })),
             None => Err(Error::Unauthorized("missing bearer token".into())),
+        },
+        ("GET", p) if cloud_project_overview_route(p).is_some() => {
+            let project_id = cloud_project_overview_route(p).expect("guarded above");
+            match token {
+                Some(t) => (|| -> Result<Value> {
+                    let project = guard.cloud_owned_project(t, project_id)?;
+                    let store = crate::cloud::ProjectStore::open(&guard.cloud_root, project_id)?;
+                    let domains = guard.custom_domains.values()
+                        .filter(|domain| domain.project_id == project_id && domain.vm_id.is_none())
+                        .cloned().collect::<Vec<_>>();
+                    Ok(json!({
+                        "project": project,
+                        "resources": store.admin_inventory()?,
+                        "domains": domains,
+                    }))
+                })(),
+                None => Err(Error::Unauthorized("missing bearer token".into())),
+            }
         },
         (m, p) if matches!(m, "GET" | "PUT") && cloud_site_route(p).is_some() => {
             let project_id = cloud_site_route(p).expect("guarded above");
@@ -9486,6 +9519,18 @@ fn cloud_site_route(path: &str) -> Option<&str> {
         && parts[2] == "projects"
         && parts[4] == "site"
     {
+        Some(parts[3])
+    } else {
+        None
+    }
+}
+
+fn cloud_project_overview_route(path: &str) -> Option<&str> {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if parts.len() == 5 && parts[0] == "v1" && parts[1] == "cloud"
+        && parts[2] == "projects" && parts[4] == "overview"
+        && parts[3].len() == 28 && parts[3].starts_with("prj_")
+        && parts[3][4..].bytes().all(|byte| byte.is_ascii_hexdigit()) {
         Some(parts[3])
     } else {
         None
@@ -11738,6 +11783,12 @@ mod tests {
             .0,
             200
         );
+        let overview_path = format!("/v1/cloud/projects/{project_id}/overview");
+        let (status, overview) = route(&arc, "GET", &overview_path, b"", Some(&auth));
+        assert_eq!(status, 200, "{overview}");
+        assert_eq!(overview["resources"]["functions"][0]["name"], "answer");
+        assert_eq!(overview["resources"]["functions"][0]["active_version"], version["version"]);
+        assert_eq!(route(&arc, "GET", &overview_path, b"", Some(&format!("Bearer {stranger}"))).0, 401);
 
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

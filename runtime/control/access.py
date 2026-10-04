@@ -224,7 +224,7 @@ class Access:
                 raise Failure('project_binding_conflict', 409)
             db.execute("INSERT OR IGNORE INTO principals VALUES('agent',?,?,0)", (agent, customer))
             db.execute('INSERT OR IGNORE INTO identity_sources VALUES(?,?,?)', (agent, node, email))
-            db.execute('INSERT OR IGNORE INTO projects VALUES(?,?,?,?)', (project, customer, node, agent))
+            db.execute('INSERT OR IGNORE INTO projects(id,customer,node,owner) VALUES(?,?,?,?)', (project, customer, node, agent))
             db.execute("INSERT OR IGNORE INTO grants VALUES(?,?,'owner')", (project, agent))
             trial_credit_granted=self.ensure_trial(db,customer,trial_ip)
             claimed_at = int(self.a.clock()) if free_vm_claim else None

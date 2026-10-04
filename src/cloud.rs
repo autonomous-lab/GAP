@@ -469,9 +469,13 @@ impl ProjectStore {
     pub fn admin_inventory(&self) -> Result<Value> {
         let mut stmt=self.control.prepare("SELECT f.name,f.active_version,f.created_at,count(v.version) FROM functions f LEFT JOIN function_versions v ON v.name=f.name GROUP BY f.name ORDER BY f.name LIMIT 100").map_err(db_error)?;
         let functions=stmt.query_map([],|r|Ok(json!({"name":r.get::<_,String>(0)?,"active_version":r.get::<_,Option<i64>>(1)?,"created_at":r.get::<_,i64>(2)?,"versions":r.get::<_,i64>(3)?}))).map_err(db_error)?.collect::<std::result::Result<Vec<_>,_>>().map_err(db_error)?;
+        let kv_count: i64 = self.control.query_row("SELECT COUNT(*) FROM kv",[],|r|r.get(0)).map_err(db_error)?;
+        let object_count: i64 = self.control.query_row("SELECT COUNT(*) FROM objects",[],|r|r.get(0)).map_err(db_error)?;
+        let mut schedules_stmt=self.control.prepare("SELECT id,function,enabled,next_run_at,last_status FROM schedules ORDER BY id LIMIT 100").map_err(db_error)?;
+        let schedules=schedules_stmt.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"function":r.get::<_,String>(1)?,"enabled":r.get::<_,i64>(2)?!=0,"next_run_at":r.get::<_,i64>(3)?,"last_status":r.get::<_,Option<String>>(4)?}))).map_err(db_error)?.collect::<std::result::Result<Vec<_>,_>>().map_err(db_error)?;
         let schema=self.database_query("SELECT name,type,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 100",&[])?;
         Ok(
-            json!({"functions":functions,"site":self.site_config()?,"site_versions":self.site_versions()?,"database_schema":schema,"limit":100}),
+            json!({"functions":functions,"site":self.site_config()?,"site_versions":self.site_versions()?,"database_schema":schema,"kv_count":kv_count,"object_count":object_count,"schedules":schedules,"limit":100}),
         )
     }
     pub fn user_database_path(&self) -> PathBuf {

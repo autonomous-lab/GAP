@@ -66,7 +66,7 @@ class Authority:
                    customer TEXT NOT NULL REFERENCES customers(id), verified INTEGER NOT NULL,
                    PRIMARY KEY(kind,subject))''',
                 '''CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,customer TEXT NOT NULL REFERENCES customers(id),
-                   node TEXT NOT NULL,owner TEXT NOT NULL)''',
+                   node TEXT NOT NULL,owner TEXT NOT NULL,name TEXT)''',
                 '''CREATE TABLE IF NOT EXISTS grants(project TEXT NOT NULL REFERENCES projects(id),
                    agent TEXT NOT NULL,role TEXT NOT NULL,PRIMARY KEY(project,agent))''',
                 '''CREATE TABLE IF NOT EXISTS operations(actor TEXT NOT NULL,id TEXT NOT NULL,
@@ -97,6 +97,8 @@ class Authority:
                 'CREATE INDEX IF NOT EXISTS capacity_customer ON capacity(customer,state,vm)',
             ):
                 db.execute(sql)
+            if 'name' not in {row['name'] for row in db.execute('PRAGMA table_info(projects)')}:
+                db.execute('ALTER TABLE projects ADD COLUMN name TEXT')
             # Quotas written before tiers existed are either the former default
             # defaults or an explicit operator override. Preserve overrides as
             # approved accounts and migrate only the old trial defaults.
@@ -204,7 +206,7 @@ class Authority:
             old = db.execute('SELECT * FROM projects WHERE id=?', (project,)).fetchone()
             if old and (old['customer'], old['node'], old['owner']) != (customer, node, owner):
                 raise Failure('project_binding_conflict', 409)
-            db.execute('INSERT OR IGNORE INTO projects VALUES(?,?,?,?)', (project, customer, node, owner))
+            db.execute('INSERT OR IGNORE INTO projects(id,customer,node,owner) VALUES(?,?,?,?)', (project, customer, node, owner))
             db.execute("INSERT OR IGNORE INTO grants VALUES(?,?,'owner')", (project, owner))
             return body
         return self.mutation(actor, request, body, attach)
@@ -630,10 +632,26 @@ class Authority:
         with self.db() as db:
             self.customer(db, customer)
             if agent is None:
-                rows = db.execute("SELECT id,node,owner,'owner' AS role FROM projects WHERE customer=? AND id>? ORDER BY id LIMIT 101", (customer, after)).fetchall()
+                rows = db.execute("SELECT id,node,owner,name,'owner' AS role FROM projects WHERE customer=? AND id>? ORDER BY id LIMIT 101", (customer, after)).fetchall()
             else:
-                rows = db.execute('SELECT p.id,p.node,p.owner,g.role FROM projects p JOIN grants g ON g.project=p.id WHERE p.customer=? AND g.agent=? AND p.id>? ORDER BY p.id LIMIT 101', (customer, agent, after)).fetchall()
+                rows = db.execute('SELECT p.id,p.node,p.owner,p.name,g.role FROM projects p JOIN grants g ON g.project=p.id WHERE p.customer=? AND g.agent=? AND p.id>? ORDER BY p.id LIMIT 101', (customer, agent, after)).fetchall()
             return dict(projects=[dict(r) for r in rows[:100]], next_cursor=rows[99]['id'] if len(rows) > 100 else None)
+
+    def rename_project(self, customer, agent, request, project, name):
+        if not isinstance(project,str) or not re.fullmatch(r'prj_[0-9a-f]{24}',project):raise Failure('invalid_project')
+        if not isinstance(name,str) or not 1<=len(name.strip())<=64 or any(ord(c)<32 or ord(c)==127 for c in name):
+            raise Failure('invalid_project_name')
+        name=name.strip()
+        body=dict(action='rename_project',project=project,name=name)
+        def rename(db):
+            row=db.execute('SELECT customer FROM projects WHERE id=?',(project,)).fetchone()
+            if not row or row['customer']!=customer:raise Failure('project_membership_required',403)
+            if agent is not None:
+                grant=db.execute('SELECT role FROM grants WHERE project=? AND agent=?',(project,agent)).fetchone()
+                if not grant or grant['role'] not in ('owner','operator'):raise Failure('project_management_required',403)
+            db.execute('UPDATE projects SET name=? WHERE id=?',(name,project))
+            return dict(project_id=project,name=name)
+        return self.mutation('human:'+customer if agent is None else 'agent:'+agent,request,body,rename)
 
     def issue(self, customer, agent, ttl=3600):
         maximum = HUMAN_SESSION_SECONDS if agent is None else 3600

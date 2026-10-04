@@ -42,7 +42,10 @@ balances or change the project's billing mode.
 
 Use the control credential on the operator gateway (Elestio: `https://gap.geta.team`)
 with `GET /v1/fleet/account`, `/v1/fleet/projects`, `/v1/fleet/wallet` and
-`/v1/fleet/quotas`. Projects are restricted to this agent's grants; follow
+`/v1/fleet/quotas`. `GET /v1/fleet/usage?days=7` returns only your account's
+completed-hour usage and charge totals; add `project_id=prj_...` to scope it to
+one authorized project. The response flags incomplete host coverage. Projects
+are restricted to this agent's grants; follow
 `next_cursor` as `?after=...`. `POST /v1/fleet/project-token` with
 `{"project_id":"prj_...","ttl_seconds":120}` returns a signed management bearer
 for that exact project and node. Send it to the node where the project resides;
@@ -52,6 +55,17 @@ MicroVM approval checks still apply. Tokens expire after 30–300 seconds and mu
 be renewed, including when used with a dashboard browser session. Logout through
 `POST /v1/fleet/logout` blocks new issuance; existing project tokens expire within
 five minutes. Operator accounts and credentials are independent across operators.
+
+Projects have human-readable names in the fleet list. An owner/operator can set
+one with `POST /v1/fleet/project-name` and
+`{"request_id":"unique-operation","project_id":"prj_...","name":"Production"}`.
+With the short-lived project management bearer, call
+`GET /v1/cloud/projects/<project_id>/overview` on its home node to list function
+names and active versions, static site state, custom domains and database schema
+metadata without returning function source or site credentials. Viewer grants
+cannot use this management inventory. The web Account uses the same APIs and
+silently renews capabilities; humans do not need to copy temporary tokens to
+navigate between projects.
 
 The account page also lists every authorized MicroVM across the configured
 nodes, with node/project filters and SSH/HTTPS details. Create and manage actions

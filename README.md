@@ -637,10 +637,22 @@ and VM in tab session storage, renews its short-lived fleet capability every two
 minutes while the Account session remains valid, and provides **Back to fleet**.
 Signing out of Account revokes all MicroVM browser sessions recorded by that tab.
 
-The customer entry point is `/account`: its overview shows MicroVM cards and the
-shared wallet, while Projects, Access and Activity remain under Advanced. Creating
-a MicroVM picks an available host and starter resources by default; resource and
-SSH customization remain optional. A machine opens its project-scoped console
+The customer entry point is `/account`: its overview shows actual MicroVM cards
+and the shared wallet. Projects have editable names and group MicroVMs, serverless
+functions, sites, SQLite, key–value data, objects, schedules and seven-day usage
+in one navigable detail page. The project page can deploy and test JavaScript
+functions, publish a single-page site, run read-only database queries, and read
+or save text keys and objects; complex releases and realtime remain available
+through documented APIs. The separate Serverless view summarizes resources
+across projects.
+Billing shows the shared MicroVM wallet, charged usage and resource consumption
+for 1, 7 or 30 completed UTC days, and flags incomplete host reports. Realtime
+credits are shown separately per project; other serverless primitives retain
+their own quotas. Access and Activity remain under
+Advanced. Temporary management capabilities are issued behind the scenes, not
+required as a navigation step. Creating a MicroVM picks an available host and
+starter resources by default; resource and SSH customization remain optional.
+A machine opens its project-scoped console
 with Overview, Connect, Network, Usage and Settings tabs. The old direct
 `/microvms` project-token form remains available under Advanced for API users.
 When a claimed VM cannot start due to exhausted wallet credits or a project

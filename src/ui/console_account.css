@@ -72,6 +72,37 @@ body{background:#f5f7f2;color:#182719}
 .project-technical summary{font-size:12px;font-weight:650;color:#617063}
 .project-technical code{display:block;margin:14px 0;font-size:11px;overflow-wrap:anywhere}
 .project-token-output{overflow-wrap:anywhere;font:11px/1.6 ui-monospace,monospace;margin:10px 0 0}
+.rename-project{font-size:11px;padding:6px 10px}
+.rename-form{display:flex;align-items:center;gap:8px;max-width:460px;margin:0 0 18px}
+.rename-form input{flex:1}
+.project-resources{border-top:1px solid #e2e9dc;margin-top:22px;padding-top:22px;min-height:75px;color:#566b59;font-size:12px}
+.project-resources>h4{font-size:16px;color:#203723;margin:0 0 15px}
+.project-resource-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px}
+.resource-card{background:#f8fbf5;border:1px solid #dde8d8;border-radius:11px;padding:17px;min-height:128px}
+.resource-card h4{font-size:14px;color:#1e3522;margin:0 0 6px}
+.resource-card p{font-size:12px;color:#617063;margin:0 0 12px}
+.resource-card a{color:#2b6234;font-weight:700;font-size:12px}
+.resource-card small{font-size:10px;color:#7a8b7c}
+.resource-card button{display:block;margin-top:15px;background:#203c27;color:#fff;border-color:#203c27}
+.resource-card .resource-link{margin:0;padding:0;min-height:0;border:0;background:transparent;color:#2b6234;font-weight:700;text-align:left;font-size:12px}
+.resource-card .resource-link:hover{background:transparent;text-decoration:underline}
+.resource-line{border-top:1px solid #e0eadb;display:flex;gap:8px;justify-content:space-between;padding:9px 0;font-size:11px}
+.resource-line span{color:#6b7c6d;white-space:nowrap}
+.function-dialog{width:min(680px,calc(100% - 28px));border:1px solid #dae6d5;border-radius:14px;padding:25px;color:#1d3020}
+.function-dialog textarea{display:block;width:100%;min-height:220px;padding:12px;border:1px solid #bdcbb9;border-radius:7px;background:#101d18;color:#c8e9c7;font:12px/1.6 ui-monospace,monospace;margin-top:8px;resize:vertical}
+.function-dialog button{margin-right:9px}
+.resource-output{max-height:230px;overflow:auto;background:#f2f7ee;color:#223824;padding:12px;border-radius:7px;font:11px/1.5 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+#serverlessSection h2{font-size:23px}
+#usagePanel{border:1px solid #e2e9dc;border-radius:16px;background:#fff;padding:24px;margin-bottom:20px}
+.usage-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.usage-head h3{font-size:17px;color:#1e3522;margin:0}
+.usage-head label{margin:0;width:160px}
+.usage-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:20px 0 12px}
+.usage-metrics>div{background:#f6faf2;padding:16px;border-radius:9px;display:flex;flex-direction:column;color:#607363}
+.usage-metrics strong{color:#1d3020;font-size:23px;line-height:1.3}
+.usage-metrics span{font-size:11px}
+.usage-note{color:#6a7a6d;font-size:11px;margin:0}
+#usagePanel[data-complete=false] .usage-note{color:#9c5d22}
 .access-advanced{border-top:1px solid #e2e9dc;margin:20px 0 0;padding-top:15px}
 .access-advanced summary{font-size:13px;font-weight:700;color:#254b2b}
 .access-advanced form{margin-top:18px}
@@ -84,4 +115,4 @@ body:not(.console-signed-in) .account-hero{text-align:center;margin-top:24px}
 body:not(.console-signed-in) .account-hero h1{font-size:34px}
 body:not(.console-signed-in) #login{margin-top:35px}
 @media(max-width:900px){.shell{padding:28px 22px 55px}.console-nav{width:200px}#account #fleetSection{padding:22px}}
-@media(max-width:650px){.shell{margin:0;padding:20px 14px 55px}.console-nav{position:static;width:auto;padding:9px 12px}.console-nav .console-links{overflow:auto}.console-nav a{color:#dcead6}.console-advanced{display:block;border:0;margin:3px 0;padding:0}.console-advanced[open] a{display:block}.account-hero h1{font-size:27px}#overviewStats{grid-template-columns:1fr 1fr}#billingSection{display:block}#placeVM{float:none;margin:10px 0 0;width:100%}#vmCards{grid-template-columns:1fr}#login{padding:24px;margin:20px auto}}
+@media(max-width:650px){.shell{margin:0;padding:20px 14px 55px}.console-nav{position:static;width:auto;padding:9px 12px}.console-nav .console-links{overflow:auto}.console-nav a{color:#dcead6}.console-advanced{display:block;border:0;margin:3px 0;padding:0}.console-advanced[open] a{display:block}.account-hero h1{font-size:27px}#overviewStats{grid-template-columns:1fr 1fr}#billingSection{display:block}#placeVM{float:none;margin:10px 0 0;width:100%}#vmCards{grid-template-columns:1fr}#login{padding:24px;margin:20px auto}.usage-metrics{grid-template-columns:1fr 1fr}.usage-head{align-items:flex-start;flex-direction:column}}

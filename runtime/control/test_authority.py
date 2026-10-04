@@ -1,6 +1,7 @@
 import concurrent.futures
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
@@ -28,6 +29,29 @@ class AuthorityTests(unittest.TestCase):
         with self.assertRaises(Failure) as found:
             fn()
         self.assertEqual(found.exception.code, code)
+
+    def test_project_names_are_persistent_scoped_and_idempotent(self):
+        self.assertIsNone(self.a.projects(self.customer)['projects'][0]['name'])
+        result=self.a.rename_project(self.customer,None,'rename-1',PROJECT,'  Mon application  ')
+        self.assertEqual(result['name'],'Mon application')
+        self.assertEqual(self.a.rename_project(self.customer,None,'rename-1',PROJECT,'Mon application'),result)
+        self.fails('request_id_conflict',lambda:self.a.rename_project(self.customer,None,'rename-1',PROJECT,'Another'))
+        self.fails('invalid_project_name',lambda:self.a.rename_project(self.customer,None,'bad',PROJECT,' '))
+        self.fails('project_membership_required',lambda:self.a.rename_project('cus_'+'f'*32,None,'cross',PROJECT,'Stolen'))
+        restarted=Authority(self.path,'operator-one')
+        self.assertEqual(next(p for p in restarted.projects(self.customer)['projects'] if p['id']==PROJECT)['name'],'Mon application')
+
+    def test_old_project_table_migrates_without_losing_bindings(self):
+        legacy=Path(self.temp.name)/'legacy.sqlite'
+        with sqlite3.connect(legacy) as db:
+            db.execute('CREATE TABLE customers(id TEXT PRIMARY KEY,label TEXT NOT NULL,balance INTEGER NOT NULL DEFAULT 0,spent INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL)')
+            db.execute('CREATE TABLE projects(id TEXT PRIMARY KEY,customer TEXT NOT NULL,node TEXT NOT NULL,owner TEXT NOT NULL)')
+            db.execute('INSERT INTO customers VALUES(?,?,?,?,?)',(self.customer,'Customer',0,0,1000))
+            db.execute('INSERT INTO projects VALUES(?,?,?,?)',(PROJECT,self.customer,'node-one',OWNER))
+        migrated=Authority(legacy,'operator-one')
+        projects=migrated.projects(self.customer)['projects']
+        self.assertEqual(len(projects),1)
+        self.assertIsNone(projects[0]['name'])
 
     def test_concurrent_nodes_cannot_spend_the_same_final_credit(self):
         self.a.topup('operator', 'fund', self.customer, 1, 'promotional')

@@ -513,7 +513,9 @@ On the authority's public gateway (node 01 for Elestio), use that credential wit
 GET  /v1/fleet/account
 GET  /v1/fleet/projects?after=prj_...
 GET  /v1/fleet/wallet
+GET  /v1/fleet/usage?days=7&project_id=prj_...
 GET  /v1/fleet/quotas
+POST /v1/fleet/project-name   {"request_id":"unique","project_id":"prj_...","name":"Production"}
 POST /v1/fleet/project-token  {"project_id":"prj_...","ttl_seconds":120}
 POST /v1/fleet/placements     {"request_id":"unique","project_id":"prj_...","cpu_quarters":4,"memory_mib":1024,"disk_gib":8,"region":""}
 POST /v1/fleet/logout        {}
@@ -523,6 +525,11 @@ The projects list is filtered by the agent's grants and paginated in batches of
 100. A project token requires owner/operator rights; viewer grants cannot mint a
 management token. The returned `gapf1.` token is signed with Ed25519 and restricted
 to the operator, destination node, exact project, owner and `project.manage` scope.
+Project names are account metadata: only owner/operator grants can rename one.
+Usage returns customer-filtered, completed-hour resource and debit totals for 1,
+7 or 30 days, optionally restricted to one authorized project. `coverage_complete`
+must be checked before treating a total as final; provider costs and other
+customers' records are never returned from this endpoint.
 It works as a bearer on that project's existing Cloud and MicroVM management APIs,
 including the dashboard browser-session exchange. It cannot create another project,
 list an agent's other projects, connect an identity, or administer a node.

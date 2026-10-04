@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 import urllib.request
 import urllib.error
 
@@ -65,6 +66,33 @@ class ServiceTests(unittest.TestCase):
         token = self.operator('issue-token', customer_id=customer)['token']
         self.assertEqual(self.call('/v1/wallet', token)[1]['spent_microcredits'], 100)
         self.assertEqual(len(self.call('/v1/projects', token)[1]['projects']), 2)
+
+    def test_project_rename_requires_customer_session(self):
+        customer=self.customer()
+        token=self.operator('issue-token',customer_id=customer)['token']
+        body=dict(request_id='rename-1',project_id=PROJECT,name='Production API')
+        self.assertEqual(self.call('/v1/project-name',token,body),(200,dict(project_id=PROJECT,name='Production API')))
+        self.assertEqual(self.call('/v1/projects',token)[1]['projects'][0]['name'],'Production API')
+        self.assertEqual(self.call('/v1/project-name','node-one-test',body)[0],403)
+
+    def test_customer_usage_is_scoped_and_excludes_operator_finance_fields(self):
+        customer=self.customer()
+        token=self.operator('issue-token',customer_id=customer)['token']
+        calls=[]
+        def report(start,end,project,selected_customer):
+            calls.append((start,end,project,selected_customer))
+            return dict(available=True,coverage_complete=True,start=start,end=end,
+                        usage={'debited_microcredits':125000,'vcpu_ms':3600000},
+                        providers=[{'provider':'private-cost'}],customer_options=['other-customer'])
+        self.app.finance=SimpleNamespace(report=report)
+        status,body=self.call('/v1/usage?days=7&project_id='+PROJECT,token)
+        self.assertEqual(status,200)
+        self.assertEqual(body['usage']['debited_microcredits'],125000)
+        self.assertNotIn('providers',body)
+        self.assertNotIn('customer_options',body)
+        self.assertEqual(calls[0][2:],(PROJECT,customer))
+        self.assertEqual(self.call('/v1/usage?days=7&project_id='+'prj_'+'f'*24,token)[0],403)
+        self.assertEqual(self.call('/v1/usage?days=365',token)[0],400)
 
     def test_node_token_cannot_fund_or_mint_customer_credentials(self):
         self.customer()

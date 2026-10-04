@@ -303,6 +303,25 @@ class Application:
             return {'operator_id': a.operator, 'customer_id': actor['customer'], 'agent_did': actor['agent']}
         if method == 'GET' and parsed.path == '/v1/wallet':
             return a.wallet(actor['customer'])
+        if method == 'GET' and parsed.path == '/v1/usage':
+            if not self.finance:raise Failure('fleet_finance_not_configured',409)
+            query=parse_qs(parsed.query)
+            if set(query)-{'days','project_id'} or any(len(values)!=1 for values in query.values()):
+                raise Failure('invalid_usage_filter')
+            days=query.get('days',['7'])[0]
+            if days not in ('1','7','30'):raise Failure('invalid_usage_period')
+            project=query.get('project_id',[None])[0]
+            if project:
+                with a.db() as db:
+                    row=db.execute('SELECT customer FROM projects WHERE id=?',(project,)).fetchone()
+                    if not row or row['customer']!=actor['customer']:raise Failure('project_membership_required',403)
+                    if actor['agent'] is not None and not db.execute('SELECT 1 FROM grants WHERE project=? AND agent=?',(project,actor['agent'])).fetchone():
+                        raise Failure('project_membership_required',403)
+            end=int(a.clock())//3600*3600
+            report=self.finance.report(end-int(days)*86400,end,project,actor['customer'])
+            return dict(available=report['available'],coverage_complete=report['coverage_complete'],
+                        start=report['start'],end=report['end'],project_id=project,
+                        usage=report['usage'],microcredits_per_credit=1_000_000)
         if method == 'GET' and parsed.path == '/v1/quotas':
             # Aggregate only: no other agent's project/VM identifiers disclosed.
             return a.quotas(actor['customer'])
@@ -312,6 +331,9 @@ class Application:
         if method == 'GET' and parsed.path == '/v1/projects':
             after = parse_qs(parsed.query).get('after', [''])[0]
             return a.projects(actor['customer'], actor['agent'], after)
+        if method == 'POST' and parsed.path == '/v1/project-name':
+            if set(body)!={'request_id','project_id','name'}:raise Failure('invalid_project_name_fields')
+            return a.rename_project(actor['customer'],actor['agent'],body['request_id'],body['project_id'],body['name'])
         if method == 'POST' and parsed.path == '/v1/logout':
             return a.revoke(token)
         if method == 'POST' and parsed.path == '/v1/project-token':
