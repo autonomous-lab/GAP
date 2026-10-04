@@ -22,6 +22,12 @@ class PublicCapacity(unittest.TestCase):
             self.assertIn('swap_mib',result['hardware'])
             self.assertEqual(result['headroom']['disk_gib'],7)
             self.assertNotIn('SECRET',json.dumps(result))
+            (root/'catalog'/'ghost.json').write_text(json.dumps(dict(state='stopped',
+                retained=False,free_vm_cleanup_complete=True,vcpus=1,memory_mib=1024,disk_gib=8)))
+            with patch('admission.check',return_value={'ready':True}),patch('public_capacity.os.sched_getaffinity',return_value=set(range(4))),patch('public_capacity.shutil.disk_usage',return_value=SimpleNamespace(free=20*1024**3,total=100*1024**3)),patch('public_capacity.host_capacity.memory_mib',return_value=dict(MemTotal=16384,MemAvailable=6144,SwapTotal=16384,SwapFree=12288)):
+                cleaned=snapshot(manager,SimpleNamespace(ledger=ledger))
+            self.assertEqual(cleaned['headroom']['disk_gib'],7)
+            self.assertEqual(cleaned['headroom']['vm_slots'],32)
             (root/'catalog'/'4.json').write_text(json.dumps(dict(state='running',retained=False,vcpus=.5,memory_mib=256,disk_gib=1)))
             with patch('admission.check',return_value={'ready':True}),patch('public_capacity.os.sched_getaffinity',return_value=set(range(4))),patch('public_capacity.shutil.disk_usage',return_value=SimpleNamespace(free=20*1024**3,total=100*1024**3)),patch('public_capacity.host_capacity.memory_mib',return_value=dict(MemTotal=16384,MemAvailable=6144,SwapTotal=16384,SwapFree=12288)):
                 running=snapshot(manager,SimpleNamespace(ledger=ledger))

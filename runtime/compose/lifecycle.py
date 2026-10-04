@@ -487,6 +487,14 @@ class Runtime:
         if meta['state']=='migrated':return
         if meta.get('tier')=='anonymous':
             if meta.get('free_vm_cleanup_complete'):
+                # Older cleanup runs saved a stale pre-destruction snapshot and
+                # resurrected `stopped` metadata after deleting the VM. Repair
+                # only records whose backing and retained folders are gone.
+                if meta['state']!='destroyed':
+                    if self.manager.folder(meta).exists() or (self.manager.root/'retained'/meta['vm_id']).exists():
+                        raise VMError('anonymous_cleanup_disk_still_present')
+                    meta['state']='destroyed';meta['retained']=False
+                    self.manager.save(meta)
                 return
             now=time.time()
             # A verified claim is reflected by node approval. Do not turn a
@@ -525,6 +533,11 @@ class Runtime:
                             {'vm_id':meta['vm_id'],'delete_data':True,'confirm_data_loss':True},
                             approval={'quota':{'vcpus':1,'memory_mib':1024,'max_vms':1,'disk_gib':8},
                                       'network_restricted':True,'tier':'anonymous'})
+                    # _perform persists the destroyed state. Reload it rather
+                    # than saving the stale stopped state after finish_free_vm.
+                    meta=json.loads(path.read_text())
+                if meta['state']!='destroyed' or meta.get('retained'):
+                    raise VMError('anonymous_cleanup_incomplete')
                 if self.runner.ingress:self.runner.ingress.sync()
                 self.runner.finish_free_vm(meta['project_id'],meta['owner_did'],meta['vm_id'])
                 meta['free_vm_cleanup_complete']=True

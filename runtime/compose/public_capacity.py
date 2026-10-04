@@ -18,7 +18,11 @@ def snapshot(manager, runtime):
         memory = host_capacity.memory_mib()
         rows = [json.loads(p.read_text()) for p in (manager.root / 'catalog').glob('*.json')]
         active = [r for r in rows if r['state'] not in ('destroyed', 'migrated') and manager.alive(r)]
-        retained = [r for r in rows if r['state'] != 'migrated' and (r['state'] != 'destroyed' or r.get('retained'))]
+        # A completed anonymous cleanup has already destroyed the disk and
+        # released the central reservation. Old workers could leave its
+        # catalog state as `stopped`; never count that ghost allocation.
+        retained = [r for r in rows if not r.get('free_vm_cleanup_complete')
+                    and r['state'] != 'migrated' and (r['state'] != 'destroyed' or r.get('retained'))]
         cpu = host_capacity.logical_cpus()
         # Execution headroom counts only verified live guests. Retained disks
         # stay committed; a stopped/hibernated guest must pass admission on wake.

@@ -196,13 +196,42 @@ class LifecycleEfficiencyTests(unittest.TestCase):
             with patch('lifecycle.time.time',return_value=90000):
                 with self.assertRaisesRegex(VMError,'deletion_failed'):runtime.tick_project(path)
             runtime.runner.finish_free_vm.assert_not_called()
-            runtime.manager._perform.side_effect=None
+            def destroy(*_args, **_kwargs):
+                saved=json.loads(path.read_text());saved['state']='destroyed';saved['retained']=False
+                path.write_text(json.dumps(saved))
+            runtime.manager._perform.side_effect=destroy
             runtime.manager.save.side_effect=lambda value:path.write_text(json.dumps(value))
             with patch('lifecycle.time.time',return_value=90000):runtime.tick_project(path)
             runtime.runner.finish_free_vm.assert_called_once_with(meta['project_id'],meta['owner_did'],meta['vm_id'])
-            self.assertTrue(json.loads(path.read_text())['free_vm_cleanup_complete'])
+            completed=json.loads(path.read_text())
+            self.assertTrue(completed['free_vm_cleanup_complete'])
+            self.assertEqual(completed['state'],'destroyed')
             with patch('lifecycle.time.time',return_value=90002):runtime.tick_project(path)
             runtime.runner.finish_free_vm.assert_called_once()
+
+    def test_anonymous_cleanup_repairs_old_stopped_catalog_without_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);path=root/'vm.json'
+            meta=dict(self.meta('stopped'),tier='anonymous',free_vm_cleanup_complete=True)
+            path.write_text(json.dumps(meta))
+            runtime=self.runtime(root)
+            runtime.manager=SimpleNamespace(root=root,folder=Mock(return_value=root/'missing'),
+                save=Mock(side_effect=lambda value:path.write_text(json.dumps(value))))
+            runtime.tick_project(path)
+            self.assertEqual(json.loads(path.read_text())['state'],'destroyed')
+            self.assertFalse(json.loads(path.read_text())['retained'])
+            runtime.manager.save.assert_called_once()
+
+    def test_anonymous_cleanup_does_not_hide_remaining_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);path=root/'vm.json';disk=root/'vm-disk';disk.mkdir()
+            meta=dict(self.meta('stopped'),tier='anonymous',free_vm_cleanup_complete=True)
+            path.write_text(json.dumps(meta))
+            runtime=self.runtime(root)
+            runtime.manager=SimpleNamespace(root=root,folder=Mock(return_value=disk),save=Mock())
+            with self.assertRaisesRegex(VMError,'anonymous_cleanup_disk_still_present'):
+                runtime.tick_project(path)
+            runtime.manager.save.assert_not_called()
 
     def test_anonymous_vm_recovers_after_transient_authority_outage(self):
         with tempfile.TemporaryDirectory() as directory:
