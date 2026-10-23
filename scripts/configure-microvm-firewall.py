@@ -14,7 +14,8 @@ MARKER = '# Block all new external connections to Docker ports not explicitly al
 
 
 def configure(config, script, apply=False, container=None, no_provider_script=False):
-    network=json.loads(Path(config).read_text())['hypervisor']['public_network']
+    configuration=json.loads(Path(config).read_text())
+    network=configuration['hypervisor']['public_network']
     first,last=network['first_port'],network['last_port']
     if type(first) is not int or type(last) is not int or not 1024<=first<=last<=65535:
         raise ValueError('Invalid managed public port pool')
@@ -27,6 +28,9 @@ def configure(config, script, apply=False, container=None, no_provider_script=Fa
     rules=[]
     for protocol in ('tcp','udp'):
         rules.append(['-p',protocol,'-m',protocol,'--dport',f'{first}:{last}','-m','conntrack','--ctorigdstport',f'{first}:{last}','-m','comment','--comment','gap-microvm-public','-j','ACCEPT'])
+    if configuration.get('free_vm',{}).get('enabled') is True:
+        rules.append(['-p','tcp','-m','tcp','--dport','2121','-m','conntrack',
+                      '--ctorigdstport','2121','-m','comment','--comment','gap-free-vm-ssh','-j','ACCEPT'])
     block=BEGIN+'\n'+''.join('iptables -w 5 -C DOCKER-USER '+' '.join(r)+' 2>/dev/null || iptables -w 5 -I DOCKER-USER '+' '.join(r)+'\n' for r in rules)+END+'\n\n'
     stripped=re.sub(re.escape(BEGIN)+r'.*?'+re.escape(END)+r'\n*','',source,flags=re.S)
     updated=stripped.replace(MARKER,block+MARKER)
@@ -41,7 +45,7 @@ def configure(config, script, apply=False, container=None, no_provider_script=Fa
     existing_rules=subprocess.check_output(['iptables','-w','5','-S','DOCKER-USER'],text=True)
     for line in existing_rules.splitlines():
         parts=shlex.split(line)
-        if '--comment' in parts and parts[parts.index('--comment')+1]=='gap-microvm-public' and parts[2:] not in rules:
+        if '--comment' in parts and parts[parts.index('--comment')+1] in ('gap-microvm-public','gap-free-vm-ssh') and parts[2:] not in rules:
             subprocess.run(['iptables','-w','5','-D','DOCKER-USER',*parts[2:]],check=True)
     for rule in rules:
         exists=subprocess.run(['iptables','-w','5','-C','DOCKER-USER',*rule],capture_output=True).returncode==0

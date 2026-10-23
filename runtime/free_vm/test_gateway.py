@@ -24,6 +24,18 @@ from gateway import (FreeServer, GatewayError, admission_error, claimable_banner
 
 
 class GatewayTests(unittest.TestCase):
+    def test_routes_accept_two_nodes_and_reject_self_or_untrusted_peers(self):
+        from gateway import validate_fleet_routes
+        peer={'host':'gap-node-02-u3.vm.elestio.app',
+              'host_key':asyncssh.generate_private_key('ssh-ed25519').export_public_key().decode().strip()}
+        settings={'node_id':'node-01','peers':{'node-02':peer},'fleet_public_key':'0'*64}
+        validate_fleet_routes(settings)
+        validate_fleet_routes(dict(settings,peers={}))
+        validate_fleet_routes(dict(settings,peers={'node-02':peer,'node-03':peer}))
+        for peers in ({'node-01':peer},{'attacker':peer},{'node-02':dict(peer,host_key='')}):
+            with self.assertRaises(ValueError):
+                validate_fleet_routes(dict(settings,peers=peers))
+
     def test_terminal_modes_are_restored_before_interrupt_message(self):
         from gateway import finish_shell
         process=SimpleNamespace(term_type='xterm-256color',stdout=Mock(drain=AsyncMock()),

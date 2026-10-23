@@ -614,24 +614,13 @@ async def serve(runner,port,host_key,settings=None):
     await server.wait_closed()
 
 
-def start(runner,config):
-    settings=config.get('free_vm',{})
-    if settings.get('enabled') is not True:return
-    port=settings.get('ssh_port',2121)
-    if type(port) is not int or port!=2121 or runner.hypervisor is None or runner.runtime is None:
-        raise ValueError('invalid_free_vm_gateway_configuration')
-    key=Path(config['state_dir'])/'free-vm-ssh-host-key'
-    if not key.exists():
-        pending=key.with_suffix('.new')
-        pending.write_bytes(asyncssh.generate_private_key('ssh-ed25519').export_private_key())
-        os.chmod(pending,0o600);pending.replace(key)
-    elif key.stat().st_mode & 0o077:
-        raise ValueError('insecure_free_vm_host_key')
+def validate_fleet_routes(settings):
+    """Only configured peers may relay; fleet membership need not be three nodes."""
     node_id=settings.get('node_id')
     peers=settings.get('peers')
     public=settings.get('fleet_public_key')
     if (not isinstance(node_id,str) or not re.fullmatch(r'node-0[1-3]',node_id)
-            or not isinstance(peers,dict) or set(peers)!={'node-01','node-02','node-03'}-{node_id}
+            or not isinstance(peers,dict) or not set(peers)<={'node-01','node-02','node-03'}-{node_id}
             or not isinstance(public,str) or not re.fullmatch(r'[0-9a-f]{64}',public)):
         raise ValueError('invalid_free_vm_fleet_route_configuration')
     for peer in peers.values():
@@ -642,6 +631,22 @@ def start(runner,config):
                 or not re.fullmatch(r'ssh-ed25519 [A-Za-z0-9+/=]{60,128}',peer['host_key'])
                 or type(peer.get('port',2121)) is not int or not 1<=peer.get('port',2121)<=65535):
             raise ValueError('invalid_free_vm_fleet_peer')
+
+
+def start(runner,config):
+    settings=config.get('free_vm',{})
+    if settings.get('enabled') is not True:return
+    port=settings.get('ssh_port',2121)
+    if type(port) is not int or port!=2121 or runner.hypervisor is None or runner.runtime is None:
+        raise ValueError('invalid_free_vm_gateway_configuration')
+    validate_fleet_routes(settings)
+    key=Path(config['state_dir'])/'free-vm-ssh-host-key'
+    if not key.exists():
+        pending=key.with_suffix('.new')
+        pending.write_bytes(asyncssh.generate_private_key('ssh-ed25519').export_private_key())
+        os.chmod(pending,0o600);pending.replace(key)
+    elif key.stat().st_mode & 0o077:
+        raise ValueError('insecure_free_vm_host_key')
     relay_key=Path(config['state_dir'])/'free-vm-relay-key'
     if not relay_key.exists():
         pending=relay_key.with_suffix('.new')

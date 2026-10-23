@@ -6,10 +6,9 @@
 |---|---|---|---|
 | gap-node-01 | root@159.195.122.180 | /opt/app/gap-node-01 | https://gap.geta.team |
 | gap-node-02 | root@159.195.123.24 | /opt/app/gap-node-02 | https://gap-node-02-u3.vm.elestio.app |
-| gap-node-03 | root@152.53.201.183 | /opt/app/gap-node-03 | https://gap-node-03-u3.vm.elestio.app |
 
-Node 02 hostname: `cicd-gap-2-u3`. Node 03 hostname: `cicd-gap-3-u3`. Observed
-capacity on both secondary nodes: 8 vCPUs, approximately 16 GiB RAM, and
+Node 02 hostname: `cicd-gap-2-u3`. Observed
+capacity on node 02: 8 vCPUs, approximately 16 GiB RAM, and
 `/dev/kvm` present. The existing operator SSH key is authorized on the hosts.
 From the operator workspace:
 
@@ -19,14 +18,31 @@ ssh -i /opt/app/data/.ssh/id_ed25519 root@159.195.123.24
 
 The private key stays in the operator workspace. Never copy it into a node or
 repository. Each node keeps its own live secrets in its checkout's `.env`.
-Nodes 02 and 03 use the GAP Caddy edge (`/opt/elestio/caddy`) with their assigned
+Both remaining nodes use the GAP Caddy edge (`/opt/elestio/caddy`) with their assigned
 HTTPS hostnames, forwarding to `172.17.0.1:8080`; their legacy Elestio nginx
 containers remain stopped with restart policy `no` for rollback. Each node's
 `GAP_PUBLIC_URL` must name its own origin, not node 01's origin.
 
-All three nodes are configured in CI/CD against the same GAP repository. Every
+Both nodes are configured in CI/CD against the same GAP repository. Every
 push can rebuild and redeploy the stacks. Validate changes on the target host
 before pushing, and check the health of all nodes after automatic deployments.
+
+## Retired nodes
+
+`node-03` (`cicd-gap-3-u3`) was deleted by the operator. It must not appear
+in explorer membership, placement sources, financial report polling, control
+credentials or SSH relay peers. `GAP_FLEET_NODE03_HOST` must be unset so the edge
+cannot forward console traffic to the retired hostname. Historical accounting records remain retained.
+The SSH gateway accepts the configured subset of peers, with pinned host keys.
+
+Use `python3 scripts/retire-fleet-node.py CHECKOUT --node-id node-03
+--origin https://gap-node-03-u3.vm.elestio.app` to preview configuration changes;
+add `--apply` to save private backups and apply them. Restart the control service,
+affected GAP API and offline SSH workers afterwards. On the control node,
+`--apply --release-orphans` can release offline VM slots and stale host bindings
+only after all canonical projects have been resolved and leases have expired.
+This operation does not refund unsettled financial reservations: a lost worker's
+last checkpoint is not proof of final consumption. Reconcile those explicitly.
 
 ## Verification email transport
 

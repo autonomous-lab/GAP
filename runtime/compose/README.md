@@ -186,7 +186,7 @@ that already has the fleet fast-snapshot image, `Dockerfile.rust-overlay` can
 build the same canary more quickly after building the `rust-http-build` stage.
 Set `BASE_IMAGE=gap-compose-fast-snapshot:rust` when layering onto an existing
 Rust worker image rather than the fleet base.
-The GAP three-node fleet uses `deploy.yml` plus `fast-rust.override.yml` on each
+The GAP fleet (nodes 01 and 02; node 03 retired) uses `deploy.yml` plus `fast-rust.override.yml` on each
 node. Node 02 layers onto its existing `gap-compose-fast-snapshot:rust` image;
 nodes 01 and 03 can layer onto their existing
 `gap-compose-fast-snapshot:billing-recovery` image, then tag the result as
@@ -1170,10 +1170,11 @@ application. See the [complete WordPress example](../../examples/wordpress/READM
 
 Secondary MicroVM consoles can share node01's isolated management origin through
 allowlisted `/nodes/<node-id>/microvms` paths. The bundled edge currently accepts
-node02 and node03: set `GAP_FLEET_NODE02_HOST` and `GAP_FLEET_NODE03_HOST` to
-their trusted public DNS hostnames. On each secondary node set
+node02 and an optional legacy node03 path. Set `GAP_FLEET_NODE02_HOST` to
+node02's trusted public DNS hostname. Keep `GAP_FLEET_NODE03_HOST` unset after
+retirement so that `/nodes/node-03/` returns 404. On each secondary node set
 `GAP_ADMIN_ORIGIN` to node01's isolated HTTPS origin and set
-`GAP_VM_CONSOLE_PREFIX` to `/nodes/node-02` or `/nodes/node-03`. Keep each
+`GAP_VM_CONSOLE_PREFIX` to `/nodes/node-02` on the remaining secondary node. Keep each
 secondary node's `GAP_PUBLIC_URL` unchanged.
 The edge verifies upstream TLS, preserves the management Host/Origin, scopes
 its project cookie to the node prefix, and rewrites management resource paths.

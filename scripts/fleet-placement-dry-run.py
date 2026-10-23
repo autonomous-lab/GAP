@@ -18,7 +18,6 @@ import urllib.request
 DEFAULT_NODES = (
     "node-01=https://gap.geta.team",
     "node-02=https://gap-node-02-u3.vm.elestio.app",
-    "node-03=https://gap-node-03-u3.vm.elestio.app",
 )
 NODE_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 

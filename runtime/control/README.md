@@ -66,15 +66,13 @@ credentials (at least 32 random bytes, base64url encoded) in mode-0600 files:
   "operator_token_file": "/config/operator.token",
   "node_token_files": {
     "node-01": "/config/node-01.token",
-    "node-02": "/config/node-02.token",
-    "node-03": "/config/node-03.token"
+    "node-02": "/config/node-02.token"
   },
   "allow_online_debits": false,
   "allow_capacity": true,
   "placement_sources": [
     {"node_id": "node-01", "url": "https://gap.geta.team"},
-    {"node_id": "node-02", "url": "https://gap-node-02-u3.vm.elestio.app"},
-    {"node_id": "node-03", "url": "https://gap-node-03-u3.vm.elestio.app"}
+    {"node_id": "node-02", "url": "https://gap-node-02-u3.vm.elestio.app"}
   ]
 }
 ```

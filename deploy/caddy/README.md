@@ -99,20 +99,7 @@ gap-node-02-u3.vm.elestio.app, gap-node-01-u3.vm.elestio.app {
 }
 ```
 
-For node-03, use the same block with its own hostname:
-
-```caddyfile
-gap-node-03-u3.vm.elestio.app, gap-node-01-u3.vm.elestio.app {
-    tls /certs/fullchain.cer /certs/vm.elestio.app.key
-    @internal path /internal/*
-    respond @internal 404
-    reverse_proxy 172.17.0.1:8080 {
-        header_up Host {host}
-        header_up X-GAP-Verified-Client-IP {client_ip}
-        header_up -X-GAP-Custom-Domain
-    }
-}
-```
+Node 03 has been retired; the active fleet consists of nodes 01 and 02.
 
 Keep the central hostname isolated by the existing GAP admin-origin boundary;
 do not remove tenant marking from the catch-all or forward arbitrary headers

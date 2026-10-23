@@ -203,7 +203,7 @@ template. On a secondary node, the explicit site block must contain both its
 own hostname and the central control hostname, for example:
 
 ```caddyfile
-gap-node-03-u3.vm.elestio.app, gap-node-01-u3.vm.elestio.app {
+gap-node-02-u3.vm.elestio.app, gap-node-01-u3.vm.elestio.app {
     tls /certs/fullchain.cer /certs/vm.elestio.app.key
     @internal path /internal/*
     respond @internal 404

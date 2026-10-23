@@ -33,8 +33,6 @@ def main():
         if not re.fullmatch(r'ssh-ed25519 [A-Za-z0-9+/=]{60,128}', host_key):
             parser.error('invalid peer host key')
         peers[node] = {'host': host, 'host_key': host_key}
-    if set(peers) != {'node-01', 'node-02', 'node-03'} - {args.node_id}:
-        parser.error('both other fleet nodes are required')
     stat = args.config.stat()
     config = json.loads(args.config.read_text())
     if config.get('free_vm', {}).get('enabled') is not True:
